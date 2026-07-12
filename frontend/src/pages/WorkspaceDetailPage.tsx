@@ -741,7 +741,6 @@ export function WorkspaceDetailPage() {
                 onDelete={workspace.dataSources.length > 1 && selectedDs
                     ? () => handleDeleteDsClick(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
-                onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${selectedDsId}`)}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
                 onSetPrimary={() => { if (selectedDsId) handleSetPrimary(selectedDsId) }}

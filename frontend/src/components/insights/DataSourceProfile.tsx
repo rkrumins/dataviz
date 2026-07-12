@@ -148,12 +148,18 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
     )
 }
 
-function UsedByList({ icon: Icon, label, items, href, empty }: {
+function UsedByList({ icon: Icon, label, items, href, empty, currentId, onItemClick }: {
     icon: React.ComponentType<{ className?: string }>
     label: string
     items: Array<{ id: string; name: string }>
     href: (id: string) => string
     empty: string
+    /** Marks the item the viewer is currently inside (e.g. the workspace the
+     *  drawer is open in) so a same-page link isn't a silent no-op. */
+    currentId?: string
+    /** Called on click so a host (the drawer) can close itself — otherwise a
+     *  link to the page you're already on does nothing visible. */
+    onItemClick?: () => void
 }) {
     return (
         <div>
@@ -167,9 +173,12 @@ function UsedByList({ icon: Icon, label, items, href, empty }: {
             ) : (
                 <div className="space-y-1">
                     {items.map((it) => (
-                        <Link key={it.id} to={href(it.id)}
+                        <Link key={it.id} to={href(it.id)} onClick={() => onItemClick?.()}
                             className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-sm text-ink-secondary hover:text-ink transition-colors group">
-                            <span className="truncate">{it.name}</span>
+                            <span className="truncate">
+                                {it.name}
+                                {it.id === currentId && <span className="text-ink-muted/70 font-normal"> · you're here</span>}
+                            </span>
                             <ExternalLink className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
                         </Link>
                     ))}
@@ -209,13 +218,16 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
 
 // ── component ────────────────────────────────────────────────────────────
 
-export function DataSourceProfile({ catalogId, context, embedded }: {
+export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: {
     catalogId: string
     context?: DataSourceProfileContext | null
     /** True when a host already shows the source's identity + actions (the
      *  workspace drawer header). Suppresses the profile's own hero, explore
      *  card, semantic-layer link and vocab warning so nothing is duplicated. */
     embedded?: boolean
+    /** Called when an internal link is followed, so a host drawer can close
+     *  itself (a link to the page you're already on is otherwise a no-op). */
+    onNavigate?: () => void
 }) {
     const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
 
@@ -363,12 +375,15 @@ export function DataSourceProfile({ catalogId, context, embedded }: {
                         items={workspaces}
                         href={(id) => `/workspaces/${id}`}
                         empty="Not scoped into any workspace yet."
+                        currentId={context?.wsId}
+                        onItemClick={onNavigate}
                     />
                     <UsedByList
                         icon={Eye} label="Views"
                         items={views}
                         href={(id) => `/views/${id}`}
                         empty="No views reference this source."
+                        onItemClick={onNavigate}
                     />
                 </div>
             </Card>

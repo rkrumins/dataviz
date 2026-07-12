@@ -45,7 +45,6 @@ interface DataSourceDetailPanelProps {
     views: View[]
     onEdit: () => void
     onDelete?: () => void
-    onExplore: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
@@ -123,7 +122,6 @@ export function DataSourceDetailPanel({
     views,
     onEdit,
     onDelete,
-    onExplore,
     onReaggregate,
     onPurge,
     onSaveAggregationConfig,
@@ -248,14 +246,16 @@ export function DataSourceDetailPanel({
 
                             {/* Status + meta badges */}
                             <div className="flex flex-wrap items-center gap-2 mb-4">
-                                <span className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border", aggMeta.text,
+                                <span
+                                    title="Lineage aggregation — whether this source's rolled-up lineage has been built. Trigger or manage it in the Aggregation tab."
+                                    className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border", aggMeta.text,
                                     ds.aggregationStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/20' :
                                     ds.aggregationStatus === 'failed' ? 'bg-red-500/10 border-red-500/20' :
                                     ds.aggregationStatus === 'running' || ds.aggregationStatus === 'pending' ? 'bg-amber-500/10 border-amber-500/20' :
                                     'bg-black/5 dark:bg-white/5 border-glass-border'
                                 )}>
                                     <span className={cn("w-2 h-2 rounded-full", aggMeta.dot)} />
-                                    {aggMeta.label}
+                                    Lineage: {aggMeta.label}
                                 </span>
                                 {ontologyName && (
                                     <Link
@@ -318,6 +318,7 @@ export function DataSourceDetailPanel({
                                         catalogId={ds.catalogItemId}
                                         context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName } satisfies DataSourceProfileContext}
                                         embedded
+                                        onNavigate={onClose}
                                     />
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
@@ -530,17 +531,20 @@ export function DataSourceDetailPanel({
                             )}
                         </div>
 
-                        {/* ── Footer actions ─────────────────────────────── */}
-                        <div className="px-6 py-4 border-t border-glass-border/50 shrink-0 space-y-2">
-                            <button onClick={() => { onExplore(); onClose() }}
+                        {/* ── Footer action ──────────────────────────────── */}
+                        <div className="px-6 py-4 border-t border-glass-border/50 shrink-0">
+                            {/* Views are the payoff of a data source; the header
+                                already has Schema Editor + Explorer, so the primary
+                                footer CTA points at the views that consume it. */}
+                            <Link to={`/workspaces/${wsId}/views`} onClick={onClose}
                                 className={cn(
                                     'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
                                     'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
                                     'shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5',
                                     'transition-[transform,box-shadow] duration-200',
                                 )}>
-                                <ExternalLink className="w-4 h-4" /> Open in Schema Editor
-                            </button>
+                                <Eye className="w-4 h-4" /> See all views
+                            </Link>
                         </div>
                     </motion.aside>
                 )}
