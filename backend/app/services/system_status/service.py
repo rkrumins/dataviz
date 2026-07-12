@@ -153,12 +153,18 @@ async def _assemble(app_state) -> dict:
     else:
         overall = "healthy"
 
-    # A failed or stalled "enable version control" job is invisible to every other probe —
-    # its graph deliberately reports a parked, in-sync watermark — yet it BLOCKS WRITES to
-    # that data source until someone resumes or abandons it. Left out of the rollup, the
-    # dashboard would keep saying "projections in sync" over a data source nobody can edit.
-    if bootstrap_jobs and overall == "healthy" and (
-            bootstrap_jobs.get("failed") or bootstrap_jobs.get("stalled")):
+    # A STALLED copy means no worker claimed a job whose heartbeat aged out — the versioning
+    # worker tier is gone, not one job being slow (the worker heartbeats on a timer, not on
+    # progress). That is systemic, so it degrades the deployment.
+    #
+    # A FAILED copy deliberately does NOT. It blocks writes to ONE data source until someone
+    # resumes or abandons it — real, and an admin must action it — but scoping a whole
+    # deployment to "degraded" for one stuck data source is how a dashboard becomes wallpaper.
+    # The gap this closed was that a failed copy was INVISIBLE, not that it was un-alarmed:
+    # `bootstrapJobs` now carries it and the infrastructure panel shows it in red, with the
+    # reason and the fact that writes are blocked. (Aggregation draws the same line — its
+    # stuck jobs degrade the worker tile, not the rollup.)
+    if bootstrap_jobs and overall == "healthy" and bootstrap_jobs.get("stalled"):
         overall = "degraded"
 
     return {
