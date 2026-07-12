@@ -41,7 +41,7 @@
     "@types/react-window": "^2.0.0",
     "@xyflow/react": "^12.11.2",
     "@zxcvbn-ts/core": "^3.0.4",
-    "@zxcvbn-ts/language-common": "^3.0.4",
+    "@zxcvbn-ts/language-common": "^4.1.2",
     "@zxcvbn-ts/language-en": "^3.0.2",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
