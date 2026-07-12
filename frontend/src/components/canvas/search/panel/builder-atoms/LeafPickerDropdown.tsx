@@ -11,7 +11,7 @@
  * canvas-elevated, heavy shadow, search input on top) so users
  * experience one picker style throughout the panel.
  */
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { Search } from 'lucide-react'
 import * as LucideIcons from 'lucide-react'
 import { type FC, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -183,12 +183,14 @@ export const LeafPickerDropdown: FC<LeafPickerDropdownProps> = ({
     let flatIdx = 0
 
     const popover = (
-        <AnimatePresence>
+        <>
+            {/* No AnimatePresence: the popover unmounts instantly on close so an
+                interrupted exit can never strand an invisible click-blocker at
+                z-1000 over the toolbar. It still animates in. */}
             <motion.div
                 ref={popoverRef}
                 initial={{ opacity: 0, y: -4, scale: 0.98 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -4, scale: 0.98 }}
                 transition={{ duration: 0.12 }}
                 style={{
                     position: 'fixed',
@@ -277,7 +279,7 @@ export const LeafPickerDropdown: FC<LeafPickerDropdownProps> = ({
                     )}
                 </div>
             </motion.div>
-        </AnimatePresence>
+        </>
     )
 
     return createPortal(popover, document.body)
