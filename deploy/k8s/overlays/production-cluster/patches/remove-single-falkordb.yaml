@@ -1,0 +1,17 @@
+# The 3-shard cluster replaces the single-node FalkorDB. Its PVC
+# (falkordb-data-falkordb-0) is left behind by design — StatefulSet
+# deletion never removes PVCs; reclaim or delete it manually after the
+# cutover is verified (graphs reseed from Cloud SQL, doc §7.4).
+$patch: delete
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falkordb
+  namespace: synodic
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: falkordb
+  namespace: synodic

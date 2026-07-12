@@ -1,0 +1,363 @@
+# FalkorDB Redis Cluster — 3 shards × (1 master + 1 replica) = 6 pods,
+# one StatefulSet per shard (INFRASTRUCTURE_LAUNCH_SCALE.md §7.1/§7.2).
+# The three docs below are identical except for the shard name.
+#
+# Placement: dedicated tainted pool (falkordb-pool, n4-highmem-8), ONE pod
+# per node (hostname anti-affinity across all cluster pods), and each
+# shard's master/replica pair forced into different zones (per-shard zone
+# spread) so a zone loss costs at most one side of each pair.
+#
+# Redis config is doc §7.2 verbatim. Two additions the doc implies but
+# k8s makes explicit:
+#   - cluster-announce-hostname + preferred-endpoint-type hostname:
+#     gossip/MOVED carry the stable per-pod DNS name (see the headless
+#     Service) instead of a pod IP that dies with every reschedule.
+#   - aof-load-truncated yes: same crash-recovery stance as the base
+#     single-instance StatefulSet.
+# cluster-require-full-coverage no = a dead shard must not take down
+# reads on the other two (the whole point of this exercise).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falkordb-shard-0
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-shard-0
+    app.kubernetes.io/part-of: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  serviceName: falkordb-cluster
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falkordb-shard-0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: falkordb-shard-0
+        app.kubernetes.io/part-of: falkordb-cluster
+        app.kubernetes.io/component: graph-database
+    spec:
+      serviceAccountName: synodic-infra
+      # 120s: final AOF fsync + failover handoff on drain (doc §7.2).
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        dedicated: falkordb
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: falkordb
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          # One FalkorDB pod per node, across ALL shards — the pod owns
+          # the node (requests ≈ limits below).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: falkordb-cluster
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        # THIS shard's master+replica must not share a zone.
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: falkordb-shard-0
+      containers:
+        - name: falkordb
+          image: REGISTRY/falkordb:latest
+          ports:
+            - containerPort: 6379
+              name: falkordb
+            - containerPort: 16379
+              name: cluster-bus
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Module args per doc §7.2: THREAD_COUNT 6 of 8 reserves cores
+            # for Redis I/O + AOF rewrite + replication; QUERY_MEM_CAPACITY
+            # 2 GiB bounds a runaway Cypher query.
+            - name: FALKORDB_ARGS
+              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
+            # maxmemory 40gb ≈ 62% of the 64 GB node; the rest covers fork
+            # COW, replica buffers, query memory. noeviction: Redis must
+            # never silently evict a graph key — eviction is the app's job
+            # (GRAPHVER_FALKOR_BUDGETS, doc §7.3).
+            - name: REDIS_ARGS
+              value: >-
+                --cluster-enabled yes
+                --cluster-config-file /data/nodes.conf
+                --cluster-node-timeout 5000
+                --cluster-require-full-coverage no
+                --cluster-migration-barrier 1
+                --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
+                --cluster-preferred-endpoint-type hostname
+                --maxmemory 40gb
+                --maxmemory-policy noeviction
+                --appendonly yes
+                --appendfsync everysec
+                --aof-load-truncated yes
+                --save 3600 1
+                --repl-backlog-size 256mb
+                --repl-diskless-sync yes
+          resources:
+            # requests ≈ limits — the pod owns its n4-highmem-8 node.
+            requests:
+              cpu: "7"
+              memory: 56Gi
+            limits:
+              cpu: "7"
+              memory: 56Gi
+          readinessProbe:
+            # Strict: -LOADING (AOF/RDB replay) and -MASTERDOWN are not
+            # PONG, so a replaying or orphaned pod takes no traffic.
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              # LOADING = alive and replaying — killing it restarts the
+              # replay from scratch (see the base StatefulSet's history).
+              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+            # RDB load of a full 40 GB shard takes minutes (doc §7.2).
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: falkordb-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: falkordb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # n4 machines require Hyperdisk. 250 Gi ≈ 6× maxmemory for
+        # AOF/RDB growth between rewrites (doc §7.2).
+        storageClassName: hyperdisk-balanced
+        resources:
+          requests:
+            storage: 250Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falkordb-shard-1
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-shard-1
+    app.kubernetes.io/part-of: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  serviceName: falkordb-cluster
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falkordb-shard-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: falkordb-shard-1
+        app.kubernetes.io/part-of: falkordb-cluster
+        app.kubernetes.io/component: graph-database
+    spec:
+      serviceAccountName: synodic-infra
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        dedicated: falkordb
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: falkordb
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: falkordb-cluster
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: falkordb-shard-1
+      containers:
+        - name: falkordb
+          image: REGISTRY/falkordb:latest
+          ports:
+            - containerPort: 6379
+              name: falkordb
+            - containerPort: 16379
+              name: cluster-bus
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FALKORDB_ARGS
+              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
+            - name: REDIS_ARGS
+              value: >-
+                --cluster-enabled yes
+                --cluster-config-file /data/nodes.conf
+                --cluster-node-timeout 5000
+                --cluster-require-full-coverage no
+                --cluster-migration-barrier 1
+                --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
+                --cluster-preferred-endpoint-type hostname
+                --maxmemory 40gb
+                --maxmemory-policy noeviction
+                --appendonly yes
+                --appendfsync everysec
+                --aof-load-truncated yes
+                --save 3600 1
+                --repl-backlog-size 256mb
+                --repl-diskless-sync yes
+          resources:
+            requests:
+              cpu: "7"
+              memory: 56Gi
+            limits:
+              cpu: "7"
+              memory: 56Gi
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: falkordb-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: falkordb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: hyperdisk-balanced
+        resources:
+          requests:
+            storage: 250Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falkordb-shard-2
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-shard-2
+    app.kubernetes.io/part-of: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  serviceName: falkordb-cluster
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falkordb-shard-2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: falkordb-shard-2
+        app.kubernetes.io/part-of: falkordb-cluster
+        app.kubernetes.io/component: graph-database
+    spec:
+      serviceAccountName: synodic-infra
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        dedicated: falkordb
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: falkordb
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: falkordb-cluster
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: falkordb-shard-2
+      containers:
+        - name: falkordb
+          image: REGISTRY/falkordb:latest
+          ports:
+            - containerPort: 6379
+              name: falkordb
+            - containerPort: 16379
+              name: cluster-bus
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FALKORDB_ARGS
+              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
+            - name: REDIS_ARGS
+              value: >-
+                --cluster-enabled yes
+                --cluster-config-file /data/nodes.conf
+                --cluster-node-timeout 5000
+                --cluster-require-full-coverage no
+                --cluster-migration-barrier 1
+                --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
+                --cluster-preferred-endpoint-type hostname
+                --maxmemory 40gb
+                --maxmemory-policy noeviction
+                --appendonly yes
+                --appendfsync everysec
+                --aof-load-truncated yes
+                --save 3600 1
+                --repl-backlog-size 256mb
+                --repl-diskless-sync yes
+          resources:
+            requests:
+              cpu: "7"
+              memory: 56Gi
+            limits:
+              cpu: "7"
+              memory: 56Gi
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: falkordb-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: falkordb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: hyperdisk-balanced
+        resources:
+          requests:
+            storage: 250Gi

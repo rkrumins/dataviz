@@ -1,0 +1,29 @@
+# Governing headless Service for ALL cluster pods (all three shard
+# StatefulSets set serviceName: falkordb-cluster). Provides the stable
+# per-pod DNS names the whole design depends on:
+#   falkordb-shard-<N>-<M>.falkordb-cluster.synodic.svc.cluster.local
+# Pods announce these names (cluster-announce-hostname), so a rotated pod
+# rejoins the cluster under the SAME address — pod-IP announcement would
+# strand every peer and client on the dead IP after a reschedule.
+# publishNotReadyAddresses: DNS must resolve before pods are Ready or the
+# cluster-init Job and node gossip deadlock on first bootstrap.
+apiVersion: v1
+kind: Service
+metadata:
+  name: falkordb-cluster
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/part-of: falkordb-cluster
+  ports:
+    - name: falkordb
+      port: 6379
+      targetPort: 6379
+    - name: cluster-bus
+      port: 16379
+      targetPort: 16379
