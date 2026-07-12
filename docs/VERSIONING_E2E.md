@@ -170,7 +170,15 @@ graph cannot be paged into one HTTP call, and doing so made the web tier's memor
 | `POST /graph/bootstrap/retry?dataSourceId=&mode=resume\|restart` | resume from the last window, or re-read the source | `…:manage` |
 | `POST /graph/bootstrap/abandon?dataSourceId=` | drop everything the job imported; the source reads as before | `…:manage` |
 
-Phases: `counting → nodes → edges → validate → heads → merkle → finalize → backfill`.
+Phases: `counting → nodes → edges → validate → heads → merkle → backfill → finalize`.
+
+**`finalize` is last, and it is the only irreversible step** — it flips the head, which makes
+the graph live and writable. Everything the live graph depends on must already be true when
+it runs, including `backfill`, which stamps the projector's delete/update anchors
+(`n.entityId`, `r.id`) onto the source graph. Finalizing first would leave a window — and,
+if backfill then failed, a permanent state — where the graph is editable but the projector
+cannot anchor: an edit MERGEs a duplicate node beside the original, and a delete matches
+nothing and silently leaves the entity on the canvas.
 
 Properties worth knowing:
 
@@ -182,7 +190,10 @@ Properties worth knowing:
 - **Invisible until proven.** The import commit sits at seq 2 while the head stays at
   genesis; every read composes bounded by `main_head_commit_seq`. Validation runs *before*
   `entity_heads` is written, so a failed copy leaves the data source reading exactly as it
-  did — there is nothing to unwind.
+  did — there is nothing to unwind. A failed job therefore also **blocks writes** to that
+  graph (resume it or abandon it): editing around it would advance the head past the partial
+  import commit, un-park the projection watermark, and let the projector drop and reseed the
+  source graph from a fraction of the data.
 - **Proven.** Source counts vs what landed, per node label AND per edge type (the
   containment/lineage preservation proof), no duplicate identifiers, no dangling endpoints,
   plus a random sample re-read from the source and content-hash-compared. The report is
