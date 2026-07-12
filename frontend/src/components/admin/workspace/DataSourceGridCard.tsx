@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Database, Star, GitBranch, ChevronRight, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -24,7 +25,7 @@ interface DataSourceGridCardProps {
     onSetPrimary?: () => void
 }
 
-export function DataSourceGridCard({
+function DataSourceGridCardBase({
     ds,
     stats,
     providerInfo,
@@ -170,3 +171,8 @@ export function DataSourceGridCard({
         </div>
     )
 }
+
+// Memoized: in a workspace's data-source grid these render in a .map, so this
+// keeps a card from re-rendering when a sibling/parent changes. (Full benefit
+// needs the parent to pass stable onSelect/onSetPrimary via useCallback.)
+export const DataSourceGridCard = memo(DataSourceGridCardBase)
