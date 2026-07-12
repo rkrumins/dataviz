@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ``visualization.view.<action>`` verbs.
 ACTIONS = frozenset({
     "created", "updated", "visibility_changed", "shared", "unshared",
-    "favourited", "unfavourited", "deleted", "restored",
+    "favourited", "unfavourited", "deleted", "restored", "data_changed",
 })
 
 
@@ -44,6 +44,8 @@ class ViewActivityEntry(BaseModel):
     summary: Optional[str] = None
     changes: Optional[Any] = None
     createdAt: str
+    # Populated only in the workspace-wide feed (redundant in a per-view view).
+    viewName: Optional[str] = None
     # True for synthesized legacy anchors (no real row existed).
     synthetic: bool = False
 
@@ -145,6 +147,38 @@ def _to_entry(
         createdAt=r.created_at,
         synthetic=synthetic,
     )
+
+
+async def get_workspace_activity(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    limit: int = 30,
+    offset: int = 0,
+) -> list[ViewActivityEntry]:
+    """Recent activity across ALL of a workspace's views, newest first, with
+    the view name resolved for each entry. Powers the governance-tab feed."""
+    rows = (await session.execute(
+        select(ViewActivityLogORM)
+        .where(ViewActivityLogORM.workspace_id == workspace_id)
+        .order_by(ViewActivityLogORM.created_at.desc())
+        .limit(limit).offset(offset)
+    )).scalars().all()
+    if not rows:
+        return []
+    actor_map = await resolve_user_ids(session, {r.actor for r in rows})
+    # Batch-resolve view names.
+    view_ids = {r.view_id for r in rows}
+    name_rows = (await session.execute(
+        select(ViewORM.id, ViewORM.name).where(ViewORM.id.in_(view_ids))
+    )).all()
+    names = {vid: name for vid, name in name_rows}
+    out: list[ViewActivityEntry] = []
+    for r in rows:
+        e = _to_entry(r, actor_map)
+        e.viewName = names.get(r.view_id)
+        out.append(e)
+    return out
 
 
 async def _synthetic_anchor(

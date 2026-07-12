@@ -728,3 +728,26 @@ async def get_view_activity(
     return await view_activity_repo.get_view_activity(
         session, view_id, action=action, limit=limit, offset=offset,
     )
+
+
+@router.get(
+    "/workspace/{workspace_id}/activity",
+    response_model=List[view_activity_repo.ViewActivityEntry],
+)
+async def get_workspace_view_activity(
+    workspace_id: str = Path(...),
+    limit: int = Query(30, le=100),
+    offset: int = Query(0, ge=0),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Recent activity across all of a workspace's views (each entry carries the
+    view name). Powers the governance-tab feed. Gated by workspace view-read."""
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        from backend.app.services.permission_service import has_permission
+        if not has_permission(claims, "workspace:view:read", workspace_id=workspace_id):
+            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:read")
+    return await view_activity_repo.get_workspace_activity(
+        session, workspace_id, limit=limit, offset=offset,
+    )

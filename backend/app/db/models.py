@@ -713,7 +713,8 @@ class ViewActivityLogORM(Base):
         Index("idx_val_created", "created_at"),
         CheckConstraint(
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
-            "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored')",
+            "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
+            "'data_changed')",
             name="ck_val_action_enum",
         ),
     )
