@@ -148,6 +148,12 @@ _COUNT_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
 _COUNT_INVISIBLE_NODES = f"MATCH (n) WHERE n.urn IS NULL AND {_not_derived('n')} RETURN count(n)"
 _COUNT_INVISIBLE_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
                           "AND (a.urn IS NULL OR b.urn IS NULL) RETURN count(r)")
+# How many edges a node-id window actually holds — cheap (no properties materialized), and
+# the only reliable way to size an edge window (see config.BOOTSTRAP_EDGE_TARGET).
+_COUNT_EDGES_IN_WINDOW = (
+    "MATCH (a) WHERE ID(a) >= $lo AND ID(a) < $hi "
+    "MATCH (a)-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r)"
+)
 
 _SCAN_NODES = (
     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND n.urn IS NOT NULL AND {_not_derived('n')} "
@@ -384,7 +390,11 @@ class BootstrapRunner:
             main_id = await self._main_branch_id(s, graph_id)
             cursor, summary = job.last_cursor, dict(job.summary or {})
             actor = str(summary.get("actor") or "system")
-            width = job.batch_size or config.BOOTSTRAP_SCAN_WIDTH
+            # Edges re-fit their window every time (it's one cheap count, and edge density
+            # swings band to band); nodes remember the width that worked, so they don't
+            # re-pay a failed query per window to rediscover it.
+            width = (config.BOOTSTRAP_SCAN_WIDTH if kind == "edges"
+                     else (job.batch_size or config.BOOTSTRAP_SCAN_WIDTH))
         client = await self._client(ps)
 
         lo = int(cursor.split(":")[-1]) if cursor else 0
@@ -393,6 +403,8 @@ class BootstrapRunner:
             return True                                        # nothing (left) to scan
 
         rules = await _ontology_rules(job_id)
+        if kind == "edges":
+            width = await self._fit_edge_window(client, lo, width)
         rows, width = await self._scan(client, kind, lo, width)
         hi = lo + width
 
@@ -433,9 +445,8 @@ class BootstrapRunner:
             job.processed = int(summary["written"]["nodes"]) + int(summary["written"]["edges"])
             job.progress = _percent(kind, job.processed, job.total)
             job.last_cursor = f"{kind}:{hi}"
-            # Remember the width that fit: without this the next window starts at the
-            # configured size again and re-pays a failed query to rediscover the same answer.
-            job.batch_size = width
+            if kind == "nodes":
+                job.batch_size = width                     # see the width note above
             job.updated_at = _now()
             job.last_sequence = job.last_sequence + 1
         return False                                           # more windows may remain
@@ -694,6 +705,33 @@ class BootstrapRunner:
         rs = getattr(res, "result_set", None) or []
         val = rs[0][0] if rs and rs[0] else None
         return int(val) if val is not None else None
+
+    async def _fit_edge_window(self, client, lo: int, width: int) -> int:
+        """Shrink the node span until the edges it holds fit one query.
+
+        Node ids cluster by entity type, so a fixed node width is a terrible predictor of
+        edge volume: on a real 5M-edge model, one 10k-node window held 15k edges and the
+        next held 185k — enough to blow the server's per-query budget even at the minimum
+        node width, which the reactive halve-on-failure ladder could not rescue (it only
+        halves AFTER a 60s timeout, and it has a floor). Counting first is ~0.1s and
+        costs nothing: no properties are materialized.
+        """
+        target = config.BOOTSTRAP_EDGE_TARGET
+        while width > 1:
+            try:
+                n = await self._count_window(client, lo, width)
+            except Exception:                              # counting failed → let the ladder try
+                return width
+            if n <= target:
+                return width
+            width = max(1, width // 2)
+        return width
+
+    async def _count_window(self, client, lo: int, width: int) -> int:
+        res = await _q(client, _COUNT_EDGES_IN_WINDOW, {"lo": lo, "hi": lo + width},
+                       timeout_ms=_READ_TIMEOUT_MS)
+        rs = getattr(res, "result_set", None) or []
+        return int(rs[0][0]) if rs and rs[0] and rs[0][0] is not None else 0
 
     async def _scan(self, client, kind: str, lo: int, width: int) -> Tuple[List[tuple], int]:
         """One window, halving on failure until it fits (a dense ID range, or one with fat

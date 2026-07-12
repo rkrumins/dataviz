@@ -234,6 +234,12 @@ STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
 # making a crashed job resumable mid-phase.
 BOOTSTRAP_SCAN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_WIDTH", "100000"))
 BOOTSTRAP_SCAN_MIN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH", "10000"))
+# Edges per window. A node-id window is a terrible predictor of how many EDGES it holds:
+# ids cluster by entity type, so on a real 5M-edge model one 10k-node window held 15k edges
+# and the next held 185k — enough to blow the server's per-query budget even at the minimum
+# node width. Counting a window's edges first is cheap (~0.1s); returning them is not. So the
+# edge phase sizes its window by this target and halves the node span until it fits.
+BOOTSTRAP_EDGE_TARGET: int = int(os.getenv("GRAPHVER_BOOTSTRAP_EDGE_TARGET", "50000"))
 # Rows accumulated before a window is committed to Postgres.
 BOOTSTRAP_WINDOW: int = int(os.getenv("GRAPHVER_BOOTSTRAP_WINDOW", "50000"))
 # Entities re-read from the SOURCE and content-hash-compared during validation.

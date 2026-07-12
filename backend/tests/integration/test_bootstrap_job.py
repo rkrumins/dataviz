@@ -95,6 +95,35 @@ class FakeGraph:
         raise AssertionError("the projector must never DROP a bootstrapped source graph")
 
 
+class DenseBandGraph(FakeGraph):
+    """A graph whose edges are wildly uneven across the node-id space — like a real model,
+    where ids cluster by entity type. The edge window must be sized by EDGES, not nodes."""
+
+    def __init__(self, nodes, edges, dense_from, dense_to):
+        super().__init__(nodes, edges)
+        self.dense = range(dense_from, dense_to)
+        self.max_edges_returned = 0
+
+    async def query(self, cypher, params=None, timeout=None):
+        p = params or {}
+        lo, hi = p.get("lo", 0), p.get("hi", 10**9)
+        # The count query the fitter uses (cheap; no properties).
+        if "count(r)" in cypher and "ID(a) >= $lo" in cypher:
+            n = sum(1 for i, (s, t, ty, pr) in enumerate(self.edges)
+                    if lo <= self._src_idx(s) < hi)
+            return _RS([[n]])
+        res = await super().query(cypher, params, timeout)
+        if cypher.startswith("MATCH (a) WHERE ID(a)") and "SET" not in cypher:
+            self.max_edges_returned = max(self.max_edges_returned, len(res.result_set))
+        return res
+
+    def _src_idx(self, urn):
+        for i, (_, pr) in enumerate(self.nodes):
+            if pr.get("urn") == urn:
+                return i
+        return -1
+
+
 class _RS:
     def __init__(self, rows):
         self.result_set = rows
@@ -359,6 +388,30 @@ async def _run() -> None:
         orphans = await s.scalar(select(func.count()).select_from(NodeVersionORM).where(
             NodeVersionORM.graph_id == gid))
         assert orphans == 0, "the fenced worker must not write rows into a deleted graph"
+
+    # ══ D4. an edge window is sized by EDGES, not nodes ══════════════════════
+    # Real models cluster node ids by entity type, so one node window can hold 15k edges
+    # and the next 185k — enough to blow the graph server's per-query budget even at the
+    # minimum node width (measured on a 5M-edge model; it killed a scale run). The window
+    # must shrink on EDGE count, which is cheap to ask for.
+    d = ds()
+    ns = [_node(f"urn:n{i}") for i in range(8)]
+    # Every node in the dense band (4..8) points at every node in 0..4 → 16 edges there,
+    # while nodes 0..4 have one edge each. A uniform node window would return them all.
+    es = [_edge(f"urn:n{i}", f"urn:n{i + 1}") for i in range(4)]
+    es += [_edge(f"urn:n{i}", f"urn:n{j}", etype="FANS_TO") for i in range(4, 8) for j in range(4)]
+    dense = DenseBandGraph(ns, es, 4, 8)
+    from backend.app.services.versioning import config as _cfg
+    _cfg.BOOTSTRAP_EDGE_TARGET = 6                         # tiny target so the fitter must act
+    res = await _enable(d)
+    out = await _drive(_runner(dense, width=8), res["job_id"])
+    _cfg.BOOTSTRAP_EDGE_TARGET = 50_000
+    assert out["status"] == "completed", out
+    assert dense.max_edges_returned <= 8, (
+        f"a window returned {dense.max_edges_returned} edges against a target of 6 — "
+        "the window was sized by nodes, not edges")
+    _, e = await _counts(res["graph_id"], await _commit_id(res["graph_id"]))
+    assert e == len(es), f"every edge must still be copied exactly once (got {e}/{len(es)})"
 
     # ══ E. duplicate identifiers fail; parallel connections merge + report ═══
     d = ds()
