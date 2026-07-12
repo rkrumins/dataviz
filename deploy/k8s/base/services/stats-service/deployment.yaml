@@ -35,10 +35,11 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for postgres..."
-              until nc -z postgres 5432; do sleep 2; done
-              echo "Waiting for redis..."
-              until nc -z redis 6379; do sleep 2; done
+              # Do NOT gate on postgres/redis: in production those are managed
+              # endpoints (Cloud SQL / Memorystore) and the in-cluster Services
+              # are deleted by the managed-data-tier patch — an nc -z against
+              # those names deadlocks every rescheduled pod in Init. The backend
+              # retries the DB at startup and connects to Redis lazily.
               # The control plane runs the aggregation-schema migrations the
               # poller/purge paths depend on — wait for it to be serving.
               echo "Waiting for aggregation-controlplane..."

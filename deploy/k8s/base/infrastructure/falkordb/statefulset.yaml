@@ -19,7 +19,10 @@ spec:
         app.kubernetes.io/component: graph-database
     spec:
       serviceAccountName: synodic-infra
-      terminationGracePeriodSeconds: 30
+      # 120s: a node drain must leave time for the final AOF fsync + clean
+      # shutdown of a multi-GB dataset — SIGKILL at 30s risks a truncated
+      # append and a longer (or failed) replay on the next node.
+      terminationGracePeriodSeconds: 120
       containers:
         - name: falkordb
           image: REGISTRY/falkordb:latest
@@ -34,8 +37,11 @@ spec:
             # Instance ceiling at 75% of the 8Gi pod limit: QUERY_MEM_CAPACITY
             # bounds one query; the dataset itself needs maxmemory or growth
             # OOM-kills the pod. noeviction = writes fail loudly at the ceiling.
+            # save 3600 1 = hourly RDB floor alongside AOF: appendonly-yes with
+            # a missing/quarantined appendonlydir boots EMPTY without an RDB
+            # base, and engine upgrades must reload from RDB (docs §5c).
             - name: REDIS_ARGS
-              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes"
+              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --save 3600 1"
           resources:
             requests:
               cpu: "1"

@@ -27,21 +27,11 @@ spec:
     spec:
       serviceAccountName: synodic-backend
       terminationGracePeriodSeconds: 60
-      initContainers:
-        # WS1.1 decoupling: gate ONLY on Postgres + Redis. Do NOT wait for
-        # FalkorDB — the worker connects to it lazily and fast-fails while it
-        # loads, so a graph blip must not block this pod from starting.
-        - name: wait-for-deps
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              echo "Waiting for postgres..."
-              until nc -z postgres 5432; do sleep 2; done
-              echo "Waiting for redis..."
-              until nc -z redis 6379; do sleep 2; done
-              echo "Dependencies ready."
+      # No init gates: postgres/redis are managed endpoints in production (the
+      # in-cluster Services are deleted by the managed-data-tier patch, so an
+      # nc -z against those names deadlocks every rescheduled pod in Init), and
+      # FalkorDB is connected lazily with fast-fail (WS1.1). The worker's own
+      # loops retry both stores with backoff.
       containers:
         - name: versioning-worker
           image: REGISTRY/aggregation-worker:latest
