@@ -63,39 +63,34 @@ services:
       - ./scripts/falkordb-dev-entrypoint.sh:/docker-entrypoint.d/falkordb-dev-entrypoint.sh:ro
 
   viz-service:
+    # WS1.3: dev runs the SAME spec as prod. The base sets SYNODIC_ROLE=web
+    # (stateless) + AGGREGATION_PROXY_ENABLED=true (proxy to the control
+    # plane), and dev inherits both — so the dev web tier runs NO background
+    # loops either: the aggregation-controlplane container owns
+    # scheduler/reconciler/state-sync and the worker containers execute jobs,
+    # exactly like production. The only dev deltas are the bind mount and a
+    # gunicorn --reload command — the SAME gunicorn/UvicornWorker as prod
+    # (2 workers instead of 4), with the poll-based reloader so file-watching
+    # works over the macOS bind mount. Running multi-worker locally surfaces
+    # per-replica bugs (shared module state, duplicate loops) before prod.
     volumes:
       - ./backend:/app/backend
     command:
-      - uvicorn
+      - gunicorn
       - backend.app.main:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
+      - --worker-class
+      - uvicorn.workers.UvicornWorker
+      - --workers
+      - "2"
+      - --bind
+      - 0.0.0.0:8000
       - --reload
-      - --reload-dir
-      - /app/backend
-    environment:
-      # Dev mode: direct aggregation API (no proxy hop) but dispatch to
-      # the Redis stream — this compose file RUNS the dedicated
-      # aggregation-worker container, so jobs must execute there, never
-      # inside the viz-service process. ``inprocess`` here contradicted
-      # the worker container: UI-triggered jobs silently ran in the
-      # viz-service while the worker (and its fleet panel) sat idle,
-      # and the two executors collided on the per-graph write lease.
-      # Use ``inprocess`` only when running uvicorn standalone without
-      # the worker container.
-      SYNODIC_ROLE: dev
-      AGGREGATION_PROXY_ENABLED: "false"
-      AGGREGATION_DISPATCH_MODE: redis
-      # WS1.1: the versioning projection worker must NOT run inside the web
-      # process. Its full-seed build is CPU-bound and wedges the shared event
-      # loop (event_loop_lag CRITICAL) while FalkorDB loads/projects — which
-      # freezes EVERY request (auth, /docs, health), not just graph reads.
-      # Off here; projection is delegated to the standalone versioning-worker
-      # container (see below). Only set to "1" when running uvicorn standalone
-      # with no worker container.
-      GRAPHVER_PROJECTION_INPROCESS: "0"
+      - --reload-engine
+      - poll
+      - --timeout
+      - "120"
+      - --graceful-timeout
+      - "30"
 
   aggregation-controlplane:
     volumes:
