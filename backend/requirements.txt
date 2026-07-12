@@ -40,7 +40,7 @@ google-cloud-spanner>=3.49.0                 # Spanner Graph adapter (bundles sp
 anyio>=4.0.0                                 # Threadpool used by Spanner async/sync seam
 
 # Structured logging
-python-json-logger>=2.0.7
+python-json-logger>=4.1.0
 
 greenlet>=3.1.1          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
 python-multipart>=0.0.31 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
