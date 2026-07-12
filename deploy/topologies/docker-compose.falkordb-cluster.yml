@@ -17,7 +17,7 @@
 # For TLS add the --tls-* args (see the standalone file) plus
 # --tls-cluster yes to each node, and create with `redis-cli --tls ...`.
 x-node: &node
-  image: falkordb/falkordb:latest
+  image: falkordb/falkordb:v4.18.11
   restart: unless-stopped
   network_mode: host
 
@@ -49,7 +49,7 @@ services:
 
   # One-shot: wait for the nodes, then form the cluster (3 masters + 3 replicas).
   cluster-init:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb:v4.18.11
     network_mode: host
     restart: "no"
     depends_on: [node-0, node-1, node-2, node-3, node-4, node-5]
