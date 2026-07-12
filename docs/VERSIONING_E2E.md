@@ -134,8 +134,77 @@ curl -b cookies.txt -s "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BID/st
 | `GET  /pulls/{pr}` | PR metadata | `…:read` |
 | `GET  /pulls/{pr}/preview` | dry-run the PR merge | `…:read` |
 | `POST /pulls/{pr}/merge` | merge the PR into base main | `…:manage` |
+| `POST /graphs/{gid}/commits/{cid}/revert` | undo ONE published commit (409 `merge_conflict` if later commits touched the same entities) | `…:manage` |
+| `POST /graphs/{gid}/commits/{cid}/restore` | reset main to its state at that commit — point-in-time rollback, never conflicts | `…:manage` |
+| `GET  /graphs/{gid}/commits/{cid}/restore-preview` | exact impact of that restore (commits undone + per-kind counts) | `…:read` |
 
 `…` = `workspace:datasource` (a versioned graph is 1:1 with a data source).
+
+### Rollback: revert vs restore
+
+Both write a **new commit** — history is never rewritten, and the rollback itself is
+revertable.
+
+- **Revert** undoes one commit and keeps everything after it (git-revert). Because it
+  has to reconcile with later work, it *can* conflict: if a later commit changed the same
+  entities, it returns 409 with the blocking entity ids.
+- **Restore** resets main to its state at commit *K*: entities modified after *K* go back,
+  entities created after *K* are deleted, entities deleted after *K* come back. It
+  overrides everything after *K* by definition, so it **cannot conflict** — which makes it
+  the escape hatch when a revert is blocked. The UI offers exactly that (a blocked revert
+  offers "restore to just before it instead"). Restoring to genesis is the well-defined
+  "empty the graph".
+
+The UI reaches both from the history timeline (per-revision menu) and offers "Revert this
+merge" on a merged PR (which maps to its `resulting_commit_id`).
+
+### "Enable version control" (`/api/v1/{ws_id}/graph/bootstrap`)
+
+Copying a whole source graph into version history is a **job**, not a request — a 10M-entity
+graph cannot be paged into one HTTP call, and doing so made the web tier's memory O(graph).
+
+| Method & path | Purpose | Permission |
+|---|---|---|
+| `POST /graph/bootstrap?dataSourceId=` | start the copy → **202** `{jobId, graphId, status}` (200 `{alreadyEnabled}` if versioned) | `…:manage` |
+| `GET  /graph/bootstrap/status?dataSourceId=` | phase / processed / total / percent / error / integrity report | `…:read` |
+| `POST /graph/bootstrap/retry?dataSourceId=&mode=resume\|restart` | resume from the last window, or re-read the source | `…:manage` |
+| `POST /graph/bootstrap/abandon?dataSourceId=` | drop everything the job imported; the source reads as before | `…:manage` |
+
+Phases: `counting → nodes → edges → validate → heads → merkle → finalize → backfill`.
+
+Properties worth knowing:
+
+- **Bounded memory.** The source is scanned in ID-range windows (never OFFSET) and written
+  in per-window transactions: peak memory is O(window), not O(graph).
+- **Resumable.** Rows, tallies and the cursor commit in ONE transaction, and version rows
+  carry deterministic ids (`ON CONFLICT DO NOTHING`), so a crashed worker resumes exactly
+  and a replayed window is a no-op. A `running` job whose heartbeat goes stale is taken over.
+- **Invisible until proven.** The import commit sits at seq 2 while the head stays at
+  genesis; every read composes bounded by `main_head_commit_seq`. Validation runs *before*
+  `entity_heads` is written, so a failed copy leaves the data source reading exactly as it
+  did — there is nothing to unwind.
+- **Proven.** Source counts vs what landed, per node label AND per edge type (the
+  containment/lineage preservation proof), no duplicate identifiers, no dangling endpoints,
+  plus a random sample re-read from the source and content-hash-compared. The report is
+  persisted on the job and rendered in the UI.
+- **No reseed.** The graph is pinned to the source FalkorDB graph the canvas already reads,
+  and validation just proved they agree, so finalize *fast-forwards* the projection
+  watermark. (During the copy the watermark is parked at genesis on purpose: a projector
+  that thought it had work would DROP that graph and reseed it from an empty genesis.)
+- What the copy contains is **exactly what the application can see**: the reader ignores
+  nodes without a `urn` and edges whose endpoints have none, so those are counted and
+  disclosed in the report rather than copied. Derived artifacts (`:AGGREGATED`,
+  `_GVRollupMeta`, `_AggMeta`, `_Projection`) are never imported.
+
+### The `versioningEnabled` admin flag
+
+`Admin → Features → Lineage → Version control` (a `feature_flags` boolean, default ON).
+When off: every **mutating** versioning route returns 403
+`{"type": "feature_disabled", "feature": "versioningEnabled"}` and the UI hides drafts,
+reviews, history, blank models and the Edit entry — canvases become view-only. **Reads stay
+open** and nothing is deleted: existing versioned graphs and blank models remain viewable,
+and background projection keeps running. The frontend reads the flag from the public
+`GET /api/v1/features/values` (no auth) at boot.
 
 ---
 

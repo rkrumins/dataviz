@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for the versioned-graph API — run against a LIVE viz-service.
 
-Logs in as the seeded admin (cookie session + CSRF), then drives the whole MVP
-flow over HTTP — the browser never touches Postgres directly:
+Logs in as the seeded admin (cookie session + CSRF), then drives the whole flow
+over HTTP — the browser never touches Postgres directly:
 
     create graph -> open draft -> stage -> checkpoint -> read state
                  -> publish to main -> history + diff
                  -> fork (copy-on-write) -> diverge on the fork
                  -> open PR -> preview -> merge into base -> verify
+                 -> REVERT the merged PR -> RESTORE to an earlier revision
+                 -> the admin versioningEnabled flag (writes 403, reads keep working)
+                 -> [--enable-data-source] "enable version control" on a REAL data
+                    source: 202 + job, live phases, then its integrity report
 
 Every call is plain HTTP, so this doubles as living documentation of the API and
 as the manual E2E you can run on your end.
@@ -19,7 +23,8 @@ Usage
     python scripts/versioning_smoke.py \
         --base http://localhost:8000 \
         --email admin@synodic.local --password admin123 \
-        [--workspace <ws_id>]
+        [--workspace <ws_id>] \
+        [--enable-data-source ds_xxx]   # needs a versioning worker running
 
 If --workspace is omitted the script uses the first workspace from
 GET /api/v1/admin/workspaces, falling back to a synthetic id — the admin's
@@ -96,7 +101,8 @@ def pick_workspace(client: httpx.Client, base: str, override: str | None) -> str
     return "ws_smoke_" + uuid.uuid4().hex[:8]
 
 
-def run(base: str, email: str, password: str, workspace: str | None) -> int:
+def run(base: str, email: str, password: str, workspace: str | None,
+        enable_ds: str | None = None, bootstrap_timeout: int = 900) -> int:
     jar = http.cookiejar.CookieJar(policy=_LocalhostCookiePolicy())
     with httpx.Client(timeout=30.0, follow_redirects=True, cookies=httpx.Cookies(jar)) as client:
         login(client, base, email, password)
@@ -152,14 +158,123 @@ def run(base: str, email: str, password: str, workspace: str | None) -> int:
         s.ok(f"opened PR {pr}")
         prev = s.get(f"/pulls/{pr}/preview")
         s.check(prev["clean"] is True, f"PR preview clean (changes={prev['changes']})")
-        s.post(f"/pulls/{pr}/merge", {"message": "merge fork PR"})
+        merge_commit = s.post(f"/pulls/{pr}/merge", {"message": "merge fork PR"})["commitId"]
         s.ok("merged PR into base main")
         final = s.get(f"/graphs/{gid}/branches/{mid}/state")
         s.check(final["nodes"]["A"]["displayName"] == "Alpha (forked)" and "C" in final["nodes"],
                 "base reflects merged fork changes (A edited, C added)")
 
-        print(f"\n{GREEN}PASS{RESET} — {s.n} steps over HTTP. The frontend↔Postgres path is API-only, end to end.")
+        # 6. ROLLBACK — undo the merged PR, then restore the graph to a point in time.
+        #    Both write a NEW commit; history is never rewritten.
+        s.post(f"/graphs/{gid}/commits/{merge_commit}/revert", {"message": "revert the merge"})
+        s.ok("reverted the merged PR (a new `revert` revision)")
+        reverted = s.get(f"/graphs/{gid}/branches/{mid}/state")
+        s.check(reverted["nodes"]["A"]["displayName"] == "Alpha" and "C" not in reverted["nodes"],
+                "main is back to its pre-merge state (A restored, C gone)")
+
+        # A restore is a point-in-time RESET of main, not just an undo: it puts the graph
+        # back exactly as it was at the chosen revision — including undoing the revert we
+        # just made. (A no-op restore writes nothing, so we restore to a state that differs.)
+        pv = s.get(f"/graphs/{gid}/commits/{merge_commit}/restore-preview")
+        s.check(pv["commitsUndone"] >= 1,
+                f"restore preview: rolls back {pv['commitsUndone']} revision(s), "
+                f"{pv['nodes']} nodes / {pv['edges']} edges")
+        s.post(f"/graphs/{gid}/commits/{merge_commit}/restore", {"message": "restore to the merge"})
+        s.ok("restored the graph to the merged revision (the revert itself is rolled back)")
+        restored = s.get(f"/graphs/{gid}/branches/{mid}/state")
+        s.check(restored["nodes"]["A"]["displayName"] == "Alpha (forked)" and "C" in restored["nodes"],
+                "main is exactly the merged state again")
+
+        # ...and back to the first publish. A restore NEVER conflicts, which is what makes it
+        # the escape hatch when a revert is blocked.
+        log = s.get(f"/graphs/{gid}/commits")
+        commits = log["commits"] if isinstance(log, dict) else log
+        first_publish = next(c for c in reversed(commits) if c["kind"] == "squash_publish")
+        s.post(f"/graphs/{gid}/commits/{first_publish['commit_id']}/restore", {})
+        s.ok("restored the graph to its first published revision")
+        restored = s.get(f"/graphs/{gid}/branches/{mid}/state")
+        s.check(set(restored["nodes"]) == {"A", "B"} and restored["nodes"]["A"]["displayName"] == "Alpha",
+                "main is exactly the first published state")
+
+        kinds = [c["kind"] for c in (s.get(f"/graphs/{gid}/commits")["commits"])]
+        s.check(kinds.count("restore") == 2 and "revert" in kinds,
+                f"every step is kept in history (oldest→newest: {', '.join(reversed(kinds))})")
+
+        # 7. the admin flag, and (optionally) enabling version control on a REAL
+        #    data source — the async, integrity-checked copy.
+        run_flag(base, client, ws)
+        if enable_ds:
+            run_bootstrap(base, client, ws, enable_ds, bootstrap_timeout)
+
+        print(f"\n{GREEN}PASS{RESET} — every step over HTTP. The frontend↔Postgres path is API-only, end to end.")
         return 0
+
+
+def run_flag(base: str, client: httpx.Client, ws: str) -> None:
+    """The admin `versioningEnabled` flag: writes are refused, reads keep working."""
+    print(f"\n{DIM}→ admin feature flag{RESET}")
+    s = Smoke(base, ws, client)
+    values = client.get(f"{base}/api/v1/features/values").json()["values"]
+    s.check("versioningEnabled" in values, "public /features/values serves the flag (no auth needed)")
+
+    def set_flag(on: bool) -> None:
+        cur = client.get(f"{base}/api/v1/admin/features").json()
+        r = client.patch(f"{base}/api/v1/admin/features",
+                         json={"version": cur["version"], "versioningEnabled": on},
+                         headers={"X-CSRF-Token": client.cookies.get("nx_csrf") or ""})
+        r.raise_for_status()
+
+    set_flag(False)
+    try:
+        r = client.post(f"{base}/api/v1/{ws}/versioning/resolve", json={"dataSourceId": "ds_flag_probe"},
+                        headers={"X-CSRF-Token": client.cookies.get("nx_csrf") or ""})
+        s.check(r.status_code == 403 and r.json()["detail"]["type"] == "feature_disabled",
+                "flag OFF → a versioning WRITE is refused (403 feature_disabled)")
+        r = client.get(f"{base}/api/v1/{ws}/versioning/resolve", params={"dataSourceId": "ds_flag_probe"})
+        s.check(r.status_code != 403, "flag OFF → READS still work (existing graphs stay viewable)")
+    finally:
+        set_flag(True)
+    s.ok("flag restored to ON")
+
+
+def run_bootstrap(base: str, client: httpx.Client, ws: str, ds: str, timeout_s: int) -> None:
+    """"Enable version control" as an async, resumable, integrity-checked job."""
+    import time
+    print(f"\n{DIM}→ enable version control on {ds}{RESET}")
+    s = Smoke(base, ws, client)
+    hdr = {"X-CSRF-Token": client.cookies.get("nx_csrf") or ""}
+    r = client.post(f"{base}/api/v1/{ws}/graph/bootstrap", params={"dataSourceId": ds}, headers=hdr)
+    r.raise_for_status()
+    body = r.json()
+    if body.get("alreadyEnabled"):
+        s.ok("already versioned — nothing to do (idempotent)")
+        return
+    s.check(r.status_code == 202 and body["jobId"],
+            f"202 + job {body['jobId']} (the request never blocks on the copy)")
+
+    deadline = time.time() + timeout_s
+    job, last = None, None
+    while time.time() < deadline:
+        job = client.get(f"{base}/api/v1/{ws}/graph/bootstrap/status", params={"dataSourceId": ds}).json()
+        if job["status"] in ("completed", "failed"):
+            break
+        cur = (job["phase"], job["percent"])
+        if cur != last:
+            print(f"    {DIM}{job['phase']:<9} {job['percent']:>3}%  "
+                  f"{job['processed']:,}/{job['total']:,}{RESET}")
+            last = cur
+        time.sleep(2)
+    if not job or job["status"] != "completed":
+        raise AssertionError(f"bootstrap did not complete: {job}")
+
+    rep = job["report"]
+    s.check(all(c["ok"] for c in rep["checks"]), f"all {len(rep['checks'])} integrity checks passed")
+    s.check(rep["stored"]["nodes"] == rep["source"]["nodes"],
+            f"every item copied ({rep['stored']['nodes']:,} of {rep['source']['nodes']:,})")
+    s.check(len(rep["edgeTypes"]) > 0 or rep["source"]["edges"] == 0,
+            f"{len(rep['edgeTypes'])} relationship type(s) preserved (containment + lineage)")
+    s.check(rep["sampleChecked"] > 0 and not rep["sampleMismatched"],
+            f"{rep['sampleChecked']} random items re-read from the source match exactly")
 
 
 def main() -> int:
@@ -168,9 +283,16 @@ def main() -> int:
     ap.add_argument("--email", default="admin@synodic.local")
     ap.add_argument("--password", default="admin123")
     ap.add_argument("--workspace", default=None, help="workspace id (default: discover or synthesize)")
+    ap.add_argument("--enable-data-source", default=None, metavar="DS_ID",
+                    help="also run 'enable version control' on this REAL data source and "
+                         "assert its integrity report (needs a versioning worker running)")
+    ap.add_argument("--bootstrap-timeout", type=int, default=900,
+                    help="seconds to wait for the copy (default 900; a 10M-entity graph "
+                         "takes minutes)")
     args = ap.parse_args()
     try:
-        return run(args.base, args.email, args.password, args.workspace)
+        return run(args.base, args.email, args.password, args.workspace,
+                   args.enable_data_source, args.bootstrap_timeout)
     except httpx.HTTPStatusError as exc:
         print(f"\n{RED}FAIL{RESET} {exc.request.method} {exc.request.url} -> "
               f"{exc.response.status_code}\n{exc.response.text[:600]}", file=sys.stderr)
