@@ -644,7 +644,9 @@ async def get_top_level_nodes(
     ),
     includeChildCount: bool = Query(True, description="Populate child_count on each node."),
     engine: ContextEngine = Depends(get_context_engine),
-    session: AsyncSession = Depends(get_db_session),
+    # R-H3 bulkhead: held across the materialized-serve miss → FalkorDB read;
+    # isolate from the WEB pool so a slow provider can't starve auth/nav.
+    session: AsyncSession = Depends(get_graph_read_db_session),
 ):
     """Return instances that have no incoming containment edge.
 
@@ -864,7 +866,8 @@ async def search_advanced(
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
-    session: AsyncSession = Depends(get_db_session),
+    # R-H3 bulkhead: held across svc.search() → FalkorDB; isolate from WEB.
+    session: AsyncSession = Depends(get_graph_read_db_session),
 ):
     """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
@@ -930,7 +933,8 @@ async def search_explain(
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
-    session: AsyncSession = Depends(get_db_session),
+    # R-H3 bulkhead: held across svc.explain() → FalkorDB; isolate from WEB.
+    session: AsyncSession = Depends(get_graph_read_db_session),
 ):
     """Compile a SearchQuery without executing it.
 

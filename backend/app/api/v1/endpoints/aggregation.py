@@ -31,7 +31,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
     requires,
 )
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
@@ -573,7 +573,9 @@ async def get_readiness(
     ds_id: str,
     request: Request,
     svc=Depends(_get_svc),
-    session: AsyncSession = Depends(get_db_session),
+    # R-H3 bulkhead: direct-mode readiness holds this across
+    # compute_graph_fingerprint(provider) → FalkorDB; isolate from WEB.
+    session: AsyncSession = Depends(get_graph_read_db_session),
 ):
     if _PROXY_ENABLED:
         return await _proxy("GET", f"/aggregation/data-sources/{ds_id}/readiness", request)
