@@ -2,7 +2,7 @@
 # Stateless companion: provider discovery & connectivity testing.
 # Serves on port 8001. No database access — takes params in request body.
 # ──────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS base
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 

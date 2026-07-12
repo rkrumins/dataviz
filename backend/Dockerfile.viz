@@ -2,7 +2,7 @@
 # Primary backend: auth, workspace management, graph queries, ontology.
 # Serves on port 8000. Requires Management DB + graph provider at runtime.
 # ──────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS base
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 
