@@ -763,7 +763,24 @@ class ProviderManager:
         mid-job nulls the graph handle out from under a running aggregation and
         surfaces as ``'NoneType' object has no attribute 'query'``. When busy we
         background a drain-then-close so the pool isn't leaked.
+
+        This is the SINGLE eviction chokepoint (evict_provider / evict_workspace /
+        evict_all all funnel here), so it also invalidates the versioning
+        registry's memoized connection config + its cached graph clients. Without
+        that, an admin repointing a provider (new host, standalone→cluster, rotated
+        credentials) would update the read path while the PROJECTOR kept writing to
+        the old instance until a restart — and a recovered-after-rotation provider
+        would keep its dead sockets in those long-lived pools.
         """
+        try:
+            from backend.app.providers.falkor_graph_registry import invalidate_provider
+
+            await invalidate_provider(provider_id)
+        except Exception as exc:                     # pragma: no cover - best effort
+            logger.warning(
+                "Failed to invalidate registry graph clients for %s: %s",
+                provider_id, exc,
+            )
         cache_key = (provider_id, graph_name or "")
         provider = self._providers.pop(cache_key, None)
         self._locks.pop(cache_key, None)
@@ -818,11 +835,44 @@ class ProviderManager:
         for ds in sources:
             await self.evict_data_source(ds.provider_id, ds.graph_name or "")
 
-    async def evict_provider(self, provider_id: str) -> None:
-        """Evict all cached providers for a given provider_id (any graph_name)."""
+    async def evict_provider(self, provider_id: str, *, _broadcast: bool = True) -> None:
+        """Evict everything cached for a provider_id — read instances AND the
+        projector/registry's connection config + graph clients — in EVERY process.
+
+        The registry invalidation runs UNCONDITIONALLY, not inside the loop below:
+        ``self._providers`` is populated only by READ traffic, while the registry's
+        caches are populated by the PROJECTOR. A provider that has been projected to
+        but never read from (or whose read instance was already evicted by a breaker
+        cycle) has no key here at all — so gating invalidation on that loop meant an
+        admin repointing the provider left the projector writing to the OLD instance
+        until the process restarted.
+
+        The broadcast covers the other processes: this runs in ONE web pod, but the
+        other replicas, the aggregation worker and the versioning worker each hold
+        their own caches, and no self-heal reaches them (after a repoint the OLD host
+        usually still answers, so warmup never sees the false→true transition that
+        drives its eviction). ``_broadcast=False`` is used by the listener applying a
+        received invalidation, so a message can't echo forever.
+        """
+        try:
+            from backend.app.providers.falkor_graph_registry import invalidate_provider
+
+            await invalidate_provider(provider_id)
+        except Exception as exc:                     # pragma: no cover - best effort
+            logger.warning(
+                "Failed to invalidate registry graph clients for %s: %s",
+                provider_id, exc,
+            )
         keys_to_evict = [k for k in self._providers if k[0] == provider_id]
         for key in keys_to_evict:
             await self.evict_data_source(key[0], key[1])
+
+        if _broadcast:
+            from backend.app.providers.invalidation_bus import (
+                publish_provider_invalidation,
+            )
+
+            await publish_provider_invalidation(provider_id)
 
     async def evict_all(self) -> None:
         """Evict all cached providers. Called during shutdown."""

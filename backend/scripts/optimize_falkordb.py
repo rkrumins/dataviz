@@ -68,6 +68,11 @@ async def optimize():
     logger.info("Optimization complete!")
 
 if __name__ == "__main__":
+    # Standalone-only client: on a Sentinel/Cluster instance the index creation
+    # would silently skip every node but one. Fail fast.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+
+    assert_standalone_env("optimize_falkordb.py")
     try:
         asyncio.run(optimize())
     except KeyboardInterrupt:

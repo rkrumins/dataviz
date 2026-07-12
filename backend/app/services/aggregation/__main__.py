@@ -756,6 +756,21 @@ async def main() -> None:
     except Exception as e:
         logger.warning("Health endpoint failed to start: %s (continuing without it)", e)
 
+    # Cross-process provider invalidation — this worker owns its OWN
+    # ProviderManager + registry caches, so an admin repointing a provider in the
+    # web tier would otherwise leave it reading/writing the OLD instance (with the
+    # OLD credentials) until restart. The warmup loop can't rescue it: after a
+    # repoint the old host usually still answers, so there is no false→true
+    # transition to trigger the recovery eviction.
+    from backend.app.providers.invalidation_bus import ProviderInvalidationListener
+    invalidation_listener = ProviderInvalidationListener(
+        redis_client, provider_manager=registry,
+    )
+    try:
+        await invalidation_listener.start()
+    except Exception as e:
+        logger.warning("Provider invalidation listener failed to start: %s", e)
+
     # Cross-process cancel bridge — subscribes to the Redis Pub/Sub
     # control channel and forwards into this process's local
     # CancelRegistry. Without this, cancel requests issued by the web
@@ -789,6 +804,10 @@ async def main() -> None:
         await consumer.drain(timeout=60.0)
         try:
             await cancel_listener.stop()
+        except Exception:
+            pass
+        try:
+            await invalidation_listener.stop()
         except Exception:
             pass
         warmup_shutdown.set()

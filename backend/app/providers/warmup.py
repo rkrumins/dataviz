@@ -567,11 +567,24 @@ async def start_provider_warmup(
     from backend.app.db.repositories import provider_repo as _provider_repo
 
     async def _list_providers() -> list:
+        import json as _json
+
         async with get_provider_probe_session() as session:
             rows = await _provider_repo.list_providers(session)
             out = []
             for row in rows:
                 creds = await _provider_repo.get_credentials(session, row.id)
+                # extra_config carries falkordbConnection (mode + sentinel/cluster
+                # nodes). WITHOUT it every provider is probed as STANDALONE against
+                # its stored host:port — a Sentinel instance gets pinged at whatever
+                # that row happens to name, and a Cluster instance at one seed — so
+                # the probe verdict describes a topology the read path never uses.
+                # That verdict drives record_probe_success/failure (breaker close +
+                # pool eviction), so getting it wrong corrupts recovery itself.
+                try:
+                    extra = _json.loads(row.extra_config) if row.extra_config else None
+                except Exception:
+                    extra = None
                 out.append({
                     "id": row.id,
                     "provider_type": (
@@ -583,6 +596,7 @@ async def start_provider_warmup(
                     "port": row.port,
                     "tls": row.tls_enabled,
                     "creds": creds,
+                    "extra_config": extra,
                 })
             return out
 
@@ -594,6 +608,7 @@ async def start_provider_warmup(
             None,
             cfg.get("tls", False),
             cfg.get("creds") or {},
+            cfg.get("extra_config"),
         )
 
     async def _on_recovery(provider_id: str, entry: dict) -> None:

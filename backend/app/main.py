@@ -784,6 +784,25 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:
             logger.warning("Aggregation service startup warning: %s", exc)
 
+    # Cross-process provider invalidation: an admin edit lands in ONE replica, but
+    # every other web pod (and both workers) caches provider config + graph clients.
+    # Nothing self-heals that — after a repoint the OLD host usually still answers,
+    # so warmup never sees a failure — so they'd keep writing to the old instance
+    # until restart. Best-effort: a bus outage must never fail an admin edit.
+    try:
+        from .providers.invalidation_bus import ProviderInvalidationListener
+
+        _app.state._provider_invalidation_listener = ProviderInvalidationListener(
+            provider_manager=provider_manager,
+        )
+        await _app.state._provider_invalidation_listener.start()
+    except Exception as exc:
+        logger.warning(
+            "Provider invalidation listener failed to start — a provider edit in "
+            "another replica will not be picked up here until restart: %s", exc,
+        )
+        _app.state._provider_invalidation_listener = None
+
     # Background provider warmup loop — the single source of provider
     # health observability. The loop probes each registered provider via
     # preflight() in round-robin and updates ``app.state.provider_warmup_cache``
@@ -1022,6 +1041,14 @@ async def lifespan(_app: FastAPI):
     if _cancel_listener is not None:
         try:
             await _cancel_listener.stop()
+        except Exception:
+            pass
+
+    # Stop the cross-process provider invalidation listener.
+    _inv_listener = getattr(_app.state, "_provider_invalidation_listener", None)
+    if _inv_listener is not None:
+        try:
+            await _inv_listener.stop()
         except Exception:
             pass
 

@@ -111,6 +111,125 @@ def test_web_and_worker_share_one_starter():
     assert "_list_providers_for_warmup" not in src
 
 
+@pytest.mark.asyncio
+async def test_warmup_probes_the_provider_s_own_topology(monkeypatch):
+    """AUDIT FIX: the warmup lister must carry extra_config through to the probe.
+
+    Without it every provider is probed as STANDALONE against its stored host:port
+    — a Sentinel instance gets pinged wherever that row points and a Cluster
+    instance at one seed — so the verdict describes a topology the read path never
+    uses. That verdict drives record_probe_success/failure (breaker close + pool
+    eviction), so a wrong probe corrupts recovery itself.
+    """
+    from backend.app.providers import warmup
+
+    class _Row:
+        id = "prov_cluster"
+        provider_type = "falkordb"
+        host = "seed-1"
+        port = 6379
+        tls_enabled = False
+        extra_config = (
+            '{"falkordbConnection": {"mode": "cluster", '
+            '"cluster": {"startupNodes": [["n1", 7000]]}}}'
+        )
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    from backend.app.db import engine as _engine
+    from backend.app.db.repositories import provider_repo as _repo
+
+    monkeypatch.setattr(_engine, "get_provider_probe_session", lambda: _FakeSession())
+    monkeypatch.setattr(_repo, "list_providers", lambda _s: _async_value([_Row()]))
+    monkeypatch.setattr(_repo, "get_credentials", lambda _s, _i: _async_value({}))
+
+    captured = {}
+
+    async def fake_initial_pass(**kwargs):
+        rows = await kwargs["list_providers"]()
+        captured["rows"] = rows
+        kwargs["build_instance"](rows[0])
+
+    async def fake_supervised(**kwargs):
+        return None
+
+    monkeypatch.setattr(warmup, "initial_fast_pass", fake_initial_pass)
+    monkeypatch.setattr(warmup, "supervised_warmup_loop", fake_supervised)
+
+    mgr = _FakeManager()
+    built = {}
+    mgr._create_provider_instance = lambda *a: built.update(args=a) or object()
+
+    tasks = await warmup.start_provider_warmup(mgr, shutdown_event=asyncio.Event())
+    await asyncio.gather(*tasks)
+
+    # The row snapshot carries the topology…
+    assert captured["rows"][0]["extra_config"]["falkordbConnection"]["mode"] == "cluster"
+    # …and it reaches _create_provider_instance as the extra_config argument (7th).
+    assert built["args"][6]["falkordbConnection"]["mode"] == "cluster"
+
+
+def _async_value(value):
+    async def _coro():
+        return value
+
+    return _coro()
+
+
+def test_outbound_provider_loader_passes_extra_config():
+    """AUDIT FIX: _load_provider_for_outbound (used by discover_schema) dropped
+    extra_config → a standalone client for a Sentinel/Cluster provider. The sibling
+    /test endpoint always passed it; the two had drifted."""
+    import inspect
+
+    from backend.app.api.v1.endpoints import providers as prov_ep
+
+    src = inspect.getsource(prov_ep._load_provider_for_outbound)
+    assert "extra_config" in src
+    assert "_create_provider_instance(" in src
+
+
+def test_list_graphs_fans_out_on_cluster():
+    """AUDIT FIX: a single-node GRAPH.LIST under-reports on a cluster (a node holds
+    only its own slots' keys) — insights discovery would show a partial asset list."""
+    import inspect
+
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    src = inspect.getsource(FalkorDBProvider.list_graphs)
+    assert "list_graph_keys_for_config" in src
+
+
+def test_projection_mode_routes_proj_graph_on_cluster():
+    """AUDIT FIX: {graph}_proj may hash to a DIFFERENT shard than {graph}; reusing
+    the source graph's client sent AGGREGATED writes to the wrong node."""
+    import inspect
+
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    src = inspect.getsource(FalkorDBProvider.set_projection_mode)
+    assert "build_graph_client" in src
+    assert 'mode == "cluster"' in src
+
+
+def test_orphan_drop_is_routed_to_its_provider():
+    """AUDIT FIX: drop_graph(orphan) with no provider_id issued GRAPH.DELETE against
+    the ENV instance — it would miss the orphan and could delete a same-named graph
+    over there."""
+    import inspect
+
+    from backend.app.api.v1.endpoints import versioning as ver_ep
+
+    src = inspect.getsource(ver_ep.project_now)
+    assert "falkor_provider" in src
+    assert "drop_graph(orphan," in src
+
+
 # ── 2. topology-aware FalkorDB probe ─────────────────────────────────
 
 @pytest.fixture

@@ -239,6 +239,72 @@ async def test_cluster_preflight_discovery_is_deadline_bounded(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sentinel_preflight_probes_the_master_not_the_sentinel(monkeypatch):
+    """A Sentinel daemon answers PONG while the master it watches is DEAD. Probing
+    it would report the provider healthy through a whole master outage — and,
+    because warmup never observes a failure, the false→true recovery eviction
+    would never fire. Probe the master Sentinel names instead."""
+    p = FalkorDBProvider(host="ignored", graph_name="g")
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379), ("sentinel-2", 26379)],
+    )
+
+    async def fake_discover(cfg, socket_timeout):
+        assert cfg.sentinel_master == "mymaster"
+        return ("master-node", 6379)
+
+    monkeypatch.setattr(
+        "backend.app.providers.falkordb_connection.resolve_sentinel_master",
+        fake_discover,
+    )
+
+    probed = {}
+
+    async def fake_ping(host, port, **kwargs):
+        probed["target"] = (host, port)
+        return "PREFLIGHT_OK"
+
+    monkeypatch.setattr(
+        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
+    )
+
+    assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
+    assert probed["target"] == ("master-node", 6379)     # NOT sentinel-1:26379
+
+
+@pytest.mark.asyncio
+async def test_sentinel_preflight_falls_back_when_discovery_fails(monkeypatch):
+    """Quorum unreachable / mid-failover: degrade to probing the first Sentinel
+    rather than raising out of a probe that promises never to raise."""
+    p = FalkorDBProvider(host="ignored", graph_name="g")
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379)],
+    )
+
+    async def boom(cfg, socket_timeout):
+        raise RedisConnectionError("no quorum")
+
+    monkeypatch.setattr(
+        "backend.app.providers.falkordb_connection.resolve_sentinel_master", boom,
+    )
+
+    probed = {}
+
+    async def fake_ping(host, port, **kwargs):
+        probed["target"] = (host, port)
+        return "PREFLIGHT_OK"
+
+    monkeypatch.setattr(
+        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
+    )
+
+    assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
+    assert probed["target"] == ("sentinel-1", 26379)
+
+
+@pytest.mark.asyncio
 async def test_standalone_preflight_unchanged(monkeypatch):
     """Standalone probes the configured host directly — no discovery."""
     p = FalkorDBProvider(host="plainhost", graph_name="g")

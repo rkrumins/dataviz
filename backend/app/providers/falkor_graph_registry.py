@@ -45,6 +45,37 @@ logger = logging.getLogger(__name__)
 
 _UNROUTED = (None, "", "default")
 
+# provider_id -> FalkorDBConnConfig. Process-wide (NOT per-factory) so that ONE
+# admin edit can invalidate it everywhere: main.py, the versioning endpoints and
+# the versioning worker each build their own factory, and a per-closure memo would
+# leave the others writing to the old instance.
+_RESOLVED: dict = {}
+
+
+async def invalidate_provider(provider_id: str) -> None:
+    """Forget a provider's connection config and drop every graph client built
+    from it.
+
+    Called from ``ProviderManager.evict_data_source`` — the single eviction
+    chokepoint — so an admin changing a provider's host / mode / credentials
+    invalidates the READ path and the PROJECTOR path together. Without this the
+    projector would keep writing to the OLD instance (or the old topology) until
+    the process restarted: a silent data-corruption hazard, not just a stale read.
+
+    Also runs on the warmup loop's recovery eviction, which is what discards the
+    dead sockets a rotated pod leaves behind in these long-lived pools.
+    """
+    cfg = _RESOLVED.pop(provider_id, None)
+    if cfg is None:
+        return
+    from backend.app.providers.falkordb_connection import graph_clients
+
+    try:
+        await graph_clients().invalidate_config(cfg)
+    except Exception:                                # pragma: no cover - best effort
+        logger.warning("failed to drop cached graph clients for provider %r",
+                       provider_id, exc_info=True)
+
 
 async def resolve_provider_conn_config(provider_id: str, session_factory=None):
     """PINNED ``provider_id`` → its ``FalkorDBConnConfig`` (topology + auth + TLS).
@@ -107,17 +138,16 @@ def make_registry_graph_factory(session_factory=None) -> Callable[[str, Optional
     """
     from backend.app.providers.falkordb_connection import env_conn_config, graph_clients
 
-    resolved: dict = {}                 # provider_id -> FalkorDBConnConfig
-
     async def _resolve(provider_id: str):
         """Memoized on success only — a transient lookup error or a since-fixed
         provider row is retried on the next call rather than staying broken for the
-        process lifetime."""
-        if provider_id not in resolved:
-            resolved[provider_id] = await resolve_provider_conn_config(
+        process lifetime. The memo is the module-level ``_RESOLVED`` so
+        ``invalidate_provider`` can clear it for every factory at once."""
+        if provider_id not in _RESOLVED:
+            _RESOLVED[provider_id] = await resolve_provider_conn_config(
                 provider_id, session_factory,
             )
-        return resolved[provider_id]
+        return _RESOLVED[provider_id]
 
     async def graph(name: str, provider_id: Optional[str] = None):
         cfg = (

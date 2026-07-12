@@ -280,8 +280,13 @@ async def test_mixed_fleet_every_graph_reaches_its_own_instance(fleet):
 
 @pytest.mark.asyncio
 async def test_client_sharing_matches_topology(fleet):
-    """One client per instance for standalone/sentinel; one per GRAPH for
-    cluster (a graph key lives entirely on one node)."""
+    """Pools are bounded by ENDPOINTS, never by graphs.
+
+    Standalone/Sentinel: one client per instance. Cluster: one client per OWNING
+    NODE — the 4 graphs live on 3 nodes (gv_cl_1 and gv_cl_4 share cl-node-a), so
+    3 clients, not 4. Keying by graph would open a pool per graph (×pool size):
+    at 1000s of graphs that is tens of thousands of sockets against a 3-node
+    cluster."""
     graph = _factory()
     for name in STANDALONE_GRAPHS:
         await graph(name, "standalone-1")
@@ -297,10 +302,14 @@ async def test_client_sharing_matches_topology(fleet):
 
     assert len(standalone) == 1          # 3 graphs share one pool
     assert len(sentinel) == 1            # 2 graphs share the master's pool
-    assert len(cluster) == 4             # one pinned client per graph key
-    # ...and the cluster clients are keyed BY GRAPH, standalone/sentinel are not.
-    assert {k[1] for k in cluster} == set(CLUSTER_GRAPHS)
     assert standalone[0][1] is None and sentinel[0][1] is None
+
+    # 4 graphs → 3 distinct owning nodes → 3 clients.
+    assert len(cluster) == 3
+    assert {k[1] for k in cluster} == set(CLUSTER_OWNERS[g] for g in CLUSTER_GRAPHS)
+    # The graph→node map still knows all four graphs (cheap, no sockets).
+    owners = fleet["clients"]._owner
+    assert len([k for k in owners if k[1] in CLUSTER_GRAPHS]) == 4
 
 
 @pytest.mark.asyncio
@@ -339,16 +348,21 @@ async def test_cluster_node_rotation_reresolves_owner(fleet):
     g = await graph("gv_cl_2", "cluster-1")
     assert (await g.query("RETURN 1"))["endpoint"] == ("cl-node-b", 7001)
 
-    # Rotation: the pinned client's connection dies and the slot moves.
+    # Rotation: the client pinned to the OWNING NODE dies and the slot moves.
     cached = next(
         db for (key, (db, _pool)) in fleet["clients"]._clients.items()
-        if key[1] == "gv_cl_2"
+        if key[1] == ("cl-node-b", 7001)
     )
     cached.fail_once = True
     CLUSTER_OWNERS["gv_cl_2"] = ("cl-node-b2", 7011)      # replica promoted
 
     res = await g.query("RETURN 1")
     assert res == {"endpoint": ("cl-node-b2", 7011), "graph": "gv_cl_2"}
+    # The dead node's client is gone (it was dead for EVERY graph it held), and
+    # the graph's owner mapping was re-resolved to the promoted replica.
+    assert not any(
+        k[1] == ("cl-node-b", 7001) for k in fleet["clients"]._clients
+    )
 
 
 @pytest.mark.asyncio
@@ -433,6 +447,73 @@ async def test_projection_env_factory_shares_the_same_topology_path(fleet, monke
     graph = make_falkor_graph_factory()
     res = await (await graph("gv_cl_4", None)).query("RETURN 1")
     assert res == {"endpoint": ("cl-node-a", 7000), "graph": "gv_cl_4"}
+
+
+# ── pools are bounded by endpoints, not by graphs ────────────────────
+
+@pytest.mark.asyncio
+async def test_cluster_pools_do_not_scale_with_graph_count(fleet):
+    """The scale invariant: 200 graphs across 3 nodes must open 3 clients, not
+    200. Keying clients by graph would open a pool per graph (× FALKORDB_POOL_SIZE
+    connections) — tens of thousands of sockets against a 3-node cluster at this
+    platform's graph counts."""
+    graph = _factory()
+    nodes = [("cl-node-a", 7000), ("cl-node-b", 7001), ("cl-node-c", 7002)]
+    for i in range(200):
+        name = f"gv_bulk_{i}"
+        CLUSTER_OWNERS[name] = nodes[i % 3]
+        await graph(name, "cluster-1")
+
+    cluster_clients = [k for k in fleet["clients"]._clients if k[0][0] == "cluster"]
+    assert len(cluster_clients) == 3            # one per owning node
+    assert len(fleet["clients"]._owner) >= 200  # the graph→node map is cheap
+
+    for i in range(200):
+        CLUSTER_OWNERS.pop(f"gv_bulk_{i}", None)
+
+
+# ── provider edits invalidate BOTH paths ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_provider_eviction_drops_registry_config_and_clients(fleet):
+    """An admin repointing a provider (new host / standalone→cluster / rotated
+    credentials) must invalidate the PROJECTOR path too. Otherwise the read path
+    picks up the change while the projector keeps writing to the OLD instance
+    until the process restarts — silent data corruption, not a stale read.
+
+    ProviderManager.evict_data_source is the single chokepoint (evict_provider /
+    evict_workspace / evict_all all funnel through it)."""
+    from backend.app.providers import falkor_graph_registry as reg
+
+    graph = _factory()
+    g = await graph("gv_sa_1", "standalone-1")
+    assert (await g.query("RETURN 1"))["endpoint"] == ("falkor-standalone", 6379)
+    assert "standalone-1" in reg._RESOLVED
+    assert any(k[0][0] == "standalone" for k in fleet["clients"]._clients)
+
+    # Admin repoints the provider at a different instance.
+    PROVIDER_ROWS["standalone-1"]["host"] = "falkor-standalone-2"
+    try:
+        await reg.invalidate_provider("standalone-1")
+
+        # Memo AND clients dropped — the next call re-reads the row.
+        assert "standalone-1" not in reg._RESOLVED
+        assert not any(k[0][0] == "standalone" for k in fleet["clients"]._clients)
+
+        g2 = await graph("gv_sa_1", "standalone-1")
+        assert (await g2.query("RETURN 1"))["endpoint"] == ("falkor-standalone-2", 6379)
+    finally:
+        PROVIDER_ROWS["standalone-1"]["host"] = "falkor-standalone"
+
+
+def test_manager_eviction_invalidates_the_registry():
+    """Pin the wiring: the manager's chokepoint calls the registry invalidation."""
+    import inspect
+
+    from backend.app.providers.manager import ProviderManager
+
+    src = inspect.getsource(ProviderManager.evict_data_source)
+    assert "invalidate_provider(" in src
 
 
 # ── fail-loud contract preserved ─────────────────────────────────────

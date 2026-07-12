@@ -832,26 +832,33 @@ class FalkorDBProvider(GraphDataProvider):
             username=self._username, password=self._password,
             tls_enabled=self._tls_enabled,
         )
+        # Probe the node that actually SERVES this graph, never just an entry
+        # point. A Sentinel daemon answers PONG while the master it watches is
+        # dead, and a healthy cluster seed masks a dead slot owner — in both cases
+        # warmup would keep reporting the provider healthy (so the recovery
+        # eviction never fires) while every real query fails. Discovery is
+        # deadline-bounded and falls back to the configured entry point when it
+        # can't resolve; connect() remains the authoritative topology check.
         host, port = self._host, self._port
+        discover = None
         if cfg.mode == "sentinel" and cfg.sentinel_nodes:
             host, port = cfg.sentinel_nodes[0]
+            from backend.app.providers.falkordb_connection import (
+                resolve_sentinel_master,
+            )
+            discover = resolve_sentinel_master(cfg, 1.0)
         elif cfg.mode == "cluster" and cfg.cluster_nodes:
-            # Probe the node that OWNS this graph, not just an entry node.
-            # A healthy startup node would otherwise mask a dead owner: the
-            # warmup loop keeps reporting the provider healthy (so the
-            # recovery eviction never fires) while every real query against
-            # the pinned pool fails. Discovery is deadline-bounded and falls
-            # back to the first startup node when it can't resolve —
-            # connect() remains the authoritative topology check.
             host, port = cfg.cluster_nodes[0]
             from backend.app.providers.falkordb_connection import (
                 resolve_cluster_node_for_key,
             )
+            discover = resolve_cluster_node_for_key(cfg, self._graph_name, 1.0)
+
+        if discover is not None:
             started = time.monotonic()
             try:
                 host, port = await asyncio.wait_for(
-                    resolve_cluster_node_for_key(cfg, self._graph_name, 1.0),
-                    timeout=max(0.5, deadline_s * 0.6),
+                    discover, timeout=max(0.5, deadline_s * 0.6),
                 )
             except Exception:
                 pass
@@ -1860,7 +1867,27 @@ class FalkorDBProvider(GraphDataProvider):
         self._projection_mode = mode
         if mode == "dedicated":
             if self._proj_graph is None:
-                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+                proj_name = f"{self._graph_name}_proj"
+                if self._conn_cfg is not None and self._conn_cfg.mode == "cluster":
+                    # {graph}_proj may hash to a DIFFERENT shard than {graph}, so it
+                    # needs its own owning-node client — reusing self._db would send
+                    # the AGGREGATED writes to the wrong node (MOVED/CROSSSLOT).
+                    # Same routing _ensure_connected does when the mode is known at
+                    # connect time; this path is the per-job switch.
+                    from backend.app.providers.falkordb_connection import (
+                        build_graph_client,
+                    )
+                    socket_timeout = self._conn_cfg.socket_timeout or float(
+                        os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
+                    )
+                    self._proj_db, self._proj_pool = await build_graph_client(
+                        self._conn_cfg,
+                        graph_name=proj_name,
+                        pool_kwargs=self._build_pool_kwargs(socket_timeout),
+                    )
+                    self._proj_graph = self._proj_db.select_graph(proj_name)
+                else:
+                    self._proj_graph = self._db.select_graph(proj_name)
         else:
             # Switching back to in_source — clear proj_graph so _proj returns _graph
             self._proj_graph = None
@@ -8342,6 +8369,20 @@ class FalkorDBProvider(GraphDataProvider):
         "no graphs exist". Only an empty result is normalised to ``[]``.
         """
         await self._ensure_connected()
+        # On a CLUSTER, self._db is pinned to ONE node and a node only holds the
+        # graph keys in its own slots — a single-node GRAPH.LIST silently
+        # UNDER-reports (insights discovery would show a partial asset list). Fan
+        # out over every primary and union, exactly as list_graph_keys_for_config
+        # does for the registry path.
+        if self._conn_cfg is not None and self._conn_cfg.mode == "cluster":
+            from backend.app.providers.falkordb_connection import (
+                list_graph_keys_for_config,
+            )
+            keys = await asyncio.wait_for(
+                list_graph_keys_for_config(self._conn_cfg),
+                timeout=self._READ_TIMEOUT,
+            )
+            return sorted(keys)
         # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
         # client (not Cypher, not the TimeoutRedis proxy) so it has no
         # natural wrapper.  Bound it inline at the read-query timeout to

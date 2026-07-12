@@ -25,6 +25,7 @@ Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port").
 """
 import asyncio
+import hashlib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -62,6 +63,11 @@ class FalkorDBConnConfig:
     password: Optional[str] = None
     sentinel_master: Optional[str] = None
     sentinel_nodes: List[Tuple[str, int]] = field(default_factory=list)
+    # Auth for the Sentinel DAEMONS themselves (separate service from the data
+    # plane). Default: none — see load_connection_config.
+    sentinel_username: Optional[str] = None
+    sentinel_password: Optional[str] = None
+    sentinel_auth_enabled: bool = False
     cluster_nodes: List[Tuple[str, int]] = field(default_factory=list)
     # Per-provider advanced knobs (None → fall back to env defaults at the
     # call site). socket_timeout bounds a single Cypher query; graph_pool_size
@@ -185,6 +191,24 @@ def load_connection_config(
         sentinel_nodes=_parse_nodes(
             sentinel.get("nodes") or os.getenv("FALKORDB_SENTINEL_NODES")
         ),
+        # Sentinel DAEMONS authenticate separately from the data plane (they are a
+        # different service on a different port). Explicit creds win; otherwise
+        # ``authEnabled: true`` opts into reusing the FalkorDB credentials; the
+        # default is NO auth to the sentinels — sending AUTH to an unauthenticated
+        # sentinel makes redis-py raise, which used to make discover_master fail and
+        # take sentinel mode down entirely.
+        sentinel_username=(
+            sentinel.get("username") or os.getenv("FALKORDB_SENTINEL_USERNAME")
+        ),
+        sentinel_password=(
+            sentinel.get("password") or os.getenv("FALKORDB_SENTINEL_PASSWORD")
+        ),
+        sentinel_auth_enabled=_as_bool(
+            sentinel.get(
+                "authEnabled", os.getenv("FALKORDB_SENTINEL_AUTH_ENABLED", False),
+            ),
+            False,
+        ),
         cluster_nodes=_parse_nodes(
             cluster.get("startupNodes") or os.getenv("FALKORDB_CLUSTER_NODES")
         ),
@@ -280,6 +304,33 @@ def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
     return kw
 
 
+def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
+    """Connection kwargs for talking to the Sentinel DAEMONS (not the master).
+
+    Sentinels are a separate service with their own auth. Passing the FalkorDB
+    password to an UNAUTHENTICATED sentinel makes redis-py raise on the AUTH reply,
+    which fails ``discover_master`` and takes sentinel mode down entirely — so
+    credentials are sent only when explicitly configured (``sentinel.username`` /
+    ``sentinel.password``) or when ``sentinel.authEnabled`` opts into reusing the
+    data-plane credentials.
+    """
+    kw: dict = {
+        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_timeout": socket_timeout,
+    }
+    username = cfg.sentinel_username or (
+        cfg.username if cfg.sentinel_auth_enabled else None
+    )
+    password = cfg.sentinel_password or (
+        cfg.password if cfg.sentinel_auth_enabled else None
+    )
+    if username:
+        kw["username"] = username
+    if password:
+        kw["password"] = password
+    return kw
+
+
 async def resolve_cluster_node_for_key(
     cfg: FalkorDBConnConfig, graph_name: str, socket_timeout: float,
 ) -> Tuple[str, int]:
@@ -353,15 +404,33 @@ async def build_graph_client(
                 "sentinel.nodes (or FALKORDB_SENTINEL_MASTER / "
                 "FALKORDB_SENTINEL_NODES)."
             )
-        auth = _conn_auth_kwargs(cfg, socket_timeout)
-        sentinel = Sentinel(cfg.sentinel_nodes, sentinel_kwargs=auth, **auth)
-        # ``master_for`` returns a Redis bound to a pool that transparently
-        # re-resolves the master on failover; hand that pool to FalkorDB.
-        master = sentinel.master_for(
-            cfg.sentinel_master,
-            max_connections=pool_kwargs.get("max_connections"),
-            **auth,
+        # The MASTER pool must carry the caller's full pool kwargs — socket
+        # timeouts AND socket_keepalive / health_check_interval — plus TLS. Passing
+        # only max_connections+auth (as this did) silently dropped the idle-socket
+        # health check in sentinel mode alone: after a failover, stale pooled
+        # sockets stalled to the caller's asyncio.TimeoutError (which _run_guarded
+        # refuses to retry, by design) instead of a retryable redis ConnectionError,
+        # so the breaker opened where a transparent retry was intended. It also
+        # force-set decode_responses=True, giving Sentinel deployments `str` where
+        # standalone/cluster give the same callers `bytes`.
+        master_kwargs = {**pool_kwargs, **tls_client_kwargs(cfg.tls_settings())}
+        # Data-plane credentials: pool_kwargs normally carries them (both
+        # build_graph_pool_kwargs and _build_pool_kwargs add them), but fall back to
+        # the config so a caller passing bare pool kwargs can never end up connecting
+        # to the master UNAUTHENTICATED.
+        if cfg.username and "username" not in master_kwargs:
+            master_kwargs["username"] = cfg.username
+        if cfg.password and "password" not in master_kwargs:
+            master_kwargs["password"] = cfg.password
+        sentinel = Sentinel(
+            cfg.sentinel_nodes,
+            sentinel_kwargs=_sentinel_auth_kwargs(cfg, socket_timeout),
+            **master_kwargs,
         )
+        # ``master_for`` returns a Redis bound to a pool that transparently
+        # re-resolves the master on failover (redis-py re-runs discover_master on
+        # every (re)connect), so a promoted replica is picked up without a rebuild.
+        master = sentinel.master_for(cfg.sentinel_master, **master_kwargs)
         return FalkorDB(connection_pool=master.connection_pool), master.connection_pool
 
     if cfg.mode == "cluster":
@@ -477,6 +546,24 @@ def build_graph_pool_kwargs(
     return kw
 
 
+def build_node_client(
+    cfg: FalkorDBConnConfig, host: str, port: int, pool_kwargs: dict,
+) -> Tuple[Any, Any]:
+    """A FalkorDB client bound to ONE already-resolved endpoint.
+
+    Used when the caller has already discovered the owning cluster node (so the
+    slot lookup is not repeated per graph) — TLS still applied here, since raw
+    pools need ``connection_class=SSLConnection``.
+    """
+    from falkordb.asyncio import FalkorDB
+    from redis.asyncio import ConnectionPool
+
+    pool = ConnectionPool(
+        host=host, port=port, **pool_kwargs, **tls_pool_kwargs(cfg.tls_settings()),
+    )
+    return FalkorDB(connection_pool=pool), pool
+
+
 def env_conn_config() -> FalkorDBConnConfig:
     """Connection config for the ENV-configured default instance.
 
@@ -494,6 +581,29 @@ def env_conn_config() -> FalkorDBConnConfig:
         username=None,
         password=None,
     )
+
+
+def assert_standalone_env(script: str) -> None:
+    """Fail fast when an ops script that speaks plain STANDALONE Redis is pointed at
+    a Sentinel or Cluster instance.
+
+    The seed/import/maintenance scripts under ``backend/scripts/`` build a direct
+    ``FalkorDB(host, port)`` client. Against a Sentinel instance that can land on a
+    demoted replica; against a Cluster it reaches only the slots of one node — so a
+    wipe or ``GRAPH.DELETE`` would partially apply and a reindex would silently skip
+    shards. Refusing to run is strictly better than half-doing it.
+
+    Deployed services never call this: they route through the topology-aware client.
+    """
+    cfg = env_conn_config()
+    if cfg.mode != "standalone":
+        raise SystemExit(
+            f"{script}: refusing to run — FALKORDB_MODE={cfg.mode!r} ({cfg.describe()}). "
+            f"This script speaks standalone Redis only; on a {cfg.mode} instance it "
+            f"would reach a single node (partial writes/deletes). Run it against a "
+            f"standalone instance, or drive the change through the application "
+            f"(which is topology-aware)."
+        )
 
 
 def _is_retryable_client_error(exc: BaseException) -> bool:
@@ -573,30 +683,54 @@ class ResilientGraph:
 
 
 class TopologyGraphClients:
-    """Process-wide cache of FalkorDB clients, keyed by connection identity.
+    """Process-wide cache of FalkorDB clients, keyed by connection identity and —
+    in CLUSTER mode — by the OWNING NODE (never by the graph).
 
-    Cache key = the instance's connection identity + (in CLUSTER mode only) the
-    graph name: a graph key lives entirely on one cluster node, so its client is
-    pinned to that node, while standalone/Sentinel instances share one client
-    per instance. ``invalidate`` drops a client so the next call re-resolves —
-    the hook a rotated cluster node or a Sentinel failover needs.
+    A graph key lives entirely on one cluster node, so a graph's client must be
+    pinned to that node. But many graphs share a node: keying the client by graph
+    would open one ConnectionPool **per graph** (×FALKORDB_POOL_SIZE connections),
+    which at this platform's scale (100s of graphs, 1000s of versioned views)
+    means thousands of pools and tens of thousands of sockets against a 3-node
+    cluster. So the client cache is keyed by node and a separate, cheap map
+    remembers which node owns each graph:
+
+        _owner:   (identity, graph) -> (host, port)     # slot lookup, cached
+        _clients: (identity, node)  -> (FalkorDB, pool) # bounded by #nodes
+
+    Standalone/Sentinel have a single endpoint, so they share one client per
+    instance (node = None).
+
+    ``invalidate(cfg, graph)`` drops BOTH the graph's owner mapping and that
+    node's client — the node is presumed dead (rotated pod / failover), and every
+    other graph on it must re-resolve too. That is the hook a rotated cluster node
+    or a Sentinel failover needs; the next call re-runs slot discovery and lands
+    on the promoted replica.
     """
 
     def __init__(self, *, socket_timeout: Optional[float] = None):
-        self._clients: dict = {}     # key -> (FalkorDB, pool)
-        self._locks: dict = {}       # key -> asyncio.Lock (per-key: a slow
-                                     # cluster discovery must not block others)
+        self._clients: dict = {}     # (identity, node|None) -> (FalkorDB, pool)
+        self._owner: dict = {}       # (identity, graph) -> (host, port)  [cluster]
+        self._locks: dict = {}       # per-key lock: a slow cluster discovery must
+                                     # not block clients for other instances
         self._socket_timeout = socket_timeout
 
     @staticmethod
-    def cache_key(cfg: FalkorDBConnConfig, graph_name: str) -> tuple:
-        identity = (
-            cfg.mode, cfg.host, cfg.port, cfg.username,
+    def identity(cfg: FalkorDBConnConfig) -> tuple:
+        # The password is folded in as a HASH (never the secret itself — identities
+        # reach log lines via cfg.describe()). Without it a pure credential rotation
+        # produces an IDENTICAL identity, so any process that missed the
+        # invalidation broadcast would get a cache HIT on the client built with the
+        # OLD password and never notice. It also keeps two providers that share
+        # host/port/user but differ in password from colliding on one client.
+        secret = hashlib.sha256(
+            (cfg.password or "").encode("utf-8")
+        ).hexdigest()[:16] if cfg.password else None
+        return (
+            cfg.mode, cfg.host, cfg.port, cfg.username, secret,
             cfg.sentinel_master,
             tuple(cfg.sentinel_nodes), tuple(cfg.cluster_nodes),
             cfg.tls_enabled,
         )
-        return (identity, graph_name if cfg.mode == "cluster" else None)
 
     def _pool_kwargs(self, cfg: FalkorDBConnConfig) -> dict:
         # The socket timeout here is a HANG NET for these long-lived pools
@@ -609,22 +743,46 @@ class TopologyGraphClients:
             st = max(st, float(cfg.socket_timeout))
         return build_graph_pool_kwargs(cfg, socket_timeout=st)
 
+    async def _owner_node(self, cfg: FalkorDBConnConfig, graph_name: str):
+        """(host, port) of the cluster node owning ``graph_name`` — memoized, so
+        slot discovery is not on the hot path. Dropped by ``invalidate`` (a MOVED
+        or a dead node), which is what lets a slot migration be picked up."""
+        okey = (self.identity(cfg), graph_name)
+        node = self._owner.get(okey)
+        if node is None:
+            st = float(self._pool_kwargs(cfg)["socket_timeout"])
+            node = await resolve_cluster_node_for_key(cfg, graph_name, st)
+            self._owner[okey] = node
+        return node
+
     async def _client_for(self, cfg: FalkorDBConnConfig, graph_name: str):
-        key = self.cache_key(cfg, graph_name)
+        ident = self.identity(cfg)
+        node = await self._owner_node(cfg, graph_name) if cfg.mode == "cluster" else None
+        key = (ident, node)
+
         entry = self._clients.get(key)
         if entry is not None:
             return entry[0]
+
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             entry = self._clients.get(key)          # another task may have built it
             if entry is None:
-                db, pool = await build_graph_client(
-                    cfg, graph_name=graph_name, pool_kwargs=self._pool_kwargs(cfg),
-                )
+                if node is not None:
+                    # Already resolved the owning node — build straight to it
+                    # instead of re-running discovery inside build_graph_client.
+                    db, pool = build_node_client(
+                        cfg, node[0], node[1], self._pool_kwargs(cfg),
+                    )
+                else:
+                    db, pool = await build_graph_client(
+                        cfg, graph_name=graph_name, pool_kwargs=self._pool_kwargs(cfg),
+                    )
                 self._clients[key] = entry = (db, pool)
                 logger.info(
-                    "falkordb: built graph client for %s (graph=%r)",
-                    cfg.describe(), graph_name,
+                    "falkordb: built graph client for %s%s",
+                    cfg.describe(),
+                    f" node={node[0]}:{node[1]}" if node else "",
                 )
         return entry[0]
 
@@ -641,7 +799,12 @@ class TopologyGraphClients:
         )
 
     async def invalidate(self, cfg: FalkorDBConnConfig, graph_name: str) -> None:
-        key = self.cache_key(cfg, graph_name)
+        """Drop the graph's owner mapping AND its node's client. Both must go: on
+        a rotation the node is dead for EVERY graph it held, and the slot may have
+        moved elsewhere."""
+        ident = self.identity(cfg)
+        node = self._owner.pop((ident, graph_name), None) if cfg.mode == "cluster" else None
+        key = (ident, node)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             entry = self._clients.pop(key, None)
@@ -650,6 +813,25 @@ class TopologyGraphClients:
                 await entry[1].aclose()
             except Exception:                        # pragma: no cover - best effort
                 pass
+
+    async def invalidate_config(self, cfg: FalkorDBConnConfig) -> None:
+        """Drop EVERY client + owner mapping for one instance. Called when a
+        provider row changes (host/mode/credentials) — otherwise the projector
+        would keep writing to the old instance until the process restarts."""
+        ident = self.identity(cfg)
+        keys = [k for k in self._clients if k[0] == ident]
+        for k in keys:
+            entry = self._clients.pop(k, None)
+            if entry is not None:
+                try:
+                    await entry[1].aclose()
+                except Exception:                    # pragma: no cover - best effort
+                    pass
+        for k in [k for k in self._owner if k[0] == ident]:
+            self._owner.pop(k, None)
+        if keys:
+            logger.info("falkordb: dropped %d cached client(s) for %s",
+                        len(keys), cfg.describe())
 
     async def aclose(self) -> None:
         entries, self._clients = list(self._clients.values()), {}
@@ -683,6 +865,31 @@ def make_env_graph_factory() -> Callable[..., Any]:
         return await graph_clients().get_graph(env_conn_config(), name)
 
     return graph
+
+
+async def resolve_sentinel_master(
+    cfg: FalkorDBConnConfig, socket_timeout: float,
+) -> Tuple[str, int]:
+    """Ask the Sentinel quorum for the CURRENT master's address.
+
+    Needed by preflight: pinging a Sentinel daemon proves only that Sentinel is
+    alive — it answers PONG happily while the master it watches is dead. Probing
+    the master it names is the same discipline the cluster path uses (probe the
+    node that actually serves the data, not an entry point).
+    """
+    from redis.asyncio.sentinel import Sentinel
+
+    if not cfg.sentinel_master or not cfg.sentinel_nodes:
+        raise ProviderConfigurationError(
+            "FalkorDB sentinel mode requires sentinel.masterName and "
+            "sentinel.nodes (or FALKORDB_SENTINEL_MASTER / FALKORDB_SENTINEL_NODES)."
+        )
+    sentinel_auth = _sentinel_auth_kwargs(cfg, socket_timeout)
+    sentinel = Sentinel(
+        cfg.sentinel_nodes, sentinel_kwargs=sentinel_auth, **sentinel_auth,
+    )
+    host, port = await sentinel.discover_master(cfg.sentinel_master)
+    return host, int(port)
 
 
 async def cluster_primary_nodes(

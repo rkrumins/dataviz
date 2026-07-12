@@ -95,10 +95,25 @@ async def _amain() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, worker.stop)
 
+    # This process caches provider configs + graph clients (via the registry factory)
+    # and has NO warmup loop, so an admin repointing a provider would otherwise leave
+    # it projecting into the OLD instance until restart.
+    from backend.app.providers.invalidation_bus import ProviderInvalidationListener
+
+    invalidation_listener = ProviderInvalidationListener()
+    try:
+        await invalidation_listener.start()
+    except Exception as exc:
+        logger.warning("Provider invalidation listener failed to start: %s", exc)
+
     logger.info("versioning projection worker starting (poll=%ss)", config.PROJECTION_POLL_SECS)
     try:
         await worker.run()
     finally:
+        try:
+            await invalidation_listener.stop()
+        except Exception:
+            pass
         await close_broker_redis()
         await db.dispose_engine()
         logger.info("versioning projection worker stopped")
