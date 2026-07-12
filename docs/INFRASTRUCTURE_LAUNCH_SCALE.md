@@ -199,35 +199,62 @@ One HA instance carries both schemas for launch (A4). The `graphver` split (§5.
 - Regional HA is **synchronous** → **zero RPO** on zonal failover; the standby promotes automatically, the private IP is unchanged, so no app repoint.
 - The read replica is **asynchronous** — the `READONLY` pool tolerates seconds of lag (it serves diffs/exports/audits, never authoritative reads).
 
-### 5.4 Connection budget — the arithmetic that must always balance
+### 5.4 Connection management under horizontal scale (the section that must always balance)
 
-The app opens **per-role pools per process** (`backend/app/db/engine.py`): `WEB`, `GRAPH_READ`, `READONLY`, `JOBS`, `PROVIDER_PROBE`, `ADMIN`, plus a separate `GRAPHVER` pool. `viz-service` runs `GUNICORN_WORKERS` processes per pod, so **direct connections multiply fast**: at 12 web pods × 4 workers × default (~85 conns) = **4,080 connections** — far over any instance.
+Connections are the resource most likely to break when you autoscale, because the pools are **per-process** and the multiplier is **pods × `GUNICORN_WORKERS` × Σ(role pool_size)**. HPA moves the first term, so the connection count grows with replica count even though each pool looks small: at 12 web pods × 4 workers × the default ~85 conns/process = **4,080 direct connections** — over any instance on its own.
 
-> **Decision.** Front Cloud SQL with **Managed Connection Pooling** (or PgBouncer in **transaction** mode), *and* right-size the per-role pools by env. The per-process pools become **client-side fairness bulkheads** (one saturated role can't starve another); the pooler is the **aggregate server-side cap**. Transaction pooling is safe because the web tier's transactions are short (the long-hold exception, `GRAPH_READ` across a 30 s trace, holds an app-side connection, not a pinned server session — provider I/O is not a DB transaction).
+**Principle: scale connections by adding pods, never by growing pools.** The per-role pools (`WEB`, `GRAPH_READ`, `READONLY`, `JOBS`, `PROVIDER_PROBE`, `ADMIN`, `GRAPHVER` — `backend/app/db/engine.py`) are **per-process fairness bulkheads** (a saturated `GRAPH_READ` can't starve `WEB`); the **pooler is the aggregate server-side cap**. Keep the pools *small* and let the pooler absorb the pod count.
 
-**Per-role env overrides (set on `viz-service`):**
+**Per-role env overrides (set on `viz-service`) — these do NOT change with HPA:**
 
 ```
-DB_POOL_SIZE=8         DB_POOL_MAX_OVERFLOW=4      # WEB
-DB_GRAPH_READ_POOL_SIZE=6   DB_GRAPH_READ_POOL_MAX_OVERFLOW=4
-DB_READONLY_POOL_SIZE=4     DB_READONLY_POOL_MAX_OVERFLOW=2
-DB_JOBS_POOL_SIZE=2         DB_JOBS_POOL_MAX_OVERFLOW=1
+DB_POOL_SIZE=8              DB_POOL_MAX_OVERFLOW=4       # WEB (legacy knob still honoured)
+DB_GRAPH_READ_POOL_SIZE=6  DB_GRAPH_READ_POOL_MAX_OVERFLOW=4
+DB_READONLY_POOL_SIZE=4    DB_READONLY_POOL_MAX_OVERFLOW=2
+DB_JOBS_POOL_SIZE=2        DB_JOBS_POOL_MAX_OVERFLOW=1
 DB_PROVIDER_PROBE_POOL_SIZE=2
-GRAPHVER_POOL_SIZE=6        GRAPHVER_POOL_MAX_OVERFLOW=3
+GRAPHVER_POOL_SIZE=6       GRAPHVER_POOL_MAX_OVERFLOW=3
 ```
 
-**Server-side budget through the pooler (`max_connections=800`):**
+#### Pooler mode — and a required application setting
 
-| Tier | Pods × procs | Client peak/proc | Client total | Server-side via pooler |
-| :--- | :--- | :--- | :--- | :--- |
-| viz web | 12 × 4 | ~35 | ~1,680 | **~250** (transaction multiplexing; web txns are ms-scale) |
-| versioning-worker | 4 × 1 | ~20 (`GRAPHVER` heavy) | ~80 | ~80 |
-| aggregation-worker | 8 × 1 | ~15 | ~120 | ~80 |
-| controlplane | 2 × 1 | ~25 | ~50 | ~50 |
-| stats-service | 2 × 1 | ~12 | ~24 | ~24 |
-| **Total server-side** | | | | **≈ 484 / 800** ✓ (60%) |
+**Session-mode pooling does NOT solve the multiplication.** SQLAlchemy holds `pool_size` connections open (idle between requests); a *session*-mode pooler pins a server backend for each held connection's lifetime, so server connections ≈ the ~2,400 held client connections. No reduction — you'd still exhaust `max_connections`.
 
-The pooler's `default_pool_size` is tuned so the *server* side stays < 70% while the *client* side can burst to thousands. Alert on server-side utilization, not client pool counts.
+**Only transaction-mode pooling multiplexes**, because it returns the backend to the pool *after each transaction*. The ~2,400 client connections are idle ~99% of the time and collapse onto a small server pool sized by *concurrent-in-transaction* count. (Safe here: the web tier's transactions are ms-scale; the long-hold exception — `GRAPH_READ` across a 30 s trace — holds an *app-side* connection during awaited provider I/O, which is not an open DB transaction.)
+
+> **Required app setting.** Transaction/statement-mode pooling with asyncpg needs server-side prepared statements disabled, or they collide across multiplexed backends (`prepared statement "__asyncpg_stmt_N__" already exists`). Set **`DB_POOLER_MODE=transaction`** on every backend tier; `db/engine.py` then passes `statement_cache_size=0` to asyncpg. This is verified correct for SQLAlchemy 2.0 (whose asyncpg dialect routes prepared-statement caching *through* asyncpg's `statement_cache_size` — there is no separate dialect knob) and is exactly what GCP documents for asyncpg behind Cloud SQL Managed Connection Pooling. Leave it **unset** for dev / direct connections so prepared statements (the query-plan-cache win) stay on.
+
+#### The math — client scales with pods, server is bounded by load
+
+Compute the client side at **HPA _max_**, not baseline — that is the number the pooler's `max_client_conn` must cover.
+
+| Tier | Pods × procs @ HPA max | Client conns (steady pools) | Server-side via **transaction** pooler |
+| :--- | :--- | :--- | :--- |
+| viz web — mgmt pools (~24/proc) | 12 × 4 = 48 | ~1,152 | **~150** (ms-scale txns) |
+| viz web — `GRAPHVER` (~6/proc) | 48 | ~288 | ~40 |
+| aggregation-worker | 8 × 1 | ~120 | ~80 (longer txns) |
+| versioning-worker | 4 × 1 | ~80 | ~60 (projection scans) |
+| controlplane + stats | 4 procs | ~74 | ~50 |
+| **Total** | | **client ~1,700 steady / ~2,400 peak** | **server ≈ 380 / 800 (48%)** ✓ |
+
+The takeaway: **horizontal scaling multiplies the CLIENT side** (cheap — the pooler holds idle client connections almost for free) **but not the SERVER side** (bounded by concurrent queries, a few hundred). That is precisely why a transaction-mode pooler makes autoscale safe. **Alert on server-side utilization, never client pool counts.**
+
+#### Pooler configuration (two pools, so a slow worker can't starve the web tier)
+
+| Pool | `pool_mode` | `default_pool_size` | Serves |
+| :--- | :--- | :--- | :--- |
+| web | transaction | ~150 | short, high-multiplex web transactions |
+| workers | transaction | ~100 | longer projection / aggregation scans (they hold a backend longer) |
+| _global_ | — | `max_client_conn=5000`, `min_pool_size=20`, `reserve_pool_size=25`, `reserve_pool_timeout=3` | |
+
+Instance `max_connections=800` = 150 + 100 server pools + ~50 system/replication/admin reserve + headroom for a failover (the promoted standby needs its share). At ~380 in use that is < 50% — deliberate headroom.
+
+#### Autoscale-storm safety
+
+- **`HPA maxReplicas` is a connection-safety knob.** Set it deliberately (viz 12, aggregation-worker 8) and confirm the client-side total *at maxReplicas* fits `max_client_conn`. A runaway HPA is a connection storm.
+- **Lazy pools work in your favour** — SQLAlchemy opens connections on demand, so a freshly-scaled pod ramps connections *as traffic arrives*, not an instant `pool_size` burst; the connection ramp tracks the traffic ramp.
+- **Rate-limit scale-up** — HPA `behavior.scaleUp` ~+50%/60 s with a stabilization window, so you never add 6 pods in one tick.
+- Keep `DB_POOL_PRE_PING=true` + `DB_POOL_RECYCLE_SECS=1800` so failovers and scale-downs don't leave half-open backends behind the pooler.
 
 ### 5.5 Ingest & maintenance
 
@@ -360,8 +387,9 @@ Phased; each gate verifiable before the next.
 | Var | Where | Value at launch scale |
 | :--- | :--- | :--- |
 | `MANAGEMENT_DB_URL` / `GRAPHVER_DB_URL` | all backend tiers | pooled DSN → the one HA instance (equal until the §5.6 split) |
-| `DB_<ROLE>_POOL_SIZE` / `_MAX_OVERFLOW` | `viz-service` | §5.4 table |
+| `DB_<ROLE>_POOL_SIZE` / `_MAX_OVERFLOW` | `viz-service` | §5.4 code block |
 | `GRAPHVER_POOL_SIZE` / `_MAX_OVERFLOW` | web + projection | 6 / 3 |
+| **`DB_POOLER_MODE`** | **all backend tiers** | **`transaction`** (behind Cloud SQL MCP / PgBouncer txn mode → disables asyncpg prepared statements; §5.4). Unset for dev/direct. |
 | `DB_POOL_PRE_PING` | all | `true` (keep — makes failover a ~5 s blip) |
 | `GUNICORN_WORKERS` | `viz-service` | `4` |
 | `SYNODIC_ROLE` | per service | `web` / `controlplane` / `worker` |

@@ -189,6 +189,31 @@ def _pool_kwargs(role: PoolRole) -> dict:
     }
 
 
+def _pooler_disables_prepared_statements() -> bool:
+    """True when the DB is fronted by a TRANSACTION- or STATEMENT-mode
+    connection pooler (Cloud SQL Managed Connection Pooling / PgBouncer),
+    which multiplexes many client connections onto few server backends.
+
+    In those modes asyncpg's server-side prepared statements collide across
+    pooled backends (``prepared statement "__asyncpg_stmt_N__" already
+    exists`` / ``does not exist``), so we disable asyncpg's statement cache
+    with ``statement_cache_size=0`` (via connect_args). SQLAlchemy 2.0's
+    asyncpg dialect routes its prepared-statement caching *through* asyncpg's
+    own ``statement_cache_size`` — there is no separate dialect-level cache to
+    turn off — so this single knob is sufficient (and is exactly what GCP
+    documents for asyncpg behind Cloud SQL Managed Connection Pooling).
+    SESSION-mode pooling and direct connections keep prepared statements (the
+    default) for their query-plan-caching win.
+
+    Opt in with ``DB_POOLER_MODE=transaction`` (or ``statement``) in
+    deployments behind such a pooler; leave unset for dev / session-mode /
+    direct.
+    """
+    return os.getenv("DB_POOLER_MODE", "").strip().lower() in (
+        "transaction", "statement",
+    )
+
+
 def _asyncpg_connect_args(role: PoolRole) -> dict:
     """Per-connection knobs passed through to asyncpg.
 
@@ -217,6 +242,11 @@ def _asyncpg_connect_args(role: PoolRole) -> dict:
         # PROVIDER_PROBE only reads provider config rows — guard at the
         # protocol layer the same way READONLY does.
         args["server_settings"] = {"default_transaction_read_only": "on"}
+    if _pooler_disables_prepared_statements():
+        # asyncpg-level: no cached server-side prepared statements, which a
+        # transaction/statement-mode pooler cannot keep coherent across
+        # multiplexed backends.
+        args["statement_cache_size"] = 0
     return args
 
 
