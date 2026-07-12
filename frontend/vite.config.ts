@@ -47,9 +47,12 @@ export default defineConfig({
             // isolated; do NOT co-bundle d3/dagre here — d3 is a canvas (xyflow)
             // dependency, and merging it with mermaid was what pulled the whole
             // mermaid chunk onto every canvas route. Let Rollup auto-chunk d3.
-            if (id.includes('mermaid')) {
-              return 'vendor-mermaid'
-            }
+            // NOTE: deliberately NO manual chunk for mermaid. It is ONLY ever
+            // dynamically imported (MermaidBlock: `import('mermaid')`), and forcing a
+            // dynamically-imported module into a NAMED manual chunk promotes that chunk
+            // into the entry's static graph — Vite then emits a <link modulepreload> for
+            // it, so 3MB of docs-only mermaid was downloaded on EVERY page load and sat
+            // directly on LCP. Letting the bundler split it naturally keeps it lazy.
           }
         },
       },
