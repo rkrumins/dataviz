@@ -2,6 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: synodic-ingress
+  namespace: synodic
 spec:
   rules:
     - host: dev.synodic.example.com
@@ -19,6 +20,7 @@ apiVersion: networking.gke.io/v1
 kind: ManagedCertificate
 metadata:
   name: synodic-certificate
+  namespace: synodic
 spec:
   domains:
     - dev.synodic.example.com

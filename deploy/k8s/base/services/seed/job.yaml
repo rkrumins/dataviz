@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synodic-seed
+  name: seed
   namespace: synodic
   labels:
     app.kubernetes.io/name: seed
@@ -26,7 +26,7 @@ spec:
               until nc -z falkordb 6379; do sleep 2; done
       containers:
         - name: seed
-          image: REGISTRY/synodic-seed:latest
+          image: REGISTRY/seed:latest
           env:
             - name: FALKORDB_HOST
               value: "falkordb"

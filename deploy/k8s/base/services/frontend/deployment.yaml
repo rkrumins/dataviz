@@ -36,7 +36,7 @@ spec:
               echo "All dependencies ready."
       containers:
         - name: frontend
-          image: REGISTRY/synodic-frontend:latest
+          image: REGISTRY/frontend:latest
           # R-M2: drain before SIGTERM so nginx deregisters from the LB before
           # it stops accepting — avoids 502s on rollout / scale-down.
           lifecycle:

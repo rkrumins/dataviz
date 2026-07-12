@@ -39,6 +39,7 @@ resources:
   - services/aggregation-worker/hpa.yaml
   - services/aggregation-worker/pdb.yaml
   - services/versioning-worker/deployment.yaml
+  - services/stats-service/deployment.yaml
   - services/frontend/deployment.yaml
   - services/frontend/service.yaml
   - services/frontend/hpa.yaml

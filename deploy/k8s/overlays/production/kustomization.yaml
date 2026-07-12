@@ -20,24 +20,24 @@ patches:
         value: "WARNING"
 
 images:
-  - name: REGISTRY/synodic-viz
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-viz
-    newTag: latest
-  - name: REGISTRY/synodic-controlplane
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-controlplane
-    newTag: latest
-  - name: REGISTRY/synodic-worker
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-worker
-    newTag: latest
-  - name: REGISTRY/synodic-graph
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-graph
-    newTag: latest
-  - name: REGISTRY/synodic-frontend
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-frontend
-    newTag: latest
-  - name: REGISTRY/synodic-falkordb
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-falkordb
-    newTag: latest
-  - name: REGISTRY/synodic-seed
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-seed
-    newTag: latest
+  - name: REGISTRY/viz-service
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/viz-service
+    newTag: prod-latest
+  - name: REGISTRY/aggregation-controlplane
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/aggregation-controlplane
+    newTag: prod-latest
+  - name: REGISTRY/aggregation-worker
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/aggregation-worker
+    newTag: prod-latest
+  - name: REGISTRY/stats-service
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/stats-service
+    newTag: prod-latest
+  - name: REGISTRY/frontend
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/frontend
+    newTag: prod-latest
+  - name: REGISTRY/falkordb
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/falkordb
+    newTag: prod-latest
+  - name: REGISTRY/seed
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/seed
+    newTag: prod-latest

@@ -435,7 +435,7 @@ export function ExplorerPreviewDrawer({
             {/* ── Body ── */}
             <div className="flex-1 px-6 py-5 space-y-5">
               {editMode && view ? (
-                <EditDetailsPanel view={view} onCancel={() => setEditMode(false)} onSaved={onSaved} />
+                <EditDetailsPanel view={view} onCancel={() => setEditMode(false)} onSaved={onSaved} onEditLayout={onEdit} editDisabled={editDisabled} />
               ) : (
               <>
               {/* Workspace + Visibility badges */}
@@ -786,10 +786,12 @@ export function ExplorerPreviewDrawer({
  * — no wizard — and the change is captured by the activity log's field diff.
  * Structural edits (scope/layers/layout) stay in the builder ("Edit layout & scope").
  */
-function EditDetailsPanel({ view, onCancel, onSaved }: {
+function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDisabled }: {
   view: ViewT
   onCancel: () => void
   onSaved?: () => void
+  onEditLayout?: () => void
+  editDisabled?: boolean
 }) {
   const { showToast } = useToast()
   const [name, setName] = useState(view.name)
@@ -846,8 +848,7 @@ function EditDetailsPanel({ view, onCancel, onSaved }: {
       <div>
         <h3 className="text-sm font-bold text-ink">Edit details</h3>
         <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
-          Name, description, tags and visibility. To change entity scope, layers or layout use{' '}
-          <span className="font-medium text-ink">Edit layout &amp; scope</span>.
+          Update this view's name, description, tags and who can see it.
         </p>
       </div>
 
@@ -919,6 +920,33 @@ function EditDetailsPanel({ view, onCancel, onSaved }: {
           })}
         </div>
       </div>
+
+      {onEditLayout && (
+        <div className="pt-2 border-t border-glass-border/60">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-2 mt-2">Want to change the data or layout?</p>
+          <button
+            type="button"
+            onClick={() => { if (!editDisabled) onEditLayout() }}
+            disabled={editDisabled}
+            title={editDisabled ? "Switch to this view's workspace to edit" : undefined}
+            className={cn(
+              'group/cta w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left',
+              'border-accent-lineage/45 bg-gradient-to-r from-accent-lineage/[0.10] to-violet-500/[0.06]',
+              'shadow-sm shadow-accent-lineage/10 transition-all duration-200',
+              editDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:from-accent-lineage/[0.16] hover:to-violet-500/[0.10] hover:border-accent-lineage/70 hover:-translate-y-0.5 hover:shadow-md',
+            )}
+          >
+            <span className="w-9 h-9 rounded-lg bg-accent-lineage/15 text-accent-lineage border border-accent-lineage/25 flex items-center justify-center shrink-0">
+              <Settings2 className="h-[18px] w-[18px]" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-bold text-accent-lineage">Edit layout &amp; scope</span>
+              <span className="block text-xs text-ink-muted">Entity scope, layers, filters &amp; layout — in the builder</span>
+            </span>
+            <ChevronRight className="h-5 w-5 text-accent-lineage shrink-0 transition-transform group-hover/cta:translate-x-0.5" />
+          </button>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 pt-1">
         <button

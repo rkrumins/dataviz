@@ -44,7 +44,7 @@ spec:
               echo "All dependencies ready."
       containers:
         - name: viz-service
-          image: REGISTRY/synodic-viz:latest
+          image: REGISTRY/viz-service:latest
           # R-M2: drain endpoints before SIGTERM reaches uvicorn — avoids the
           # kube-proxy/LB deregistration race that 502s in-flight requests on
           # every rollout / HPA scale-down / pod reschedule.

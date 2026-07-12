@@ -22,7 +22,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: falkordb
-          image: REGISTRY/synodic-falkordb:latest
+          image: REGISTRY/falkordb:latest
           ports:
             - containerPort: 6379
               name: falkordb

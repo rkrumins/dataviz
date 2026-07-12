@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: viz-service
+  namespace: synodic
 spec:
   replicas: 3
 ---
@@ -9,6 +10,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aggregation-worker
+  namespace: synodic
 spec:
   replicas: 3
 ---
@@ -16,6 +18,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
+  namespace: synodic
 spec:
   replicas: 3
 ---
@@ -23,5 +26,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aggregation-controlplane
+  namespace: synodic
 spec:
-  replicas: 1
+  # HA: 2 replicas removes the single-pod SPOF during GKE rebalancing. Safe
+  # because every control-plane loop is HA-safe — state-sync (consumer group),
+  # reconciler (Postgres advisory xact lock), scheduler (detect-and-log only,
+  # idempotent), crash-recovery (per-job exec-lock dedup).
+  replicas: 2

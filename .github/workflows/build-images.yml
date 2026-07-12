@@ -31,8 +31,6 @@ jobs:
         include:
           - name: viz-service
             dockerfile: backend/Dockerfile.viz
-          - name: graph-service
-            dockerfile: backend/Dockerfile.graph
           - name: aggregation-controlplane
             dockerfile: backend/Dockerfile.controlplane
           - name: aggregation-worker
