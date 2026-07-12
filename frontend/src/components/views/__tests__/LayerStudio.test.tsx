@@ -69,13 +69,15 @@ vi.mock('@/hooks/useEntityBrowser', () => ({
 // Here it is a stub that exposes just the CRUD callbacks so we can assert what
 // the Studio commits (and that one undo restores it).
 vi.mock('../LayerHierarchyPanel', () => ({
-  LayerHierarchyPanel: ({ onAddLayer, onDeleteLayer }: {
+  LayerHierarchyPanel: ({ onAddLayer, onDeleteLayer, onClearLayer }: {
     onAddLayer: (name: string) => void
     onDeleteLayer: (layerId: string) => void
+    onClearLayer: (layerId: string) => void
   }) => (
     <div data-testid="layer-hierarchy-panel-stub">
       <button onClick={() => onAddLayer('Curated')}>stub-add-layer</button>
       <button onClick={() => onDeleteLayer('l1')}>stub-delete-l1</button>
+      <button onClick={() => onClearLayer('l1')}>stub-clear-l1</button>
     </div>
   ),
 }))
@@ -161,6 +163,56 @@ describe('LayerStudio — in-step layer CRUD commits through the shared undo his
     // Layer gone, its assignment gone, the other layer's assignment kept.
     expect(call.layers.map((l: ViewLayerConfig) => l.id)).toEqual(['l2'])
     expect(call.assignments).toEqual({ 'urn:b': { layerId: 'l2', inheritsChildren: true } })
+  })
+})
+
+describe('LayerStudio — bulk unassign from a layer', () => {
+  it('clears every placement in the layer, leaving other layers alone', () => {
+    const updateFormData = vi.fn()
+    const formData = makeFormData({
+      assignments: {
+        'urn:a': { layerId: 'l1', inheritsChildren: true },
+        'urn:b': { layerId: 'l1', inheritsChildren: true },
+        'urn:keep': { layerId: 'l2', inheritsChildren: true },
+      },
+    })
+    render(<LayerStudio formData={formData} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByText('stub-clear-l1'))
+
+    expect(updateFormData).toHaveBeenCalledTimes(1)
+    const call = updateFormData.mock.calls[0][0]
+    // Layer survives; only its placements go.
+    expect(call.layers.map((l: ViewLayerConfig) => l.id)).toEqual(['l1', 'l2'])
+    expect(call.assignments).toEqual({ 'urn:keep': { layerId: 'l2', inheritsChildren: true } })
+  })
+
+  it('is undoable — ⌘Z puts every cleared placement back', () => {
+    const updateFormData = vi.fn()
+    const assignments = {
+      'urn:a': { layerId: 'l1', inheritsChildren: true },
+      'urn:b': { layerId: 'l1', inheritsChildren: true },
+    }
+    render(<LayerStudio formData={makeFormData({ assignments })} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByText('stub-clear-l1'))
+    expect(updateFormData.mock.calls[0][0].assignments).toEqual({})
+
+    // Bulk-clearing 197 placements without an undo would be a trap, so this is
+    // the contract: it goes through the same history as every other mutation.
+    fireEvent.keyDown(window, { key: 'z', metaKey: true })
+
+    expect(updateFormData).toHaveBeenCalledTimes(2)
+    expect(updateFormData.mock.calls[1][0].assignments).toEqual(assignments)
+  })
+
+  it('does nothing when the layer is already empty', () => {
+    const updateFormData = vi.fn()
+    render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByText('stub-clear-l1'))
+
+    expect(updateFormData).not.toHaveBeenCalled()
   })
 })
 

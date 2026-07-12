@@ -796,7 +796,7 @@ function LayerRow({
                     <div className="mt-1 mx-1 px-3 py-2 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30">
                         <p className="text-[11px] text-amber-800 dark:text-amber-300">
                             Remove all {totalAssigned} {totalAssigned === 1 ? 'placement' : 'placements'} from{' '}
-                            <span className="font-semibold">{layer.name}</span>? The layer stays.
+                            <span className="font-semibold">{layer.name}</span>? The layer stays, and this can be undone (⌘Z).
                         </p>
                         <div className="mt-1.5 flex items-center gap-2">
                             <button
@@ -878,9 +878,22 @@ function LayerRow({
                                 {/* Entities placed directly in the layer */}
                                 {unassignedEntities.length > 0 && (
                                     <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
-                                        <div className="flex items-center gap-1.5 px-3 py-1 text-[10px] font-semibold tracking-wide text-slate-400 uppercase">
-                                            <Layers className="w-3 h-3" />
-                                            Layer Entities ({unassignedEntities.length})
+                                        {/* The bulk escape hatch lives HERE, next to the things it
+                                            removes — not as a hover-only icon on the layer row, which
+                                            is where nobody found it. */}
+                                        <div className="flex items-center gap-1.5 px-3 py-1">
+                                            <Layers className="w-3 h-3 text-slate-400 shrink-0" />
+                                            <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
+                                                Layer Entities ({unassignedEntities.length})
+                                            </span>
+                                            <span className="flex-1" />
+                                            <button
+                                                onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
+                                                title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
+                                                className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                                            >
+                                                Clear all
+                                            </button>
                                         </div>
                                         {unassignedEntities.map(entityId => (
                                             <AssignedEntityItem
