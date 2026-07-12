@@ -90,7 +90,10 @@ export function StatusChip({ meta, compact, className }: Props) {
         Icon = Clock
         const ago = formatStaleness(staleness_secs)
         label = compact ? `Stale${ago ? ` ${ago}` : ''}` : `Stale${ago ? ` (${ago})` : ''}`
-        title = 'Cached data older than the configured UI threshold; a refresh job is in flight'
+        // Honest copy: a stale row has NO refresh job pending — reads never
+        // enqueue provider work (see insights.py _build_response). It updates
+        // on the next scheduled scan, or immediately via a manual refresh.
+        title = `These figures haven't refreshed in ${ago ?? 'a while'}. They update on the next scheduled scan — or refresh them now to update immediately.`
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
     } else if (effectiveStatus === 'partial') {
         Icon = AlertTriangle
