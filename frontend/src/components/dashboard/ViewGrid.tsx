@@ -27,7 +27,7 @@ export function ViewGrid({ title, subtitle, views, icon: Icon, emptyMessage = 'N
     const activeViewId = useSchemaStore(s => s.activeViewId)
 
     return (
-        <section className="mb-16 px-4 md:px-0">
+        <section className="mb-16">
             <div className="flex items-end justify-between mb-6">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">

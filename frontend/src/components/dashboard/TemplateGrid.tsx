@@ -24,7 +24,7 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
 
     if (items.length === 0) {
         return (
-            <section className="mb-16 px-4 md:px-0">
+            <section className="mb-16">
                 <div className="flex items-end justify-between mb-6">
                     <div className="flex items-center gap-3">
                         <div className="p-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">
@@ -50,7 +50,7 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
     const displayItems = filteredItems
 
     return (
-        <section className="mb-16 px-4 md:px-0">
+        <section className="mb-16">
             <div className="flex items-end justify-between mb-6">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-xl bg-accent-business/10 border border-accent-business/20">

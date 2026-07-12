@@ -115,7 +115,7 @@ export function Dashboard() {
     if (isOnboarding) {
         return (
             <div className="w-full h-full bg-canvas overflow-y-auto custom-scrollbar">
-                <div className="px-6 md:px-10 lg:px-12 pb-28">
+                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pb-28">
                     <DashboardOnboarding
                         completedSteps={onboardingCompletedSteps}
                         onCreateWorkspace={() => navigate('/workspaces')}
@@ -129,7 +129,6 @@ export function Dashboard() {
                             initial={{ opacity: 0, y: MOTION.sectionY }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
-                            className="px-4 md:px-0"
                         >
                             <BlueprintGrid
                                 title="Starter Templates"
@@ -150,7 +149,7 @@ export function Dashboard() {
 
     return (
         <div className="w-full h-full bg-canvas overflow-y-auto custom-scrollbar">
-            <div className="max-w-[1440px] mx-auto pb-28">
+            <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pb-28">
 
                 {/* 1. Hero Search */}
                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ ...MOTION.sectionEntry }}>

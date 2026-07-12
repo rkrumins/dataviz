@@ -430,7 +430,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
     const handleSelectWorkspace = (wsId: string) => setActiveWorkspace(wsId)
 
     return (
-        <section className="mb-20 px-4 md:px-0">
+        <section className="mb-20">
             {/* Header */}
             <div className="flex items-end justify-between mb-8">
                 <div className="flex items-center gap-3">

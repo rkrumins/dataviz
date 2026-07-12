@@ -14,7 +14,7 @@ export function InsightCards({ stats, templatesCount, viewsCount }: {
         { label: 'Tracked Entities', sublabel: 'Nodes in all graphs', value: new Intl.NumberFormat().format(stats.totalEntities), icon: Component },
     ]
     return (
-        <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 px-4 md:px-0 mb-14">
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-14">
             {cards.map((c, i) => {
                 const t = CARD_THEMES[i]
                 return (
