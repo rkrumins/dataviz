@@ -13,7 +13,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
   ChevronDown,
   Eye,
@@ -176,14 +176,16 @@ export function DisplaySettingsPopover({
         />
       </button>
 
+      {/* No AnimatePresence: the popover unmounts instantly on close so an
+          interrupted exit can never strand an invisible click-blocker at
+          z-1000 over the toolbar. It still animates in. */}
       {typeof document !== 'undefined' && createPortal(
-        <AnimatePresence>
+        <>
           {open && anchor && (
             <motion.div
               ref={popoverRef}
               initial={{ opacity: 0, y: -6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -6, scale: 0.97 }}
               transition={{ duration: 0.15, ease: 'easeOut' }}
               role="dialog"
               aria-label="Display settings"
@@ -227,7 +229,7 @@ export function DisplaySettingsPopover({
               />
             </motion.div>
           )}
-        </AnimatePresence>,
+        </>,
         document.body,
       )}
     </>

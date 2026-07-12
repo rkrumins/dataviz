@@ -19,7 +19,7 @@
  * group then adds siblings into that group via the inline AddRowButton.
  * Matches the Notion / Linear / Airtable filter builder pattern.
  */
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
     Copy,
     MoreHorizontal,
@@ -103,13 +103,15 @@ export const RowMenu: FC<RowMenuProps> = ({
             >
                 <MoreHorizontal className="w-3.5 h-3.5" />
             </button>
+            {/* No AnimatePresence: the popover unmounts instantly on close so an
+                interrupted exit can never strand an invisible click-blocker at
+                z-1000 over the toolbar. It still animates in. */}
             {open && coords && createPortal((
-                <AnimatePresence>
+                <>
                     <motion.div
                         ref={popoverRef}
                         initial={{ opacity: 0, y: -4, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: -4, scale: 0.98 }}
                         transition={{ duration: 0.12 }}
                         style={{
                             position: 'fixed',
@@ -167,7 +169,7 @@ export const RowMenu: FC<RowMenuProps> = ({
                             ⌥ NOT inverts — useful for "everything except…" patterns
                         </MenuFooterHint>
                     </motion.div>
-                </AnimatePresence>
+                </>
             ), document.body)}
         </>
     )

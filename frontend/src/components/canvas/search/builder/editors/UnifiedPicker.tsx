@@ -533,7 +533,13 @@ function UnifiedPickerDropdown({
 
     if (portal) {
         if (typeof document === 'undefined' || !portalCoords) return null
-        return createPortal(<AnimatePresence>{inner}</AnimatePresence>, document.body)
+        // Portal path uses a plain fragment, NOT <AnimatePresence>: a portaled
+        // popover whose exit is interrupted (StrictMode double-mount, rapid
+        // toggle) strands an invisible click-blocker at z-9999 over the page.
+        // No AnimatePresence = instant unmount = can't strand. The inline
+        // (non-portal, in-flow) path below is not a page-wide blocker, so it
+        // keeps its AnimatePresence exit.
+        return createPortal(<>{inner}</>, document.body)
     }
     return <AnimatePresence>{inner}</AnimatePresence>
 }

@@ -1431,13 +1431,15 @@ function LayerHeaderTitle({
         </p>
       )}
 
+      {/* No AnimatePresence: the tooltip unmounts instantly on close so an
+          interrupted exit can never strand an invisible click-blocker at
+          z-1000 over the canvas. It still animates in. */}
       {typeof document !== 'undefined' && createPortal(
-        <AnimatePresence>
+        <>
           {open && anchor && (
             <motion.div
               initial={{ opacity: 0, y: -4, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.98 }}
               transition={{ duration: 0.14, ease: 'easeOut' }}
               role="tooltip"
               onMouseEnter={() => {
@@ -1470,7 +1472,7 @@ function LayerHeaderTitle({
               )}
             </motion.div>
           )}
-        </AnimatePresence>,
+        </>,
         document.body,
       )}
     </div>

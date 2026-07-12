@@ -16,13 +16,15 @@
  * renders at document.body with measured positioning, escapes every
  * stacking context, and gets full theme control.
  *
- * IMPORTANT layout invariant: ``<AnimatePresence>`` MUST sit INSIDE the
- * ``createPortal(...)`` call. AnimatePresence cannot track motion
- * components rendered inside a portal subtree from outside the portal
- * — that's the bug the previous revision had, which left clicks
- * apparently doing nothing because the menu never mounted.
+ * IMPORTANT: the menu is portal-mounted but rendered WITHOUT
+ * AnimatePresence — it unmounts instantly on close. An exit animation on
+ * a portaled popover can strand an invisible node (StrictMode
+ * double-mount, rapid toggle, or a parent re-render mid-exit) at this
+ * z-index over the page, silently swallowing every click until a full
+ * refresh. Instant unmount can't strand. The menu still animates IN via
+ * initial/animate.
  */
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { Check, ChevronDown } from 'lucide-react'
 import {
     type FC,
@@ -194,13 +196,12 @@ export function OperatorMenu<T extends string>({
             </button>
 
             {typeof document !== 'undefined' && createPortal(
-                <AnimatePresence>
+                <>
                     {open && renderCoords && (
                         <motion.div
                             ref={menuRef}
                             initial={{ opacity: 0, y: renderCoords.flipped ? 4 : -4, scale: 0.97 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: renderCoords.flipped ? 4 : -4, scale: 0.97 }}
                             transition={{ duration: 0.12 }}
                             style={{
                                 position: 'fixed',
@@ -255,7 +256,7 @@ export function OperatorMenu<T extends string>({
                             })}
                         </motion.div>
                     )}
-                </AnimatePresence>,
+                </>,
                 document.body,
             )}
         </>
