@@ -1275,6 +1275,16 @@ class FalkorDBProvider(GraphDataProvider):
                         try:
                             await self._ensure_connected()
                         except Exception as reconnect_exc:
+                            # If FalkorDB is loading (RDB replay) during the
+                            # reconnect, surface the retryable warming signal
+                            # rather than a hard failure that steps the breaker.
+                            if _is_loading_error(reconnect_exc):
+                                from backend.common.adapters import ProviderLoading
+                                raise ProviderLoading(
+                                    provider_name=self._graph_name,
+                                    reason="graph is starting up (loading dataset into memory)",
+                                    retry_after_seconds=5,
+                                ) from reconnect_exc
                             # Reconnect failed → the host is unreachable, not a
                             # transient blip. Stop retrying and surface the
                             # failure now so the breaker opens fast instead of

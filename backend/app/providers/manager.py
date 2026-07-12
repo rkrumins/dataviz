@@ -19,6 +19,7 @@ Design invariants:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from backend.common.adapters import (
     BreakerState,
     CircuitBreakerProxy,
     ProviderBusy,
+    ProviderLoading,
     ProviderUnavailable,
 )
 from backend.common.interfaces.provider import GraphDataProvider
@@ -92,7 +94,6 @@ _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.
 # providers skip the probe entirely (zero added latency on the hot path).
 _REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "1.5"))
 _REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
-_REACHABLE_TRUST_HEALTHY_S = float(os.getenv("PROVIDER_PREFLIGHT_TRUST_HEALTHY_S", "45"))
 
 
 class HealthState(str, Enum):
@@ -163,8 +164,12 @@ class ProviderManager:
 
         # Short-lived inline reachability verdicts (WS0.1). See the
         # _REACHABLE_PROBE_* constants + _ensure_reachable below.
-        # (provider_id, graph_name) -> (ok, monotonic_ts).
-        self._reachable_probe: Dict[Tuple[str, str], Tuple[bool, float]] = {}
+        # (provider_id, graph_name) -> (verdict, monotonic_ts) where verdict is
+        # "ok" | "loading" | "down".
+        self._reachable_probe: Dict[Tuple[str, str], Tuple[str, float]] = {}
+        # Single-flight the inline preflight so a herd of concurrent callers on
+        # a just-downed provider triggers ONE probe, not N.
+        self._reachable_inflight: Dict[Tuple[str, str], "asyncio.Future[str]"] = {}
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -326,71 +331,96 @@ class ProviderManager:
         self, cache_key: Tuple[str, str], provider: GraphDataProvider,
     ) -> None:
         """Bounded reachability gate (WS0.1) run before handing a provider to a
-        caller. Fast-fails in ~1.5s when the provider is unreachable, instead
-        of letting the caller burn ~25s of query timeouts against a down host
-        while pinning a DB connection (which drains the pool and stalls
-        unrelated endpoints — the app-wide freeze).
+        caller. Fast-fails an unreachable provider in ~1.5s (then <1ms via a
+        short single-flighted verdict cache) instead of letting the caller burn
+        ~25s of query timeouts against a down host while pinning a DB connection
+        (which drains the pool and stalls unrelated endpoints — the app freeze).
 
-        SAFE for long-running queries: this probes REACHABILITY (a fast
-        TCP+PING), NOT query duration — a healthy provider mid-trace answers
-        PING instantly and passes, so legitimate long reads run their full
-        budget. Warmup-confirmed-healthy providers skip the probe entirely, and
-        providers without a preflight() (non-FalkorDB) are never gated.
+        Reconciled with the WS0.1 audit:
+        - Probes REACHABILITY (a fast TCP+PING via the provider's own
+          preflight), NOT query duration — a healthy provider mid-trace answers
+          PING instantly and passes, so long reads run their full budget.
+        - Does NOT gate on warmup's single-blip observation (that would
+          blackhole a healthy provider for 60s on one transient probe). The sole
+          signal is a short, self-healing preflight verdict cache.
+        - Maps a FalkorDB ``LOADING`` (restart / RDB replay) to the warming
+          ProviderLoading path (retry-in-5s UX), NOT a hard "unreachable" — a
+          pod restart must not pre-trip the breaker for 30-60s.
+        - Probes the UNWRAPPED provider so a non-raising ok=False preflight
+          can't be recorded as a breaker success and reset an open breaker.
+        - Single-flights the probe per (provider, graph): a herd of concurrent
+          callers triggers ONE probe, not N.
+        - Providers without a preflight() are never gated.
         """
-        cp = f"{cache_key[0]}:{cache_key[1]}"
-        state = self._provider_states.get(cache_key)
-        if state is not None:
-            if state.is_recent_unhealthy(max_age_s=60.0):
-                obs = state.last_observation
-                raise ProviderUnavailable(
-                    provider_name=cp,
-                    reason=f"provider unreachable: {obs.reason if obs else 'unhealthy'}",
-                    retry_after_seconds=_BREAKER_RESET_TIMEOUT,
-                )
-            if state.is_recent_healthy(max_age_s=_REACHABLE_TRUST_HEALTHY_S):
-                return  # warmup confirms reachable — trust it, skip the probe
-
-        # Only FalkorDB-class providers expose a bounded preflight; others are
-        # not gated here (their own timeouts apply).
-        preflight = getattr(provider, "preflight", None)
-        if preflight is None:
-            return
-
         now = time.monotonic()
         cached = self._reachable_probe.get(cache_key)
         if cached is not None and (now - cached[1]) < _REACHABLE_PROBE_CACHE_S:
-            if not cached[0]:
-                raise ProviderUnavailable(
-                    provider_name=cp,
-                    reason="provider unreachable (recent preflight failed)",
-                    retry_after_seconds=_BREAKER_RESET_TIMEOUT,
-                )
+            self._raise_for_verdict(cache_key, cached[0])
             return
+        verdict = await self._probe_reachable_singleflight(cache_key, provider)
+        self._raise_for_verdict(cache_key, verdict)
 
-        ok = False
-        try:
-            pf = await asyncio.wait_for(
-                preflight(deadline_s=_REACHABLE_PROBE_DEADLINE_S),
-                timeout=_REACHABLE_PROBE_DEADLINE_S + 1.0,
-            )
-            ok = bool(getattr(pf, "ok", False))
-        except Exception:
-            ok = False
-        self._reachable_probe[cache_key] = (ok, now)
-        if not ok:
-            # Record so the warmup gate + status endpoints agree and concurrent
-            # callers fast-fail via state without each running a probe.
-            try:
-                await self.record_probe_failure(
-                    cache_key[0], reason="inline_preflight_unreachable", source="traffic",
-                )
-            except Exception:
-                pass
-            raise ProviderUnavailable(
+    def _raise_for_verdict(self, cache_key: Tuple[str, str], verdict: str) -> None:
+        if verdict == "ok":
+            return
+        cp = f"{cache_key[0]}:{cache_key[1]}"
+        if verdict == "loading":
+            # Warming, not down — surface the retryable ProviderLoading signal
+            # (the breaker ignores it) so the FE shows "graph is starting up".
+            raise ProviderLoading(
                 provider_name=cp,
-                reason="provider unreachable (preflight failed)",
-                retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+                reason="graph is starting up (loading dataset into memory)",
+                retry_after_seconds=5,
             )
+        raise ProviderUnavailable(
+            provider_name=cp,
+            reason="provider unreachable (preflight failed)",
+            retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+        )
+
+    async def _probe_reachable_singleflight(
+        self, cache_key: Tuple[str, str], provider: GraphDataProvider,
+    ) -> str:
+        """One in-flight preflight per cache_key; concurrent callers share it.
+        The get/create is synchronous (no await between), so it's atomic under
+        asyncio — no lock needed."""
+        task = self._reachable_inflight.get(cache_key)
+        if task is None:
+            task = asyncio.ensure_future(self._probe_reachable(cache_key, provider))
+            self._reachable_inflight[cache_key] = task
+            task.add_done_callback(
+                lambda _t, k=cache_key: self._reachable_inflight.pop(k, None)
+            )
+        return await task
+
+    async def _probe_reachable(
+        self, cache_key: Tuple[str, str], provider: GraphDataProvider,
+    ) -> str:
+        """Run one bounded preflight against the UNWRAPPED provider and cache
+        the verdict ('ok' | 'loading' | 'down'). Never raises."""
+        # Unwrap the CircuitBreakerProxy so a non-raising ok=False result is not
+        # recorded as a breaker success (which would reset an open breaker).
+        target = getattr(provider, "target", provider)
+        preflight = getattr(target, "preflight", None)
+        # Only gate providers exposing a REAL async preflight; a missing or
+        # non-coroutine attribute (e.g. a test double) is not gateable.
+        if preflight is None or not inspect.iscoroutinefunction(preflight):
+            verdict = "ok"  # no async preflight — never gate
+        else:
+            verdict = "down"
+            try:
+                pf = await asyncio.wait_for(
+                    preflight(deadline_s=_REACHABLE_PROBE_DEADLINE_S),
+                    timeout=_REACHABLE_PROBE_DEADLINE_S + 1.0,
+                )
+                if getattr(pf, "ok", False):
+                    verdict = "ok"
+                elif "loading" in str(getattr(pf, "reason", "")).lower():
+                    verdict = "loading"
+            except Exception:
+                verdict = "down"
+        self._reachable_probe[cache_key] = (verdict, time.monotonic())
+        return verdict
 
     def get_health(self, provider_id: str, graph_name: str) -> HealthState:
         """Return the observable health state of a specific provider."""
