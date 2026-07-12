@@ -339,87 +339,50 @@ async def build_graph_client(
 def build_cache_client(
     cfg: FalkorDBConnConfig, *, cache_url: Optional[str], pool_kwargs: dict,
 ) -> Optional[Any]:
-    """Build the provider's cache Redis — TLS-aware, topology-aware.
+    """Build the provider's cache Redis on a DEDICATED endpoint — or nothing.
 
-    Precedence:
+    Only a dedicated ``cache_url`` produces a client:
 
-    1. ``cache_url`` (dedicated cache) wins — its own host/auth/scheme. A
-       ``rediss://`` URL also picks up the connection's custom CA / client
-       cert / verify mode (shared-PKI assumption) so mutual-TLS caches work,
-       not just system-trust ``rediss://``.
-    2. Otherwise mirror the GRAPH topology so the cache lands on the same
-       infrastructure: standalone / sentinel as before (now TLS-aware), and
-       **cluster → a dedicated async ``RedisCluster`` cache client** (no longer
-       cache-disabled). This is safe because every provider cache op is
-       single-key or single-hash (``{graph}:urn_labels``,
-       ``{graph}:ancestor_chains``, ``{graph}:stats_cache``,
-       ``{graph}:agg_members:{s}:{t}``) — pipelines are non-atomic and
-       one-key-per-command, so redis-py routes each to its owning node. No
-       atomic multi-key / cross-slot op is used.
-
-    Returns ``None`` only when a topology genuinely cannot serve the cache.
+    * ``cache_url`` set → a client on that dedicated Redis, with its own
+      host / auth / scheme. A ``rediss://`` URL also picks up the connection's
+      custom CA / client cert / verify mode (shared-PKI assumption) so
+      mutual-TLS caches work, not just system-trust ``rediss://``.
+    * ``cache_url`` unset → ``None`` (cache DISABLED). WS2.1: the provider's
+      cache is NEVER co-located on the FalkorDB instance. FalkorDB hosts the
+      graph and nothing else, so a graph outage cannot also wipe the cache or
+      let cache traffic contend with graph queries on FalkorDB's single-
+      threaded process. Decoupling is structural here, not conventional;
+      deployed roles additionally fail fast at startup when no dedicated cache
+      is configured (see ``ProviderManager``).
     """
-    from redis.asyncio import ConnectionPool, Redis
+    from redis.asyncio import Redis
 
     socket_timeout = float(pool_kwargs.get("socket_timeout", 10.0))
 
-    if cache_url:
-        extra: dict = {}
-        if cache_url.lower().startswith("rediss://"):
-            # rediss:// already implies ssl=True (from_url sets SSLConnection);
-            # add only the cert/verify kwargs so custom CA / mTLS apply.
-            extra = tls_client_kwargs(cfg.tls_settings())
-            extra.pop("ssl", None)
-        return Redis.from_url(
-            cache_url,
-            max_connections=pool_kwargs.get("max_connections"),
-            socket_connect_timeout=2.0,
-            socket_timeout=socket_timeout,
-            decode_responses=True,
-            **extra,
-        )
+    if not cache_url:
+        # No dedicated endpoint → cache off. Do NOT mirror the FalkorDB
+        # topology — that is exactly the coupling this decoupling removes.
+        return None
 
-    _tls_pool = tls_pool_kwargs(cfg.tls_settings())
-
-    if cfg.mode == "standalone":
-        pool = ConnectionPool(host=cfg.host, port=cfg.port, **pool_kwargs, **_tls_pool)
-        return Redis(connection_pool=pool)
-
-    if cfg.mode == "sentinel":
-        from redis.asyncio.sentinel import Sentinel
-
-        auth = _conn_auth_kwargs(cfg, socket_timeout)
-        sentinel = Sentinel(cfg.sentinel_nodes, sentinel_kwargs=auth, **auth)
-        return sentinel.master_for(
-            cfg.sentinel_master,
-            max_connections=pool_kwargs.get("max_connections"),
-            **auth,
-        )
-
-    if cfg.mode == "cluster":
-        from redis.asyncio.cluster import RedisCluster
-        from redis.cluster import ClusterNode
-
-        nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-        if not nodes:
-            logger.warning(
-                "falkordb_connection: cluster cache requires cluster nodes — "
-                "running cache-disabled (DEGRADED).",
-            )
-            return None
-        logger.info(
-            "falkordb_connection: cluster cache via dedicated RedisCluster "
-            "client (%d startup nodes)%s.",
-            len(nodes), " (TLS)" if cfg.tls_enabled else "",
-        )
-        return RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
-
-    return None
+    extra: dict = {}
+    if cache_url.lower().startswith("rediss://"):
+        # rediss:// already implies ssl=True (from_url sets SSLConnection);
+        # add only the cert/verify kwargs so custom CA / mTLS apply.
+        extra = tls_client_kwargs(cfg.tls_settings())
+        extra.pop("ssl", None)
+    return Redis.from_url(
+        cache_url,
+        max_connections=pool_kwargs.get("max_connections"),
+        socket_connect_timeout=2.0,
+        socket_timeout=socket_timeout,
+        decode_responses=True,
+        **extra,
+    )
 
 
 def build_cache_redis_fallback(
     cfg: FalkorDBConnConfig, *, pool_kwargs: dict,
 ) -> Optional[Any]:
-    """Backward-compatible shim → :func:`build_cache_client` with no dedicated
-    URL (mirrors the graph topology)."""
+    """:func:`build_cache_client` with no dedicated URL. Always ``None`` now:
+    the provider cache is never co-located on FalkorDB (WS2.1 decoupling)."""
     return build_cache_client(cfg, cache_url=None, pool_kwargs=pool_kwargs)

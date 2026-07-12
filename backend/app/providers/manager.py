@@ -115,10 +115,34 @@ def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvide
     )
 
 
+def _assert_dedicated_cache_configured() -> None:
+    """WS2.1 decoupling guard. Deployed roles MUST run the provider cache on a
+    DEDICATED Redis, never the FalkorDB instance — a graph outage must not also
+    disable caching, and cache traffic must not contend with graph queries on
+    FalkorDB's single-threaded process. Fail fast at startup when CACHE_REDIS_URL
+    is unset in a WEB / WORKER / CONTROLPLANE role. In DEV a missing URL simply
+    runs cache-disabled (still decoupled — ``build_cache_client`` never
+    co-locates the cache on FalkorDB)."""
+    import os as _os
+    from backend.app.runtime.role import current_role, SynodicRole
+
+    if current_role() == SynodicRole.DEV:
+        return
+    if not _os.getenv("CACHE_REDIS_URL"):
+        raise RuntimeError(
+            f"CACHE_REDIS_URL is required in the {current_role().value!r} role: "
+            "the application cache must run on a DEDICATED Redis, not the "
+            "FalkorDB instance. Set CACHE_REDIS_URL (see common-config / "
+            "app-secrets)."
+        )
+
+
 class ProviderManager:
     """Resilient, workspace-centric manager for GraphDataProvider instances."""
 
     def __init__(self) -> None:
+        # WS2.1: enforce operational/graph Redis decoupling at process start.
+        _assert_dedicated_cache_configured()
         # Workspace-centric cache: (provider_id, graph_name) -> breaker-wrapped provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
