@@ -12,7 +12,7 @@ import { updateView, type View as ViewT } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
   X,
@@ -356,8 +356,8 @@ export function ExplorerPreviewDrawer({
           StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
       <Backdrop open={!!(isOpen && view)} onClick={onClose} zClassName="z-[60]" />
 
-      {/* Drawer panel — keyed single child so AnimatePresence tracks its exit cleanly */}
-      <AnimatePresence>
+      {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
+      <>
         {isOpen && view && (
           <motion.aside
             key="explorer-preview-drawer"
@@ -369,7 +369,6 @@ export function ExplorerPreviewDrawer({
             )}
             initial={{ x: 440 }}
             animate={{ x: 0 }}
-            exit={{ x: 440 }}
             transition={MOTION.drawerSlide}
           >
             {/* ── Header ── */}
@@ -772,7 +771,7 @@ export function ExplorerPreviewDrawer({
             )}
           </motion.aside>
         )}
-      </AnimatePresence>
+      </>
     </>
   )
 

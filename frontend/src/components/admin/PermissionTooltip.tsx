@@ -28,7 +28,7 @@
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { Info, Lock, Briefcase, Zap, Sparkles } from 'lucide-react'
 import type { PermissionResponse } from '@/services/permissionsService'
 import { cn } from '@/lib/utils'
@@ -230,14 +230,14 @@ export function PermissionTooltip({
                 escapes any ``overflow`` / sticky / stacking-context
                 trap from the trigger's ancestors. */}
             {typeof document !== 'undefined' && createPortal(
-                <AnimatePresence>
+                /* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */
+                <>
                     {open && (
                         <motion.div
                             id={id}
                             role="tooltip"
                             initial={{ opacity: 0, y: 4, scale: 0.96 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: 4, scale: 0.96 }}
                             transition={{ duration: 0.12 }}
                             // Keep the popover open while the cursor
                             // is inside it, so the user can read.
@@ -320,7 +320,7 @@ export function PermissionTooltip({
                             )}
                         </motion.div>
                     )}
-                </AnimatePresence>,
+                </>,
                 document.body,
             )}
         </>

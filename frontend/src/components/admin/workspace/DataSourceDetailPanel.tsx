@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
@@ -221,8 +221,8 @@ export function DataSourceDetailPanel({
                 StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
             <Backdrop open={!!(isOpen && ds)} onClick={onClose} zClassName="z-[60]" />
 
-            {/* Drawer panel — keyed single child so AnimatePresence tracks its exit cleanly */}
-            <AnimatePresence>
+            {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
+            <>
                 {isOpen && ds && (
                     <motion.aside
                         key="data-source-detail-drawer"
@@ -233,7 +233,6 @@ export function DataSourceDetailPanel({
                         )}
                         initial={{ x: 480 }}
                         animate={{ x: 0 }}
-                        exit={{ x: 480 }}
                         transition={MOTION.drawerSlide}
                     >
                         {/* ── Header ─────────────────────────────────────── */}
@@ -608,7 +607,7 @@ export function DataSourceDetailPanel({
                         </div>
                     </motion.aside>
                 )}
-            </AnimatePresence>
+            </>
         </>
     )
 
