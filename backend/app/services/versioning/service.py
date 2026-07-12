@@ -308,7 +308,7 @@ class GraphVersioningService:
         (``ix_jobs_graph_status``); the UI never gets here because the enable flow
         shows progress instead of the editor."""
         active = await s.scalar(select(func.count()).select_from(JobORM).where(
-            JobORM.job_type == "ingest", JobORM.graph_id == graph_id,
+            JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
             JobORM.status.in_(("pending", "running")),
         ))
         if active:

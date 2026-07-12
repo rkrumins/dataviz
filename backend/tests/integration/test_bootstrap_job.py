@@ -149,6 +149,23 @@ async def _run() -> None:
     svc = GraphVersioningService()
     ds = lambda: "ds_" + os.urandom(4).hex()
 
+    # ══ 0. the bootstrap worker must never touch the FILE-import worker's jobs ═
+    # Both live in the same `jobs` table and a worker claims by job_type, so a shared
+    # type would have each run the other's jobs through the wrong phase machine.
+    from backend.app.services.versioning.bootstrap_worker import BOOTSTRAP_JOB_TYPE
+    assert BOOTSTRAP_JOB_TYPE == "bootstrap" != "ingest"
+    import_graph = "graph_import_" + os.urandom(4).hex()
+    async with db.graphver_session() as s:
+        s.add(JobORM(job_type="ingest", graph_id=import_graph, status="pending",
+                     current_phase="parse"))                  # a file import, mid-flight
+    claimed = await BootstrapRunner(lambda name, provider_id=None: _graph()).claim_one()
+    assert claimed is None, "the bootstrap worker claimed a file-import job"
+    async with db.graphver_session() as s:
+        untouched = (await s.execute(select(JobORM).where(
+            JobORM.graph_id == import_graph))).scalars().one()
+        assert untouched.status == "pending" and untouched.current_phase == "parse", \
+            "the file-import job was mutated by the bootstrap worker"
+
     # ══ A. happy path: one import commit, validated, head flipped last ═══════
     d = ds()
     fake = _graph(nodes=6, edges=3)

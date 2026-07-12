@@ -79,6 +79,12 @@ from .service import (
 
 logger = logging.getLogger(__name__)
 
+# The job's own type. NOT 'ingest' — that belongs to the FILE-import worker
+# (``import_export/service.py``). A worker claims work by ``job_type``, so sharing one
+# would have each worker pick up the other's jobs and run them through the wrong phase
+# machine. Keeping the claim sets disjoint by construction is the whole point.
+BOOTSTRAP_JOB_TYPE = "bootstrap"
+
 # Phase order. `last_cursor` is prefixed with the phase it belongs to, so a resume
 # re-enters exactly where it stopped.
 PHASES = ("counting", "nodes", "edges", "validate", "heads", "merkle", "finalize", "backfill")
@@ -211,7 +217,7 @@ class BootstrapRunner:
         async with self._session() as s:
             row = (await s.execute(
                 select(JobORM).where(
-                    JobORM.job_type == "ingest",
+                    JobORM.job_type == BOOTSTRAP_JOB_TYPE,
                     text("(status = 'pending' OR (status = 'running' AND updated_at < :stale))")
                     .bindparams(stale=stale_before),
                 ).order_by(JobORM.created_at).limit(1).with_for_update(skip_locked=True)
@@ -257,6 +263,9 @@ class BootstrapRunner:
                             return {"job_id": job_id, "status": "completed"}
                         job.current_phase = nxt
                         job.last_cursor = None
+                        # Each phase re-learns its own window size (edge payloads are a
+                        # different weight from node payloads).
+                        job.batch_size = config.BOOTSTRAP_SCAN_WIDTH
                         job.updated_at = _now()
         except BootstrapFailure as exc:
             await self._fail(job_id, exc.reason, exc.code)
@@ -343,8 +352,8 @@ class BootstrapRunner:
             return True                                        # nothing (left) to scan
 
         rules = await _ontology_rules(job_id)
+        rows, width = await self._scan(client, kind, lo, width)
         hi = lo + width
-        rows = await self._scan(client, kind, lo, hi)
 
         # Convert → validate → rows. Rejections are counted, never silent.
         if kind == "nodes":
@@ -372,6 +381,9 @@ class BootstrapRunner:
             job.processed = int(summary["written"]["nodes"]) + int(summary["written"]["edges"])
             job.progress = _percent(kind, job.processed, job.total)
             job.last_cursor = f"{kind}:{hi}"
+            # Remember the width that fit: without this the next window starts at the
+            # configured size again and re-pays a failed query to rediscover the same answer.
+            job.batch_size = width
             job.updated_at = _now()
             job.last_sequence = job.last_sequence + 1
         _ = written
@@ -632,14 +644,17 @@ class BootstrapRunner:
         val = rs[0][0] if rs and rs[0] else None
         return int(val) if val is not None else None
 
-    async def _scan(self, client, kind: str, lo: int, hi: int) -> List[tuple]:
-        """One window, shrinking on timeout (a dense ID range can exceed the budget)."""
-        width = hi - lo
+    async def _scan(self, client, kind: str, lo: int, width: int) -> Tuple[List[tuple], int]:
+        """One window, halving on failure until it fits (a dense ID range, or one with fat
+        property payloads, can blow the server's per-query budget).
+
+        Returns the width that actually WORKED so the caller can remember it: rediscovering
+        it from scratch every window means paying a failed query per window forever."""
         while True:
             try:
                 res = await _q(client, _SCAN_NODES if kind == "nodes" else _SCAN_EDGES,
                                {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
-                return list(getattr(res, "result_set", None) or [])
+                return list(getattr(res, "result_set", None) or []), width
             except Exception:
                 if width <= config.BOOTSTRAP_SCAN_MIN_WIDTH:
                     raise
@@ -824,7 +839,7 @@ async def create_bootstrap_job(
             if graph.main_head_commit_seq > 1:
                 return {"graph_id": graph.id, "already_enabled": True}
             job = (await s.execute(select(JobORM).where(
-                JobORM.job_type == "ingest", JobORM.graph_id == graph.id,
+                JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.graph_id == graph.id,
             ).order_by(JobORM.created_at.desc()))).scalars().first()
             if job is not None:
                 if job.status in ("pending", "running"):
@@ -849,7 +864,7 @@ async def create_bootstrap_job(
             ps.target_commit_seq = 1
         commit = await _ensure_import_commit(s, gid, main_id, actor)
         job = JobORM(
-            job_type="ingest", graph_id=gid, workspace_id=workspace_id,
+            job_type=BOOTSTRAP_JOB_TYPE, graph_id=gid, workspace_id=workspace_id,
             data_source_id=data_source_id, branch_id=main_id, status="pending",
             current_phase="counting", idempotency_key=f"bootstrap:{gid}",
             batch_size=config.BOOTSTRAP_SCAN_WIDTH, target_commit_id=commit.id,
@@ -864,7 +879,7 @@ async def bootstrap_status(*, data_source_id: str) -> Optional[Dict[str, object]
     """The data source's latest enablement job, in the shape the UI polls."""
     async with db.graphver_session() as s:
         job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == "ingest", JobORM.data_source_id == data_source_id,
+            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
         ).order_by(JobORM.created_at.desc()))).scalars().first()
         if job is None:
             return None
@@ -885,7 +900,7 @@ async def retry_bootstrap(*, data_source_id: str, mode: str = "resume") -> Dict[
     mid-copy). Neither can touch a graph whose head already flipped."""
     async with db.graphver_session() as s:
         job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == "ingest", JobORM.data_source_id == data_source_id,
+            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
         ).order_by(JobORM.created_at.desc()))).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
@@ -921,7 +936,7 @@ async def abandon_bootstrap(*, data_source_id: str) -> Dict[str, object]:
     UI instead)."""
     async with db.graphver_session() as s:
         job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == "ingest", JobORM.data_source_id == data_source_id,
+            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
         ).order_by(JobORM.created_at.desc()))).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
