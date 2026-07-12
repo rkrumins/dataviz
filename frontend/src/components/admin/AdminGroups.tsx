@@ -25,6 +25,7 @@ import {
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { TablePagination } from '@/components/ui/TablePagination'
 import { avatarGradient, getInitials, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
@@ -141,6 +142,8 @@ export function AdminGroups() {
     const [sortDir, setSortDir] = useState<SortDir>('asc')
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [modal, setModal] = useState<ModalType>(null)
+    const [page, setPage] = useState(0)
+    const PAGE_SIZE = 25
     const { showToast } = useToast()
 
     // The whole page requires ``system:groups:manage`` on the
@@ -204,6 +207,13 @@ export function AdminGroups() {
         })
         return list
     }, [groups, search, sortField, sortDir])
+
+    const pageCount = Math.max(1, Math.ceil(processedGroups.length / PAGE_SIZE))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const pagedGroups = processedGroups.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE)
+
+    // Back to page one whenever the visible set changes shape.
+    useEffect(() => { setPage(0) }, [search, sortField, sortDir])
 
 
     const handleSort = (field: SortField) => {
@@ -413,7 +423,7 @@ export function AdminGroups() {
                             </tr>
                         </thead>
                         <tbody>
-                            {processedGroups.map((g, i) => {
+                            {pagedGroups.map((g, i) => {
                                 const isActing = actionLoading === g.id
                                 const isScim = g.source === 'scim'
                                 return (
@@ -515,22 +525,25 @@ export function AdminGroups() {
                         </tbody>
                     </table>
 
-                    {/* Footer */}
-                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between">
+                    {/* Footer — total count (left) + page controls (right) */}
+                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between gap-3">
                         <p className="text-xs text-ink-muted">
                             Showing <span className="font-semibold text-ink-secondary">{processedGroups.length}</span>
                             {processedGroups.length !== groups.length && (
                                 <> of <span className="font-semibold text-ink-secondary">{groups.length}</span></>
                             )} group{groups.length !== 1 ? 's' : ''}
                         </p>
-                        {search && (
-                            <button
-                                onClick={() => setSearch('')}
-                                className="text-xs font-medium text-accent-lineage hover:underline"
-                            >
-                                Clear search
-                            </button>
-                        )}
+                        <div className="flex items-center gap-4">
+                            {search && (
+                                <button
+                                    onClick={() => setSearch('')}
+                                    className="text-xs font-medium text-accent-lineage hover:underline"
+                                >
+                                    Clear search
+                                </button>
+                            )}
+                            <TablePagination page={clampedPage} pageSize={PAGE_SIZE} total={processedGroups.length} onPageChange={setPage} />
+                        </div>
                     </div>
                 </div>
             )}

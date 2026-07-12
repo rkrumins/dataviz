@@ -36,6 +36,7 @@ import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { TablePagination } from '@/components/ui/TablePagination'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
@@ -217,6 +218,8 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     const [search, setSearch] = useState('')
     const [sortField, setSortField] = useState<SortField>('subject')
     const [sortDir, setSortDir] = useState<SortDir>('asc')
+    const [page, setPage] = useState(0)
+    const PAGE_SIZE = 25
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [modal, setModal] = useState<ModalType>(null)
     // Phase 4.4: revoke confirms now go through an impact preview.
@@ -289,6 +292,13 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         })
         return list
     }, [members, search, sortField, sortDir])
+
+    const pageCount = Math.max(1, Math.ceil(processedMembers.length / PAGE_SIZE))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const pagedMembers = processedMembers.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE)
+
+    // Back to page one whenever the visible set changes shape.
+    useEffect(() => { setPage(0) }, [search, sortField, sortDir])
 
     const handleSort = (field: SortField) => {
         if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -514,7 +524,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                             </tr>
                         </thead>
                         <tbody>
-                            {processedMembers.map((m, i) => {
+                            {pagedMembers.map((m, i) => {
                                 const role = roleVisualFor(m.role)
                                 const RoleIcon = role.icon
                                 const isActing = actionLoading === `revoke-${m.bindingId}`
@@ -586,13 +596,15 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                             })}
                         </tbody>
                     </table>
-                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between">
+
+                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between gap-3">
                         <p className="text-xs text-ink-muted">
                             Showing <span className="font-semibold text-ink-secondary">{processedMembers.length}</span>
                             {processedMembers.length !== members.length && (
                                 <> of <span className="font-semibold text-ink-secondary">{members.length}</span></>
                             )} member{members.length !== 1 ? 's' : ''}
                         </p>
+                        <TablePagination page={clampedPage} pageSize={PAGE_SIZE} total={processedMembers.length} onPageChange={setPage} />
                     </div>
                 </div>
             )}

@@ -24,6 +24,7 @@ import { workspaceService, type WorkspaceResponse } from '@/services/workspaceSe
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { TablePagination } from '@/components/ui/TablePagination'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -195,6 +196,8 @@ export function AdminUsers() {
     const [search, setSearch] = useState('')
     const [sortField, setSortField] = useState<SortField>('createdAt')
     const [sortDir, setSortDir] = useState<SortDir>('desc')
+    const [page, setPage] = useState(0)
+    const PAGE_SIZE = 25
     const [actionLoading, setActionLoading] = useState<string | null>(null)
 
     // Modal state (unified)
@@ -322,6 +325,13 @@ export function AdminUsers() {
         })
         return list
     }, [users, filter, search, sortField, sortDir])
+
+    const pageCount = Math.max(1, Math.ceil(processedUsers.length / PAGE_SIZE))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const pagedUsers = processedUsers.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE)
+
+    // Back to page one whenever the visible set changes shape.
+    useEffect(() => { setPage(0) }, [filter, search, sortField, sortDir])
 
     // ── Actions ──────────────────────────────────────────────────────
 
@@ -723,7 +733,7 @@ export function AdminUsers() {
                             </tr>
                         </thead>
                         <tbody>
-                            {processedUsers.map((user, i) => {
+                            {pagedUsers.map((user, i) => {
                                 const sc = STATUS_CONFIG[user.status]
                                 const rc = roleVisualFor(user.role)
                                 const RoleIcon = rc.icon
@@ -877,18 +887,21 @@ export function AdminUsers() {
                         </tbody>
                     </table>
 
-                    {/* Table footer */}
-                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between">
+                    {/* Table footer — total count (left) + page controls (right) */}
+                    <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between gap-3">
                         <p className="text-xs text-ink-muted">
                             Showing <span className="font-semibold text-ink-secondary">{processedUsers.length}</span>
                             {processedUsers.length !== users.length && (
                                 <> of <span className="font-semibold text-ink-secondary">{users.length}</span></>
                             )} user{users.length !== 1 ? 's' : ''}
                         </p>
-                        {(search || filter !== 'all') && (
-                            <button onClick={() => { setSearch(''); setFilter('all') }}
-                                className="text-xs font-medium text-accent-lineage hover:underline">Clear filters</button>
-                        )}
+                        <div className="flex items-center gap-4">
+                            {(search || filter !== 'all') && (
+                                <button onClick={() => { setSearch(''); setFilter('all') }}
+                                    className="text-xs font-medium text-accent-lineage hover:underline">Clear filters</button>
+                            )}
+                            <TablePagination page={clampedPage} pageSize={PAGE_SIZE} total={processedUsers.length} onPageChange={setPage} />
+                        </div>
                     </div>
                 </div>
             )}
