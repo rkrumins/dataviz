@@ -1,72 +1,83 @@
 import { describe, it, expect } from 'vitest'
-import { buildNameSuggestions, deriveRootTypes, type SuggestionEntityType } from '../nameSuggestions'
+import {
+    buildNameSuggestions,
+    isHumanLabel,
+    CURATED_SUGGESTIONS,
+} from '../nameSuggestions'
 
-const types: SuggestionEntityType[] = [
-    { id: 'system', name: 'System', pluralName: 'Systems', hierarchy: { level: 0, canContain: ['table'] } },
-    { id: 'table', name: 'Table', pluralName: 'Tables', hierarchy: { level: 1, canContain: ['column'] } },
-    { id: 'column', name: 'Column', pluralName: 'Columns', hierarchy: { level: 2, canContain: [] } },
-]
-
-describe('deriveRootTypes', () => {
-    it('prefers explicit level 0 types', () => {
-        expect(deriveRootTypes(types).map(t => t.id)).toEqual(['system'])
+describe('isHumanLabel', () => {
+    it('accepts labels a person would recognise', () => {
+        expect(isHumanLabel('Finance')).toBe(true)
+        expect(isHumanLabel('Core DWH')).toBe(true)
+        expect(isHumanLabel('Customer 360')).toBe(true)
+        expect(isHumanLabel('Sales & Ops')).toBe(true)
     })
 
-    it('falls back to types never contained by others', () => {
-        const noLevels: SuggestionEntityType[] = [
-            { id: 'a', name: 'A', hierarchy: { canContain: ['b'] } },
-            { id: 'b', name: 'B', hierarchy: { canContain: [] } },
-        ]
-        expect(deriveRootTypes(noLevels).map(t => t.id)).toEqual(['a'])
+    it('rejects machine-minted identifiers', () => {
+        expect(isHumanLabel('ds_930583737602')).toBe(false)   // snake_case + digit blob
+        expect(isHumanLabel('roots-node')).toBe(false)        // lowercase slug
+        expect(isHumanLabel('urn:synodic:solidatus')).toBe(false)
+        expect(isHumanLabel('3e105c56b3b4')).toBe(false)      // doesn't start with a letter
+        expect(isHumanLabel('warehouse/prod')).toBe(false)
     })
 
-    it('falls back to the first two types when hierarchy is uninformative', () => {
-        const flat: SuggestionEntityType[] = [
-            { id: 'a', name: 'A', hierarchy: { canContain: ['b'] } },
-            { id: 'b', name: 'B', hierarchy: { canContain: ['a'] } },
-        ]
-        expect(deriveRootTypes(flat).map(t => t.id)).toEqual(['a', 'b'])
-        expect(deriveRootTypes([])).toEqual([])
+    it('rejects placeholders and empties', () => {
+        expect(isHumanLabel('Unknown')).toBe(false)
+        expect(isHumanLabel('Data Source')).toBe(false)
+        expect(isHumanLabel('Blank model')).toBe(false)
+        expect(isHumanLabel('')).toBe(false)
+        expect(isHumanLabel(undefined)).toBe(false)
+        expect(isHumanLabel('A very long data source label indeed')).toBe(false)
     })
 })
 
 describe('buildNameSuggestions', () => {
-    it('leads with data source + workspace for existing-data scopes', () => {
-        const out = buildNameSuggestions(
-            { workspaceName: 'Finance', dataSourceLabel: 'Core DWH' },
-            types,
-        )
-        expect(out[0]).toBe('Core DWH Lineage')
-        expect(out[1]).toBe('Finance Overview')
-        expect(out).toContain('Systems Landscape')
-        expect(out).toContain('System to Table Flow')
-        expect(out.length).toBeLessThanOrEqual(6)
+    it('offers the curated list when there is no scope at all', () => {
+        expect(buildNameSuggestions(undefined, [])).toEqual([...CURATED_SUGGESTIONS])
     })
 
-    it('uses the ontology (not a data source) for blank scopes', () => {
+    it('leads with the data source when its label is a real name', () => {
+        const out = buildNameSuggestions({ dataSourceLabel: 'Finance' }, [])
+
+        expect(out[0]).toBe('Finance Lineage')
+        // The curated list still follows, capped at 6 overall.
+        expect(out.slice(1)).toEqual(CURATED_SUGGESTIONS.slice(0, 5))
+        expect(out).toHaveLength(6)
+    })
+
+    it('never templates an identifier-shaped label into a name', () => {
+        const out = buildNameSuggestions({ dataSourceLabel: 'ds_930583737602' }, [])
+
+        expect(out).toEqual([...CURATED_SUGGESTIONS])
+        expect(out.some(s => s.includes('ds_'))).toBe(false)
+    })
+
+    it('ignores workspace, ontology and entity types entirely (they read badly)', () => {
         const out = buildNameSuggestions(
-            { workspaceName: 'Finance', dataSourceLabel: 'Banking', ontologyName: 'Banking', isBlank: true },
+            { workspaceName: 'Overlay WS', ontologyName: 'Solidatus multi-containment' },
+            [{ id: 'zone', name: 'Zone', pluralName: 'Zones', hierarchy: { level: 0, canContain: ['asset'] } }],
+        )
+
+        expect(out).toEqual([...CURATED_SUGGESTIONS])
+        expect(out).not.toContain('Overlay WS Overview')
+        expect(out).not.toContain('Solidatus multi-containment Model')
+        expect(out).not.toContain('Zones Landscape')
+    })
+
+    it('gives blank models the curated list only (their label is the ontology name)', () => {
+        const out = buildNameSuggestions(
+            { dataSourceLabel: 'Banking Model', ontologyName: 'Banking Model', isBlank: true },
             [],
         )
-        expect(out[0]).toBe('Finance Overview')
-        expect(out).toContain('Banking Model')
-        expect(out.every(s => !s.endsWith('Lineage'))).toBe(true)
+
+        expect(out).toEqual([...CURATED_SUGGESTIONS])
+        expect(out).not.toContain('Banking Model Lineage')
     })
 
-    it('skips generic fallback labels and dedupes case-insensitively', () => {
-        const out = buildNameSuggestions(
-            { workspaceName: 'Unknown', dataSourceLabel: 'Data Source' },
-            [{ id: 'impact', name: 'Impact Analysis' }],
-        )
-        expect(out).not.toContain('Data Source Lineage')
-        expect(out).not.toContain('Unknown Overview')
-        // 'Impact Analysis Landscape' from the root type is distinct, but the
-        // evergreen 'Impact Analysis' itself must appear only once.
-        expect(out.filter(s => s === 'Impact Analysis')).toHaveLength(1)
-    })
+    it('dedupes case-insensitively', () => {
+        const out = buildNameSuggestions({ dataSourceLabel: 'Data' }, [])
 
-    it('still returns evergreen suggestions with no scope at all', () => {
-        const out = buildNameSuggestions(undefined, [])
-        expect(out).toEqual(['Impact Analysis', 'Source to Target'])
+        // "Data Lineage" from the label collides with the curated entry.
+        expect(out.filter(s => s.toLowerCase() === 'data lineage')).toHaveLength(1)
     })
 })

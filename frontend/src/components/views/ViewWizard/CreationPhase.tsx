@@ -1,24 +1,24 @@
 /**
- * CreationPhase — what the wizard shows AFTER "Create View" is clicked.
+ * CreationPhase — the wizard's terminal step: creating the view, then handing it over.
  *
- * Creating a view is several sequential HTTP calls (blank models add graph
- * provisioning, which can wait on a cold provider). The wizard used to show a
- * spinner on the footer button and nothing else, so a multi-second create read
- * as a hang — people clicked again.
+ * These are STEP BODIES + FOOTERS, not modals. They render inside `WizardShell`
+ * exactly like every other step, so the header, the stepper and the footer stay
+ * put and creating a view reads as the last step of the wizard rather than a
+ * detached card that appears and then vanishes. (It previously rendered its own
+ * Backdrop + card, which is why it looked like a mystery dialog.)
  *
  * Stages are one row per awaited call, because that is genuinely all the
  * frontend can observe. We do NOT invent sub-steps we can't see.
  *
- * On success the view is already usable: the success card offers to open it now
- * and, if you do nothing, opens it for you after a short countdown (paused
- * while the pointer is over the card, cancelled by any click).
+ * On success the view is already saved: the footer offers to open it now and,
+ * if the user does nothing, opens it for them after a short countdown (paused
+ * while they're reading the summary, cancelled by any click).
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { AlertCircle, ArrowRight, Check, Loader2, X } from 'lucide-react'
+import { AlertCircle, ArrowRight, Check, Compass, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Backdrop } from '@/components/ui/Backdrop'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -32,76 +32,100 @@ export interface CreationStage {
     state: CreationStageState
 }
 
-/** Seconds the success card waits before opening the view on your behalf. */
-const AUTO_OPEN_SECONDS = 5
-
-// ─── Shell ──────────────────────────────────────────────────────────────────
-
-const PHASE_KEYFRAMES = `
-@keyframes vw-confetti-fall {
-  0%   { transform: translate3d(0, -10px, 0) rotate(0deg); opacity: 1; }
-  100% { transform: translate3d(var(--vw-dx), 190px, 0) rotate(var(--vw-rot)); opacity: 0; }
-}
-.vw-confetti-piece { animation: vw-confetti-fall 1.15s ease-out forwards; }
-@media (prefers-reduced-motion: reduce) {
-  .vw-confetti-piece { display: none; }
-}
-`
-
-function PhaseShell({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
-    return (
-        <>
-            {/* Sibling of the pointer-events-none wrapper — never nested inside it. */}
-            <Backdrop open={true} zClassName="z-50" className="bg-black/60" />
-            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
-                <style>{PHASE_KEYFRAMES}</style>
-                <motion.div
-                    initial={{ scale: 0.96, opacity: 0, y: 16 }}
-                    animate={{ scale: 1, opacity: 1, y: 0 }}
-                    transition={{ duration: 0.14 }}
-                    className="pointer-events-auto relative w-full max-w-lg bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden"
-                >
-                    {onClose && (
-                        <button
-                            onClick={onClose}
-                            aria-label="Close"
-                            className="absolute top-4 right-4 z-10 p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                        >
-                            <X className="w-4 h-4 text-slate-500" />
-                        </button>
-                    )}
-                    {children}
-                </motion.div>
-            </div>
-        </>
-    )
+export interface CreationSummaryStat {
+    label: string
+    value: string | number
 }
 
-// ─── Progress ───────────────────────────────────────────────────────────────
+/** Seconds the success step waits before opening the view on the user's behalf. */
+export const AUTO_OPEN_SECONDS = 5
+
+// ─── Auto-open countdown ────────────────────────────────────────────────────
+
+/**
+ * Ticks down while `enabled`, fires once, and never fires again. Hoisted out of
+ * the success body because the countdown drives BOTH the body (progress rail)
+ * and the wizard footer (the "Open view now" action bar).
+ */
+export function useAutoOpenCountdown({
+    enabled,
+    seconds = AUTO_OPEN_SECONDS,
+    onFire,
+}: {
+    enabled: boolean
+    seconds?: number
+    onFire: () => void
+}): {
+    remaining: number
+    paused: boolean
+    setPaused: (paused: boolean) => void
+    cancel: () => void
+} {
+    const [remaining, setRemaining] = useState(seconds)
+    const [paused, setPaused] = useState(false)
+    const firedRef = useRef(false)
+
+    // Keep the callback fresh without restarting the timer on every render.
+    const onFireRef = useRef(onFire)
+    useEffect(() => { onFireRef.current = onFire })
+
+    // No reset branch on purpose: the wizard unmounts when it closes, so a fresh
+    // create always starts from a fresh hook. `enabled` only ever goes false→true
+    // (steps → success), never back.
+    useEffect(() => {
+        if (!enabled || paused || firedRef.current || remaining < 0) return
+        if (remaining === 0) {
+            firedRef.current = true
+            onFireRef.current()
+            return
+        }
+        const t = setTimeout(() => setRemaining(r => r - 1), 1000)
+        return () => clearTimeout(t)
+    }, [enabled, paused, remaining])
+
+    /** Any deliberate click wins over the countdown. */
+    const cancel = useCallback(() => {
+        firedRef.current = true
+        setRemaining(-1)
+    }, [])
+
+    return { remaining, paused, setPaused, cancel }
+}
+
+// ─── Creating ───────────────────────────────────────────────────────────────
 
 function StageRow({ stage }: { stage: CreationStage }) {
     const icon = {
-        done: <Check className="w-3.5 h-3.5 text-white" />,
-        active: <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />,
-        failed: <AlertCircle className="w-3.5 h-3.5 text-white" />,
+        done: <Check className="w-4 h-4 text-white" />,
+        active: <Loader2 className="w-4 h-4 text-white animate-spin" />,
+        failed: <AlertCircle className="w-4 h-4 text-white" />,
         pending: <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />,
     }[stage.state]
 
     const dotClass = {
         done: 'bg-emerald-500',
-        active: 'bg-blue-500',
+        active: 'bg-blue-500 shadow-md shadow-blue-500/25',
         failed: 'bg-red-500',
         pending: 'bg-slate-200 dark:bg-slate-700',
     }[stage.state]
 
     return (
-        <div className="flex items-start gap-3">
-            <div className={cn('w-6 h-6 rounded-full flex items-center justify-center shrink-0 transition-colors', dotClass)}>
+        <div
+            className={cn(
+                'flex items-start gap-4 rounded-xl border px-4 py-3.5 transition-colors',
+                stage.state === 'active'
+                    ? 'border-blue-500/30 bg-blue-500/5'
+                    : stage.state === 'failed'
+                        ? 'border-red-500/30 bg-red-500/5'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/40',
+            )}
+        >
+            <div className={cn('w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-colors', dotClass)}>
                 {icon}
             </div>
             <div className="min-w-0 flex-1 pt-0.5">
                 <p className={cn(
-                    'text-sm font-medium transition-colors',
+                    'text-sm font-semibold transition-colors',
                     stage.state === 'pending'
                         ? 'text-slate-400'
                         : stage.state === 'failed'
@@ -110,36 +134,41 @@ function StageRow({ stage }: { stage: CreationStage }) {
                 )}>
                     {stage.label}
                 </p>
-                {stage.detail && stage.state !== 'pending' && (
+                {stage.detail && (
                     <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">{stage.detail}</p>
                 )}
             </div>
+            {stage.state === 'done' && (
+                <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0 pt-1">Done</span>
+            )}
         </div>
     )
 }
 
-export function CreationProgress({
+export function CreationProgressBody({
     stages,
     viewName,
     error,
-    onRetry,
-    onBack,
 }: {
     stages: CreationStage[]
     viewName: string
     error: string | null
-    onRetry: () => void
-    onBack: () => void
 }) {
     return (
-        <PhaseShell>
-            <div className="px-8 pt-8 pb-6">
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                    {error ? 'Couldn’t finish creating your view' : 'Creating your view'}
-                </h2>
-                <p className="text-sm text-slate-500 mt-0.5 truncate" title={viewName}>{viewName}</p>
+        <div className="min-h-[440px] flex flex-col items-center justify-center">
+            <div className="w-full max-w-xl">
+                <div className="text-center mb-8">
+                    <h3 className="text-2xl font-bold text-slate-900 dark:text-white">
+                        {error ? 'We couldn’t finish' : 'Creating your view'}
+                    </h3>
+                    <p className="mt-1.5 text-sm text-slate-500 truncate" title={viewName}>
+                        {error
+                            ? 'Your work is safe — pick up exactly where it stopped.'
+                            : <>Hang tight — <span className="font-semibold text-slate-700 dark:text-slate-300">{viewName}</span> is on its way.</>}
+                    </p>
+                </div>
 
-                <div className="mt-6 space-y-4">
+                <div className="space-y-2.5" aria-live="polite">
                     {stages.map(stage => <StageRow key={stage.id} stage={stage} />)}
                 </div>
 
@@ -147,53 +176,85 @@ export function CreationProgress({
                     <div className="mt-6 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3">
                         <p className="text-xs text-red-700 dark:text-red-300 leading-relaxed">{error}</p>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
-                            Nothing was lost — retrying picks up exactly where it stopped.
+                            Nothing was lost. Retrying resumes from the step that failed — it will never
+                            create a second view.
                         </p>
                     </div>
                 )}
             </div>
+        </div>
+    )
+}
 
-            {error && (
-                <div className="flex items-center justify-end gap-3 px-8 py-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
-                    <button
-                        onClick={onBack}
-                        className="px-4 py-2 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                    >
-                        Back to review
-                    </button>
-                    <button
-                        onClick={onRetry}
-                        className="px-5 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors"
-                    >
-                        Retry
-                    </button>
-                </div>
-            )}
-        </PhaseShell>
+/** Footer while the create is in flight — deliberately actionless. */
+export function CreationBusyFooter() {
+    return (
+        <div className="flex items-center gap-2 text-sm text-slate-500">
+            <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+            Saving your view — this only takes a moment
+        </div>
+    )
+}
+
+export function CreationErrorFooter({
+    onBack,
+    onRetry,
+}: {
+    onBack: () => void
+    onRetry: () => void
+}) {
+    return (
+        <div className="flex items-center justify-between w-full">
+            <button
+                type="button"
+                onClick={onBack}
+                className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+            >
+                Back to review
+            </button>
+            <button
+                type="button"
+                onClick={onRetry}
+                className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150"
+            >
+                <Loader2 className="w-4 h-4" />
+                Retry
+            </button>
+        </div>
     )
 }
 
 // ─── Success ────────────────────────────────────────────────────────────────
 
-/** Deterministic confetti — no layout thrash, transform/opacity only. */
+const CONFETTI_KEYFRAMES = `
+@keyframes vw-confetti-fall {
+  0%   { transform: translate3d(0, -12px, 0) rotate(0deg); opacity: 1; }
+  100% { transform: translate3d(var(--vw-dx), 240px, 0) rotate(var(--vw-rot)); opacity: 0; }
+}
+.vw-confetti-piece { animation: vw-confetti-fall 1.25s ease-out forwards; }
+@media (prefers-reduced-motion: reduce) { .vw-confetti-piece { display: none; } }
+`
+
+/** Deterministic confetti — transform/opacity only, no layout thrash. */
 const CONFETTI = [
-    { dx: '-58px', rot: '-140deg', delay: '0ms', color: '#3b82f6', left: '18%' },
-    { dx: '34px', rot: '120deg', delay: '40ms', color: '#8b5cf6', left: '30%' },
-    { dx: '-18px', rot: '200deg', delay: '90ms', color: '#22c55e', left: '42%' },
-    { dx: '52px', rot: '-95deg', delay: '20ms', color: '#f59e0b', left: '54%' },
-    { dx: '-42px', rot: '160deg', delay: '120ms', color: '#ec4899', left: '66%' },
-    { dx: '22px', rot: '-180deg', delay: '70ms', color: '#06b6d4', left: '78%' },
-    { dx: '-8px', rot: '90deg', delay: '150ms', color: '#6366f1', left: '24%' },
-    { dx: '46px', rot: '140deg', delay: '110ms', color: '#22c55e', left: '72%' },
+    { dx: '-62px', rot: '-150deg', delay: '0ms', color: '#3b82f6', left: '22%' },
+    { dx: '38px', rot: '120deg', delay: '40ms', color: '#8b5cf6', left: '31%' },
+    { dx: '-20px', rot: '210deg', delay: '90ms', color: '#22c55e', left: '40%' },
+    { dx: '56px', rot: '-95deg', delay: '20ms', color: '#f59e0b', left: '48%' },
+    { dx: '-46px', rot: '165deg', delay: '120ms', color: '#ec4899', left: '56%' },
+    { dx: '26px', rot: '-185deg', delay: '70ms', color: '#06b6d4', left: '64%' },
+    { dx: '-10px', rot: '95deg', delay: '150ms', color: '#6366f1', left: '73%' },
+    { dx: '48px', rot: '140deg', delay: '110ms', color: '#22c55e', left: '78%' },
 ]
 
 function ConfettiBurst() {
     return (
-        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-48 overflow-hidden">
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 -top-6 h-56 overflow-hidden">
+            <style>{CONFETTI_KEYFRAMES}</style>
             {CONFETTI.map((p, i) => (
                 <span
                     key={i}
-                    className="vw-confetti-piece absolute top-6 block w-1.5 h-2.5 rounded-[1px]"
+                    className="vw-confetti-piece absolute top-0 block w-1.5 h-3 rounded-[1px]"
                     style={{
                         left: p.left,
                         backgroundColor: p.color,
@@ -207,111 +268,149 @@ function ConfettiBurst() {
     )
 }
 
-export function CreationSuccess({
+export function CreationSuccessBody({
     viewName,
     scopeLabel,
     isBlank,
-    onOpenNow,
-    onClose,
+    stats,
+    onPauseChange,
 }: {
     viewName: string
     scopeLabel?: string
     isBlank: boolean
-    onOpenNow: () => void
-    onClose: () => void
+    stats: CreationSummaryStat[]
+    /** Hovering the summary pauses the auto-open — the user is clearly reading. */
+    onPauseChange: (paused: boolean) => void
 }) {
-    const [remaining, setRemaining] = useState(AUTO_OPEN_SECONDS)
-    const [paused, setPaused] = useState(false)
+    return (
+        <div
+            className="relative min-h-[440px] flex flex-col items-center justify-center text-center"
+            onMouseEnter={() => onPauseChange(true)}
+            onMouseLeave={() => onPauseChange(false)}
+        >
+            <ConfettiBurst />
 
-    // Auto-open unless the user is clearly still reading (pointer over the card)
-    // or has taken an action themselves.
-    useEffect(() => {
-        if (paused || remaining < 0) return
-        if (remaining === 0) {
-            onOpenNow()
-            return
-        }
-        const t = setTimeout(() => setRemaining(r => r - 1), 1000)
-        return () => clearTimeout(t)
-    }, [remaining, paused, onOpenNow])
+            <motion.div
+                initial={{ scale: 0.4, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 380, damping: 18 }}
+                className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25"
+            >
+                <Check className="w-8 h-8 text-white" strokeWidth={3} />
+            </motion.div>
 
-    const cancelAuto = useCallback(() => setRemaining(-1), [])
+            <motion.h3
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.08 }}
+                className="mt-6 text-2xl font-bold text-slate-900 dark:text-white"
+            >
+                {isBlank ? 'Your model is ready' : 'Your view is ready'}
+            </motion.h3>
 
-    const handleOpen = useCallback(() => {
-        cancelAuto()
-        onOpenNow()
-    }, [cancelAuto, onOpenNow])
+            <motion.p
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.12 }}
+                className="mt-1.5 max-w-lg text-sm text-slate-500"
+            >
+                <span className="font-semibold text-slate-700 dark:text-slate-300">{viewName}</span>
+                {scopeLabel && <span className="text-slate-400"> · {scopeLabel}</span>}
+            </motion.p>
 
-    const handleClose = useCallback(() => {
-        cancelAuto()
-        onClose()
-    }, [cancelAuto, onClose])
+            {stats.length > 0 && (
+                <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.16 }}
+                    className="mt-7 grid gap-3 w-full max-w-lg"
+                    style={{ gridTemplateColumns: `repeat(${stats.length}, minmax(0, 1fr))` }}
+                >
+                    {stats.map(stat => (
+                        <div
+                            key={stat.label}
+                            className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 px-3 py-3"
+                        >
+                            <p className="text-lg font-bold text-slate-800 dark:text-slate-200 truncate" title={String(stat.value)}>
+                                {stat.value}
+                            </p>
+                            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400 truncate">
+                                {stat.label}
+                            </p>
+                        </div>
+                    ))}
+                </motion.div>
+            )}
 
-    const autoRunning = remaining >= 0 && !paused
+            <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.2 }}
+                className="mt-6 inline-flex items-center gap-1.5 text-xs text-slate-400"
+            >
+                <Compass className="w-3.5 h-3.5" />
+                Saved — you’ll always find it in Explorer
+            </motion.p>
+        </div>
+    )
+}
+
+export function CreationSuccessFooter({
+    remaining,
+    paused,
+    onOpenNow,
+    onStayHere,
+}: {
+    remaining: number
+    paused: boolean
+    onOpenNow: () => void
+    onStayHere: () => void
+}) {
+    const counting = remaining >= 0
+    const pct = counting ? Math.max(0, Math.min(1, remaining / AUTO_OPEN_SECONDS)) * 100 : 0
 
     return (
-        <PhaseShell onClose={handleClose}>
-            <div
-                onMouseEnter={() => setPaused(true)}
-                onMouseLeave={() => setPaused(false)}
-                className="relative px-8 pt-10 pb-8 text-center"
-            >
-                <ConfettiBurst />
+        <div className="relative flex items-center justify-between w-full">
+            {/* Countdown rail — pinned to the footer's top edge, freezes on hover so
+                the page is never yanked away mid-read. */}
+            {counting && (
+                <div className="absolute -top-5 left-0 right-0 h-0.5 bg-slate-200 dark:bg-slate-700 overflow-hidden rounded-full">
+                    <div
+                        className={cn(
+                            'h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-[width] ease-linear',
+                            paused ? 'duration-150' : 'duration-1000',
+                        )}
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+            )}
 
-                <motion.div
-                    initial={{ scale: 0.4, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    transition={{ type: 'spring', stiffness: 380, damping: 18 }}
-                    className="relative mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25"
-                >
-                    <Check className="w-7 h-7 text-white" strokeWidth={3} />
-                </motion.div>
+            <p className="text-xs text-slate-400">
+                {counting
+                    ? (paused
+                        ? 'Auto-open paused while you’re reading'
+                        : `Opening automatically in ${remaining}s`)
+                    : 'Open it whenever you’re ready'}
+            </p>
 
-                <h2 className="mt-5 text-xl font-bold text-slate-900 dark:text-white">
-                    {isBlank ? 'Your model is ready' : 'View created'}
-                </h2>
-                <p className="mt-1 text-sm text-slate-500 truncate" title={viewName}>
-                    <span className="font-semibold text-slate-700 dark:text-slate-300">{viewName}</span>
-                    {scopeLabel && <span className="text-slate-400"> · {scopeLabel}</span>}
-                </p>
-
+            <div className="flex items-center gap-3">
                 <button
-                    onClick={handleOpen}
-                    className="mt-6 inline-flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors"
+                    type="button"
+                    onClick={onStayHere}
+                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+                >
+                    Stay here
+                </button>
+                <button
+                    type="button"
+                    onClick={onOpenNow}
+                    autoFocus
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150"
                 >
                     Open view now
                     <ArrowRight className="w-4 h-4" />
                 </button>
-
-                <div className="mt-4 h-4">
-                    {remaining >= 0 ? (
-                        <p className="text-[11px] text-slate-400">
-                            {paused
-                                ? 'Auto-open paused'
-                                : `Opening automatically in ${remaining}s`}
-                        </p>
-                    ) : (
-                        <button
-                            onClick={handleClose}
-                            className="text-[11px] font-medium text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                        >
-                            Stay here
-                        </button>
-                    )}
-                </div>
             </div>
-
-            {/* Countdown rail — freezes on hover so it never yanks the page away. */}
-            <div className="h-1 w-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                {remaining >= 0 && (
-                    <motion.div
-                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-600"
-                        initial={{ width: '100%' }}
-                        animate={{ width: autoRunning ? '0%' : `${(Math.max(remaining, 0) / AUTO_OPEN_SECONDS) * 100}%` }}
-                        transition={{ duration: autoRunning ? remaining : 0, ease: 'linear' }}
-                    />
-                )}
-            </div>
-        </PhaseShell>
+        </div>
     )
 }

@@ -70,6 +70,12 @@ interface LayerStudioProps {
     updateFormData: (updates: Partial<WizardFormData>) => void
 }
 
+/** Layers rail sizing. Wide enough by default to read a nested entity name. */
+const RAIL_DEFAULT = 300
+const RAIL_MIN = 220
+const RAIL_MAX = 560
+const RAIL_WIDTH_KEY = 'viz-layer-studio-rail-width'
+
 // ─── Auto-Organize Review Sheet ────────────────────────────────────────────────
 
 function AutoOrganizeSheet({
@@ -358,12 +364,18 @@ export function LayerStudio({
         return map
     }, [canvasEdges, containmentEdgeTypes])
 
-    // Merge: canvas-derived parent map takes precedence (always fresh),
-    // then fall back to store parent map (populated after computeAssignments)
+    // The containment map the ENTITY BROWSER discovered (real containment edges,
+    // straight from the API). This is the only one that exists in the wizard:
+    // there is no canvas here, so canvasParentMap and the store's map are both
+    // EMPTY — which meant every containment rule below silently no-opped and a
+    // parent + its children could be placed as unrelated, flat entries.
+    const [browserParentMap, setBrowserParentMap] = useState<Map<string, string>>(new Map())
+
     const parentMap = useMemo(() => {
+        if (browserParentMap.size > 0) return browserParentMap
         if (canvasParentMap.size > 0) return canvasParentMap
         return storeParentMap
-    }, [canvasParentMap, storeParentMap])
+    }, [browserParentMap, canvasParentMap, storeParentMap])
 
     // Build layer assignment lookup from formData.assignments (wizard's canonical
     // buffer) AND store effectiveAssignments (backend state). formData.assignments
@@ -436,6 +448,69 @@ export function LayerStudio({
         }
         return result
     }, [childMap, layerAssignmentMap])
+
+    /** True when any ANCESTOR of `entityId` is in `batch`. */
+    const hasAncestorIn = useCallback((entityId: string, batch: Set<string>): boolean => {
+        const seen = new Set<string>()
+        let cur = parentMap.get(entityId)
+        while (cur && !seen.has(cur)) {
+            if (batch.has(cur)) return true
+            seen.add(cur)
+            cur = parentMap.get(cur)
+        }
+        return false
+    }, [parentMap])
+
+    /** Descendants of `entityId` that already hold an EXPLICIT entry in `layerId`. */
+    const getRedundantDescendants = useCallback((entityId: string, layerId: string): string[] => {
+        const current = formData.assignments ?? {}
+        const result: string[] = []
+        const queue = [...(childMap.get(entityId) ?? [])]
+        const visited = new Set<string>()
+        while (queue.length > 0) {
+            const cId = queue.shift()!
+            if (visited.has(cId)) continue
+            visited.add(cId)
+            if (current[cId]?.layerId === layerId) result.push(cId)
+            queue.push(...(childMap.get(cId) ?? []))
+        }
+        return result
+    }, [childMap, formData.assignments])
+
+    /**
+     * Work out what placing `rawIds` into `layerId` should ACTUALLY write.
+     *
+     * Two collapses, both of which exist to protect containment:
+     *   1. An entity whose ancestor is in the same batch needs no entry of its
+     *      own — it inherits. (Selecting "HR System + its 200 children" and
+     *      dropping them used to write 201 flat entries, which is what destroyed
+     *      the hierarchy in the Layers panel.)
+     *   2. An entity ALREADY placed explicitly below a newly-placed ancestor is
+     *      now redundant: drop its entry so it inherits instead of shadowing.
+     */
+    const planPlacement = useCallback((rawIds: string[], layerId: string) => {
+        const batch = new Set(rawIds)
+        const roots = rawIds.filter(id => !hasAncestorIn(id, batch))
+        const inheritedFromBatch = rawIds.length - roots.length
+
+        const allowed = roots.filter(id => !isContainmentLocked(id, layerId))
+        const blocked = roots.length - allowed.length
+
+        const movedFromOtherLayers: string[] = []
+        const redundant: string[] = []
+        allowed.forEach(id => {
+            movedFromOtherLayers.push(...getDescendantsInDifferentLayer(id, layerId))
+            redundant.push(...getRedundantDescendants(id, layerId))
+        })
+
+        return {
+            allowed,
+            blocked,
+            inheritedFromBatch,
+            movedFromOtherLayers: [...new Set(movedFromOtherLayers)],
+            redundant: [...new Set(redundant)],
+        }
+    }, [hasAncestorIn, isContainmentLocked, getDescendantsInDifferentLayer, getRedundantDescendants])
 
     // ── Entity identity (names + children) ──────────────────────────────────────
     // The wizard has NO canvas, so identity comes from the entity browser's own
@@ -564,12 +639,12 @@ export function LayerStudio({
     // back to containment inheritance from the newly-assigned parent — mirrors
     // the canvas's handleAssignToLayer/moveToLayer (assignmentMutations.ts).
     const commitAssignment = useCallback(
-        (entityIds: string[], descendantsToMove: string[], layerId: string, logicalNodeId?: string) => {
+        (entityIds: string[], descendantsToClear: string[], layerId: string, logicalNodeId?: string) => {
             const next = assignEntities(
                 { layers, assignments },
                 entityIds,
                 layerId,
-                { logicalNodeId, clearDescendants: descendantsToMove },
+                { logicalNodeId, clearDescendants: descendantsToClear },
             )
             commitLayout(next)
 
@@ -579,20 +654,37 @@ export function LayerStudio({
                 (sum, id) => sum + (entityIndex.resolve(id)?.childCount ?? 0),
                 0,
             )
-            if (inherited > 0) {
-                const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
-                const what = entityIds.length === 1 ? nameOf(entityIds[0]) : `${entityIds.length} entities`
-                showToast('success', `${what} → ${layerName} · ${inherited} ${inherited === 1 ? 'child inherits' : 'children inherit'} automatically`)
-            }
+            const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
+            const what = entityIds.length === 1 ? nameOf(entityIds[0]) : `${entityIds.length} entities`
+            showToast(
+                'success',
+                inherited > 0
+                    ? `${what} → ${layerName} · ${inherited.toLocaleString()} ${inherited === 1 ? 'child follows' : 'children follow'} automatically`
+                    : `${what} → ${layerName}`,
+            )
         },
         [layers, assignments, commitLayout, entityIndex, nameOf, showToast]
     )
 
-    /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
+    /**
+     * Confirm only what deserves confirming.
+     *
+     * `movedFromOtherLayers` genuinely changes where an entity lives — ask first.
+     * `redundant` entries are descendants already sitting in the SAME layer that
+     * we're folding back into inheritance — no semantic change, so no dialog.
+     */
     const confirmOrCommit = useCallback(
-        (entityIds: string[], descendantsToMove: string[], layerId: string, logicalNodeId?: string) => {
-            if (descendantsToMove.length === 0) {
-                commitAssignment(entityIds, [], layerId, logicalNodeId)
+        (
+            entityIds: string[],
+            movedFromOtherLayers: string[],
+            redundant: string[],
+            layerId: string,
+            logicalNodeId?: string,
+        ) => {
+            const clearAll = [...movedFromOtherLayers, ...redundant]
+
+            if (movedFromOtherLayers.length === 0) {
+                commitAssignment(entityIds, clearAll, layerId, logicalNodeId)
                 return
             }
             // Build info for the confirmation dialog
@@ -602,7 +694,7 @@ export function LayerStudio({
                     ? nameOf(entityIds[0])
                     : `${entityIds.length} entities`,
                 targetLayerId: layerId,
-                descendantsToMove: descendantsToMove.map(dId => ({
+                descendantsToMove: movedFromOtherLayers.map(dId => ({
                     id: dId,
                     name: nameOf(dId),
                     currentLayerId: layerAssignmentMap.get(dId) ?? '',
@@ -611,7 +703,7 @@ export function LayerStudio({
             setPendingReassign({
                 info,
                 commit: () => {
-                    commitAssignment(entityIds, descendantsToMove, layerId, logicalNodeId)
+                    commitAssignment(entityIds, clearAll, layerId, logicalNodeId)
                     setPendingReassign(null)
                 },
             })
@@ -630,39 +722,32 @@ export function LayerStudio({
 
             // HARD RULE: Block containment children from being assigned to a different layer
             if (isContainmentLocked(entityId, layerId)) {
-                showAssignmentWarning('Cannot assign child to a different layer than its parent. Children always inherit their parent\'s layer assignment.')
+                showAssignmentWarning('A child can’t sit in a different layer from its parent — children always follow their parent. Move the parent, or place the parent here and let this one follow.')
                 return
             }
 
-            // DOWN check: gather descendants in a different layer
-            const descendantsToMove = getDescendantsInDifferentLayer(entityId, layerId)
+            const plan = planPlacement([entityId], layerId)
+            if (plan.allowed.length === 0) return
             const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
 
-            confirmOrCommit([entityId], descendantsToMove, layerId, targetNodeId)
+            confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, targetNodeId)
         },
-        [activeTarget, layers, assignments, commitLayout, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
+        [activeTarget, layers, assignments, commitLayout, isContainmentLocked, planPlacement, showAssignmentWarning, confirmOrCommit]
     )
 
     const handleBulkAssignment = useCallback(
         (layerId: string, entityIds: string[]) => {
-            // UP check: filter out containment-locked children
-            const allowed = entityIds.filter(id => !isContainmentLocked(id, layerId))
-            const blockedCount = entityIds.length - allowed.length
-            if (blockedCount > 0) {
-                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
-            }
-            if (allowed.length === 0) return
+            const plan = planPlacement(entityIds, layerId)
 
-            // DOWN check: collect containment descendants that need to follow
-            const allDescendantsToMove: string[] = []
-            allowed.forEach(id => {
-                allDescendantsToMove.push(...getDescendantsInDifferentLayer(id, layerId))
-            })
+            if (plan.blocked > 0) {
+                showAssignmentWarning(`${plan.blocked} ${plan.blocked === 1 ? 'entity' : 'entities'} skipped — a child can’t sit in a different layer from its parent.`)
+            }
+            if (plan.allowed.length === 0) return
 
             const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
-            confirmOrCommit(allowed, allDescendantsToMove, layerId, targetNodeId)
+            confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, targetNodeId)
         },
-        [activeTarget, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
+        [activeTarget, planPlacement, showAssignmentWarning, confirmOrCommit]
     )
 
     // ── Direct drop onto hierarchy panel layer/node ─────────────────────────────
@@ -676,21 +761,13 @@ export function LayerStudio({
 
             if (rawIds.length === 0) return
 
-            // UP check: filter out containment-locked children
-            const entityIds = rawIds.filter(id => !isContainmentLocked(id, layerId))
-            const blockedCount = rawIds.length - entityIds.length
-            if (blockedCount > 0) {
-                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+            const plan = planPlacement(rawIds, layerId)
+            if (plan.blocked > 0) {
+                showAssignmentWarning(`${plan.blocked} ${plan.blocked === 1 ? 'entity' : 'entities'} skipped — a child can’t sit in a different layer from its parent.`)
             }
-            if (entityIds.length === 0) return
+            if (plan.allowed.length === 0) return
 
-            // DOWN check: collect all containment descendants that need to follow
-            const allDescendantsToMove: string[] = []
-            entityIds.forEach(id => {
-                allDescendantsToMove.push(...getDescendantsInDifferentLayer(id, layerId))
-            })
-
-            confirmOrCommit(entityIds, allDescendantsToMove, layerId, nodeId)
+            confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, nodeId)
 
             // Update active target to reflect where the drop landed
             const layer = layers.find(l => l.id === layerId)
@@ -794,15 +871,64 @@ export function LayerStudio({
         const byLayer = new Map<string, string[]>()
         accepted.forEach(s => byLayer.set(s.layerId, [...(byLayer.get(s.layerId) ?? []), s.urn]))
         byLayer.forEach((urns, layerId) => {
-            working = assignEntities(working, urns, layerId, { assignedBy: 'rule' })
+            // Same containment rule as every other placement path: anything already
+            // placed below one of these roots folds back into inheritance.
+            const redundant = urns.flatMap(urn => getRedundantDescendants(urn, layerId))
+            working = assignEntities(working, urns, layerId, {
+                assignedBy: 'rule',
+                clearDescendants: redundant,
+            })
         })
         commitLayout(working)
         setMagicSuggestions(prev => (prev ?? []).filter(s => !accepted.some(a => a.urn === s.urn)))
-        showToast('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children inherit automatically`)
+        showToast('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children follow automatically`)
+    }, [layers, assignments, commitLayout, getRedundantDescendants, showToast])
+
+    /** Empty a layer in one go — the panel offered no way back out of a bulk place. */
+    const handleClearLayer = useCallback((layerId: string) => {
+        const urns = Object.entries(assignments)
+            .filter(([, entry]) => entry.layerId === layerId)
+            .map(([urn]) => urn)
+        if (urns.length === 0) return
+        commitLayout(unassignEntities({ layers, assignments }, urns))
+        const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
+        showToast('success', `Cleared ${urns.length} ${urns.length === 1 ? 'placement' : 'placements'} from ${layerName}`)
     }, [layers, assignments, commitLayout, showToast])
 
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)
+
+    // ── Resizable Layers rail ───────────────────────────────────────────────────
+    // Deeply-nested placements with long entity names need width; 240px turned
+    // layer names into "So…". Drag the divider; the choice sticks per browser.
+    const [railWidth, setRailWidth] = useState<number>(() => {
+        const saved = Number(localStorage.getItem(RAIL_WIDTH_KEY))
+        return Number.isFinite(saved) && saved >= RAIL_MIN ? Math.min(saved, RAIL_MAX) : RAIL_DEFAULT
+    })
+    const [isResizing, setIsResizing] = useState(false)
+
+    const startRailResize = useCallback((e: React.PointerEvent) => {
+        e.preventDefault()
+        const startX = e.clientX
+        const startWidth = railWidth
+        setIsResizing(true)
+
+        const onMove = (ev: PointerEvent) => {
+            const next = Math.min(RAIL_MAX, Math.max(RAIL_MIN, startWidth + (ev.clientX - startX)))
+            setRailWidth(next)
+        }
+        const onUp = () => {
+            setIsResizing(false)
+            window.removeEventListener('pointermove', onMove)
+            window.removeEventListener('pointerup', onUp)
+            setRailWidth(w => {
+                try { localStorage.setItem(RAIL_WIDTH_KEY, String(w)) } catch { /* storage disabled */ }
+                return w
+            })
+        }
+        window.addEventListener('pointermove', onMove)
+        window.addEventListener('pointerup', onUp)
+    }, [railWidth])
 
     // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -896,13 +1022,17 @@ export function LayerStudio({
                 </div>
             )}
 
-            {/* Three-panel layout */}
+            {/* Three-panel layout. The Layers rail is user-resizable: nested
+                hierarchies with long entity names need room, and a fixed 240px
+                turned every layer name into "So…". */}
             <div className="relative flex-1 min-h-0">
                 <div
-                    className={cn(
-                        'h-full grid gap-4',
-                        showPreview ? 'grid-cols-[240px_1fr_260px]' : 'grid-cols-[240px_1fr]'
-                    )}
+                    className="h-full grid gap-4"
+                    style={{
+                        gridTemplateColumns: showPreview
+                            ? `${railWidth}px 1fr 260px`
+                            : `${railWidth}px 1fr`,
+                    }}
                 >
                     {/* Left: Layer hierarchy */}
                     <LayerHierarchyPanel
@@ -918,6 +1048,9 @@ export function LayerStudio({
                         onAddLayer={handleAddLayer}
                         onRenameLayer={handleRenameLayer}
                         onDeleteLayer={handleDeleteLayer}
+                        onClearLayer={handleClearLayer}
+                        onStartResize={startRailResize}
+                        isResizing={isResizing}
                         className="min-h-0"
                     />
 
@@ -940,6 +1073,7 @@ export function LayerStudio({
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
                             onBrowserSnapshot={setSnapshot}
+                            onParentMapChange={setBrowserParentMap}
                             className="flex-1 min-h-0"
                         />
                     </div>
