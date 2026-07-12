@@ -1,0 +1,54 @@
+name: Alembic guards
+
+# `alembic_version.version_num` is VARCHAR(32). A revision id longer than that
+# fails alembic's own post-migration `UPDATE alembic_version` with
+# StringDataRightTruncation — and because alembic uses transactional DDL, the
+# WHOLE upgrade chain rolls back with it. The symptom is brutal and misleading:
+# a brand-new environment simply cannot be built, while every already-migrated
+# database keeps working fine, so it survives local testing.
+#
+# backend/tests/test_alembic_revision_lengths.py has guarded this contract since
+# June — but nothing ever ran it: no workflow runs backend tests. So the bug has
+# now shipped three separate times (20260527_1200_user_provenance_and_config,
+# 20260707_1400_view_layout_overlays, 20260712_1730_view_activity_data_changed).
+# A test nobody runs is a comment. This job runs it.
+#
+# Deliberately narrow: the test is pure `ast` + `pathlib` parsing of the version
+# files — no database, no backend imports, no service containers — so it needs
+# nothing but pytest, finishes in seconds, and cannot flake.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'backend/alembic/**'
+      - 'backend/tests/test_alembic_revision_lengths.py'
+      - '.github/workflows/alembic-guards.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/alembic/**'
+      - 'backend/tests/test_alembic_revision_lengths.py'
+      - '.github/workflows/alembic-guards.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  revision-ids:
+    name: Revision ids fit alembic_version(32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+
+      - name: Install pytest
+        run: pip install --disable-pip-version-check pytest
+
+      - name: Every revision id fits the 32-char version_num column
+        run: python -m pytest backend/tests/test_alembic_revision_lengths.py -q
