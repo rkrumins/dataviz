@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: viz-service
+  namespace: synodic
 spec:
   template:
     spec:
@@ -19,6 +20,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
+  namespace: synodic
 spec:
   template:
     spec:
@@ -36,6 +38,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aggregation-worker
+  namespace: synodic
 spec:
   template:
     spec:

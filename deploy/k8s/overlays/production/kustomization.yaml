@@ -29,8 +29,8 @@ images:
   - name: REGISTRY/synodic-worker
     newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-worker
     newTag: latest
-  - name: REGISTRY/synodic-graph
-    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-graph
+  - name: REGISTRY/synodic-stats-service
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-stats-service
     newTag: latest
   - name: REGISTRY/synodic-frontend
     newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-frontend

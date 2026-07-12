@@ -27,8 +27,8 @@ images:
   - name: REGISTRY/synodic-worker
     newName: gcr.io/PROJECT_ID/synodic-worker
     newTag: dev-latest
-  - name: REGISTRY/synodic-graph
-    newName: gcr.io/PROJECT_ID/synodic-graph
+  - name: REGISTRY/synodic-stats-service
+    newName: gcr.io/PROJECT_ID/synodic-stats-service
     newTag: dev-latest
   - name: REGISTRY/synodic-frontend
     newName: gcr.io/PROJECT_ID/synodic-frontend
