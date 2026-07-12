@@ -38,6 +38,23 @@ def _fresh_flag_cache():
     feature_flags.invalidate()
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _dispose_graphver_engine():
+    """Hand the next test file a clean graphver engine.
+
+    Driving the versioning routes through the ASGI client creates the graphver async
+    engine on pytest-asyncio's event loop. The versioning INTEGRATION tests use
+    `asyncio.run()` — a brand-new loop — and would otherwise inherit a connection pool
+    bound to a loop that no longer exists ("attached to a different loop"). Cheap to
+    dispose; the next user rebuilds it on their own loop.
+    """
+    yield
+    import asyncio
+
+    from backend.app.services.versioning import db as gvdb
+    asyncio.run(gvdb.dispose_engine())
+
+
 def _is_feature_disabled(resp) -> bool:
     if resp.status_code != 403:
         return False
