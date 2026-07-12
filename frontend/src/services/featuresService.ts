@@ -19,6 +19,28 @@ function getFeaturesApiUrl(): string {
 
 const FEATURES_API = getFeaturesApiUrl()
 
+/** Public (unauthenticated) values endpoint — the admin URL minus `/admin`. */
+function getPublicValuesUrl(): string {
+  return FEATURES_API.replace('/admin/features', '/features') + '/values'
+}
+
+/** Read-only flag values for app bootstrap (no auth). Null on any failure —
+ *  callers keep their seeded defaults (fail-open). */
+export async function fetchPublicFeatureValues(): Promise<Record<string, unknown> | null> {
+  try {
+    const resp = await fetchWithTimeout(getPublicValuesUrl(), {
+      method: 'GET',
+      timeoutMs: 8000,
+      skipAuthRefresh: true,
+    })
+    if (!resp.ok) return null
+    const body = (await resp.json()) as { values?: Record<string, unknown> }
+    return body && typeof body.values === 'object' && body.values ? body.values : null
+  } catch {
+    return null
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────
 
 export interface FeatureOption {

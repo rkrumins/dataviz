@@ -22,6 +22,7 @@ import { useLoadingToast } from '@/components/ui/toast'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
+import { useFeature } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { BranchBehindBanner } from '@/features/versioning/components/BranchBehindBanner'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
@@ -49,6 +50,7 @@ interface CanvasRouterProps {
 
 export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
+  const versioningEnabled = useFeature('versioningEnabled')
   const { providerVersion } = useGraphProviderContext()
   // Prefer the prop (from navigation pipeline) over the store lookup.
   // This avoids the race where loadFromBackend resets activeViewId to null
@@ -150,13 +152,13 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     >
     <ReactFlowProvider>
     <div className={cn("relative w-full h-full flex flex-col", className)}>
-      {activeView?.workspaceId && (
+      {versioningEnabled && activeView?.workspaceId && (
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}
         />
       )}
-      {activeView?.workspaceId && (
+      {versioningEnabled && activeView?.workspaceId && (
         <BranchBehindBanner
           wsId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}

@@ -10,6 +10,7 @@
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useFeature } from '@/store/features'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
@@ -963,6 +964,12 @@ export function ScopeStep({
     onSelectOntology,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
+    // Blank models are versioning-native (authored via drafts/publishes) — the
+    // whole mode disappears when the admin turns version control off.
+    const blankModeAvailable = useFeature('versioningEnabled')
+    useEffect(() => {
+        if (!blankModeAvailable && scopeMode === 'blank') onScopeModeChange('existing')
+    }, [blankModeAvailable, scopeMode, onScopeModeChange])
     const [wsSearch, setWsSearch] = useState('')
     const [dsSearch, setDsSearch] = useState('')
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
@@ -1103,9 +1110,11 @@ export function ScopeStep({
             </motion.div>
 
             {/* Mode toggle */}
-            <div className="flex justify-center">
-                <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
-            </div>
+            {blankModeAvailable && (
+                <div className="flex justify-center">
+                    <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
+                </div>
+            )}
 
             {/* Two-panel layout */}
             <motion.div

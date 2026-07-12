@@ -20,6 +20,7 @@ import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission, usePermissionClaims } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { accessRequestsService } from '@/services/accessRequestsService'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
@@ -91,6 +92,9 @@ export function WorkspaceDetailPage() {
     const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
         tabParam ?? 'sources',
     )
+    // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
+    // disappears when the admin turns version control off.
+    const versioningEnabled = useFeature('versioningEnabled')
 
     // Workspace admin permission gates the Members tab. The store's
     // `usePermission` re-renders this component on permission changes
@@ -447,7 +451,9 @@ export function WorkspaceDetailPage() {
                     { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
                     { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
                     { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
-                    { id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' },
+                    ...(versioningEnabled
+                        ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' }]
+                        : []),
                     ...(canManageMembers
                         ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
                         : []),
@@ -603,7 +609,7 @@ export function WorkspaceDetailPage() {
             )}
 
             {/* ── Reviews Tab (merge requests) ────────────── */}
-            {activeSection === 'reviews' && wsId && (
+            {versioningEnabled && activeSection === 'reviews' && wsId && (
                 <>
                     <div className="flex items-start gap-3 py-4 mb-2">
                         <Info className="w-4 h-4 text-accent-lineage shrink-0 mt-0.5" />
