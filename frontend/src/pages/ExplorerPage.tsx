@@ -559,15 +559,17 @@ export function ExplorerPage() {
                   className="pointer-events-none absolute inset-0 px-3 py-2.5 flex items-center text-sm font-medium text-ink-muted/60 overflow-hidden whitespace-nowrap"
                 >
                   <span>Search </span>
-                  <span className="ml-1">{typewriter.text}</span>
-                  {/* Caret is solid while keys are flying; blinks with
-                      crisp step() timing only when the text is sitting
-                      still. Matches the feel of a terminal prompt. */}
+                  {/* The animated text and the caret's blink are driven by the
+                      hook writing DIRECTLY to these refs — it holds no React
+                      state, so this ticking animation re-renders NOTHING. See
+                      useTypewriter's performance contract: driving it through
+                      state re-rendered this whole page (and every result card)
+                      ~30x/sec forever, which in React 19 dev leaked millions of
+                      PerformanceMeasure objects into an uncapped timeline. */}
+                  <span ref={typewriter.textRef} className="ml-1" />
                   <span
-                    className={cn(
-                      'ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px]',
-                      !typewriter.isActive && 'typewriter-caret-blink',
-                    )}
+                    ref={typewriter.caretRef}
+                    className="ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px] typewriter-caret-blink"
                   />
                 </div>
               )}
