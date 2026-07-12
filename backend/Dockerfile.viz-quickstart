@@ -2,7 +2,7 @@
 # Same as Dockerfile.viz but bakes in a pre-populated SQLite management
 # DB so the quickstart needs no PostgreSQL.
 # ─────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS base
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 

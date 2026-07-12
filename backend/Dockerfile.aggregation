@@ -8,7 +8,7 @@
 # Health endpoint on port 8090.  No HTTP API — pure job execution.
 # Scale horizontally: docker compose up --scale aggregation-worker=3
 # ──────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS base
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 
