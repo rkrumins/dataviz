@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from backend.app.services.versioning import config as gv_config
 
 revision: str = "20260713_1200_restore_kind"
-down_revision: Union[str, None] = "20260712_1730_view_activity_data_changed"
+down_revision: Union[str, None] = "20260712_1730_val_data_changed"
 branch_labels = None
 depends_on = None
 
