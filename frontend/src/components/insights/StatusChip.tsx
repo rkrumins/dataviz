@@ -6,7 +6,7 @@
  * consistent across RegistryAssets rows, view-wizard schema banners, and
  * provider list health indicators.
  */
-import { CheckCircle2, Loader2, AlertTriangle, Clock, WifiOff } from 'lucide-react'
+import { CheckCircle2, Loader2, AlertTriangle, Clock, WifiOff, Database } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { InsightsMeta } from '@/types/insights'
 import { useInsightsConfig } from '@/hooks/useInsightsConfig'
@@ -56,10 +56,25 @@ export function StatusChip({ meta, compact, className }: Props) {
         'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
     let spin = false
 
-    if (showProviderDown) {
+    // Do we have real cached data to show for this row? A row rendering
+    // node/edge counts is `fresh` or `stale` — the cache has content.
+    const hasCachedData = effectiveStatus === 'fresh' || effectiveStatus === 'stale'
+
+    if (showProviderDown && hasCachedData) {
+        // The live provider is offline, but we DID cache this data — so the
+        // numbers on the row are real, just not guaranteed current. Say
+        // "cached" (calm) instead of a scary red "DOWN" on a row that's
+        // clearly showing data. This is the honest state: served from cache.
+        Icon = Database
+        const ago = formatStaleness(staleness_secs)
+        label = compact ? 'Cached' : `Cached${ago ? ` · updated ${ago}` : ''}`
+        title = `The provider is offline right now — these figures are served from the last cached copy${ago ? ` (updated ${ago})` : ''}. They refresh automatically once the provider is reachable again.`
+        tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
+    } else if (showProviderDown) {
+        // Provider offline AND no cached data to fall back on — genuinely nothing to show.
         Icon = WifiOff
-        label = compact ? 'Down' : 'Provider unreachable'
-        title = last_error ?? 'Upstream provider not responding'
+        label = compact ? 'Offline' : 'Provider offline'
+        title = last_error ?? 'The provider is offline and there is no cached data to show yet.'
         tone = 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20'
     } else if (effectiveStatus === 'computing') {
         Icon = Loader2
