@@ -23,11 +23,17 @@ interface ExplorerSortControlProps {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const SORT_OPTIONS: { key: SortOption; label: string }[] = [
-  { key: 'newest', label: 'Newest First' },
-  { key: 'oldest', label: 'Oldest First' },
-  { key: 'popular', label: 'Most Popular' },
-  { key: 'updated', label: 'Recently Updated' },
+// Ordered by intent: data-modification sorts first (the enterprise default),
+// then settings-edit, then creation, then name. Labels spell out WHAT each
+// timestamp means \u2014 "Newest first" used to ambiguously mean creation time.
+const SORT_OPTIONS: { key: SortOption; label: string; group?: string }[] = [
+  { key: 'recently-modified', label: 'Recently modified', group: 'By change' },
+  { key: 'data-newest', label: 'Recently updated data' },
+  { key: 'data-oldest', label: 'Oldest updated data' },
+  { key: 'updated', label: 'Recently edited (settings)' },
+  { key: 'newest', label: 'Newest created', group: 'By creation' },
+  { key: 'oldest', label: 'Oldest created' },
+  { key: 'popular', label: 'Most popular', group: 'Other' },
   { key: 'az', label: 'A \u2192 Z' },
   { key: 'za', label: 'Z \u2192 A' },
 ]
@@ -91,31 +97,37 @@ export function ExplorerSortControl({ sort, onSortChange }: ExplorerSortControlP
       {open && (
         <div
           className={cn(
-            'absolute right-0 top-full z-50 mt-1.5 w-48 p-1',
+            'absolute right-0 top-full z-50 mt-1.5 w-60 p-1',
             'bg-canvas border border-glass-border rounded-xl shadow-xl',
           )}
         >
           {SORT_OPTIONS.map((opt) => {
             const active = sort === opt.key
             return (
-              <button
-                key={opt.key}
-                onClick={() => {
-                  onSortChange(opt.key)
-                  setOpen(false)
-                }}
-                className={cn(
-                  'flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs transition-colors duration-150',
-                  active
-                    ? 'text-accent-lineage font-semibold bg-accent-lineage/5'
-                    : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+              <div key={opt.key}>
+                {opt.group && (
+                  <div className="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-muted/60">
+                    {opt.group}
+                  </div>
                 )}
-              >
-                <span>{opt.label}</span>
-                {active && (
-                  <Check className="h-3.5 w-3.5 text-accent-lineage" />
-                )}
-              </button>
+                <button
+                  onClick={() => {
+                    onSortChange(opt.key)
+                    setOpen(false)
+                  }}
+                  className={cn(
+                    'flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs transition-colors duration-150',
+                    active
+                      ? 'text-accent-lineage font-semibold bg-accent-lineage/5'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                  )}
+                >
+                  <span>{opt.label}</span>
+                  {active && (
+                    <Check className="h-3.5 w-3.5 text-accent-lineage shrink-0" />
+                  )}
+                </button>
+              </div>
             )
           })}
         </div>

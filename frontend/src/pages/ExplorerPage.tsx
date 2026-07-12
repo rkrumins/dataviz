@@ -83,7 +83,7 @@ function parseSearchParams(params: URLSearchParams) {
     viewTypes: params.getAll('type'),
     tags: params.getAll('tag'),
     creatorIds: params.getAll('creator'),
-    sort: (params.get('sort') as SortOption) ?? 'newest',
+    sort: (params.get('sort') as SortOption) ?? 'recently-modified',
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
     category: params.get('category'),
   }
