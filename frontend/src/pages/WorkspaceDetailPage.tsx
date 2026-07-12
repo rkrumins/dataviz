@@ -7,7 +7,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
-    ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
+    ChevronLeft, Plus, Database, Loader2, Settings2,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
     Users, ShieldOff, Send, GitPullRequestArrow,
 } from 'lucide-react'
@@ -17,7 +17,6 @@ import { cn } from '@/lib/utils'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
 import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
-import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useToast } from '@/components/ui/toast'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { accessRequestsService } from '@/services/accessRequestsService'
@@ -30,59 +29,6 @@ import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSe
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
 import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
-
-// ─────────────────────────────────────────────────────────────────────
-// Edit Data Source Modal
-// ─────────────────────────────────────────────────────────────────────
-
-function EditDsModal({ ds, ontologies, onSave, onClose }: {
-    ds: DataSourceResponse
-    ontologies: OntologyDefinitionResponse[]
-    onSave: (label: string, ontologyId: string | undefined) => void
-    onClose: () => void
-}) {
-    const [label, setLabel] = useState(ds.label || '')
-    const [ontologyId, setOntologyId] = useState(ds.ontologyId || '')
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
-                <div className="flex items-center justify-between mb-5">
-                    <h3 className="text-lg font-bold text-ink">Edit Data Source</h3>
-                    <button onClick={onClose} className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted"><X className="w-4 h-4" /></button>
-                </div>
-                <div className="space-y-4 mb-6">
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Label</label>
-                        <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Display label"
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Ontology</label>
-                        <select value={ontologyId} onChange={e => setOntologyId(e.target.value)}
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
-                            <option value="">None (use system defaults)</option>
-                            {ontologies.map(o => (
-                                <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>
-                            ))}
-                        </select>
-                        <p className="text-xs text-ink-muted mt-1">Assigns a semantic ontology to this data source for entity type resolution.</p>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink-muted mb-1">Catalog Item</label>
-                        <p className="text-sm font-mono text-ink">{ds.catalogItemId}</p>
-                    </div>
-                </div>
-                <div className="flex justify-end gap-3">
-                    <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5">Cancel</button>
-                    <button onClick={() => onSave(label, ontologyId || undefined)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors">
-                        <Save className="w-3.5 h-3.5" /> Save
-                    </button>
-                </div>
-            </div>
-        </div>
-    )
-}
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -131,7 +77,6 @@ export function WorkspaceDetailPage() {
     const [loadingImpact, setLoadingImpact] = useState(false)
 
     // ── Edit DS modal state ────────────────────────────────
-    const [editingDs, setEditingDs] = useState<DataSourceResponse | null>(null)
 
     // ── Selection + tab state ──────────────────────────────
     const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
@@ -272,9 +217,8 @@ export function WorkspaceDetailPage() {
     }
 
     const handleEditDsSave = async (label: string, ontologyId: string | undefined) => {
-        if (!wsId || !editingDs) return
-        await workspaceService.updateDataSource(wsId, editingDs.id, { label, ontologyId })
-        setEditingDs(null)
+        if (!wsId || !selectedDs) return
+        await workspaceService.updateDataSource(wsId, selectedDs.id, { label, ontologyId })
         reload()
     }
 
@@ -718,16 +662,8 @@ export function WorkspaceDetailPage() {
                 </div>
             )}
 
-            {editingDs && (
-                <EditDsModal
-                    ds={editingDs}
-                    ontologies={ontologies}
-                    onSave={handleEditDsSave}
-                    onClose={() => setEditingDs(null)}
-                />
-            )}
-
-            {/* Data source detail drawer (renders via portal — no scroll impact) */}
+            {/* Data source detail drawer (renders via portal — no scroll impact).
+                Editing is inline in the drawer now (no separate modal). */}
             <DataSourceDetailPanel
                 ds={selectedDs}
                 isOpen={!!selectedDsId && !!selectedDs}
@@ -737,7 +673,8 @@ export function WorkspaceDetailPage() {
                 ontologyName={selectedDsId ? ontologyNameMap[selectedDs?.ontologyId || ''] : undefined}
                 ontologyId={selectedDs?.ontologyId}
                 views={selectedDsId ? (viewsByDs[selectedDsId] || []) : []}
-                onEdit={() => { if (selectedDs) setEditingDs(selectedDs) }}
+                ontologies={ontologies}
+                onSaveEdit={handleEditDsSave}
                 onDelete={workspace.dataSources.length > 1 && selectedDs
                     ? () => handleDeleteDsClick(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}

@@ -17,6 +17,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
@@ -43,7 +44,11 @@ interface DataSourceDetailPanelProps {
     ontologyName?: string
     ontologyId?: string
     views: View[]
-    onEdit: () => void
+    /** Ontologies selectable in the inline edit panel. */
+    ontologies: OntologyDefinitionResponse[]
+    /** Persist an inline metadata edit (label + ontology). Replaces the old
+     *  separate Edit-Data-Source modal. */
+    onSaveEdit: (label: string, ontologyId: string | undefined) => Promise<void> | void
     onDelete?: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
@@ -120,7 +125,8 @@ export function DataSourceDetailPanel({
     ontologyName,
     ontologyId,
     views,
-    onEdit,
+    ontologies,
+    onSaveEdit,
     onDelete,
     onReaggregate,
     onPurge,
@@ -130,6 +136,27 @@ export function DataSourceDetailPanel({
     const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
+    // Inline edit (label + ontology) — replaces the old modal-over-drawer.
+    const [editing, setEditing] = useState(false)
+    const [editLabel, setEditLabel] = useState('')
+    const [editOntologyId, setEditOntologyId] = useState('')
+    const [savingEdit, setSavingEdit] = useState(false)
+    const startEditing = () => {
+        setEditLabel(ds?.label || '')
+        setEditOntologyId(ds?.ontologyId || '')
+        setEditing(true)
+    }
+    const saveEdit = async () => {
+        setSavingEdit(true)
+        try {
+            await onSaveEdit(editLabel.trim(), editOntologyId || undefined)
+            setEditing(false)
+        } finally {
+            setSavingEdit(false)
+        }
+    }
+    // Leaving edit mode when the drawer closes/opens on a different source.
+    useEffect(() => { setEditing(false) }, [ds?.id])
     // Aggregation mutations (config save / re-trigger / purge) require
     // workspace:datasource:manage. system:admin is implied through
     // has_permission's shortcut chain.
@@ -288,7 +315,7 @@ export function DataSourceDetailPanel({
                                 </Link>
                                 <DataSourceActions
                                     wsId={wsId}
-                                    onEdit={onEdit}
+                                    onEdit={startEditing}
                                     onDelete={onDelete}
                                 />
                                 {/* DataSourceActions handles permission gating per
@@ -299,18 +326,53 @@ export function DataSourceDetailPanel({
 
                         {/* Per-source vocabulary-alignment drift (Task E) — own component,
                             no overlap with the header chips. */}
-                        <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />
+                        {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
+                        {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                         </div>
+                        )}
 
-                        {/* ── Tab Content (scrollable) ───────────────────── */}
+                        {/* ── Content (scrollable): inline edit OR the active tab ── */}
                         <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-5">
+                            {editing ? (
+                            <div className="max-w-lg mx-auto space-y-5 animate-in fade-in duration-200">
+                                <div>
+                                    <h3 className="text-base font-bold text-ink">Edit data source</h3>
+                                    <p className="text-xs text-ink-muted mt-0.5">Update how this source appears and which semantic layer classifies it.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-ink mb-1.5">Display name</label>
+                                    <input value={editLabel} onChange={e => setEditLabel(e.target.value)} placeholder={ds.label || 'e.g. Production Graph'}
+                                        className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
+                                    <p className="text-xs text-ink-muted mt-1.5">A friendly label shown across the workspace. The underlying source id doesn't change.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-ink mb-1.5">Semantic layer (ontology)</label>
+                                    <select value={editOntologyId} onChange={e => setEditOntologyId(e.target.value)}
+                                        className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
+                                        <option value="">None — use system defaults</option>
+                                        {ontologies.map(o => <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>)}
+                                    </select>
+                                    <p className="text-xs text-ink-muted mt-1.5">Assigns the ontology that resolves this source's entity and relationship types.</p>
+                                </div>
+                                <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border px-4 py-3">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Source</p>
+                                    <p className="text-xs font-mono text-ink-secondary mt-1 break-all">{ds.catalogItemId}</p>
+                                </div>
+                                <div className="flex items-center justify-end gap-2 pt-1">
+                                    <button onClick={() => setEditing(false)} disabled={savingEdit} className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50">Cancel</button>
+                                    <button onClick={saveEdit} disabled={savingEdit} className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-bold shadow-md shadow-indigo-500/20 transition-colors disabled:opacity-60">
+                                        {savingEdit ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save changes
+                                    </button>
+                                </div>
+                            </div>
+                            ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (
                                 ds.catalogItemId ? (
@@ -529,6 +591,7 @@ export function DataSourceDetailPanel({
                             {activeTab === 'versioning' && (
                                 <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
                             )}
+                            </>)}
                         </div>
 
                         {/* ── Footer action ──────────────────────────────── */}
