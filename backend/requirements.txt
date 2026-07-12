@@ -5,7 +5,7 @@ pydantic>=2.4.0          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
 FalkorDB>=1.4.0
-redis>=5.0
+redis>=8.0.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
 sqlalchemy>=2.0.0
