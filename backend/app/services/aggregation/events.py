@@ -1,36 +1,34 @@
 """
-Aggregation event publisher (legacy cross-service sync path).
+Aggregation event publisher (cross-service state-sync path).
 
-Uses Redis Pub/Sub channel ``aggregation.events`` for cross-service
-status propagation. The single consumer is
-``backend/app/services/aggregation/event_listener.py``, which mirrors
-state into ``workspace_data_sources.aggregation_status`` so the viz-
-service has fresh data for its own endpoints.
+Appends cross-service status events to the Redis Stream
+``aggregation.events.stream``. The single consumer is
+``backend/app/services/aggregation/event_listener.py`` (hosted in the
+Control Plane), which mirrors state into
+``workspace_data_sources.aggregation_status`` so the viz-service has
+fresh data for its own endpoints.
 
-Co-existence with the new platform. Phase 1 introduced the Job
-Platform (``backend/app/jobs/``) which delivers events via
-``JobBroker`` (Redis Streams) for SSE clients. The two paths are
-intentionally independent:
+Co-existence with the Job Platform. ``backend/app/jobs/`` delivers
+events via ``JobBroker`` (Redis Streams) for SSE clients. The two
+paths are intentionally independent:
 
-* **This file (legacy)** — Redis Pub/Sub, single channel, single
+* **This file** — a single Redis Stream + consumer group, one logical
   consumer, used for cross-service state sync. ``event_listener.py``
-  subscribes here.
-* **JobBroker (new)** — Redis Streams, per-job + per-tenant
-  fan-out, replay-able, used for live SSE delivery.
+  consumes here via ``XREADGROUP`` (each event to exactly one consumer
+  across the fleet — the reason it moved off Pub/Sub, which fanned every
+  event out to every web replica).
+* **JobBroker** — Redis Streams, per-job + per-tenant fan-out,
+  replay-able, used for live SSE delivery.
 
 The aggregation worker calls both in parallel on terminal events:
-``self._events.job_completed(...)`` writes here (for the listener),
-``await emitter.terminal(...)`` writes to the broker (for SSE).
-There's no double-counting because the consumer sets are disjoint.
+``self._events.job_completed(...)`` writes here (for the state-sync
+consumer), ``await emitter.terminal(...)`` writes to the broker (for
+SSE). There's no double-counting because the consumer sets are disjoint.
 
-When this file retires. Phase 4 cleanup will migrate
-``event_listener.py`` to consume from the broker directly (via
-``JobEventConsumer``); at that point the Pub/Sub channel can retire
-and this class deletes. Until then it stays as-is — refactoring
-``AggregationEventPublisher`` to delegate through ``JobEmitter``
-without breaking the listener requires a dual-write knob inside
-``JobEmitter`` that pollutes the broker abstraction with a
-legacy-channel name. Not worth it for Phase 1.
+Why a separate stream from the JobBroker. State-sync needs exactly-once
+delivery (one write per event across the fleet); the JobBroker fans every
+event out to every SSE subscriber. A dedicated stream + consumer group is
+the simpler seam than a consumer-group read against a fan-out stream.
 
 Event structure (unchanged from before):
     {
@@ -57,14 +55,14 @@ def _now() -> str:
 
 
 class AggregationEventPublisher:
-    """Publishes aggregation status events to Redis Pub/Sub."""
+    """Publishes aggregation status events to the Redis events stream."""
 
     def __init__(self, redis_client: Any) -> None:
         self._redis = redis_client
 
     async def publish(self, event_type: str, payload: dict) -> None:
-        """Publish an event to the aggregation events channel."""
-        from .redis_client import EVENTS_CHANNEL
+        """Append a status event to the aggregation events stream."""
+        from .redis_client import EVENTS_STREAM, EVENTS_STREAM_MAXLEN
 
         message = json.dumps({
             "type": event_type,
@@ -72,11 +70,15 @@ class AggregationEventPublisher:
             "ts": _now(),
         })
         try:
-            await self._redis.publish(EVENTS_CHANNEL, message)
+            await self._redis.xadd(
+                EVENTS_STREAM, {"data": message},
+                maxlen=EVENTS_STREAM_MAXLEN, approximate=True,
+            )
             logger.debug("Published event %s: %s", event_type, payload.get("job_id", ""))
         except Exception as e:
-            # Pub/sub failures are non-fatal — the DB is the source of truth.
-            # The viz-service can poll the Control Plane API as a fallback.
+            # Stream-append failures are non-fatal — the DB is the source of
+            # truth. The viz-service can poll the Control Plane API as a
+            # fallback.
             logger.warning("Failed to publish event %s: %s", event_type, e)
 
     # ── Convenience methods for common events ────────────────────────

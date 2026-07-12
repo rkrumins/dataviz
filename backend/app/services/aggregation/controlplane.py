@@ -145,6 +145,24 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Stuck-job reconciler started")
 
+    # 9. State-sync consumer (WS1.2). Projects aggregation status events
+    # from the events stream into public.workspace_data_sources (the
+    # viz-service's local read hint) and invalidates aggregated-read
+    # caches. Lives HERE, not in the web tier: a consumer group delivers
+    # each event to exactly ONE consumer, so scaling the stateless web
+    # tier no longer multiplies the same row write. It is lightweight I/O
+    # (a small UPDATE + cache DEL per event), so it sits comfortably beside
+    # the readiness/drift API — well away from the heavy FalkorDB MERGE
+    # work that is isolated in the worker fleet.
+    from .event_listener import AggregationEventListener
+    state_sync = AggregationEventListener(
+        redis_client=redis_client, session_factory=get_jobs_session,
+    )
+    state_sync_task = asyncio.create_task(
+        state_sync.start(), name="aggregation-state-sync",
+    )
+    logger.info("Aggregation state-sync consumer started")
+
     # Store in app state
     app.state.aggregation_service = svc
     app.state.session_factory = get_jobs_session
@@ -161,6 +179,12 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(reconciler_task, timeout=2.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             reconciler_task.cancel()
+    await state_sync.stop()
+    state_sync_task.cancel()
+    try:
+        await state_sync_task
+    except asyncio.CancelledError:
+        pass
     await scheduler.stop()
     scheduler_task.cancel()
     recovery_task.cancel()

@@ -50,14 +50,26 @@ _ALLOWED_DIRS = (
     # — the work-routing seam, not the event-broadcast seam). See
     # backend/app/jobs/broker.py docstring for the distinction.
     "backend/app/services/aggregation/dispatcher.py",
+    # Aggregation stuck-job reconciler — re-dispatches a dead worker's
+    # job back onto JOBS_STREAM (work-routing recovery, same seam as the
+    # dispatcher above).
+    "backend/app/services/aggregation/reconciler.py",
+    # Versioning projection worker + its dispatch — the versioning
+    # domain's work-queue consumer group (XREADGROUP) and enqueue (XADD),
+    # the same pattern as the insights/aggregation workers.
+    "backend/app/services/versioning/worker.py",
+    "backend/app/services/versioning/messaging.py",
     # Stats-service worker — sibling of insights worker pattern.
     "backend/stats_service/worker.py",
     # Admission control's GCRA token bucket uses Lua + direct Redis;
     # not a broker concern.
     "backend/insights_service/admission.py",
-    # The legacy ``aggregation.events`` Pub/Sub channel writer.
-    # Stays as-is until ``event_listener.py`` migrates to consume
-    # from JobBroker (Phase 4 cleanup).
+    # Aggregation status events: the publisher (events.py) XADDs to the
+    # ``aggregation.events.stream`` stream and the state-sync consumer
+    # (event_listener.py) reads it via a dedicated consumer group. A
+    # distinct seam from the JobBroker (which fans every event out to SSE
+    # clients) — kept direct because state-sync needs exactly-once
+    # delivery across the fleet, not fan-out.
     "backend/app/services/aggregation/events.py",
     "backend/app/services/aggregation/event_listener.py",
     # Cross-process cancel bridge. Distinct from the broker (which

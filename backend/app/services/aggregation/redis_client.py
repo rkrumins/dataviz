@@ -4,8 +4,8 @@ Redis connection factory for aggregation service messaging.
 Provides a singleton async Redis client used by:
 - RedisStreamDispatcher (Control Plane): XADD to dispatch jobs
 - Worker consumer (__main__.py): XREADGROUP to consume jobs
-- AggregationEventPublisher: PUBLISH status events
-- Event listeners: SUBSCRIBE to status events
+- AggregationEventPublisher: XADD status events to the events stream
+- State-sync consumer (event_listener.py): XREADGROUP status events
 
 Separate from FalkorDB's Redis — this connects to a dedicated Redis 7
 instance used exclusively for job dispatch and event propagation.
@@ -35,10 +35,25 @@ DLQ_STREAM = "aggregation.jobs.dlq"
 """Dead letter queue. Messages that fail delivery > MAX_DELIVERY_ATTEMPTS
 are moved here for manual inspection / alerting."""
 
-EVENTS_CHANNEL = "aggregation.events"
-"""Redis Pub/Sub channel for aggregation status events.
-Workers publish job.started / job.progress / job.completed / job.failed.
-Control Plane and viz-service subscribe."""
+EVENTS_STREAM = "aggregation.events.stream"
+"""Redis Stream for aggregation status events (the workspace_data_sources
+state-sync fast path). Replaces the former ``aggregation.events`` Pub/Sub
+channel: a stream + consumer group hands each event to exactly ONE consumer
+across the fleet. Pub/Sub fanned every event out to every subscriber, so the
+N viz-service (web) replicas each re-applied the same workspace_data_sources
+write and contended on the row. The sole consumer is now the aggregation
+Control Plane's state-sync loop; the web tier is stateless and no longer
+subscribes."""
+
+STATE_SYNC_GROUP = "viz-state-sync"
+"""Consumer group for the workspace_data_sources projection. Every Control
+Plane replica joins it; Redis hands each event to exactly one consumer, so
+scaling the control plane no longer multiplies the projection write."""
+
+EVENTS_STREAM_MAXLEN = int(os.getenv("AGG_EVENTS_STREAM_MAXLEN", "10000"))
+"""Approximate cap on the events stream (``XADD ... MAXLEN ~``). Status
+events are a fast-path hint backstopped by the control-plane readiness
+endpoint (the authoritative source), so trimming old entries is safe."""
 
 MAX_DELIVERY_ATTEMPTS = 5
 """After this many failed delivery attempts (tracked by Redis PEL),
@@ -124,5 +139,29 @@ async def ensure_consumer_group() -> None:
     except aioredis.ResponseError as e:
         if "BUSYGROUP" in str(e):
             logger.debug("Consumer group '%s' already exists", CONSUMER_GROUP)
+        else:
+            raise
+
+
+async def ensure_state_sync_group() -> None:
+    """Create the workspace_data_sources state-sync consumer group if it
+    doesn't exist. Idempotent — safe on every control-plane startup.
+
+    id='0' so a freshly-created group still receives events that were
+    XADDed just before this consumer first joined (no lost first-sync —
+    the failure mode that a Pub/Sub subscriber, which drops anything sent
+    while it was down, is prone to)."""
+    client = get_redis()
+    try:
+        await client.xgroup_create(
+            EVENTS_STREAM, STATE_SYNC_GROUP, id="0", mkstream=True,
+        )
+        logger.info(
+            "Created consumer group '%s' on stream '%s'",
+            STATE_SYNC_GROUP, EVENTS_STREAM,
+        )
+    except aioredis.ResponseError as e:
+        if "BUSYGROUP" in str(e):
+            logger.debug("Consumer group '%s' already exists", STATE_SYNC_GROUP)
         else:
             raise

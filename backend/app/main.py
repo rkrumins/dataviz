@@ -563,30 +563,18 @@ async def lifespan(_app: FastAPI):
         "AGGREGATION_PROXY_ENABLED", "false"
     ).lower() == "true"
 
-    # Event listener: whenever a job bus exists (REDIS_URL), aggregation
-    # jobs execute on the worker fleet and publish their terminal events
-    # to the bus — SOMEONE in this process must consume them or the local
-    # workspace_data_sources row never syncs (observed live: a graph held
-    # 1,840 rollups while the row said status=none/count=0, because the
-    # listener only started in proxy mode while dispatch had long moved
-    # to the Redis stream for every topology with a bus). It also
-    # invalidates the aggregated-edge graph cache on job completion.
-    _agg_event_listener = None
-    if os.getenv("REDIS_URL"):
-        try:
-            from .services.aggregation.redis_client import get_redis
-            from .services.aggregation.event_listener import AggregationEventListener
-            _agg_event_listener = AggregationEventListener(
-                redis_client=get_redis(),
-                session_factory=get_jobs_session,
-            )
-            _app.state._agg_event_listener = _agg_event_listener
-            _app.state._agg_event_listener_task = asyncio.create_task(
-                _agg_event_listener.start()
-            )
-            logger.info("Aggregation event listener started (syncs status + invalidates caches)")
-        except Exception as exc:
-            logger.warning("Aggregation event listener startup failed: %s", exc)
+    # WS1.2: the aggregation state-sync consumer (events stream ->
+    # public.workspace_data_sources + aggregated-cache invalidation) is
+    # OWNED BY THE CONTROL PLANE, never the web tier. It previously ran as
+    # a Redis Pub/Sub subscriber inside EVERY web replica, so N replicas
+    # each re-applied the same row write and contended on it (and a stale
+    # gate once left a graph showing status=none while it actually held
+    # 1,840 rollups). A stream + consumer group now delivers each event to
+    # exactly ONE consumer in the control plane
+    # (services/aggregation/controlplane.py + event_listener.py). The web
+    # tier is stateless and deliberately does not start this loop — the
+    # code path is removed, not merely gated, so it cannot come back by
+    # config accident.
 
     if aggregation_proxy_enabled:
         logger.info(
@@ -1111,24 +1099,17 @@ async def lifespan(_app: FastAPI):
         except Exception:
             pass
 
-    # Stop aggregation event listener (if running in proxy mode)
-    _agg_listener = getattr(_app.state, "_agg_event_listener", None)
-    if _agg_listener is not None:
-        await _agg_listener.stop()
-        _agg_task = getattr(_app.state, "_agg_event_listener_task", None)
-        if _agg_task and not _agg_task.done():
-            _agg_task.cancel()
-            try:
-                await _agg_task
-            except asyncio.CancelledError:
-                pass
-        # Close the Redis client used by the event listener
-        try:
-            from .services.aggregation.redis_client import close_redis
-            await close_redis()
-        except Exception:
-            pass
-        logger.info("Aggregation event listener stopped")
+    # Close the aggregation bus Redis client if this process opened one
+    # (RedisStreamDispatcher / reconciler / cancel bridge in non-proxy
+    # roles). No-op when it was never created — e.g. pure proxy mode,
+    # where the web tier holds no aggregation bus client. The state-sync
+    # consumer that used to own this client now lives in the control
+    # plane (WS1.2).
+    try:
+        from .services.aggregation.redis_client import close_redis
+        await close_redis()
+    except Exception:
+        pass
 
     # Release all provider connection pools (with timeout so a hung
     # provider doesn't block graceful shutdown indefinitely).
