@@ -140,6 +140,16 @@ def _not_derived(var: str) -> str:
 # adjacency list — what a graph database is actually for — and every edge is still
 # emitted exactly once, by its source. It also means both phases share one cursor space,
 # so `edges:<lo>` and `nodes:<lo>` mean the same thing.
+#
+# FOLLOW-UP (measured, not speculative): FalkorDB can't seek a NODE id range either, so
+# every window still costs one full node scan. That is fine for the ~20 windows the node
+# phase needs and merely tolerable for the edge phase (~3k edges/sec on a 5M-edge model).
+# The graph does carry per-label `urn` indexes, and seeking through one is 145× faster:
+# `MATCH (a:Label {urn:$u})-[r]->()` = 3ms vs 435ms for the unlabelled `MATCH (a {urn:$u})`.
+# Driving both phases off `MATCH (a:Label) WHERE a.urn > $cursor … ORDER BY a.urn LIMIT $n`
+# (the label-bucket seek the read path already uses) would replace every full scan with an
+# index range scan. Deferred deliberately: it changes the cursor space, and the current
+# shape is correct, resumable and finishes.
 _MAX_NODE_ID = "MATCH (n) RETURN max(ID(n))"
 _COUNT_NODES = f"MATCH (n) WHERE n.urn IS NOT NULL AND {_not_derived('n')} RETURN count(n)"
 _COUNT_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
