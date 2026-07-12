@@ -35,6 +35,11 @@ interface DashboardHeroProps {
     recentSearches?: string[]
     onRemoveRecentSearch?: (q: string) => void
     onClearRecentSearches?: () => void
+    /** Who the person is, in business terms — their name, role, department (from
+     *  the IdP profile) and how many business areas they work across. Replaces the
+     *  generic "Data Intelligence Platform" marketing badge, which told the user
+     *  nothing they didn't already know. Omitted → falls back to the old label. */
+    contextLabel?: string
 }
 
 export function DashboardHero({
@@ -46,6 +51,7 @@ export function DashboardHero({
     recentSearches = [],
     onRemoveRecentSearch,
     onClearRecentSearches,
+    contextLabel,
 }: DashboardHeroProps) {
     const [focused, setFocused] = useState(false)
     const [activeIndex, setActiveIndex] = useState(0)
@@ -131,7 +137,7 @@ export function DashboardHero({
                     className="inline-flex items-center gap-2 mb-5 px-4 py-1.5 rounded-full glass-panel border border-accent-business/30 text-accent-business text-sm font-semibold"
                 >
                     <Zap className="w-3.5 h-3.5" />
-                    Data Intelligence Platform
+                    {contextLabel ?? 'Data Intelligence Platform'}
                 </motion.div>
                 <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
                     What would you like<br className="hidden md:block" /> to{' '}
@@ -140,7 +146,7 @@ export function DashboardHero({
                     </span>
                 </h1>
                 <p className="text-base text-ink-muted mb-8 max-w-md mx-auto">
-                    Search across workspaces, views, and data sources — or jump to a template.
+                    Search across your business areas, views, and data sources — or start from a template.
                 </p>
 
                 {/* Search box + dropdown */}

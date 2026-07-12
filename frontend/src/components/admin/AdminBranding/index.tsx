@@ -45,6 +45,7 @@ import {
 import { useBrandingStore } from '@/store/branding'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { cn } from '@/lib/utils'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 const BRANDING_QUERY_KEY = ['admin', 'branding'] as const
 
@@ -237,7 +238,7 @@ export function AdminBranding() {
     const previewLogo = hasUploadedLogo ? resolvedLogo : form.logoUrl
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
             {/* Page header */}
             <div className="flex items-start gap-4 mb-8">
                 <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 shrink-0">
@@ -482,7 +483,7 @@ export function AdminBranding() {
                 onClose={() => setShowReset(false)}
                 onConfirm={handleReset}
             />
-        </div>
+        </PageContainer>
     )
 }
 

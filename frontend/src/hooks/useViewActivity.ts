@@ -4,7 +4,12 @@
  * the endpoint; disabled until a viewId is present (e.g. drawer closed).
  */
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { getViewActivity, getWorkspaceViewActivity, type ViewActivityEntry } from '@/services/viewApiService'
+import {
+    getViewActivity,
+    getWorkspaceViewActivity,
+    getMyActivityFeed,
+    type ViewActivityEntry,
+} from '@/services/viewApiService'
 
 export const VIEW_ACTIVITY_QUERY_KEY = 'view-activity' as const
 export const WORKSPACE_ACTIVITY_QUERY_KEY = 'workspace-view-activity' as const
@@ -17,6 +22,23 @@ export function useViewActivity(
         queryKey: [VIEW_ACTIVITY_QUERY_KEY, viewId],
         queryFn: () => getViewActivity(viewId!, { limit: 100 }),
         enabled: enabled && !!viewId,
+        staleTime: 30_000,
+        retry: 1,
+    })
+}
+
+export const MY_ACTIVITY_FEED_QUERY_KEY = 'my-activity-feed' as const
+
+/** The dashboard's "What changed" feed — activity across everything the user
+ *  can see. Access-scoped server-side. */
+export function useMyActivityFeed(
+    limit = 12,
+    enabled = true,
+): UseQueryResult<ViewActivityEntry[], Error> {
+    return useQuery<ViewActivityEntry[], Error>({
+        queryKey: [MY_ACTIVITY_FEED_QUERY_KEY, limit],
+        queryFn: () => getMyActivityFeed(limit),
+        enabled,
         staleTime: 30_000,
         retry: 1,
     })

@@ -8,6 +8,7 @@ import { GitPullRequestArrow, ArrowLeft } from 'lucide-react'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 export function WorkspaceReviewsPage() {
   const { wsId } = useParams<{ wsId: string }>()
@@ -19,7 +20,7 @@ export function WorkspaceReviewsPage() {
   if (!wsId) return null
 
   return (
-    <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8">
+    <PageContainer className="py-8">
       <div className="mb-8">
         <Link to={`/workspaces/${wsId}`} className="inline-flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink mb-4">
           <ArrowLeft className="w-3.5 h-3.5" /> Back to workspace
@@ -36,6 +37,6 @@ export function WorkspaceReviewsPage() {
       </div>
 
       <WorkspaceReviewsInbox wsId={wsId} initialPrId={searchParams.get('pr')} />
-    </div>
+    </PageContainer>
   )
 }

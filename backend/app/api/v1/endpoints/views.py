@@ -762,6 +762,38 @@ async def get_workspace_view_activity(
     )
 
 
+@router.get("/me/feed", response_model=List[view_activity_repo.ViewActivityEntry])
+async def list_my_activity_feed(
+    limit: int = Query(15, le=50),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Recent activity across every view the CURRENT USER can see — the
+    dashboard's "What changed" feed.
+
+    Path is ``/me/feed`` rather than ``/me/activity`` on purpose: the latter
+    would bind ``/{view_id}/activity`` with view_id="me".
+
+    Over-fetch, then apply the SAME per-view read predicate as the views list
+    (``can_read_view``), then trim — so the feed can never surface activity for a
+    view the user has no access to.
+    """
+    pairs = await view_activity_repo.get_recent_activity(session, limit=limit * 4)
+
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return [entry for entry, _ in pairs][:limit]
+
+    ctx = await _viewer_context(session, user, claims)
+    visible: List[view_activity_repo.ViewActivityEntry] = []
+    for entry, view_orm in pairs:
+        if len(visible) >= limit:
+            break
+        if await view_access.can_read_view(session, ctx, view_orm):
+            visible.append(entry)
+    return visible
+
+
 @router.get("/me/recent", response_model=List[view_repo.RecentViewEntry])
 async def list_my_recent_views(
     limit: int = Query(5, le=20),

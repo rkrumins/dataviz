@@ -31,6 +31,7 @@ import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSe
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
 import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -345,13 +346,13 @@ export function WorkspaceDetailPage() {
         // this only shows on the first load of a new workspace.
         return (
             <div className="w-full h-full overflow-y-auto custom-scrollbar">
-                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8">
+                <PageContainer className="py-8">
                     <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
                         {Array.from({ length: 6 }).map((_, i) => (
                             <WorkspaceCardSkeleton key={i} />
                         ))}
                     </div>
-                </div>
+                </PageContainer>
             </div>
         )
     }
@@ -384,7 +385,7 @@ export function WorkspaceDetailPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 animate-in fade-in duration-500">
+        <PageContainer className="py-8 animate-in fade-in duration-500">
             {/* Breadcrumb */}
             <div className="flex items-center justify-between mb-6">
                 <nav aria-label="Breadcrumb" className="flex items-center gap-2 text-sm">
@@ -704,7 +705,7 @@ export function WorkspaceDetailPage() {
                 }}
                 onClose={() => setSelectedDsId(null)}
             />
-        </div>
+        </PageContainer>
         </div>
     )
 }

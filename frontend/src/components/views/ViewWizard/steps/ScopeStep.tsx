@@ -15,6 +15,8 @@ import {
     Database,
     Search,
     Layers,
+    Globe,
+    Building2,
     Check,
     AlertTriangle,
     Loader2,
@@ -55,7 +57,6 @@ export interface ScopeStepProps {
     schemaAvailability: SchemaAvailability
     selectedWorkspaceId: string | null
     selectedDataSourceId: string | null
-    activeWorkspaceId: string | null
     onSelectWorkspace: (wsId: string) => void
     onSelectDataSource: (dsId: string) => void
 
@@ -257,16 +258,20 @@ function FilterChip({
 
 // ─── Workspace List Item ───────────────────────────────────────────
 
+/**
+ * There is exactly ONE notion of "current" in this rail: the workspace the user
+ * has selected for THIS view. The app's old global active-workspace concept is
+ * retired, so it is deliberately not surfaced here — a second "you are here"
+ * marker pointing somewhere else is just a lie with a checkmark next to it.
+ */
 function WorkspaceItem({
     ws,
     isSelected,
-    isActive,
     dsCount,
     onClick,
 }: {
     ws: WorkspaceResponse
     isSelected: boolean
-    isActive: boolean
     dsCount: number
     onClick: () => void
 }) {
@@ -309,9 +314,6 @@ function WorkspaceItem({
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">
                         <span>{dsCount} source{dsCount !== 1 ? 's' : ''}</span>
-                        {isActive && (
-                            <span className="text-emerald-500 font-medium">active</span>
-                        )}
                     </div>
                 </div>
                 {isSelected && (
@@ -336,6 +338,7 @@ const DataSourceCard = memo(function DataSourceCard({
     statsLoading,
     isSelected,
     providerInfo,
+    foreignWorkspaceName,
     onSelect,
 }: {
     ds: DataSourceResponse
@@ -343,6 +346,9 @@ const DataSourceCard = memo(function DataSourceCard({
     statsLoading: boolean
     isSelected: boolean
     providerInfo?: DataSourceProviderInfo
+    /** Set when the source lives OUTSIDE the workspace being browsed — picking it
+     *  moves the whole view there, so say so rather than moving them silently. */
+    foreignWorkspaceName?: string
     onSelect: (id: string) => void
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
@@ -423,6 +429,15 @@ const DataSourceCard = memo(function DataSourceCard({
                 predictably instead of shoving the header around. Every card carries
                 exactly one provenance pill, so the row reads as a column. */}
             <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                {foreignWorkspaceName && (
+                    <span
+                        title={`Lives in "${foreignWorkspaceName}" — picking it builds the view there`}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold leading-none max-w-full bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-500/20"
+                    >
+                        <Building2 className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{foreignWorkspaceName}</span>
+                    </span>
+                )}
                 {sourceMode === 'managed' ? (
                     <CardBadge
                         tone="managed"
@@ -639,7 +654,16 @@ function NoWorkspacesState() {
     )
 }
 
-function NoDataSourcesState({ workspaceName }: { workspaceName: string }) {
+function NoDataSourcesState({
+    workspaceName,
+    otherSourceCount,
+    onSearchAll,
+}: {
+    workspaceName: string
+    /** Sources that exist elsewhere — an empty workspace is a dead end otherwise. */
+    otherSourceCount: number
+    onSearchAll: () => void
+}) {
     return (
         <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-3">
@@ -648,9 +672,21 @@ function NoDataSourcesState({ workspaceName }: { workspaceName: string }) {
             <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
                 No data sources
             </p>
-            <p className="text-xs text-slate-400 max-w-[220px]">
-                "{workspaceName}" has no data sources configured yet.
+            <p className="text-xs text-slate-400 max-w-[240px]">
+                &quot;{workspaceName}&quot; has no data sources configured yet.
             </p>
+            {/* Landing on an empty workspace used to be a full stop. It isn't one:
+                the source you want almost certainly exists somewhere you can see. */}
+            {otherSourceCount > 0 && (
+                <button
+                    type="button"
+                    onClick={onSearchAll}
+                    className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                >
+                    <Globe className="w-3.5 h-3.5" />
+                    Browse all {otherSourceCount} sources instead
+                </button>
+            )}
         </div>
     )
 }
@@ -1053,7 +1089,6 @@ export function ScopeStep({
     schemaAvailability,
     selectedWorkspaceId,
     selectedDataSourceId,
-    activeWorkspaceId,
     onSelectWorkspace,
     onSelectDataSource,
     scopeMode,
@@ -1073,23 +1108,35 @@ export function ScopeStep({
     const [dsFilters, setDsFilters] = useState(NO_FILTERS)
     const [dsPage, setDsPage] = useState(0)
     const [wsPage, setWsPage] = useState(0)
+    /** Search every workspace at once, not just the selected one. */
+    const [searchAllWorkspaces, setSearchAllWorkspaces] = useState(false)
 
     // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
     const { resolve: resolveProvider } = useDataSourceProviderMap()
 
+    // Picking a global result changes the workspace as a CONSEQUENCE of the pick.
+    // Without this guard the reset below would fire and wipe the very query that
+    // found it, dumping the user in the new workspace's full list.
+    const keepSearchOnScopeChange = useRef(false)
+
     // Reset data-source search/sort/filters when the workspace changes so
     // filters don't leak across workspaces.
     useEffect(() => {
+        if (keepSearchOnScopeChange.current) {
+            keepSearchOnScopeChange.current = false
+            return
+        }
         setDsSearch('')
         setDsSort('recommended')
         setDsFilters(NO_FILTERS)
         setDsPage(0)
+        setSearchAllWorkspaces(false)
     }, [selectedWorkspaceId])
 
-    // Any search/sort/filter change re-slices the list — jump back to page 1.
+    // Any search/sort/filter/scope change re-slices the list — jump back to page 1.
     useEffect(() => {
         setDsPage(0)
-    }, [dsSearch, dsSort, dsFilters])
+    }, [dsSearch, dsSort, dsFilters, searchAllWorkspaces])
 
     // Single-workspace fast path: auto-select if only one exists
     const singleWorkspace = availableWorkspaces.length === 1
@@ -1155,24 +1202,62 @@ export function ScopeStep({
         [pagedWorkspaces, availableWorkspaces],
     )
 
+    /** Does this source match the query? (name, catalog id, provider — and, when
+     *  searching globally, the workspace it lives in.) */
+    const matchesQuery = useCallback((ds: DataSourceResponse, q: string, wsName?: string) => {
+        if (!q) return true
+        const prov = resolveProvider(ds.id)
+        const haystack = [
+            ds.label,
+            ds.catalogItemId,
+            prov?.providerName,
+            prov?.providerType,
+            wsName,
+        ].filter(Boolean).join(' ').toLowerCase()
+        return haystack.includes(q)
+    }, [resolveProvider])
+
+    // Every source the user can reach, with the workspace it belongs to. A source
+    // belongs to exactly one workspace, so picking one here determines both — the
+    // workspace rail is a browsing aid, not a decision the user owes us first.
+    const allDataSources = useMemo(
+        () => availableWorkspaces.flatMap(ws =>
+            (ws.dataSources ?? []).map(ds => ({ ds, workspaceName: ws.name }))),
+        [availableWorkspaces],
+    )
+
+    const workspaceNameById = useMemo(
+        () => new Map(availableWorkspaces.map(ws => [ws.id, ws.name])),
+        [availableWorkspaces],
+    )
+
+    /** Sources exist SOMEWHERE the user can see. An empty selected workspace must
+     *  still offer the search — otherwise landing on one is a dead end, and most
+     *  workspaces in a real estate are empty. */
+    const hasAnySources = allDataSources.length > 0
+
+    /** Matches in OTHER workspaces — powers the "0 here, 3 elsewhere" rescue. */
+    const matchesElsewhere = useMemo(() => {
+        const q = dsSearch.trim().toLowerCase()
+        if (!q || searchAllWorkspaces) return 0
+        return allDataSources.filter(({ ds, workspaceName }) =>
+            ds.workspaceId !== selectedWorkspaceId && matchesQuery(ds, q, workspaceName)
+        ).length
+    }, [dsSearch, searchAllWorkspaces, allDataSources, selectedWorkspaceId, matchesQuery])
+
     // Filter + sort the data sources for display.
     const visibleDataSources = useMemo(() => {
         const q = dsSearch.trim().toLowerCase()
-        const filtered = dataSources.filter(ds => {
+        const pool = searchAllWorkspaces
+            ? allDataSources
+            : dataSources.map(ds => ({ ds, workspaceName: selectedWorkspace?.name }))
+
+        const filtered = pool.filter(({ ds, workspaceName }) => {
             if (dsFilters.ontology && !ds.ontologyId) return false
             if (dsFilters.ready && ds.aggregationStatus !== 'ready') return false
-            if (q) {
-                const prov = resolveProvider(ds.id)
-                const haystack = [
-                    ds.label,
-                    ds.catalogItemId,
-                    prov?.providerName,
-                    prov?.providerType,
-                ].filter(Boolean).join(' ').toLowerCase()
-                if (!haystack.includes(q)) return false
-            }
+            if (!matchesQuery(ds, q, searchAllWorkspaces ? workspaceName : undefined)) return false
             return true
-        })
+        }).map(({ ds }) => ds)
 
         return filtered.sort((a, b) => {
             switch (dsSort) {
@@ -1195,7 +1280,10 @@ export function ScopeStep({
                 }
             }
         })
-    }, [dataSources, dsSearch, dsSort, dsFilters, resolveProvider])
+    }, [
+        dataSources, selectedWorkspace, allDataSources, searchAllWorkspaces,
+        dsSearch, dsSort, dsFilters, matchesQuery,
+    ])
 
     // Clamp the page when the filtered list shrinks below the current page.
     const dsPageCount = Math.max(1, Math.ceil(visibleDataSources.length / DS_PAGE_SIZE))
@@ -1209,10 +1297,14 @@ export function ScopeStep({
         [visibleDataSources, dsPage],
     )
 
-    // Fetch cached stats only for the current PAGE of the selected workspace
-    // (not eagerly for every source across every workspace).
-    const visibleDsIds = useMemo(() => pagedDataSources.map(ds => ds.id), [pagedDataSources])
-    const { statsMap, isLoading: statsLoading } = useDataSourceStats(selectedWorkspaceId, visibleDsIds)
+    // Fetch cached stats only for the current PAGE (not eagerly for the estate).
+    // Each source carries its own workspace, so a page of global results fetches
+    // correctly even though its cards come from different workspaces.
+    const visibleDsRefs = useMemo(
+        () => pagedDataSources.map(ds => ({ workspaceId: ds.workspaceId, dataSourceId: ds.id })),
+        [pagedDataSources],
+    )
+    const { statsMap, isLoading: statsLoading } = useDataSourceStats(visibleDsRefs)
 
     const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.ontology || dsFilters.ready
     const clearDsFilters = useCallback(() => {
@@ -1227,6 +1319,22 @@ export function ScopeStep({
             // Parent will handle reset — we just notify
         }
     }, [onSelectWorkspace, selectedWorkspaceId])
+
+    /**
+     * Pick a source, wherever it lives.
+     *
+     * A source belongs to exactly one workspace, so choosing it settles the
+     * workspace too — the user shouldn't have to go and find the right rail entry
+     * first. The guard keeps their search query alive across the scope change.
+     */
+    const handleSelectDataSource = useCallback((dsId: string) => {
+        const found = allDataSources.find(({ ds }) => ds.id === dsId)?.ds
+        if (found && found.workspaceId !== selectedWorkspaceId) {
+            keepSearchOnScopeChange.current = true
+            onSelectWorkspace(found.workspaceId)
+        }
+        onSelectDataSource(dsId)
+    }, [allDataSources, selectedWorkspaceId, onSelectWorkspace, onSelectDataSource])
 
     if (availableWorkspaces.length === 0) {
         return <NoWorkspacesState />
@@ -1318,7 +1426,6 @@ export function ScopeStep({
                                             key={ws.id}
                                             ws={ws}
                                             isSelected={ws.id === selectedWorkspaceId}
-                                            isActive={ws.id === activeWorkspaceId}
                                             dsCount={ws.dataSources?.length ?? 0}
                                             onClick={() => handleSelectWorkspace(ws.id)}
                                         />
@@ -1363,19 +1470,34 @@ export function ScopeStep({
                             {/* Right header + toolbar */}
                             <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 space-y-2.5">
                                 <div className="flex items-center gap-2">
-                                    <GitBranch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                    <span className="text-xs text-slate-400">Data sources in</span>
-                                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 truncate">
-                                        {selectedWorkspace.name}
-                                    </span>
+                                    {searchAllWorkspaces ? (
+                                        <>
+                                            <Globe className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                                            <span className="text-xs text-slate-400">Data sources across</span>
+                                            <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                                all workspaces
+                                            </span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <GitBranch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                            <span className="text-xs text-slate-400">Data sources in</span>
+                                            <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 truncate">
+                                                {selectedWorkspace.name}
+                                            </span>
+                                        </>
+                                    )}
                                     <span className="text-xs text-slate-400 ml-auto shrink-0">
-                                        {visibleDataSources.length === dataSources.length
-                                            ? `${dataSources.length} source${dataSources.length !== 1 ? 's' : ''}`
-                                            : `${visibleDataSources.length} of ${dataSources.length} sources`}
+                                        {(() => {
+                                            const total = searchAllWorkspaces ? allDataSources.length : dataSources.length
+                                            return visibleDataSources.length === total
+                                                ? `${total} source${total !== 1 ? 's' : ''}`
+                                                : `${visibleDataSources.length} of ${total} sources`
+                                        })()}
                                     </span>
                                 </div>
 
-                                {dataSources.length > 0 && (
+                                {hasAnySources && (
                                     <div className="flex items-center gap-2 flex-wrap">
                                         {/* Search */}
                                         <div className="relative flex-1 min-w-[160px]">
@@ -1399,6 +1521,27 @@ export function ScopeStep({
                                             )}
                                         </div>
 
+                                        {/* Search scope. A real toggle, not just a search
+                                            modifier: with no query it simply lists every
+                                            source you can pick — which is the fastest route
+                                            when most workspaces are empty anyway. */}
+                                        {availableWorkspaces.length > 1 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setSearchAllWorkspaces(v => !v)}
+                                                title="Search data sources across every workspace you can see"
+                                                className={cn(
+                                                    'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors shrink-0',
+                                                    searchAllWorkspaces
+                                                        ? 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                                                        : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800',
+                                                )}
+                                            >
+                                                <Globe className="w-3.5 h-3.5" />
+                                                All workspaces
+                                            </button>
+                                        )}
+
                                         {/* Sort */}
                                         <DataSourceSortControl sort={dsSort} onSortChange={setDsSort} />
 
@@ -1412,7 +1555,30 @@ export function ScopeStep({
                                     </div>
                                 )}
 
-                                {dataSources.length > 0 && (
+                                {/* The rescue. Costs nothing when you don't need it, and
+                                    appears exactly when you're looking in the wrong place. */}
+                                {matchesElsewhere > 0 && (
+                                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-500/20 bg-blue-500/5">
+                                        <Globe className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                                        <span className="text-[11px] text-slate-600 dark:text-slate-300 min-w-0">
+                                            {visibleDataSources.length === 0
+                                                ? <>No matches in <strong>{selectedWorkspace.name}</strong>.</>
+                                                : <>More matches outside <strong>{selectedWorkspace.name}</strong>.</>}
+                                            {' '}
+                                            <strong>{matchesElsewhere}</strong>
+                                            {matchesElsewhere === 1 ? ' match' : ' matches'} in other workspaces.
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchAllWorkspaces(true)}
+                                            className="ml-auto shrink-0 text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                                        >
+                                            Search all →
+                                        </button>
+                                    </div>
+                                )}
+
+                                {hasAnySources && (
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                         <FilterChip
                                             active={dsFilters.ontology}
@@ -1431,8 +1597,12 @@ export function ScopeStep({
                             </div>
 
                             {/* Data source grid */}
-                            {dataSources.length === 0 ? (
-                                <NoDataSourcesState workspaceName={selectedWorkspace.name} />
+                            {dataSources.length === 0 && !searchAllWorkspaces ? (
+                                <NoDataSourcesState
+                                    workspaceName={selectedWorkspace.name}
+                                    otherSourceCount={allDataSources.length}
+                                    onSearchAll={() => setSearchAllWorkspaces(true)}
+                                />
                             ) : visibleDataSources.length > 0 ? (
                                 <div className="flex-1 overflow-y-auto p-3.5 custom-scrollbar">
                                     {/* A FIXED column count. It used to widen the cards when a
@@ -1450,11 +1620,16 @@ export function ScopeStep({
                                             >
                                                 <DataSourceCard
                                                     ds={ds}
-                                                    stats={statsMap[`${selectedWorkspaceId}/${ds.id}`]}
+                                                    stats={statsMap[`${ds.workspaceId}/${ds.id}`]}
                                                     statsLoading={statsLoading}
                                                     isSelected={ds.id === selectedDataSourceId}
                                                     providerInfo={resolveProvider(ds.id)}
-                                                    onSelect={onSelectDataSource}
+                                                    foreignWorkspaceName={
+                                                        ds.workspaceId !== selectedWorkspaceId
+                                                            ? workspaceNameById.get(ds.workspaceId)
+                                                            : undefined
+                                                    }
+                                                    onSelect={handleSelectDataSource}
                                                 />
                                             </motion.div>
                                         ))}

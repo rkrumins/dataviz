@@ -384,6 +384,13 @@ export async function getViewActivity(
     return apiFetch<ViewActivityEntry[]>(`/api/v1/views/${viewId}/activity${qs ? `?${qs}` : ''}`)
 }
 
+/** Recent activity across every view the CURRENT USER can see — the dashboard's
+ *  "What changed" feed. (Path is /me/feed, not /me/activity, which would bind
+ *  the /{view_id}/activity route with view_id="me".) */
+export async function getMyActivityFeed(limit = 15): Promise<ViewActivityEntry[]> {
+    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/me/feed?limit=${limit}`)
+}
+
 /** Recent activity across all of a workspace's views (each entry has viewName). */
 export async function getWorkspaceViewActivity(
     workspaceId: string,

@@ -13,6 +13,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { DataSourceProfile } from '@/components/insights/DataSourceProfile'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 export function DataSourceOverviewPage() {
     const { catalogId = '' } = useParams()
@@ -21,7 +22,7 @@ export function DataSourceOverviewPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto">
-            <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 animate-in fade-in duration-500">
+            <PageContainer className="py-8 animate-in fade-in duration-500">
                 {/* Single-column profile constrained to a comfortable reading
                     column (the profile fills its container, so the drawers show
                     it full-width; the page centres it instead of stretching). */}
@@ -34,7 +35,7 @@ export function DataSourceOverviewPage() {
                     </button>
                     <DataSourceProfile catalogId={catalogId} />
                 </div>
-            </div>
+            </PageContainer>
         </div>
     )
 }

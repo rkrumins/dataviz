@@ -18,6 +18,7 @@ import { StreamsPanel } from './StreamsPanel'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { compactNum, formatAgeMs } from './meta'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 function OverviewStrip({ overview }: { overview: OverviewSection | null }) {
     if (!overview) return null
@@ -129,7 +130,7 @@ export function AdminInfrastructure() {
     const polling = data?.statsPolling
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
             {/* Header */}
             <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-3">
@@ -231,6 +232,6 @@ export function AdminInfrastructure() {
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>
             ) : null}
-        </div>
+        </PageContainer>
     )
 }

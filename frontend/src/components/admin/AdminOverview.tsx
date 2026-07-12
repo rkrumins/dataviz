@@ -14,6 +14,7 @@ import { workspaceService, type WorkspaceResponse } from '@/services/workspaceSe
 import { providerService } from '@/services/providerService'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -126,7 +127,7 @@ export function AdminOverview() {
     }
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">
@@ -244,6 +245,6 @@ export function AdminOverview() {
                     </div>
                 </div>
             )}
-        </div>
+        </PageContainer>
     )
 }

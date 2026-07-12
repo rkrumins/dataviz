@@ -12,6 +12,7 @@ import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
 
@@ -156,7 +157,7 @@ export function IngestionPage() {
         <div className="absolute inset-0 flex flex-col animate-in fade-in duration-500">
             {/* Fixed header area — does not scroll */}
             <div className="shrink-0">
-                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pt-8">
+                <PageContainer className="pt-8">
                     {/* Header */}
                     <div className="flex items-center gap-3 mb-6">
                         <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
@@ -242,7 +243,7 @@ export function IngestionPage() {
                             )
                         })}
                     </div>
-                </div>
+                </PageContainer>
             </div>
 
             {/* Content pane — fills remaining space */}
@@ -259,10 +260,10 @@ export function IngestionPage() {
                 {activeTab === 'jobs' ? (
                     <RegistryJobHistory />
                 ) : (
-                    <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-6">
+                    <PageContainer className="py-6">
                         {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
-                    </div>
+                    </PageContainer>
                 )}
             </div>
         </div>

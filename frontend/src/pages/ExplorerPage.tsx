@@ -47,6 +47,7 @@ import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useToast } from '@/components/ui/toast'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -486,7 +487,7 @@ export function ExplorerPage() {
   return (
     <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
       <style>{STAGGER_STYLE}</style>
-      <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pb-28">
+      <PageContainer className="pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
         <header className="pt-8 pb-6">
@@ -850,7 +851,7 @@ export function ExplorerPage() {
 
           {hasMore && <div ref={sentinelRef} className="h-4" />}
         </section>
-      </div>
+      </PageContainer>
 
       {/* Overlays */}
       <ExplorerPreviewDrawer

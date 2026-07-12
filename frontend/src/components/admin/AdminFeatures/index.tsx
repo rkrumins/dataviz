@@ -10,6 +10,7 @@ import { FeatureCard } from './FeatureCard'
 import { Toast } from './Toast'
 import { SkeletonCards } from './SkeletonCards'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 export function AdminFeatures() {
   const {
@@ -96,7 +97,7 @@ export function AdminFeatures() {
   const isUsingDefaults = !data?.updatedAt && !defaultsHintDismissed
 
   return (
-    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+    <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
       {/* Early access / experimental notice — backend-driven; Disable = turn off (persisted); Enable = turn back on */}
       <AnimatePresence>
         {(experimentalNotice?.title || editNoticeOpen) && (
@@ -404,6 +405,6 @@ export function AdminFeatures() {
         onDismiss={() => setErrorToastVisible(false)}
         variant="error"
       />
-    </div>
+    </PageContainer>
   )
 }

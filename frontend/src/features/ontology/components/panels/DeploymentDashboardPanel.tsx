@@ -29,6 +29,7 @@ import { useWorkspaceViewCounts } from '../../hooks/useWorkspaceViewCounts'
 import type { DeploymentEntry } from '../../lib/ontology-types'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { WORKSPACE_PALETTES } from '@/components/dashboard/dashboard-constants'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 // ---------------------------------------------------------------------------
 // Stagger CSS (matches ExplorerPage / WorkspacesPage pattern)
@@ -289,7 +290,7 @@ export function DeploymentDashboardPanel({
   // Render
   // ────────────────────────────────────────────────────────────────────
   return (
-    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+    <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
       <style>{STAGGER_STYLE}</style>
 
       {/* ── Hero section ─────────────────────────────────────────── */}
@@ -898,7 +899,7 @@ export function DeploymentDashboardPanel({
         onUnassign={runBulkUnassign}
         isAssigning={isAssigning}
       />
-    </div>
+    </PageContainer>
   )
 }
 

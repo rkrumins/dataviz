@@ -1,12 +1,14 @@
 /**
  * useDataSourceStats — fetch cached node/edge/type counts for a specific set
- * of data sources within a single workspace.
+ * of data sources.
  *
- * Co-located with the ViewWizard ScopeStep so stats are only fetched for the
- * data sources actually being shown (the selected workspace's filtered list),
- * rather than eagerly for every source across every workspace.
+ * Takes (workspace, source) PAIRS rather than one workspace + many sources: the
+ * wizard can now search across every workspace at once, so the sources on screen
+ * no longer share a parent. The stats endpoint is per-(workspace, source), so the
+ * pair is the real unit.
  *
- * Returns a map keyed `${wsId}/${dsId}` to match the lookup ScopeStep uses.
+ * Only the sources actually being shown are fetched — never eagerly for the whole
+ * estate. Returns a map keyed `${wsId}/${dsId}`.
  */
 import { useMemo } from 'react'
 import { useQueries } from '@tanstack/react-query'
@@ -14,6 +16,12 @@ import { fetchEnveloped } from '@/services/cacheEnvelope'
 import type { DataSourceStats } from './useDashboardData'
 
 export type { DataSourceStats }
+
+/** A data source, plus the workspace it lives in (its stats key). */
+export interface DataSourceRef {
+    workspaceId: string
+    dataSourceId: string
+}
 
 export async function fetchDataSourceStats(wsId: string, dsId: string): Promise<DataSourceStats> {
     const url = `/api/v1/admin/workspaces/${wsId}/datasources/${dsId}/cached-stats`
@@ -31,31 +39,26 @@ export async function fetchDataSourceStats(wsId: string, dsId: string): Promise<
 }
 
 export function useDataSourceStats(
-    wsId: string | null,
-    dsIds: string[],
+    refs: DataSourceRef[],
 ): { statsMap: Record<string, DataSourceStats>; isLoading: boolean } {
-    const enabled = !!wsId
-
     const statQueries = useQueries({
-        queries: (enabled ? dsIds : []).map(dsId => ({
-            queryKey: ['ds-stats', wsId, dsId] as const,
-            queryFn: () => fetchDataSourceStats(wsId as string, dsId),
+        queries: refs.map(({ workspaceId, dataSourceId }) => ({
+            queryKey: ['ds-stats', workspaceId, dataSourceId] as const,
+            queryFn: () => fetchDataSourceStats(workspaceId, dataSourceId),
             staleTime: 60_000,
             gcTime: 300_000,
-            enabled,
             retry: false,
         })),
     })
 
     const statsMap = useMemo(() => {
         const map: Record<string, DataSourceStats> = {}
-        if (!enabled) return map
-        dsIds.forEach((dsId, i) => {
+        refs.forEach(({ workspaceId, dataSourceId }, i) => {
             const q = statQueries[i]
-            if (q?.data) map[`${wsId}/${dsId}`] = q.data
+            if (q?.data) map[`${workspaceId}/${dataSourceId}`] = q.data
         })
         return map
-    }, [enabled, wsId, dsIds, statQueries])
+    }, [refs, statQueries])
 
     const isLoading = statQueries.some(q => q.isLoading)
 
