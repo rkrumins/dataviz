@@ -75,7 +75,6 @@ function renderScope(dataSources: DataSourceResponse[], workspaces?: WorkspaceRe
       schemaAvailability={{ hasOntology: true, status: 'ready', message: null }}
       selectedWorkspaceId="ws1"
       selectedDataSourceId={null}
-      activeWorkspaceId="ws1"
       onSelectWorkspace={vi.fn()}
       onSelectDataSource={vi.fn()}
       scopeMode="existing"
