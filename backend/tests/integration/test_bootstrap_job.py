@@ -77,14 +77,17 @@ class FakeGraph:
         if "SET n.entityId" in cypher or "SET r.id" in cypher:
             self.writes.append(cypher.split("SET")[1].strip()[:20])
             return _RS([])
-        if cypher.startswith("MATCH (n)"):
-            urns = {pr.get("urn") for _, pr in self.nodes if pr.get("urn")}
+        if cypher.startswith("MATCH (n) WHERE ID(n)"):
             return _RS([[lab, pr] for i, (lab, pr) in enumerate(self.nodes)
                         if lo <= i < hi and pr.get("urn")])
-        if cypher.startswith("MATCH (a)-[r]->(b)"):
-            urns = {pr.get("urn") for _, pr in self.nodes if pr.get("urn")}
-            return _RS([[s, t, ty, pr] for i, (s, t, ty, pr) in enumerate(self.edges)
-                        if lo <= i < hi and s in urns and t in urns])
+        if cypher.startswith("MATCH (a) WHERE ID(a)"):
+            # Edges are anchored on their SOURCE node's id window (see _SCAN_EDGES) —
+            # each edge is emitted exactly once, by the node it leaves.
+            visible = {pr.get("urn") for _, pr in self._visible_nodes()}
+            in_window = {pr.get("urn") for i, (_, pr) in enumerate(self.nodes)
+                         if lo <= i < hi and pr.get("urn")}
+            return _RS([[s, t, ty, pr] for (s, t, ty, pr) in self.edges
+                        if s in in_window and t in visible])
         return _RS([])
 
     async def delete(self):                                    # a reseed would call this

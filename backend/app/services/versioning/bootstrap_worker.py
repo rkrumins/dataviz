@@ -107,38 +107,49 @@ _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 # own its own cache.                                                            #
 # --------------------------------------------------------------------------- #
 _DERIVED_LABELS = ("_GVRollupMeta", "_AggMeta", "_Projection")
-_NOT_DERIVED = " AND ".join(f"NOT '{lab}' IN labels(n)" for lab in _DERIVED_LABELS)
 
+
+def _not_derived(var: str) -> str:
+    return " AND ".join(f"NOT '{lab}' IN labels({var})" for lab in _DERIVED_LABELS)
+
+
+# EVERYTHING is anchored on a NODE id range — including the edges.
+#
+# The obvious way to window edges is `WHERE ID(r) >= $lo AND ID(r) < $hi`, and it is a
+# trap: FalkorDB cannot seek an edge-id range, so every window re-scans the entire edge
+# set and the phase goes quadratic. (Measured on a 6.2M-edge graph: ~230 edges/sec and
+# falling, then a scan timeout.) Anchoring on the SOURCE NODE instead walks each node's
+# adjacency list — what a graph database is actually for — and every edge is still
+# emitted exactly once, by its source. It also means both phases share one cursor space,
+# so `edges:<lo>` and `nodes:<lo>` mean the same thing.
 _MAX_NODE_ID = "MATCH (n) RETURN max(ID(n))"
-_MAX_EDGE_ID = "MATCH ()-[r]->() RETURN max(ID(r))"
-_COUNT_NODES = f"MATCH (n) WHERE n.urn IS NOT NULL AND {_NOT_DERIVED} RETURN count(n)"
+_COUNT_NODES = f"MATCH (n) WHERE n.urn IS NOT NULL AND {_not_derived('n')} RETURN count(n)"
 _COUNT_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
                 "AND a.urn IS NOT NULL AND b.urn IS NOT NULL RETURN count(r)")
 # Entities the app can't see (no identifier) — reported, never copied, never fatal.
-_COUNT_INVISIBLE_NODES = f"MATCH (n) WHERE n.urn IS NULL AND {_NOT_DERIVED} RETURN count(n)"
+_COUNT_INVISIBLE_NODES = f"MATCH (n) WHERE n.urn IS NULL AND {_not_derived('n')} RETURN count(n)"
 _COUNT_INVISIBLE_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
                           "AND (a.urn IS NULL OR b.urn IS NULL) RETURN count(r)")
 
 _SCAN_NODES = (
-    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND n.urn IS NOT NULL AND {_NOT_DERIVED} "
+    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND n.urn IS NOT NULL AND {_not_derived('n')} "
     "RETURN labels(n), properties(n)"
 )
 _SCAN_EDGES = (
-    "MATCH (a)-[r]->(b) WHERE ID(r) >= $lo AND ID(r) < $hi "
-    "AND type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL AND b.urn IS NOT NULL "
+    f"MATCH (a) WHERE ID(a) >= $lo AND ID(a) < $hi AND a.urn IS NOT NULL AND {_not_derived('a')} "
+    "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND b.urn IS NOT NULL "
     "RETURN a.urn, b.urn, type(r), properties(r)"
 )
 _SAMPLE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) RETURN labels(n), properties(n)"
 # Backfill: additive, idempotent, and scoped to the same entities we copied.
 _BACKFILL_NODES = (
-    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_NOT_DERIVED} "
+    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_not_derived('n')} "
     "AND n.entityId IS NULL AND n.urn IS NOT NULL "
     "SET n.entityId = n.urn"
 )
 _BACKFILL_EDGES = (
-    "MATCH (a)-[r]->(b) WHERE ID(r) >= $lo AND ID(r) < $hi "
-    "AND type(r) <> 'AGGREGATED' AND r.id IS NULL "
-    "AND a.urn IS NOT NULL AND b.urn IS NOT NULL "
+    f"MATCH (a) WHERE ID(a) >= $lo AND ID(a) < $hi AND a.urn IS NOT NULL AND {_not_derived('a')} "
+    "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NULL AND b.urn IS NOT NULL "
     "SET r.id = a.urn + '|' + type(r) + '|' + b.urn"
 )
 
@@ -614,9 +625,9 @@ class BootstrapRunner:
         return False
 
     # ------------------------------------------------------------- internals --
-    async def _max_id(self, client, kind: str) -> Optional[int]:
-        res = await _q(client, _MAX_NODE_ID if kind == "nodes" else _MAX_EDGE_ID,
-                       timeout_ms=_READ_TIMEOUT_MS)
+    async def _max_id(self, client, kind: str = "nodes") -> Optional[int]:
+        """The node id space — every phase (nodes, edges, backfill) windows over it."""
+        res = await _q(client, _MAX_NODE_ID, timeout_ms=_READ_TIMEOUT_MS)
         rs = getattr(res, "result_set", None) or []
         val = rs[0][0] if rs and rs[0] else None
         return int(val) if val is not None else None
