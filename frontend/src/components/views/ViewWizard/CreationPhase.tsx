@@ -17,8 +17,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { AlertCircle, ArrowRight, Check, Compass, Loader2 } from 'lucide-react'
+import { AlertCircle, ArrowRight, Check, Compass, Database, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { DynamicIcon } from '@/lib/viewUtils'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,8 +45,15 @@ export const AUTO_OPEN_SECONDS = 5
 
 /**
  * Ticks down while `enabled`, fires once, and never fires again. Hoisted out of
- * the success body because the countdown drives BOTH the body (progress rail)
- * and the wizard footer (the "Open view now" action bar).
+ * the success body because the countdown drives BOTH the body and the wizard
+ * footer (the "Open view now" action bar).
+ *
+ * Deliberately NOT hover-pausable. The pause read as considerate and was in fact
+ * useless: after clicking "Create" the pointer is already sitting on the modal, so
+ * the countdown started paused and stayed paused — the auto-open we promised
+ * simply never happened, and the footer just said "paused while you're reading"
+ * forever. A countdown that runs, plus one obvious way to stop it ("Stay here"),
+ * is both easier to reason about and the version that actually works.
  */
 export function useAutoOpenCountdown({
     enabled,
@@ -57,12 +65,9 @@ export function useAutoOpenCountdown({
     onFire: () => void
 }): {
     remaining: number
-    paused: boolean
-    setPaused: (paused: boolean) => void
     cancel: () => void
 } {
     const [remaining, setRemaining] = useState(seconds)
-    const [paused, setPaused] = useState(false)
     const firedRef = useRef(false)
 
     // Keep the callback fresh without restarting the timer on every render.
@@ -73,7 +78,7 @@ export function useAutoOpenCountdown({
     // create always starts from a fresh hook. `enabled` only ever goes false→true
     // (steps → success), never back.
     useEffect(() => {
-        if (!enabled || paused || firedRef.current || remaining < 0) return
+        if (!enabled || firedRef.current || remaining < 0) return
         if (remaining === 0) {
             firedRef.current = true
             onFireRef.current()
@@ -81,7 +86,7 @@ export function useAutoOpenCountdown({
         }
         const t = setTimeout(() => setRemaining(r => r - 1), 1000)
         return () => clearTimeout(t)
-    }, [enabled, paused, remaining])
+    }, [enabled, remaining])
 
     /** Any deliberate click wins over the countdown. */
     const cancel = useCallback(() => {
@@ -89,7 +94,7 @@ export function useAutoOpenCountdown({
         setRemaining(-1)
     }, [])
 
-    return { remaining, paused, setPaused, cancel }
+    return { remaining, cancel }
 }
 
 // ─── Creating ───────────────────────────────────────────────────────────────
@@ -199,27 +204,49 @@ export function CreationBusyFooter() {
 export function CreationErrorFooter({
     onBack,
     onRetry,
+    suggestedName,
+    onUseSuggestedName,
 }: {
     onBack: () => void
     onRetry: () => void
+    /** Set when the graph name was taken while the wizard was open. */
+    suggestedName?: string | null
+    onUseSuggestedName?: () => void
 }) {
+    // A taken graph name cannot be retried into existence — the server will refuse
+    // the same name every time (writing into an existing key would destroy it). So
+    // the primary action becomes "take the free one", not "try again".
+    const nameTaken = !!suggestedName && !!onUseSuggestedName
+
     return (
-        <div className="flex items-center justify-between w-full">
+        <div className="flex items-center justify-between w-full gap-4">
             <button
                 type="button"
                 onClick={onBack}
-                className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+                className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150 shrink-0"
             >
                 Back to review
             </button>
-            <button
-                type="button"
-                onClick={onRetry}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150"
-            >
-                <Loader2 className="w-4 h-4" />
-                Retry
-            </button>
+
+            {nameTaken ? (
+                <button
+                    type="button"
+                    onClick={onUseSuggestedName}
+                    className="flex items-center gap-2 min-w-0 px-6 py-2.5 rounded-xl font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150"
+                >
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span className="truncate">Use <span className="font-mono">{suggestedName}</span> instead</span>
+                </button>
+            ) : (
+                <button
+                    type="button"
+                    onClick={onRetry}
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150 shrink-0"
+                >
+                    <RefreshCw className="w-4 h-4" />
+                    Retry
+                </button>
+            )}
         </div>
     )
 }
@@ -272,38 +299,55 @@ export function CreationSuccessBody({
     viewName,
     scopeLabel,
     isBlank,
+    icon,
+    graphName,
     stats,
-    onPauseChange,
 }: {
     viewName: string
     scopeLabel?: string
     isBlank: boolean
+    /** The icon the user picked — shown back to them on the thing they just made. */
+    icon?: string
+    /** Blank models: the physical graph key the model now owns. */
+    graphName?: string
     stats: CreationSummaryStat[]
-    /** Hovering the summary pauses the auto-open — the user is clearly reading. */
-    onPauseChange: (paused: boolean) => void
 }) {
     return (
-        <div
-            className="relative min-h-[440px] flex flex-col items-center justify-center text-center"
-            onMouseEnter={() => onPauseChange(true)}
-            onMouseLeave={() => onPauseChange(false)}
-        >
+        <div className="relative min-h-[440px] flex flex-col items-center justify-center text-center px-2">
             <ConfettiBurst />
 
+            {/* Success mark, with the view's own icon riding along — the choice made
+                on Basics shows up on the thing it was made for. */}
             <motion.div
                 initial={{ scale: 0.4, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ type: 'spring', stiffness: 380, damping: 18 }}
-                className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25"
+                className="relative"
             >
-                <Check className="w-8 h-8 text-white" strokeWidth={3} />
+                <div
+                    aria-hidden
+                    className="absolute -inset-5 rounded-full bg-emerald-500/15 blur-2xl"
+                />
+                <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25">
+                    <Check className="w-8 h-8 text-white" strokeWidth={3} />
+                </div>
+                {icon && (
+                    <motion.span
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        transition={{ delay: 0.22, type: 'spring', stiffness: 420, damping: 20 }}
+                        className="absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-center text-slate-600 dark:text-slate-300"
+                    >
+                        <DynamicIcon name={icon} className="w-3.5 h-3.5" />
+                    </motion.span>
+                )}
             </motion.div>
 
             <motion.h3
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.08 }}
-                className="mt-6 text-2xl font-bold text-slate-900 dark:text-white"
+                className="mt-7 text-2xl font-bold text-slate-900 dark:text-white"
             >
                 {isBlank ? 'Your model is ready' : 'Your view is ready'}
             </motion.h3>
@@ -312,41 +356,64 @@ export function CreationSuccessBody({
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.12 }}
-                className="mt-1.5 max-w-lg text-sm text-slate-500"
+                className="mt-2 max-w-xl text-sm text-slate-500 break-words"
             >
                 <span className="font-semibold text-slate-700 dark:text-slate-300">{viewName}</span>
                 {scopeLabel && <span className="text-slate-400"> · {scopeLabel}</span>}
             </motion.p>
 
+            {/* Blank models get a real, permanent graph key — worth showing, because it
+                is the one thing here that can never be renamed. */}
+            {isBlank && graphName && (
+                <motion.p
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.15 }}
+                    className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1"
+                >
+                    <Database className="w-3 h-3 text-slate-400 shrink-0" />
+                    <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 break-all">
+                        {graphName}
+                    </span>
+                </motion.p>
+            )}
+
             {stats.length > 0 && (
                 <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.16 }}
-                    className="mt-7 grid gap-3 w-full max-w-lg"
-                    style={{ gridTemplateColumns: `repeat(${stats.length}, minmax(0, 1fr))` }}
+                    transition={{ delay: 0.18 }}
+                    className="mt-7 flex flex-wrap items-stretch justify-center gap-3 w-full max-w-2xl"
                 >
-                    {stats.map(stat => (
-                        <div
-                            key={stat.label}
-                            className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 px-3 py-3"
-                        >
-                            <p className="text-lg font-bold text-slate-800 dark:text-slate-200 truncate" title={String(stat.value)}>
-                                {stat.value}
-                            </p>
-                            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400 truncate">
-                                {stat.label}
-                            </p>
-                        </div>
-                    ))}
+                    {stats.map(stat => {
+                        const numeric = typeof stat.value === 'number'
+                        return (
+                            <div
+                                key={stat.label}
+                                // Sized to its content, not squeezed into an equal share —
+                                // "Context View" was rendering as "Context …".
+                                className="min-w-[132px] flex-1 basis-[132px] max-w-[200px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 px-4 py-3 text-left"
+                            >
+                                <p className={cn(
+                                    'font-bold text-slate-800 dark:text-slate-200 leading-snug break-words',
+                                    numeric ? 'text-xl tabular-nums' : 'text-sm capitalize',
+                                )}>
+                                    {stat.value}
+                                </p>
+                                <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                                    {stat.label}
+                                </p>
+                            </div>
+                        )
+                    })}
                 </motion.div>
             )}
 
             <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.2 }}
-                className="mt-6 inline-flex items-center gap-1.5 text-xs text-slate-400"
+                transition={{ delay: 0.22 }}
+                className="mt-7 inline-flex items-center gap-1.5 text-xs text-slate-400"
             >
                 <Compass className="w-3.5 h-3.5" />
                 Saved — you’ll always find it in Explorer
@@ -357,58 +424,54 @@ export function CreationSuccessBody({
 
 export function CreationSuccessFooter({
     remaining,
-    paused,
     onOpenNow,
     onStayHere,
 }: {
     remaining: number
-    paused: boolean
     onOpenNow: () => void
     onStayHere: () => void
 }) {
     const counting = remaining >= 0
+    // Drains left→right as the seconds run out.
     const pct = counting ? Math.max(0, Math.min(1, remaining / AUTO_OPEN_SECONDS)) * 100 : 0
 
     return (
-        <div className="relative flex items-center justify-between w-full">
-            {/* Countdown rail — pinned to the footer's top edge, freezes on hover so
-                the page is never yanked away mid-read. */}
-            {counting && (
-                <div className="absolute -top-5 left-0 right-0 h-0.5 bg-slate-200 dark:bg-slate-700 overflow-hidden rounded-full">
-                    <div
-                        className={cn(
-                            'h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-[width] ease-linear',
-                            paused ? 'duration-150' : 'duration-1000',
-                        )}
-                        style={{ width: `${pct}%` }}
-                    />
-                </div>
-            )}
-
-            <p className="text-xs text-slate-400">
+        <div className="flex items-center justify-between w-full gap-4">
+            <p className="text-xs text-slate-400 min-w-0">
                 {counting
-                    ? (paused
-                        ? 'Auto-open paused while you’re reading'
-                        : `Opening automatically in ${remaining}s`)
+                    ? <>Opening automatically in <span className="font-semibold text-slate-500 dark:text-slate-300 tabular-nums">{remaining}s</span></>
                     : 'Open it whenever you’re ready'}
             </p>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 shrink-0">
                 <button
                     type="button"
                     onClick={onStayHere}
-                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+                    className="px-5 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
                 >
                     Stay here
                 </button>
+
+                {/* The countdown lives INSIDE the primary action: the button visibly
+                    fills as the seconds run out, so the thing about to happen and the
+                    thing you'd click are the same object. */}
                 <button
                     type="button"
                     onClick={onOpenNow}
                     autoFocus
-                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md transition-colors duration-150"
+                    className="relative overflow-hidden flex items-center gap-2 px-6 py-2.5 rounded-xl font-semibold text-white shadow-lg shadow-blue-600/20 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 transition-colors duration-150"
                 >
-                    Open view now
-                    <ArrowRight className="w-4 h-4" />
+                    {counting && (
+                        <span
+                            aria-hidden
+                            className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-1000 ease-linear"
+                            style={{ width: `${pct}%` }}
+                        />
+                    )}
+                    <span className="relative flex items-center gap-2">
+                        Open view now
+                        <ArrowRight className="w-4 h-4" />
+                    </span>
                 </button>
             </div>
         </div>

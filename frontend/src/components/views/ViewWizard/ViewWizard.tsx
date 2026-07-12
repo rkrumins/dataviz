@@ -63,7 +63,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
-import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
+import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
@@ -139,9 +139,13 @@ export interface WizardFormData {
     advancedFilters: ActiveFilter[]
     scopeEdges?: ScopeEdgeConfig
     isValid: boolean
-    /** Blank models only: the user-chosen PHYSICAL FalkorDB graph name.
-     *  Undefined = auto-derived from `name` (slugified) until the user edits it. */
+    /** Blank models only: the PHYSICAL FalkorDB graph name the model is stored under.
+     *  Kept populated by BasicsStep — auto-derived from `name` and auto-uniquified
+     *  when that slug is already taken on the connection. */
     graphName?: string
+    /** False once the user edits the graph name by hand: their choice then survives
+     *  a rename of the view (and we stop silently re-deriving it under them). */
+    graphNameIsAuto?: boolean
     /** Blank models only: last known availability of the (derived or edited)
      *  graph name — false blocks Next on Basics; server re-validates at submit. */
     graphNameAvailable?: boolean
@@ -884,6 +888,8 @@ function ViewWizardBody({
         provision: 'pending', create: 'pending', layout: 'pending',
     })
     const [submitError, setSubmitError] = useState<string | null>(null)
+    /** A free graph name the server handed back after a late collision (blank models). */
+    const [nameConflict, setNameConflict] = useState<string | null>(null)
     // The saved view, held until the user actually leaves the success step.
     // `onComplete` is what CLOSES the wizard (AppLayout wires it to closeViewEditor),
     // so calling it the moment the save lands would unmount us mid-celebration —
@@ -1113,6 +1119,15 @@ function ViewWizardBody({
                             provisionRef.current = provisioned
                         } catch (err) {
                             setStageStates(s => ({ ...s, provision: 'failed' }))
+                            // Someone took the graph name while this wizard was open. The
+                            // server refuses to write into an existing key (it would wipe
+                            // whatever lives there), so retrying the SAME name can only fail
+                            // again — offer the free name it handed back instead.
+                            if (err instanceof GraphNameUnavailableError) {
+                                setSubmitError(err.message)
+                                setNameConflict(err.suggestion)
+                                return
+                            }
                             setSubmitError(err instanceof Error ? err.message : 'Could not create the blank model. Please try again.')
                             return
                         }
@@ -1278,11 +1293,16 @@ function ViewWizardBody({
     const isTerminal = mode === 'create' && (phase === 'creating' || phase === 'success')
 
     // Auto-open: the view is saved and there is nowhere else to go, so open it for
-    // the user unless they're clearly still reading (hover) or they choose otherwise.
+    // the user unless they say otherwise ("Stay here").
     const countdown = useAutoOpenCountdown({
         enabled: mode === 'create' && phase === 'success',
         onFire: handleOpenNow,
     })
+
+    // handleSubmit is re-created each render; the retry-with-a-new-name path needs
+    // the CURRENT one after a setState, so route it through a ref.
+    const handleSubmitRef = useRef<(() => void) | null>(null)
+    handleSubmitRef.current = handleSubmit
 
     const creationStages: CreationStage[] = useMemo(() => [
         ...(isBlank ? [{
@@ -1320,15 +1340,31 @@ function ViewWizardBody({
         return stats
     }, [formData.layoutType, formData.layers.length, formData.assignments, formData.visibleEntityTypes.length, formData.visibility])
 
+    /** Late graph-name collision: adopt the free name the server offered, then retry. */
+    const handleUseSuggestedName = useCallback(() => {
+        if (!nameConflict) return
+        setFormData(prev => ({ ...prev, graphName: nameConflict, graphNameIsAuto: true, graphNameAvailable: undefined }))
+        setNameConflict(null)
+        setSubmitError(null)
+        // Re-run submit on the next tick, with the new name in formData.
+        setTimeout(() => handleSubmitRef.current?.(), 0)
+    }, [nameConflict])
+
     const terminalFooter = phase === 'creating'
         ? (submitError
-            ? <CreationErrorFooter onBack={() => setPhase('steps')} onRetry={handleSubmit} />
+            ? (
+                <CreationErrorFooter
+                    onBack={() => setPhase('steps')}
+                    onRetry={handleSubmit}
+                    suggestedName={nameConflict}
+                    onUseSuggestedName={handleUseSuggestedName}
+                />
+            )
             : <CreationBusyFooter />)
         : phase === 'success'
             ? (
                 <CreationSuccessFooter
                     remaining={countdown.remaining}
-                    paused={countdown.paused}
                     onOpenNow={() => { countdown.cancel(); handleOpenNow() }}
                     onStayHere={() => { countdown.cancel(); handleStayHere() }}
                 />
@@ -1370,11 +1406,12 @@ function ViewWizardBody({
                     />
                 ) : (
                     <CreationSuccessBody
+                        icon={formData.icon}
+                        graphName={isBlank ? (provisionRef.current?.graphName ?? formData.graphName) : undefined}
                         viewName={formData.name}
                         scopeLabel={scopeContext?.dataSourceLabel}
                         isBlank={isBlank}
                         stats={successStats}
-                        onPauseChange={countdown.setPaused}
                     />
                 )
             ) : (

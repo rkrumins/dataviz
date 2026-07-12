@@ -126,21 +126,49 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     }, [formData.tags, updateFormData])
 
     // ── Physical graph name (blank models) ──────────────────────────────────
-    // Auto-derived from the model name until the user edits it; every change is
-    // debounce-checked against the backend's authoritative availability rules
-    // (slug shape, reserved prefixes, per-provider uniqueness, live key check).
-    const effectiveGraphName = formData.graphName ?? slugifyGraphName(formData.name)
-    const graphNameEdited = formData.graphName !== undefined
+    //
+    // This name IS the FalkorDB key the model is stored under, and a projection
+    // seed WIPES that key — so a collision is destructive, not cosmetic. The
+    // server refuses to provision onto an existing key (validated under a
+    // per-(provider, name) advisory lock, across every workspace, plus a live
+    // GRAPH.LIST check), so someone else's data can never be overwritten.
+    //
+    // What we owe the user on top of that guarantee is not making them solve it:
+    // the name is derived from the view name, so two people naming a view "Data
+    // Lineage" collide by construction. When the derived name is taken we adopt
+    // the server's free alternative (data_lineage → data_lineage_2) automatically
+    // and say so. A name the user typed themselves is never silently changed —
+    // they get the same alternative as a one-click fix instead.
+    const isAutoName = formData.graphNameIsAuto !== false
+    const derivedGraphName = slugifyGraphName(formData.name)
+    const effectiveGraphName = formData.graphName ?? derivedGraphName
+
     const [nameCheck, setNameCheck] = useState<
-        { state: 'idle' | 'checking' | 'available' } | { state: 'unavailable'; reason: string }
+        | { state: 'idle' | 'checking' | 'available' }
+        | { state: 'unavailable'; reason: string; suggestion: string | null }
     >({ state: 'idle' })
+    /** Set when we auto-moved off a taken name, so the UI can explain itself. */
+    const [autoUniquifiedFrom, setAutoUniquifiedFrom] = useState<string | null>(null)
     const checkSeq = useRef(0)
+
+    // Keep the auto-derived name in step with the view name (until the user takes
+    // the wheel). Writing it into formData — rather than deriving it at submit —
+    // is what lets the uniquified name actually be the one we provision.
+    useEffect(() => {
+        if (!blankNaming || !isAutoName) return
+        if (autoUniquifiedFrom === derivedGraphName) return   // already handled this base
+        if (formData.graphName === derivedGraphName) return
+        setAutoUniquifiedFrom(null)
+        updateFormData({ graphName: derivedGraphName, graphNameAvailable: undefined })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [blankNaming, isAutoName, derivedGraphName])
+
     useEffect(() => {
         if (!blankNaming) return
         const name = effectiveGraphName
         if (!name || !GRAPH_NAME_RE.test(name)) {
             setNameCheck(name
-                ? { state: 'unavailable', reason: "Use 3–64 characters: lowercase letters, numbers, '-' or '_'." }
+                ? { state: 'unavailable', reason: "Use 3–64 characters: lowercase letters, numbers, '-' or '_'.", suggestion: null }
                 : { state: 'idle' })
             updateFormData({ graphNameAvailable: name ? false : undefined })
             return
@@ -151,10 +179,25 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             checkBlankGraphName(blankNaming.workspaceId, blankNaming.providerId, name)
                 .then((res) => {
                     if (checkSeq.current !== seq) return
-                    setNameCheck(res.available
-                        ? { state: 'available' }
-                        : { state: 'unavailable', reason: res.reason ?? 'This name is taken.' })
-                    updateFormData({ graphNameAvailable: res.available })
+                    if (res.available) {
+                        setNameCheck({ state: 'available' })
+                        updateFormData({ graphNameAvailable: true })
+                        return
+                    }
+                    // Taken. If WE picked this name, pick a better one — don't hand
+                    // the user an error they didn't cause.
+                    if (isAutoName && res.suggestion) {
+                        setAutoUniquifiedFrom(name)
+                        setNameCheck({ state: 'checking' })
+                        updateFormData({ graphName: res.suggestion, graphNameAvailable: undefined })
+                        return
+                    }
+                    setNameCheck({
+                        state: 'unavailable',
+                        reason: res.reason ?? 'This name is taken.',
+                        suggestion: res.suggestion ?? null,
+                    })
+                    updateFormData({ graphNameAvailable: false })
                 })
                 .catch(() => {
                     // Check unavailable (offline, transient) — don't block; the
@@ -166,7 +209,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
         }, 400)
         return () => clearTimeout(t)
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [blankNaming?.workspaceId, blankNaming?.providerId, effectiveGraphName])
+    }, [blankNaming?.workspaceId, blankNaming?.providerId, effectiveGraphName, isAutoName])
 
     return (
         <div className="max-w-xl mx-auto space-y-8">
@@ -347,10 +390,14 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                         <input
                             type="text"
                             value={effectiveGraphName}
-                            onChange={(e) => updateFormData({
-                                graphName: e.target.value.toLowerCase(),
-                                graphNameAvailable: undefined,
-                            })}
+                            onChange={(e) => {
+                                setAutoUniquifiedFrom(null)
+                                updateFormData({
+                                    graphName: e.target.value.toLowerCase(),
+                                    graphNameIsAuto: false,
+                                    graphNameAvailable: undefined,
+                                })
+                            }}
                             spellCheck={false}
                             className="flex-1 px-3 py-3 bg-transparent font-mono text-sm outline-none"
                             placeholder="my_lineage_model"
@@ -361,16 +408,51 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             {nameCheck.state === 'unavailable' && <AlertTriangle className="w-4 h-4 text-rose-500" />}
                         </span>
                     </div>
+
                     {nameCheck.state === 'unavailable' ? (
-                        <p className="text-xs text-rose-500">{nameCheck.reason}</p>
+                        <div className="flex items-start gap-1.5 text-xs text-rose-500">
+                            <span className="flex-1">{nameCheck.reason}</span>
+                            {nameCheck.suggestion && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setAutoUniquifiedFrom(null)
+                                        updateFormData({
+                                            graphName: nameCheck.suggestion!,
+                                            graphNameIsAuto: false,
+                                            graphNameAvailable: undefined,
+                                        })
+                                    }}
+                                    className="shrink-0 font-medium text-blue-500 hover:underline"
+                                >
+                                    Use {nameCheck.suggestion}
+                                </button>
+                            )}
+                        </div>
+                    ) : autoUniquifiedFrom && nameCheck.state === 'available' ? (
+                        <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                            <Sparkles className="w-3 h-3 mt-0.5 shrink-0" />
+                            <span>
+                                <span className="font-mono">{autoUniquifiedFrom}</span> is already taken on this
+                                connection, so we picked <span className="font-mono">{effectiveGraphName}</span>.
+                                Nothing existing is touched — edit it if you&apos;d rather.
+                            </span>
+                        </p>
                     ) : (
                         <p className="text-xs text-slate-400 dark:text-slate-500">
                             The graph key your model is stored under — used by anything that
                             queries the graph directly. Pick it once; it can&apos;t be renamed later.
-                            {graphNameEdited && (
+                            {formData.graphNameIsAuto === false && (
                                 <button
                                     type="button"
-                                    onClick={() => updateFormData({ graphName: undefined, graphNameAvailable: undefined })}
+                                    onClick={() => {
+                                        setAutoUniquifiedFrom(null)
+                                        updateFormData({
+                                            graphName: derivedGraphName,
+                                            graphNameIsAuto: true,
+                                            graphNameAvailable: undefined,
+                                        })
+                                    }}
                                     className="ml-1.5 text-blue-500 hover:underline"
                                 >
                                     Reset to suggestion
