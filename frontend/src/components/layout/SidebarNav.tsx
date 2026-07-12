@@ -15,8 +15,8 @@ import {
   BookOpen,
   Sparkles,
 } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
-import { useNavigationStore, type NavigationTab } from '@/store/navigation'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { tabForPath, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
@@ -299,9 +299,11 @@ function NavButton({ item, collapsed, active, onClick, onHoverStart, onHoverEnd 
 // ─────────────────────────────────────────────────────────────────────
 export function SidebarNav() {
   const navigate = useNavigate()
-  // Selector subscriptions so this always-mounted shell doesn't re-render on
-  // unrelated navigation/preference writes.
-  const activeTab = useNavigationStore((s) => s.activeTab)
+  // Active section is derived from the URL — the single source of truth — so the
+  // highlight can never desync from the route. Selector subscriptions below keep
+  // this always-mounted shell from re-rendering on unrelated preference writes.
+  const { pathname } = useLocation()
+  const activeTab = tabForPath(pathname)
   const sidebarCollapsed = usePreferencesStore((s) => s.sidebarCollapsed)
   const toggleSidebar = usePreferencesStore((s) => s.toggleSidebar)
   const activeLensId = useCanvasStore((s) => s.activeLensId)

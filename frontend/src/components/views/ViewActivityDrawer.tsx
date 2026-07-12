@@ -3,7 +3,7 @@
  * Opened from anywhere a view is actioned (overflow menu, list row, view page).
  */
 import { createPortal } from 'react-dom'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { X, History } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ViewActivityTimeline } from '@/components/views/ViewActivityTimeline'
@@ -17,12 +17,12 @@ export function ViewActivityDrawer({ viewId, viewName, isOpen, onClose }: {
     return createPortal(
         <>
             <Backdrop open={isOpen && !!viewId} onClick={onClose} zClassName="z-[70]" />
-            <AnimatePresence>
+            {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
+            <>
                 {isOpen && viewId && (
                     <motion.aside
                         initial={{ x: '100%' }}
                         animate={{ x: 0 }}
-                        exit={{ x: '100%' }}
                         transition={{ type: 'spring', stiffness: 360, damping: 38 }}
                         className="fixed right-0 top-0 bottom-0 z-[71] w-full max-w-lg bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
                     >
@@ -47,7 +47,7 @@ export function ViewActivityDrawer({ viewId, viewName, isOpen, onClose }: {
                         </div>
                     </motion.aside>
                 )}
-            </AnimatePresence>
+            </>
         </>,
         document.body,
     )

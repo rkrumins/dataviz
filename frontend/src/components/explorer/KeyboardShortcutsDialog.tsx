@@ -6,7 +6,7 @@
  * reserved for the future ⌘K feature. Undiscoverable shortcuts are
  * nearly worthless; this makes them one keystroke away.
  */
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { createPortal } from 'react-dom'
 import { Command, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -63,13 +63,13 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
       {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
           through to the Backdrop beneath → outside-click still closes). */}
       <div className="fixed inset-0 z-[91] flex items-center justify-center p-4 pointer-events-none">
-        <AnimatePresence>
+        {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
+        <>
           {isOpen && (
             <motion.div
               key="shortcuts-card"
               initial={{ opacity: 0, y: 8, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.15, ease: 'easeOut' }}
               className={cn(
                 'pointer-events-auto w-full max-w-lg rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg',
@@ -108,7 +108,7 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
               </div>
             </motion.div>
           )}
-        </AnimatePresence>
+        </>
       </div>
     </>,
     document.body,
