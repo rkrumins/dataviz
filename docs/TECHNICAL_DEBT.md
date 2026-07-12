@@ -338,6 +338,25 @@ Trace operations wait for backend response before updating UI. Perceived latency
 | **Growing inline migrations** | Medium | 15+ `ALTER TABLE` statements in `init_db()` with exceptions silently caught. No ordering, no version tracking, no rollback. Each new schema change adds another raw SQL statement. Risk of partial application and silent failures increases linearly. |
 | **Per-worker ProviderRegistry cache isolation** | Medium | Each Uvicorn worker has its own `ProviderRegistry` singleton. With N workers = N separate connection pools. Config changes (eviction, provider updates) in one worker are invisible to others. Silent coherence issue at scale; fine for single-worker dev. Future: Redis-backed shared cache. |
 
+### 6.2 Pre-Production Readiness Review (2026-07)
+
+Findings from the readiness review after the strategic-decoupling wave. The k8s
+manifests were reconciled to a single system and all overlays now build (commit
+472d4a26); the items below need operator/infra decisions or work beyond the
+manifests.
+
+| Gap | Severity | Detail & recommendation |
+|-----|----------|-------------------------|
+| **Container image-naming drift** | **CRITICAL** | The build and deploy names don't match: the **Makefile** builds `$(REGISTRY)/viz-service`, **CI** (`build-images.yml`) builds `viz-service` / `aggregation-worker` / `stats-service`, but the **manifests** deploy `synodic-viz` / `synodic-worker` (the `make apply` sed rewrites `.../synodic/<name>`). Deployed names ≠ built names → `ImagePullBackOff`. **Pick ONE canonical scheme and align Makefile + `base/**` image refs + overlay `images:` maps + CI.** Cannot be guessed — depends on what's actually in your Artifact Registry. |
+| **In-cluster single-replica data tier** | **CRITICAL** | `base/infrastructure/{postgres,redis,falkordb}` are single-replica StatefulSets. On a regional GKE cluster a reschedule = downtime / the FalkorDB zombie-key/lost-write class. **Prod should use managed Cloud SQL + MemoryStore:** add a production component that (a) drops the in-cluster StatefulSets and (b) points `MANAGEMENT_DB_URL` / `REDIS_URL` / `CACHE_REDIS_URL` at managed endpoints via secret. FalkorDB has no managed equivalent → needs its own HA + backup plan. |
+| **No metrics export / alerting** | **HIGH** | Counters are collected (`jobs/metrics.py`, `middleware/db_metrics.py`) but there is no `/metrics` scrape endpoint, Prometheus exporter, or GCP Monitoring wiring. Resilience you can't observe fails silently. **Add an exporter + dashboards + alerts** on: web event-loop lag (the wedge watchdog is log-only), per-provider reachability, stream/consumer-group lag, DB pool saturation, Redis memory/eviction, worker fleet size. |
+| **No system-level load/chaos test** | **HIGH** | Every decoupling change is verified individually, but the whole topology under target scale is not. **Run one soak/chaos pass:** "Bob's FalkorDB" under concurrent load, cold-start with the 7.7M `perf-load-test-solidatus` graph, and a request storm that must 429-shed rather than OOM. |
+| **FalkorDB durability + recovery runbook** | **HIGH** | History of AOF version crash-loops, snapshot zombie keys, and lost writes on restart; graph loss is catastrophic. Dev has self-heal entrypoints; **prod needs backup + a rehearsed restore procedure.** |
+| **SSRF via provider connection-testing** | **HIGH** | The onboarding wizard tests arbitrary `host:port` from inside the cluster (a tenant could probe internal services / the GCP metadata endpoint). **Add an egress allowlist / metadata-endpoint block** on the connection tester. |
+| Control-plane scheduler not single-flight under HA | Low | Control plane is now 2 replicas (SPOF removed). The scheduler is detect-and-log (idempotent), so 2 replicas is safe, but it does 2× drift-check reads against FalkorDB every 60s. If that read load matters, gate `_tick` behind a Postgres advisory lock like the reconciler. |
+| `stats` is not a real `SynodicRole` | Low | The insights/stats service sets `SYNODIC_ROLE=stats`, which falls back to `dev`, so the WS2.1 dedicated-cache guard is skipped for it (the structural `build_cache_client` fix still prevents FalkorDB co-location). Add a `STATS` role or use `worker`. |
+| `DATA_ARCHITECTURE.md` §6 stale reference | Low | Still names the deleted `backend/stats_service/main.py`; the live service is `backend/insights_service`. |
+
 ---
 
 ## 7. Prioritized Remediation Plan
