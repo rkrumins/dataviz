@@ -1,0 +1,17 @@
+# One voluntary disruption at a time across the WHOLE cluster (doc §4):
+# GKE node upgrades therefore rotate FalkorDB pods serially, so a shard
+# never loses master AND replica to the same drain wave, and each
+# failover completes before the next pod goes down.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: falkordb-cluster
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: falkordb-cluster

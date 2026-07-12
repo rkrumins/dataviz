@@ -1,0 +1,37 @@
+# Production + FalkorDB Redis Cluster (INFRASTRUCTURE_LAUNCH_SCALE.md §7).
+#
+# Layers on the production overlay and swaps the single-replica FalkorDB
+# StatefulSet for the 3-shard × (master + replica) cluster on the dedicated
+# `falkordb-pool` node pool. Opt-in by design: rendering/deploying
+# `overlays/production` is unchanged; deploy THIS overlay to cut over.
+#
+# PREREQUISITES (see README.md in this directory):
+#   1. The tainted node pool exists:  falkordb-pool, 6 × n4-highmem-8,
+#      2 per zone, taint dedicated=falkordb:NoSchedule (doc §3).
+#   2. CACHE_REDIS_URL points at Memorystore (managed-data-tier patch) —
+#      cluster mode cannot host the provider cache (ADR-020 / doc §7.3).
+#   3. Cutover reseeds graphs from Cloud SQL (doc §7.4) — FalkorDB is a
+#      disposable projection; the RDB/AOF of the old single instance is
+#      NOT migrated.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../production
+  - resources/falkordb-cluster-service.yaml
+  - resources/falkordb-cluster-statefulsets.yaml
+  - resources/falkordb-cluster-pdb.yaml
+  - resources/falkordb-cluster-init-job.yaml
+
+patches:
+  # The 3-shard cluster replaces the single-node StatefulSet + Service.
+  - path: patches/remove-single-falkordb.yaml
+  # FALKORDB_MODE=cluster + seed nodes for the topology-aware client.
+  - path: patches/cluster-config.yaml
+
+# Image retags from ../production apply only to ITS resources; the
+# cluster StatefulSets/Job added here need their own falkordb entry.
+images:
+  - name: REGISTRY/falkordb
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/falkordb
+    newTag: prod-latest
