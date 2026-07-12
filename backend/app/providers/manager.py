@@ -68,6 +68,8 @@ def apply_local_dev_falkordb_override(host, port):
     return host, port
 
 
+from backend.app.config import resilience as _resilience
+
 # Tuneable via env vars. See backend/app/config/resilience.py for full reference.
 _BREAKER_FAIL_MAX = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
@@ -146,6 +148,12 @@ class ProviderManager:
         # Workspace-centric cache: (provider_id, graph_name) -> breaker-wrapped provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+        # Last-use clock (monotonic) per cache key, driving the LRU cap + idle reaper.
+        # Without them the cache only ever grows: each entry keeps its connection pool
+        # open forever (redis-py pools never reap idle sockets), so a data source used
+        # once holds its sockets until the pod restarts — and at full HPA fan-out the
+        # fleet-wide total approaches FalkorDB's maxclients, which fails hard.
+        self._last_used: Dict[Tuple[str, str], float] = {}
 
         # Instantiation-time circuit breakers -- prevent repeated 10s timeouts
         # against a dead downstream. Opens after _BREAKER_FAIL_MAX failures,
@@ -239,6 +247,7 @@ class ProviderManager:
         # pool while the breaker is opening.
         if cache_key in self._providers:
             provider = self._providers[cache_key]
+            self._last_used[cache_key] = time.monotonic()
             await self._ensure_reachable(cache_key, provider)
             return provider
 
@@ -331,13 +340,16 @@ class ProviderManager:
             raw_provider.manager_cache_key = cache_key
             breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
             self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
+            self._last_used[cache_key] = time.monotonic()
             state_after, _ = await breaker._record_success()
             logger.info(
                 "Provider cached for %s (breaker=%s)",
                 cache_key, state_after,
             )
+            await self._enforce_cache_cap()
 
         provider = self._providers[cache_key]
+        self._last_used[cache_key] = time.monotonic()
         await self._ensure_reachable(cache_key, provider)
         return provider
 
@@ -781,29 +793,97 @@ class ProviderManager:
                 "Failed to invalidate registry graph clients for %s: %s",
                 provider_id, exc,
             )
-        cache_key = (provider_id, graph_name or "")
+        await self._close_and_forget((provider_id, graph_name or ""))
+        logger.info("Evicted provider for key=%s", (provider_id, graph_name or ""))
+
+    async def _close_and_forget(self, cache_key: Tuple[str, str]) -> None:
+        """Drop one cached provider and release its pools.
+
+        Shared by eviction (config change / recovery) and by capacity reaping. It
+        deliberately does NOT touch the registry's connection-config caches — those
+        are about config staleness, and a reap is only about reclaiming sockets from
+        a cold provider; nuking them would force every projector client for that
+        instance to rebuild for no reason.
+
+        ``close()`` is DEFERRED while the provider has in-flight guarded ops: closing
+        mid-job nulls the graph handle out from under a running aggregation.
+        """
         provider = self._providers.pop(cache_key, None)
         self._locks.pop(cache_key, None)
+        self._last_used.pop(cache_key, None)
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
-        if provider is not None:
+        if provider is None:
+            return
+        inflight = 0
+        try:
+            inflight = provider.inflight_ops()
+        except Exception:
             inflight = 0
+        if inflight > 0:
+            logger.info(
+                "Provider %s evicted from cache but has %d in-flight ops — "
+                "deferring close until idle.", cache_key, inflight,
+            )
+            asyncio.create_task(self._close_when_idle(cache_key, provider))
+        else:
             try:
-                inflight = provider.inflight_ops()
+                await provider.close()
+            except Exception as exc:
+                logger.warning("Error closing provider %s: %s", cache_key, exc)
+
+    def _idle_keys_lru_first(self) -> list:
+        """Cached keys with no in-flight ops, least-recently-used first."""
+        idle = []
+        for key, provider in self._providers.items():
+            try:
+                if provider.inflight_ops() > 0:
+                    continue
             except Exception:
-                inflight = 0
-            if inflight > 0:
-                logger.info(
-                    "Provider %s evicted from cache but has %d in-flight ops — "
-                    "deferring close until idle.", cache_key, inflight,
-                )
-                asyncio.create_task(self._close_when_idle(cache_key, provider))
-            else:
-                try:
-                    await provider.close()
-                except Exception as exc:
-                    logger.warning("Error closing provider %s: %s", cache_key, exc)
-        logger.info("Evicted provider for key=%s", cache_key)
+                pass
+            idle.append(key)
+        idle.sort(key=lambda k: self._last_used.get(k, 0.0))
+        return idle
+
+    async def _enforce_cache_cap(self) -> None:
+        """Keep the cache under PROVIDER_CACHE_MAX by closing the least-recently-used
+        IDLE providers. A busy provider is never closed — the cap is a safety net
+        against unbounded socket growth, not a throttle on live traffic."""
+        cap = _resilience.PROVIDER_CACHE_MAX
+        if cap <= 0 or len(self._providers) <= cap:
+            return
+        for key in self._idle_keys_lru_first():
+            if len(self._providers) <= cap:
+                break
+            logger.info(
+                "Provider cache over capacity (%d > %d) — closing LRU idle provider %s",
+                len(self._providers), cap, key,
+            )
+            await self._close_and_forget(key)
+
+    async def reap_idle_providers(self) -> int:
+        """Close providers unused for PROVIDER_CACHE_IDLE_TTL_SECS, reclaiming their
+        sockets and memory (redis-py pools keep idle connections open forever, so a
+        data source touched once holds its sockets until the process restarts).
+
+        Called from the warmup loop's cycle callback, so the web tier and the
+        aggregation worker both get it. Returns the number closed.
+        """
+        ttl = _resilience.PROVIDER_CACHE_IDLE_TTL_SECS
+        if ttl <= 0 or not self._providers:
+            return 0
+        now = time.monotonic()
+        stale = [
+            key for key in self._idle_keys_lru_first()
+            if now - self._last_used.get(key, now) > ttl
+        ]
+        for key in stale:
+            logger.info(
+                "Provider %s idle for >%.0fs — closing to reclaim its connections.",
+                key, ttl,
+            )
+            await self._close_and_forget(key)
+        return len(stale)
 
     async def _close_when_idle(
         self, cache_key: tuple, provider: Any, *, timeout_s: float = 600.0,

@@ -629,6 +629,19 @@ async def start_provider_warmup(
     async def _on_cycle_complete() -> None:
         # Heartbeat for the /health/deps liveness signal.
         provider_manager.warmup_last_cycle_at = _time.monotonic()
+        # Reclaim connections held by providers nobody has used in a while. redis-py
+        # pools never reap idle sockets, so without this a data source touched once
+        # keeps its connections until the pod restarts — and at fleet scale the total
+        # approaches FalkorDB's maxclients. Runs here so the web tier AND the
+        # aggregation worker both get it (both start this loop).
+        try:
+            reap = getattr(provider_manager, "reap_idle_providers", None)
+            if reap is not None:
+                closed = await reap()
+                if closed:
+                    logger.info("Reaped %d idle provider instance(s)", closed)
+        except Exception as exc:                     # pragma: no cover - best effort
+            logger.warning("Idle-provider reap failed: %s", exc)
 
     tasks: list = []
     if initial_pass:
