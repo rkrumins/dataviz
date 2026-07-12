@@ -63,6 +63,28 @@ FALKORDB_SLOW_QUERY_MS: int = int(os.getenv("FALKORDB_SLOW_QUERY_MS", "500"))
 # Short because these run during _ensure_connected() on the critical path.
 FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
 
+# ── Provider instance cache (ProviderManager) ───────────────────────
+# One provider instance is cached per (provider_id, graph_name) — i.e. per data
+# source — and each holds its own connection pool. redis-py pools have NO idle
+# reaper: once a socket is opened it is returned to the pool and kept open, so a
+# data source touched once at 3am holds its sockets until the pod restarts.
+#
+# The ceiling this protects: sockets ≈ (data sources) × (peak concurrency per
+# provider, capped by PROVIDER_MAX_CONCURRENCY) × (pods). At full HPA fan-out that
+# approaches FalkorDB's `maxclients` (10k default), and exhausting it is not a
+# graceful degradation — FalkorDB refuses new connections fleet-wide, which reads
+# as a total graph outage.
+#
+# Max cached provider instances per process. When exceeded, the least-recently-used
+# IDLE instance is closed (in-flight ones are never touched). Generous by design:
+# this is a safety net, not a behavior change.
+PROVIDER_CACHE_MAX: int = int(os.getenv("PROVIDER_CACHE_MAX", "256"))
+# Close a cached provider after this many seconds without use, reclaiming its
+# sockets and memory. 0 disables idle reaping. Swept on the warmup loop's cycle
+# (~30s), so both the web tier and the aggregation worker get it.
+PROVIDER_CACHE_IDLE_TTL_SECS: float = float(
+    os.getenv("PROVIDER_CACHE_IDLE_TTL_SECS", "900"))
+
 # ── FalkorDB socket hygiene (every raw ConnectionPool) ──────────────
 # These four apply to ALL FalkorDB/Redis connection pools the backend
 # builds (provider read path, graph registry, versioning projector) via
