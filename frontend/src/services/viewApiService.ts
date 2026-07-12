@@ -361,6 +361,8 @@ export interface ViewActivityEntry {
     summary: string | null
     changes: Record<string, unknown> | null
     createdAt: string
+    /** Present only in the workspace-wide feed. */
+    viewName?: string | null
     /** True for a synthesized anchor on a legacy view with no recorded rows. */
     synthetic: boolean
 }
@@ -375,6 +377,15 @@ export async function getViewActivity(
     if (opts?.limit) sp.set('limit', String(opts.limit))
     const qs = sp.toString()
     return apiFetch<ViewActivityEntry[]>(`/api/v1/views/${viewId}/activity${qs ? `?${qs}` : ''}`)
+}
+
+/** Recent activity across all of a workspace's views (each entry has viewName). */
+export async function getWorkspaceViewActivity(
+    workspaceId: string,
+    opts?: { limit?: number },
+): Promise<ViewActivityEntry[]> {
+    const qs = opts?.limit ? `?limit=${opts.limit}` : ''
+    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/workspace/${workspaceId}/activity${qs}`)
 }
 
 /** Update an existing view */

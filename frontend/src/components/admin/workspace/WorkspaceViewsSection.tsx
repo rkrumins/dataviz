@@ -27,8 +27,9 @@ import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
-    Lock, Users, Globe, AlertTriangle, UserRound, Clock, X,
+    Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
 } from 'lucide-react'
+import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import {
@@ -77,6 +78,7 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
     const [attentionOnly, setAttentionOnly] = useState(false)
     const [sort, setSort] = useState<SortOption>('updated')
     const [layout, setLayout] = useState<'grid' | 'list'>('grid')
+    const [showActivity, setShowActivity] = useState(false)
 
     const filters: ExplorerFilters = useMemo(() => ({
         search,
@@ -264,6 +266,23 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
                             onClick={() => setAttentionOnly(a => !a)} />
                     )}
                 </div>
+            </div>
+
+            {/* ── Recent activity (collapsible) ──────────────────── */}
+            <div className="rounded-2xl border border-glass-border bg-canvas-elevated mb-4 overflow-hidden">
+                <button
+                    onClick={() => setShowActivity(v => !v)}
+                    className="w-full flex items-center gap-2 px-4 py-3 text-sm font-semibold text-ink hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                >
+                    <History className="w-4 h-4 text-indigo-500" />
+                    Recent activity
+                    <ChevronDown className={cn('w-4 h-4 text-ink-muted ml-auto transition-transform', showActivity && 'rotate-180')} />
+                </button>
+                {showActivity && (
+                    <div className="px-4 pb-3 border-t border-glass-border/50 pt-2">
+                        <WorkspaceActivityFeed workspaceId={wsId} />
+                    </div>
+                )}
             </div>
 
             {/* ── Header actions ─────────────────────────────────── */}
