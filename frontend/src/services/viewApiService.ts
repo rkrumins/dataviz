@@ -347,7 +347,7 @@ export async function getView(viewId: string, branchId?: string): Promise<View> 
 
 export type ViewActivityAction =
     | 'created' | 'updated' | 'visibility_changed' | 'shared' | 'unshared'
-    | 'favourited' | 'unfavourited' | 'deleted' | 'restored'
+    | 'favourited' | 'unfavourited' | 'deleted' | 'restored' | 'data_changed'
 
 /** One entry in a view's activity timeline. Field diffs live in ``changes``
  *  (e.g. { name: { from, to }, viewType: { from, to }, content: true }). */
