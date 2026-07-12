@@ -20,8 +20,19 @@ export function useBootstrapWatch(
   { headSeq, seed }: { headSeq: number; seed?: BootstrapJob | null },
 ) {
   const qc = useQueryClient()
-  const [watching, setWatching] = useState(false)
-  const [reportDismissed, setReportDismissed] = useState(false)
+
+  // WHICH data source, not a bare boolean. The drawer that hosts this is not remounted when
+  // the user picks a different data source (`<DataSourceDetailPanel ds={selectedDs}>` has no
+  // key), so booleans leak across sources — and both directions are wrong: a stale `watching`
+  // resurrects an OLD completed job's integrity report as if it had just been earned, and a
+  // stale `dismissed` swallows the receipt for the next copy the user actually runs. Holding
+  // the id makes both self-reset the moment we're pointed somewhere else, with no effect and
+  // no stale frame.
+  const [watched, setWatched] = useState<string | null>(null)
+  const [dismissed, setDismissed] = useState<string | null>(null)
+
+  const watching = !!dataSourceId && watched === dataSourceId
+  const reportDismissed = !!dataSourceId && dismissed === dataSourceId
 
   const q = useBootstrapStatus(wsId, dataSourceId, {
     // Only a not-yet-versioned source can have a live job — except while we're holding
@@ -33,8 +44,8 @@ export function useBootstrapWatch(
   const active = job?.status === 'pending' || job?.status === 'running'
 
   useEffect(() => {
-    if (active) setWatching(true)
-  }, [active])
+    if (active && dataSourceId) setWatched(dataSourceId)
+  }, [active, dataSourceId])
 
   // The moment it lands the graph is live: refresh everything that was still rendering
   // this data source as un-versioned (resolve, branches, history).
@@ -50,6 +61,6 @@ export function useBootstrapWatch(
     showProgress: !!job && (active || job.status === 'failed'),
     /** The integrity report, for whoever ran the copy, until they dismiss it. */
     showReport: !!job && job.status === 'completed' && watching && !reportDismissed,
-    dismissReport: () => setReportDismissed(true),
+    dismissReport: () => setDismissed(dataSourceId),
   }
 }
