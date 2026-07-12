@@ -451,6 +451,55 @@ export async function favouriteView(viewId: string): Promise<void> {
     return apiFetch<void>(`/api/v1/views/${viewId}/favourite`, { method: 'POST' })
 }
 
+/** One entry in "Continue where you left off". Server-side + per-user.
+ *  Optionals are `undefined` (not null) so consumers keep the exact shape the
+ *  previous localStorage store exposed. */
+export interface RecentViewEntry {
+    viewId: string
+    viewName: string
+    viewType: string
+    /** User-chosen view icon (config.icon) — wins over the type icon. */
+    icon?: string
+    workspaceId?: string
+    workspaceName?: string
+    dataSourceId?: string
+    dataSourceName?: string
+    visitedAt: string
+}
+
+/** Wire shape — the API sends JSON `null` for absent optionals. */
+interface RecentViewApi extends Omit<RecentViewEntry, 'icon' | 'workspaceId' | 'workspaceName' | 'dataSourceId' | 'dataSourceName'> {
+    icon?: string | null
+    workspaceId?: string | null
+    workspaceName?: string | null
+    dataSourceId?: string | null
+    dataSourceName?: string | null
+}
+
+/** The signed-in user's recently visited views — follows them across devices,
+ *  and is joined against the live views (never a stale name / deleted entry). */
+export async function getRecentViews(limit = 5): Promise<RecentViewEntry[]> {
+    const raw = await apiFetch<RecentViewApi[]>(`/api/v1/views/me/recent?limit=${limit}`)
+    // Normalise null → undefined at the boundary so consumers (sidebar, command
+    // palette, dashboard) keep the shape they had under localStorage.
+    return (raw ?? []).map(r => ({
+        viewId: r.viewId,
+        viewName: r.viewName,
+        viewType: r.viewType,
+        icon: r.icon ?? undefined,
+        workspaceId: r.workspaceId ?? undefined,
+        workspaceName: r.workspaceName ?? undefined,
+        dataSourceId: r.dataSourceId ?? undefined,
+        dataSourceName: r.dataSourceName ?? undefined,
+        visitedAt: r.visitedAt,
+    }))
+}
+
+/** Record that the current user opened this view (drives the recents strip). */
+export async function recordViewVisit(viewId: string): Promise<void> {
+    return apiFetch<void>(`/api/v1/views/${viewId}/visit`, { method: 'POST' })
+}
+
 /** Unfavourite a view */
 export async function unfavouriteView(viewId: string): Promise<void> {
     return apiFetch<void>(`/api/v1/views/${viewId}/favourite`, { method: 'DELETE' })

@@ -105,6 +105,16 @@ def _redis_auth_reason(line: bytes, *, had_password: bool) -> str | None:
     the frontend maps them to distinct, user-clear messages.
     """
     upper = line.decode(errors="replace").strip().upper()
+    if (
+        "WITHOUT ANY PASSWORD CONFIGURED" in upper
+        or "CLIENT SENT AUTH, BUT NO PASSWORD IS SET" in upper
+    ):
+        # We sent credentials to an instance that has NO auth configured. Not a
+        # failure: the graph is reachable. The connection layer drops the stale
+        # credentials and reconnects (see falkordb_connection.with_auth_negotiation);
+        # the probe reports the instance as healthy so a leftover password on a
+        # provider row can't show a working graph as down.
+        return "auth_not_configured"
     if "NOAUTH" in upper:
         # NOAUTH with a password sent = the AUTH didn't stick (rejected);
         # without a password = the server requires auth we never supplied.
@@ -178,7 +188,11 @@ async def redis_ping_preflight(
             auth_reply = await asyncio.wait_for(reader.readline(), timeout=remaining)
             if auth_reply and auth_reply.startswith(b"-"):
                 reason = _redis_auth_reason(auth_reply, had_password=True)
-                if reason is not None:
+                # "auth_not_configured" = we sent credentials to an instance that has
+                # none. The instance is REACHABLE — fall through to PING and report it
+                # healthy (the connection layer drops the stale credentials). Failing
+                # here would show a working graph as down over a leftover password.
+                if reason is not None and reason != "auth_not_configured":
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     return PreflightResult.failure(reason=reason, elapsed_ms=elapsed_ms)
 

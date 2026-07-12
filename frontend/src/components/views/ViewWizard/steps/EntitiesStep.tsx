@@ -23,6 +23,7 @@ import {
     Hash,
     Box,
     GitBranch,
+    Layers,
     Sparkles,
     Info,
     ListTree
@@ -30,6 +31,9 @@ import {
 import { cn } from '@/lib/utils'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { OntologyHierarchyPreview } from '../OntologyHierarchyPreview'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import type { WizardFormData, ActiveFilter } from '../ViewWizard'
 
@@ -42,15 +46,42 @@ interface EntitiesStepProps {
     updateFormData: (updates: Partial<WizardFormData>) => void
     /** Data source whose assigned ontology scopes entity/relationship type pickers. */
     dataSourceId?: string
+    /** Create mode may prune its OWN seed; an existing view's selection is the user's. */
+    mode?: 'create' | 'edit'
 }
 
 // interface ActiveFilter moved to ViewWizard.tsx
+
+/**
+ * Index type-count summaries by CASEFOLDED id.
+ *
+ * Stats are keyed by the type string as it exists in the GRAPH (the FalkorDB
+ * provider emits `EdgeTypeSummary(id=t)` straight from the physical relationship
+ * type), while the pickers below are keyed by the DECLARED ontology id. Those
+ * two drift in case — `has` vs `HAS` — and the backend itself casefolds whenever
+ * it compares them (ontology/resolver.py, ontologies.py). An exact match here
+ * silently resolved every edge count to zero, so match the same way the backend
+ * does.
+ *
+ * Variants that casefold together are SUMMED: a graph carrying both `has` and
+ * `HAS` edges genuinely has both under the declared `HAS`.
+ */
+function indexCounts(summaries: { id: string; count: number }[] | undefined): Map<string, number> {
+    const map = new Map<string, number>()
+    for (const s of summaries ?? []) {
+        const key = s.id.trim().toLowerCase()
+        map.set(key, (map.get(key) ?? 0) + s.count)
+    }
+    return map
+}
+
+const countKey = (id: string) => id.trim().toLowerCase()
 
 // ============================================
 // Component
 // ============================================
 
-export function EntitiesStep({ formData, updateFormData, dataSourceId }: EntitiesStepProps) {
+export function EntitiesStep({ formData, updateFormData, dataSourceId, mode = 'create' }: EntitiesStepProps) {
     const provider = useGraphProvider()
     const { workspaceId } = useGraphProviderContext()
     const {
@@ -58,7 +89,52 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
         relationshipTypes: dsRelationshipTypes,
         containmentEdgeTypes,
         rootEntityTypes,
+        isLoading: schemaLoading,
+        isError: schemaError,
     } = useDataSourceSchema(dataSourceId)
+
+    // ── Prune phantom type ids ────────────────────────────────────────────────
+    // The wizard seeds visibleEntityTypes/visibleRelationshipTypes from the SCHEMA
+    // STORE, which can carry a wider set than the data source's own ontology — in
+    // the wild, 12 relationship ids for a 3-relationship ontology. Those phantom
+    // ids can never match anything, yet they were saved onto the view. Drop them
+    // once this data source's real schema is known.
+    //
+    // Create mode only: an existing view's selection belongs to the user (and to
+    // the drift banner), not to us.
+    useEffect(() => {
+        if (mode !== 'create' || schemaLoading || schemaError) return
+        if (dsEntityTypes.length === 0 && dsRelationshipTypes.length === 0) return
+
+        const entityIds = new Set(dsEntityTypes.map(t => t.id))
+        const relIds = new Set(dsRelationshipTypes.map(t => t.id))
+        const prunedEntities = formData.visibleEntityTypes.filter(id => entityIds.has(id))
+        const prunedRels = formData.visibleRelationshipTypes.filter(id => relIds.has(id))
+
+        const updates: Partial<WizardFormData> = {}
+        if (prunedEntities.length !== formData.visibleEntityTypes.length) {
+            updates.visibleEntityTypes = prunedEntities
+        }
+        if (prunedRels.length !== formData.visibleRelationshipTypes.length) {
+            updates.visibleRelationshipTypes = prunedRels
+        }
+        if (Object.keys(updates).length > 0) updateFormData(updates)
+    }, [
+        mode, schemaLoading, schemaError, dsEntityTypes, dsRelationshipTypes,
+        formData.visibleEntityTypes, formData.visibleRelationshipTypes, updateFormData,
+    ])
+
+    // The semantic layer this view is built on. The ontologies endpoint is
+    // admin-gated (silently), so non-admins get `null` and we fall back to a
+    // compact card built from the schema we already loaded.
+    const ontologyId = useWorkspacesStore(s => {
+        for (const ws of s.workspaces) {
+            const ds = ws.dataSources?.find(d => d.id === dataSourceId)
+            if (ds) return ds.ontologyId
+        }
+        return undefined
+    })
+    const { ontology } = useOntologyDefinition(ontologyId)
 
     // Dynamic metadata and stats
     const [stats, setStats] = useState<GraphSchemaStats | null>(null)
@@ -114,70 +190,49 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
         loadDynamicData()
     }, [provider, workspaceId, dataSourceId, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData])
 
-    // Entity types with selection state and real counts
+    // Physical graph counts, keyed so declared↔physical case drift can't hide them.
+    const entityCounts = useMemo(() => indexCounts(stats?.entityTypeStats), [stats])
+    const edgeCounts = useMemo(() => indexCounts(stats?.edgeTypeStats), [stats])
+    const containmentKeys = useMemo(
+        () => new Set(containmentEdgeTypes.map(countKey)),
+        [containmentEdgeTypes],
+    )
+
+    // `count: undefined` means the graph reported NO count for this type — which
+    // is not the same as "zero instances", and must not be rendered as one.
     const entityTypesWithState = useMemo(() => {
-        return dsEntityTypes.map(et => {
-            const stat = stats?.entityTypeStats.find(s => s.id === et.id)
-            return {
-                ...et,
-                isSelected: formData.visibleEntityTypes.includes(et.id),
-                count: stat?.count ?? 0
-            }
-        })
-    }, [dsEntityTypes, formData.visibleEntityTypes, stats])
+        return dsEntityTypes.map(et => ({
+            ...et,
+            isSelected: formData.visibleEntityTypes.includes(et.id),
+            count: entityCounts.get(countKey(et.id)),
+        }))
+    }, [dsEntityTypes, formData.visibleEntityTypes, entityCounts])
 
-    // Edge types with selection state and real counts
     const edgeTypesWithState = useMemo(() => {
-        return dsRelationshipTypes.map(rt => {
-            const stat = stats?.edgeTypeStats.find(s => s.id === rt.id)
-            return {
-                ...rt,
-                isSelected: formData.visibleRelationshipTypes.includes(rt.id),
-                count: stat?.count ?? 0,
-                isContainment: containmentEdgeTypes.includes(rt.id)
-            }
-        })
-    }, [dsRelationshipTypes, formData.visibleRelationshipTypes, stats, containmentEdgeTypes])
+        return dsRelationshipTypes.map(rt => ({
+            ...rt,
+            isSelected: formData.visibleRelationshipTypes.includes(rt.id),
+            count: edgeCounts.get(countKey(rt.id)),
+            isContainment: containmentKeys.has(countKey(rt.id)),
+        }))
+    }, [dsRelationshipTypes, formData.visibleRelationshipTypes, edgeCounts, containmentKeys])
 
-    // Filter entity types by search and advanced filters
+    // Filter the TYPE picker by search only.
+    //
+    // The advanced filters used to also narrow this grid, which was a fiction:
+    // the "tag" filter substring-matched type IDs and the "property" filter just
+    // checked whether a field existed. What they actually do is travel with the
+    // view as fieldFilters and filter ENTITIES when the view loads — so they no
+    // longer pretend to change which types you can select.
     const filteredEntityTypes = useMemo(() => {
-        let types = entityTypesWithState
-
-        // 1. Search Query
-        if (searchQuery) {
-            const query = searchQuery.toLowerCase()
-            types = types.filter(et =>
-                et.name.toLowerCase().includes(query) ||
-                et.id.toLowerCase().includes(query) ||
-                et.pluralName.toLowerCase().includes(query)
-            )
-        }
-
-        // 2. Advanced Filters (Name, Tag, Property)
-        if (formData.advancedFilters.length > 0) {
-            formData.advancedFilters.forEach(filter => {
-                const val = String(filter.value).toLowerCase()
-                switch (filter.type) {
-                    case 'name':
-                        types = types.filter(et => et.name.toLowerCase().includes(val))
-                        break
-                    case 'tag':
-                        // In real scenario, would check if entity TYPE has this tag in schema
-                        // For now, filtering the selection list based on direct matches
-                        types = types.filter(et => et.id.toLowerCase().includes(val))
-                        break
-                    case 'property':
-                        if (val.includes('=')) {
-                            const [key] = val.split('=')
-                            types = types.filter(et => et.fields.some(f => f.id.toLowerCase() === key))
-                        }
-                        break
-                }
-            })
-        }
-
-        return types
-    }, [entityTypesWithState, searchQuery, formData.advancedFilters])
+        if (!searchQuery) return entityTypesWithState
+        const query = searchQuery.toLowerCase()
+        return entityTypesWithState.filter(et =>
+            et.name.toLowerCase().includes(query) ||
+            et.id.toLowerCase().includes(query) ||
+            et.pluralName.toLowerCase().includes(query)
+        )
+    }, [entityTypesWithState, searchQuery])
 
     // Toggle entity type
     const toggleEntityType = useCallback((typeId: string) => {
@@ -242,9 +297,25 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
         })
     }, [formData.scopeEdges, updateFormData])
 
-    // Stats
-    const selectedCount = formData.visibleEntityTypes.length
+    // Stats.
+    //
+    // Count only what THIS ontology actually has. formData can carry ids from a
+    // wider/older schema (the store seeds it), which is how "12 selected" ended
+    // up next to three edge types. Matching is exact — the same comparison that
+    // decides whether a card renders as selected — so the number can never
+    // disagree with the checkmarks on screen.
+    const availableEntityIds = useMemo(() => new Set(dsEntityTypes.map(et => et.id)), [dsEntityTypes])
+    const selectedCount = useMemo(
+        () => formData.visibleEntityTypes.filter(id => availableEntityIds.has(id)).length,
+        [formData.visibleEntityTypes, availableEntityIds],
+    )
     const totalCount = dsEntityTypes.length
+
+    const availableEdgeIds = useMemo(() => new Set(dsRelationshipTypes.map(rt => rt.id)), [dsRelationshipTypes])
+    const selectedEdgeCount = useMemo(
+        () => formData.visibleRelationshipTypes.filter(id => availableEdgeIds.has(id)).length,
+        [formData.visibleRelationshipTypes, availableEdgeIds],
+    )
 
     return (
         <div className="space-y-6">
@@ -261,6 +332,72 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                     Choose which entity types and relationships to show in your view
                 </p>
             </motion.div>
+
+            {/* Ontology context — the semantic layer these types come from.
+                Three tiers: full card (admin), compact schema-derived card
+                (non-admin / fetch failed), nothing (no ontology assigned — the
+                Scope step already warns about that). */}
+            {ontologyId && (
+                <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.04 }}
+                    className="rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 p-4"
+                >
+                    <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 text-violet-500 bg-violet-500/10 border-violet-500/20">
+                            <Layers className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                Ontology this view is built on
+                            </p>
+                            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">
+                                    {ontology?.name ?? 'Assigned semantic layer'}
+                                </h4>
+                                {ontology?.isPublished && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                                        <Check className="w-2.5 h-2.5" /> Published
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-3 mt-1">
+                                <div className="flex items-center gap-1 text-xs">
+                                    <Box className="w-3 h-3 text-emerald-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{dsEntityTypes.length}</span>
+                                    <span className="text-slate-400">entity types</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs">
+                                    <GitBranch className="w-3 h-3 text-violet-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{dsRelationshipTypes.length}</span>
+                                    <span className="text-slate-400">relationships</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs">
+                                    <ListTree className="w-3 h-3 text-amber-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{containmentEdgeTypes.length}</span>
+                                    <span className="text-slate-400">containment</span>
+                                </div>
+                            </div>
+                            {ontology?.description && (
+                                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500 line-clamp-2 leading-relaxed">
+                                    {ontology.description}
+                                </p>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* The numbers above say how MUCH; this says what SHAPE. */}
+                    <OntologyHierarchyPreview
+                        entityTypes={dsEntityTypes}
+                        relationshipTypes={dsRelationshipTypes}
+                        containmentEdgeTypes={containmentEdgeTypes}
+                        rootEntityTypes={rootEntityTypes}
+                        countFor={typeId => entityCounts.get(countKey(typeId))}
+                        className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/60"
+                    />
+                </motion.div>
+            )}
 
             {/* Search and Filter Bar */}
             <motion.div
@@ -289,7 +426,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                     )}
                 >
                     <Filter className="w-5 h-5" />
-                    Filters
+                    Data filters
                     {formData.advancedFilters.length > 0 && (
                         <span className="ml-1 px-2 py-0.5 text-xs font-bold bg-blue-600 text-white rounded-full">
                             {formData.advancedFilters.length}
@@ -308,9 +445,14 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         className="overflow-hidden"
                     >
                         <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 space-y-4">
-                            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300">
-                                <Sparkles className="w-4 h-4 text-blue-500" />
-                                Advanced Filters
+                            <div>
+                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                    <Sparkles className="w-4 h-4 text-blue-500" />
+                                    View data filters
+                                </div>
+                                <p className="text-xs text-slate-400 mt-0.5">
+                                    Applied to entities when the view loads — they don&apos;t change which types you can select below.
+                                </p>
                             </div>
 
                             <div className="grid grid-cols-3 gap-4">
@@ -533,11 +675,19 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                                 <Box className="w-5 h-5" />
                             </div>
 
-                            {entityType.count > 0 && (
-                                <span className="px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-700 text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                                    {entityType.count.toLocaleString()}
-                                </span>
-                            )}
+                            <span
+                                className={cn(
+                                    'px-2 py-1 rounded-md text-[10px] font-bold tabular-nums',
+                                    entityType.count === undefined
+                                        ? 'bg-slate-50 dark:bg-slate-800 text-slate-300 dark:text-slate-600'
+                                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
+                                )}
+                                title={entityType.count === undefined
+                                    ? 'No count available for this type'
+                                    : `${entityType.count.toLocaleString()} in the graph`}
+                            >
+                                {entityType.count === undefined ? '—' : entityType.count.toLocaleString()}
+                            </span>
                         </div>
 
                         <p className="font-bold text-sm text-slate-800 dark:text-slate-200 truncate">
@@ -584,7 +734,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         Edge Types
                     </span>
                     <span className="text-sm text-slate-400 ml-2">
-                        ({formData.visibleRelationshipTypes.length} selected)
+                        ({selectedEdgeCount} of {dsRelationshipTypes.length} selected)
                     </span>
                 </button>
 
@@ -615,11 +765,19 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                                         <span className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate flex-1">
                                             {edgeType.name}
                                         </span>
-                                        {edgeType.count > 0 && (
-                                            <span className="text-[10px] text-slate-400 font-bold group-hover:text-blue-500">
-                                                {edgeType.count}
-                                            </span>
-                                        )}
+                                        <span
+                                            className={cn(
+                                                'text-[10px] font-bold tabular-nums shrink-0',
+                                                edgeType.count === undefined
+                                                    ? 'text-slate-300 dark:text-slate-600'
+                                                    : 'text-slate-400 group-hover:text-blue-500',
+                                            )}
+                                            title={edgeType.count === undefined
+                                                ? 'No count available for this edge type'
+                                                : `${edgeType.count.toLocaleString()} edges in the graph`}
+                                        >
+                                            {edgeType.count === undefined ? '—' : edgeType.count.toLocaleString()}
+                                        </span>
                                     </button>
                                 ))}
                             </div>

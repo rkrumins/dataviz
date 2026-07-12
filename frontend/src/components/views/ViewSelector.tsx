@@ -5,6 +5,7 @@ import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import type { ViewConfiguration } from '@/types/schema'
 import { cn } from '@/lib/utils'
+import { resolveViewIcon } from '@/lib/viewUtils'
 import { Backdrop } from '@/components/ui/Backdrop'
 
 // Dynamic icon component
@@ -46,7 +47,7 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
       >
         {activeView && (
           <>
-            <DynamicIcon name={activeView.icon || 'Layout'} className="w-5 h-5" />
+            <DynamicIcon name={resolveViewIcon({ icon: activeView.icon, viewType: activeView.layout?.type })} className="w-5 h-5" />
             <div className="flex-1 text-left">
               <span className="text-sm font-medium block">{activeView.name}</span>
               <span className="text-2xs text-accent-lineage/70">
@@ -149,7 +150,7 @@ function ViewItem({ view, isActive, onClick, onEdit }: ViewItemProps) {
       onClick={onClick}
     >
       <DynamicIcon
-        name={view.icon || 'Layout'}
+        name={resolveViewIcon({ icon: view.icon, viewType: view.layout?.type })}
         className={cn(
           "w-4 h-4",
           isActive ? "text-accent-lineage" : "text-ink-muted"

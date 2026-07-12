@@ -3,6 +3,7 @@ import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, FolderOpen, Circl
 import { cn } from '@/lib/utils'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
+import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
 import { WorkspaceHealthBadge } from './workspace/WorkspaceHealthBadge'
 import { getProviderLogo } from './ProviderLogos'
 
@@ -46,6 +47,8 @@ interface WorkspaceCardProps {
      *  that jumps straight to the workspace's Members tab. Only shown
      *  to callers with ``workspace:admin``; the parent decides. */
     onManageMembers?: () => void
+    /** Optional — warms the workspace-detail cache on hover intent. */
+    onPrefetch?: () => void
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -78,8 +81,10 @@ export function WorkspaceCard({
     onDelete,
     onSetDefault,
     onManageMembers,
+    onPrefetch,
 }: WorkspaceCardProps) {
     const [showSources, setShowSources] = useState(false)
+    const prefetchHandlers = useIntentPrefetch(onPrefetch)
     const gradient = GRADIENT_ACCENTS[index % GRADIENT_ACCENTS.length]
     const { uniqueEntityTypes, uniqueRelationshipTypes, ontologyNames, providerGroups, viewCount } = schemaSummary
     // Workspace deletion + set-default both gate on system:admin
@@ -105,6 +110,7 @@ export function WorkspaceCard({
                 "hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200",
                 ws.isDefault ? "border-indigo-500/30 ring-1 ring-indigo-500/10" : "border-glass-border hover:border-indigo-500/20"
             )}
+            {...prefetchHandlers}
             onClick={onOpen}
         >
             {/* ── Gradient accent ── */}

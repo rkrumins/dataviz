@@ -3,15 +3,11 @@ import { Link } from 'react-router-dom'
 import {
   Heart,
   Link2,
-  Network,
-  GitBranch,
-  Layout,
-  Table2,
-  Layers,
   Globe,
   Users,
   Lock,
   Box,
+  Database,
   ExternalLink,
   Pencil,
   Check,
@@ -23,7 +19,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -32,54 +28,9 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 /*  View type icon + themed color mapping                              */
 /* ------------------------------------------------------------------ */
 
-const VIEW_TYPE_META: Record<
-  string,
-  { icon: React.ElementType; label: string; bg: string; border: string; text: string }
-> = {
-  graph: {
-    icon: Network,
-    label: 'Graph',
-    bg: 'bg-indigo-500/10',
-    border: 'border-indigo-500/20',
-    text: 'text-indigo-500',
-  },
-  hierarchy: {
-    icon: GitBranch,
-    label: 'Hierarchy',
-    bg: 'bg-violet-500/10',
-    border: 'border-violet-500/20',
-    text: 'text-violet-500',
-  },
-  table: {
-    icon: Table2,
-    label: 'Table',
-    bg: 'bg-emerald-500/10',
-    border: 'border-emerald-500/20',
-    text: 'text-emerald-500',
-  },
-  'layered-lineage': {
-    icon: Layers,
-    label: 'Lineage',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500/20',
-    text: 'text-amber-500',
-  },
-  reference: {
-    icon: Layout,
-    label: 'Context View',
-    bg: 'bg-rose-500/10',
-    border: 'border-rose-500/20',
-    text: 'text-rose-500',
-  },
-}
-
-const DEFAULT_TYPE_META = {
-  icon: Layout,
-  label: 'View',
-  bg: 'bg-indigo-500/10',
-  border: 'border-indigo-500/20',
-  text: 'text-indigo-500',
-}
+// View type theme comes from the SHARED resolver — see viewTypeMeta() in
+// lib/viewUtils. Do not reintroduce a local map (that drift is what made the
+// recents strip show a different icon/colour for the same view).
 
 const VISIBILITY_ICON: Record<string, React.ElementType> = {
   enterprise: Globe,
@@ -134,8 +85,9 @@ export function ExplorerListRow({
   providerInfo,
   hideWorkspaceInScope,
 }: ExplorerListRowProps) {
-  const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
-  const TypeIcon = typeMeta.icon
+  const typeMeta = viewTypeMeta(view.viewType)
+  // Glyph = user-chosen icon when set; tile colors stay type identity.
+  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
   const isDeleted = !!view.deletedAt
   const [activityOpen, setActivityOpen] = useState(false)
@@ -166,8 +118,8 @@ export function ExplorerListRow({
         className={cn(
           'grid items-center gap-3',
           onToggleSelect
-            ? 'grid-cols-[28px_minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]'
-            : 'grid-cols-[minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]',
+            ? 'grid-cols-[28px_minmax(0,1.5fr)_minmax(0,1.1fr)_90px_36px_110px_70px_80px_140px]'
+            : 'grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_90px_36px_110px_70px_80px_140px]',
           'rounded-xl px-3',
           densityPaddingClass,
           'hover:bg-black/5 dark:hover:bg-white/5',
@@ -196,12 +148,10 @@ export function ExplorerListRow({
           <div
             className={cn(
               'w-7 h-7 rounded-lg border flex items-center justify-center shrink-0',
-              typeMeta.bg,
-              typeMeta.border,
-              typeMeta.text,
+              typeMeta.iconBg,
             )}
           >
-            <TypeIcon className="h-3.5 w-3.5" />
+            <DynamicIcon name={iconName} className="h-3.5 w-3.5" />
           </div>
           <div className="min-w-0">
             <span className="truncate text-sm font-medium text-ink block">
@@ -216,17 +166,42 @@ export function ExplorerListRow({
           </div>
         </div>
 
-        {/* ── Workspace + Data source pills ── */}
-        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
-          <ViewScopeBadge
-            workspaceId={view.workspaceId}
-            workspaceName={view.workspaceName}
-            dataSourceId={view.dataSourceId}
-            dataSourceName={view.dataSourceName}
-            providerName={providerInfo?.providerName}
-            providerType={providerInfo?.providerType}
-            hideWorkspace={hideWorkspaceInScope}
-          />
+        {/* ── Scope ──
+             A table column cannot fit three chips legibly — they truncated to
+             "Major R…" / "Dat…" / "Falk…". Surface the DATA SOURCE as readable
+             text (the scope users actually scan for), with workspace · provider
+             as a muted second line. Full values stay available on hover. The
+             chip trio is still the right call on cards, which have the width. */}
+        <div className="min-w-0 overflow-hidden">
+          {view.dataSourceName || view.dataSourceId ? (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Database className="h-3 w-3 text-emerald-500 shrink-0" />
+              <span
+                className="truncate text-xs font-medium text-ink"
+                title={view.dataSourceName ?? view.dataSourceId ?? ''}
+              >
+                {view.dataSourceName ?? view.dataSourceId}
+              </span>
+            </div>
+          ) : (
+            <span className="text-xs text-ink-muted">—</span>
+          )}
+          <div className="flex items-center gap-1 min-w-0 text-[10px] text-ink-muted leading-tight">
+            {!hideWorkspaceInScope && view.workspaceName && (
+              <span className="truncate" title={view.workspaceName}>{view.workspaceName}</span>
+            )}
+            {!hideWorkspaceInScope && view.workspaceName && providerInfo?.providerName && (
+              <span className="shrink-0">·</span>
+            )}
+            {providerInfo?.providerName && (
+              <span
+                className="truncate"
+                title={`Provider: ${providerInfo.providerName}${providerInfo.providerType ? ` · ${providerInfo.providerType}` : ''}`}
+              >
+                {providerInfo.providerName}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* ── Type label ── */}

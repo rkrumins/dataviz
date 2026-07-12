@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
@@ -248,4 +248,18 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     error,
     reload,
   }
+}
+
+/**
+ * Warm the workspace-detail cache (e.g. on card hover) so opening the detail
+ * page is instant. Matches the gating ``['workspace', wsId]`` query above
+ * EXACTLY (key + fetch), so a subsequent visit within staleTime is a cache hit
+ * that renders the workspace immediately (and kicks off the phase-2 fan-out).
+ */
+export function prefetchWorkspaceDetail(queryClient: QueryClient, wsId: string) {
+  queryClient.prefetchQuery({
+    queryKey: ['workspace', wsId],
+    queryFn: () => withTimeout(workspaceService.get(wsId), TIMEOUTS.ADMIN_LIST_MS, 'workspace.get'),
+    staleTime: 5 * 60 * 1000,
+  })
 }

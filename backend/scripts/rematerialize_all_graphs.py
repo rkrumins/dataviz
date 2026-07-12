@@ -135,6 +135,13 @@ async def _trigger_and_wait(client: httpx.AsyncClient, base: str, ds_id: str) ->
 
 
 async def main() -> int:
+    # This script talks plain standalone Redis (FALKORDB_HOST/PORT). On a Sentinel
+    # or Cluster instance it would only reach one node — a partial re-materialization
+    # that looks like it succeeded. Fail fast instead.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+
+    assert_standalone_env("rematerialize_all_graphs.py")
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--control-plane", default=os.getenv("AGG_CONTROL_PLANE", "http://localhost:8091"))
     ap.add_argument("--dry-run", action="store_true")

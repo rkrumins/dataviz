@@ -5,6 +5,7 @@ import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
 import type { WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
+import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -24,13 +25,17 @@ interface WorkspaceListRowProps {
     /** Optional — when provided, the row exposes a "Members" action
      *  that jumps to the workspace's Members tab. */
     onManageMembers?: () => void
+    /** Optional — warms the workspace-detail cache on hover intent. */
+    onPrefetch?: () => void
 }
 
-function WorkspaceListRowBase({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers }: WorkspaceListRowProps) {
+function WorkspaceListRowBase({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers, onPrefetch }: WorkspaceListRowProps) {
     const uniqueProviderTypes = Array.from(new Set(dsProviders.map(p => p.providerType).filter(t => t !== 'unknown')))
+    const prefetchHandlers = useIntentPrefetch(onPrefetch)
 
     return (
         <div
+            {...prefetchHandlers}
             onClick={onOpen}
             className="group grid grid-cols-[16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors"
         >

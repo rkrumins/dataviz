@@ -638,6 +638,11 @@ class DataSourceResponse(BaseModel):
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
+    # Provenance: "managed" = in-app writable graph (blank/versioned models),
+    # "federated" = external system of record. None on legacy rows — clients
+    # derive from shape (no catalog item → managed), mirroring the ORM comment.
+    source_mode: Optional[str] = Field(None, alias="sourceMode")  # "managed" | "federated"
+    write_back_enabled: bool = Field(False, alias="writeBackEnabled")
     # Aggregation state
     aggregation_status: str = Field("none", alias="aggregationStatus")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")

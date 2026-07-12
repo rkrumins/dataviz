@@ -1,0 +1,68 @@
+# One-shot cluster bootstrap: forms the 3-master cluster and pairs each
+# shard's -1 pod as the replica of its own -0 pod (deterministic pairing —
+# plain `--cluster create` with 6 nodes pairs arbitrarily and would break
+# the per-shard StatefulSet/zone-spread model).
+#
+# Idempotent: exits 0 immediately when cluster_state is already ok, so
+# re-applying the overlay is safe. A completed Job is immutable — delete
+# it (`kubectl -n synodic delete job falkordb-cluster-init`) before
+# re-applying if this file ever changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: falkordb-cluster-init
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-cluster-init
+    app.kubernetes.io/component: graph-database
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: falkordb-cluster-init
+    spec:
+      serviceAccountName: synodic-infra
+      restartPolicy: OnFailure
+      containers:
+        - name: cluster-init
+          image: REGISTRY/falkordb:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              DOMAIN="falkordb-cluster.synodic.svc.cluster.local"
+              PODS="falkordb-shard-0-0 falkordb-shard-1-0 falkordb-shard-2-0 falkordb-shard-0-1 falkordb-shard-1-1 falkordb-shard-2-1"
+
+              for pod in $PODS; do
+                echo "waiting for $pod..."
+                until redis-cli -h "$pod.$DOMAIN" ping 2>/dev/null | grep -q PONG; do
+                  sleep 5
+                done
+              done
+
+              if redis-cli -h "falkordb-shard-0-0.$DOMAIN" cluster info | grep -q 'cluster_state:ok'; then
+                echo "cluster already formed — nothing to do."
+                exit 0
+              fi
+
+              echo "creating 3-master cluster..."
+              redis-cli --cluster create \
+                "falkordb-shard-0-0.$DOMAIN:6379" \
+                "falkordb-shard-1-0.$DOMAIN:6379" \
+                "falkordb-shard-2-0.$DOMAIN:6379" \
+                --cluster-yes
+
+              for i in 0 1 2; do
+                echo "attaching falkordb-shard-$i-1 as replica of falkordb-shard-$i-0..."
+                MASTER_ID=$(redis-cli -h "falkordb-shard-$i-0.$DOMAIN" cluster myid)
+                redis-cli --cluster add-node \
+                  "falkordb-shard-$i-1.$DOMAIN:6379" \
+                  "falkordb-shard-$i-0.$DOMAIN:6379" \
+                  --cluster-slave --cluster-master-id "$MASTER_ID"
+              done
+
+              echo "final state:"
+              redis-cli -h "falkordb-shard-0-0.$DOMAIN" cluster info
+              redis-cli -h "falkordb-shard-0-0.$DOMAIN" cluster nodes

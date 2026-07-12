@@ -1,0 +1,20 @@
+# Cluster-mode client settings (doc §7.3). FALKORDB_MODE=cluster turns on
+# the topology-aware client (owning-node routing, MOVED following, silent-
+# owner-death re-resolve, owner-probing preflight). The three -0 pods are
+# the seed list — any one alive is enough for discovery.
+#
+# FALKORDB_HOST is repointed at a seed pod: env-default (unrouted) graphs
+# resolve their topology from FALKORDB_MODE + FALKORDB_CLUSTER_NODES below
+# (the registry/projection/worker factories all go through the same
+# topology-aware client as the read path), so they route to the OWNING shard
+# rather than to whatever slots live on the seed. Per-provider graphs declare
+# their own topology on the provider row (see README).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-config
+  namespace: synodic
+data:
+  FALKORDB_MODE: "cluster"
+  FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
+  FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"

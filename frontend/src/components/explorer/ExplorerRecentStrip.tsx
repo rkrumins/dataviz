@@ -6,55 +6,17 @@
  */
 
 import { Link } from 'react-router-dom'
-import {
-    Clock,
-    Network,
-    GitBranch,
-    Layers,
-    Table2,
-    LayoutGrid,
-} from 'lucide-react'
+import { Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { useRecentViews } from '@/hooks/useRecentViews'
-
-// ─── View-type mappings ─────────────────────────────────────────────────────
-const VIEW_TYPE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-    graph: Network,
-    hierarchy: Layers,
-    lineage: GitBranch,
-    table: Table2,
-    context: LayoutGrid,
-}
-
-const VIEW_TYPE_COLORS: Record<string, { icon: string; gradient: string }> = {
-    graph: {
-        icon: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-        gradient: 'from-indigo-500/20 to-indigo-500/0',
-    },
-    hierarchy: {
-        icon: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-        gradient: 'from-amber-500/20 to-amber-500/0',
-    },
-    lineage: {
-        icon: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-        gradient: 'from-violet-500/20 to-violet-500/0',
-    },
-    table: {
-        icon: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
-        gradient: 'from-emerald-500/20 to-emerald-500/0',
-    },
-    context: {
-        icon: 'bg-cyan-500/10 text-cyan-500 border-cyan-500/20',
-        gradient: 'from-cyan-500/20 to-cyan-500/0',
-    },
-}
-
-const FALLBACK_COLOR = {
-    icon: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-    gradient: 'from-indigo-500/20 to-indigo-500/0',
-}
+// Icon + colour come from the SHARED resolver — never a local map. This strip
+// used to keep its own type→icon/colour tables keyed on `lineage`/`context`,
+// which don't exist (the real types are `layered-lineage`/`reference`), so every
+// Context View fell through to a purple Network icon while the grid rendered the
+// same view as a rose "Context View". It also ignored the user's config.icon.
+import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 
 // ─── Component ──────────────────────────────────────────────────────────────
 export function ExplorerRecentStrip() {
@@ -87,8 +49,9 @@ export function ExplorerRecentStrip() {
                 )}
             >
                 {recentViews.map((entry) => {
-                    const Icon = VIEW_TYPE_ICONS[entry.viewType] ?? Network
-                    const typeColor = VIEW_TYPE_COLORS[entry.viewType] ?? FALLBACK_COLOR
+                    // Identical resolution to ExplorerViewCard / ExplorerListRow.
+                    const iconName = resolveViewIcon({ icon: entry.icon, viewType: entry.viewType })
+                    const meta = viewTypeMeta(entry.viewType)
                     return (
                         <Link
                             key={entry.viewId}
@@ -100,24 +63,30 @@ export function ExplorerRecentStrip() {
                                 'min-w-[260px] max-w-[320px]',
                             )}
                         >
-                            {/* Gradient hover overlay */}
+                            {/* Gradient hover overlay — shared type tint */}
                             <div
                                 className={cn(
-                                    'absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none',
-                                    typeColor.gradient,
+                                    'absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none',
+                                    meta.gradient,
                                 )}
                             />
 
                             {/* Content layer */}
                             <div className="relative z-10 flex flex-col gap-3">
-                                {/* Icon container */}
-                                <div
-                                    className={cn(
-                                        'w-10 h-10 rounded-xl border flex items-center justify-center shrink-0',
-                                        typeColor.icon,
-                                    )}
-                                >
-                                    <Icon className="w-5 h-5" />
+                                {/* Icon container + type label — same chip and label
+                                    the grid card uses, so a view looks identical here. */}
+                                <div className="flex items-center gap-2.5">
+                                    <div
+                                        className={cn(
+                                            'w-10 h-10 rounded-xl border flex items-center justify-center shrink-0',
+                                            meta.iconBg,
+                                        )}
+                                    >
+                                        <DynamicIcon name={iconName} className="w-5 h-5" />
+                                    </div>
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                                        {meta.label}
+                                    </span>
                                 </div>
 
                                 {/* View name */}

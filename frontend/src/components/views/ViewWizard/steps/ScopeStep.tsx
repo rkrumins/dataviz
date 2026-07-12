@@ -9,15 +9,12 @@
  * only requires changing the data source, not this component.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
 import { useFeature } from '@/store/features'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
     Search,
-    Star,
-    CircleDot,
-    ArrowRightLeft,
     Layers,
     Check,
     AlertTriangle,
@@ -38,11 +35,13 @@ import {
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
-import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
+import { TablePagination } from '@/components/ui/TablePagination'
+import { resolveSourceMode, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
+import { useWorkspacePage } from '@/hooks/useWorkspacePage'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
@@ -92,8 +91,50 @@ const AGG_STATUS_META: Record<string, { dot: string; label: string }> = {
     none:    { dot: 'bg-slate-300 dark:bg-slate-600', label: 'Not run' },
 }
 
+/**
+ * "Ready to build on": it has a semantic layer and its lineage has been rolled up.
+ *
+ * Deliberately no longer keyed off `isPrimary` — being the workspace's primary
+ * source says nothing about whether a view built on it will actually work, and
+ * we no longer surface primacy anywhere in this picker.
+ */
 function isRecommended(ds: DataSourceResponse): boolean {
-    return ds.isPrimary && !!ds.ontologyId && ds.aggregationStatus === 'ready'
+    return !!ds.ontologyId && ds.aggregationStatus === 'ready'
+}
+
+/** One pill, one shape. Provenance and readiness used to be styled three different
+ *  ways on the same row (a bare amber "★ Primary" beside two uppercase pills), which
+ *  is what made the badge row look unsettled. */
+function CardBadge({
+    icon,
+    label,
+    tone,
+    title,
+}: {
+    icon: ReactNode
+    label: string
+    tone: 'managed' | 'federated' | 'ready'
+    title?: string
+}) {
+    const tones = {
+        managed: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+        federated: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+        ready: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+    }[tone]
+
+    return (
+        <span
+            title={title}
+            className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-md border',
+                'text-[10px] font-semibold leading-none whitespace-nowrap',
+                tones,
+            )}
+        >
+            {icon}
+            {label}
+        </span>
+    )
 }
 
 // ─── Data source sort ──────────────────────────────────────────────
@@ -234,7 +275,10 @@ function WorkspaceItem({
         <button
             onClick={onClick}
             className={cn(
-                'w-full text-left px-3.5 py-3 rounded-xl transition-colors duration-150',
+                // Comfortable, not cramped: this is a primary navigation surface, and a
+                // squeezed row reads as an afterthought. Eight of these still fit the
+                // step without scrolling, which is the constraint that matters.
+                'w-full text-left px-3 py-2.5 rounded-xl transition-colors duration-150',
                 'border',
                 isSelected
                     ? 'bg-blue-600/8 dark:bg-blue-500/10 border-blue-500/30 shadow-sm'
@@ -243,7 +287,7 @@ function WorkspaceItem({
         >
             <div className="flex items-center gap-2.5">
                 <div className={cn(
-                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-bold',
+                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-[11px] font-bold',
                     isSelected
                         ? 'bg-blue-600 text-white'
                         : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
@@ -259,17 +303,15 @@ function WorkspaceItem({
                             {ws.name}
                         </span>
                         {ws.isDefault && (
-                            <span className="px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+                            <span className="px-1.5 py-0.5 text-[9px] font-semibold rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0 leading-none">
                                 Default
                             </span>
                         )}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[11px] text-slate-400 dark:text-slate-500">
-                            {dsCount} source{dsCount !== 1 ? 's' : ''}
-                        </span>
+                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">
+                        <span>{dsCount} source{dsCount !== 1 ? 's' : ''}</span>
                         {isActive && (
-                            <span className="text-[10px] text-emerald-500 font-medium">active</span>
+                            <span className="text-emerald-500 font-medium">active</span>
                         )}
                     </div>
                 </div>
@@ -283,29 +325,45 @@ function WorkspaceItem({
 
 // ─── Data Source Card ───────────────────────────────────────────────
 
-function DataSourceCard({
+/**
+ * memo + a stable `onSelect(id)` (rather than a fresh `() => select(ds.id)` arrow per
+ * render): typing in the search box, or a stats query resolving, used to re-render
+ * every card on the page — each of which runs a provider-health store subscription
+ * and a logo lookup. Now only the cards whose own data changed re-render.
+ */
+const DataSourceCard = memo(function DataSourceCard({
     ds,
     stats,
     statsLoading,
     isSelected,
     providerInfo,
-    onClick,
+    onSelect,
 }: {
     ds: DataSourceResponse
     stats?: DataSourceStats
     statsLoading: boolean
     isSelected: boolean
     providerInfo?: DataSourceProviderInfo
-    onClick: () => void
+    onSelect: (id: string) => void
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
     const recommended = isRecommended(ds)
+    const sourceMode = resolveSourceMode(ds)
+    // Live provider health — providerInfo is admin-gated, but ds.providerId
+    // rides the workspaces payload for everyone, so the dot works for all
+    // roles (unknown = neutral gray, never blocks selection).
+    const health = useProviderHealth(providerInfo?.providerId ?? ds.providerId)
+    const healthMeta = PROVIDER_HEALTH_META[health.state]
+    const provMeta = providerInfo ? providerMeta(providerInfo.providerType) : null
+    const Logo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
 
     return (
         <button
-            onClick={onClick}
+            onClick={() => onSelect(ds.id)}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                // h-full + flex-col: the card fills its grid cell, so every card in a
+                // row is the same height and their footers line up (mt-auto below).
+                'relative flex h-full w-full flex-col text-left rounded-xl border-2 p-3.5 transition-colors duration-150',
                 'hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
@@ -314,90 +372,125 @@ function DataSourceCard({
         >
             {/* Selection checkmark */}
             {isSelected && (
-                <div className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
+                <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
 
             {/* Header */}
-            <div className="flex items-start gap-3 mb-3">
+            <div className="flex items-start gap-2.5">
+                {/* Branded provider tile — identifies WHICH connection this source
+                    lives on at a glance (three FalkorDB instances stop looking
+                    identical). Falls back to the neutral Database tile when the
+                    provider registry isn't readable (non-admin). */}
                 <div className={cn(
-                    'w-9 h-9 rounded-lg flex items-center justify-center shrink-0',
-                    isSelected
-                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
-                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
+                    'w-8 h-8 rounded-lg border flex items-center justify-center shrink-0',
+                    Logo && provMeta
+                        ? provMeta.color
+                        : isSelected
+                            ? 'border-transparent bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                            : 'border-transparent bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
                 )}>
-                    <Database className="w-4 h-4" />
+                    {Logo ? <Logo className="w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5" />}
                 </div>
-                <div className="min-w-0 flex-1 pr-6">
-                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">
-                        {ds.label || ds.catalogItemId || 'Unnamed'}
-                    </h4>
-                    {providerInfo && (
-                        <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                            <Server className="w-3 h-3 shrink-0 text-sky-500" />
-                            <span className="break-words">
+                <div className="min-w-0 flex-1 pr-5">
+                    {/* Two lines are reserved whether the name needs them or not: a
+                        wrapping name would otherwise push this card's provider line,
+                        badges and metrics out of step with its neighbours'. */}
+                    <div className="flex items-start gap-1.5 min-h-[2.1rem]">
+                        <h4 className="min-w-0 text-sm font-bold leading-[1.15] text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
+                            {ds.label || ds.catalogItemId || 'Unnamed'}
+                        </h4>
+                        <span
+                            className={cn('w-2 h-2 mt-1 rounded-full shrink-0', healthMeta.dot)}
+                            title={health.error ?? healthMeta.label}
+                        />
+                    </div>
+                    <div
+                        className="text-[11px] leading-4 text-slate-500 dark:text-slate-400 truncate"
+                        title={providerInfo ? `${providerInfo.providerName} · ${providerInfo.providerType}` : undefined}
+                    >
+                        {providerInfo && (
+                            <>
                                 {providerInfo.providerName}
                                 <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
-                            </span>
-                        </div>
-                    )}
-                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                        {ds.isPrimary && (
-                            <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
-                                <Star className="w-2.5 h-2.5" />
-                                Primary
-                            </span>
-                        )}
-                        {recommended && (
-                            <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                                Recommended
-                            </span>
+                            </>
                         )}
                     </div>
                 </div>
             </div>
 
-            {/* Stats row */}
-            <div className="flex items-center gap-3 mb-3">
-                {statsLoading && !stats ? (
-                    <div className="flex items-center gap-2 text-xs text-slate-400">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Loading stats...
-                    </div>
-                ) : stats ? (
-                    <>
-                        <div className="flex items-center gap-1 text-xs">
-                            <CircleDot className="w-3 h-3 text-indigo-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{compactNum(stats.nodeCount)}</span>
-                            <span className="text-slate-400">nodes</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-xs">
-                            <ArrowRightLeft className="w-3 h-3 text-violet-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{compactNum(stats.edgeCount)}</span>
-                            <span className="text-slate-400">edges</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-xs">
-                            <Layers className="w-3 h-3 text-emerald-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{stats.entityTypes.length}</span>
-                            <span className="text-slate-400">types</span>
-                        </div>
-                    </>
+            {/* Badges — their own row (not squeezed beside the logo), so they wrap
+                predictably instead of shoving the header around. Every card carries
+                exactly one provenance pill, so the row reads as a column. */}
+            <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                {sourceMode === 'managed' ? (
+                    <CardBadge
+                        tone="managed"
+                        icon={<Sparkles className="w-3 h-3 shrink-0" />}
+                        label="Fully managed"
+                        title="Created and versioned in this app — we own the graph"
+                    />
                 ) : (
-                    <span className="text-[11px] text-slate-400">No statistics available</span>
+                    <CardBadge
+                        tone="federated"
+                        icon={<Server className="w-3 h-3 shrink-0" />}
+                        label="Federated"
+                        title={`External system of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
+                    />
+                )}
+                {recommended && (
+                    <CardBadge
+                        tone="ready"
+                        icon={<Check className="w-3 h-3 shrink-0" />}
+                        label="Ready"
+                        title="Has a semantic layer and its lineage is rolled up"
+                    />
                 )}
             </div>
 
-            {/* Status row */}
-            <div className="flex items-center gap-3 pt-3 border-t border-slate-100 dark:border-slate-700/50">
+            {/* Metrics — ONE line that can never wrap. Three stacked columns cost two
+                lines and read like a dashboard; this is a summary, so it reads as a
+                sentence. Full values live in the tooltip. */}
+            <div className="mt-2 mb-2.5 h-4 flex items-center text-[11px] leading-none">
+                {statsLoading && !stats ? (
+                    <span className="flex items-center gap-1.5 text-slate-400">
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                        Loading metrics…
+                    </span>
+                ) : stats ? (
+                    <span
+                        className="min-w-0 truncate whitespace-nowrap text-slate-400"
+                        title={`${stats.nodeCount.toLocaleString()} nodes · ${stats.edgeCount.toLocaleString()} edges · ${stats.entityTypes.length} entity types`}
+                    >
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{compactNum(stats.nodeCount)}</b>
+                        {' nodes '}
+                        <span className="text-slate-300 dark:text-slate-600">·</span>
+                        {' '}
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{compactNum(stats.edgeCount)}</b>
+                        {' edges '}
+                        <span className="text-slate-300 dark:text-slate-600">·</span>
+                        {' '}
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{stats.entityTypes.length}</b>
+                        {stats.entityTypes.length === 1 ? ' type' : ' types'}
+                    </span>
+                ) : (
+                    <span className="text-slate-400">No metrics yet</span>
+                )}
+            </div>
+
+            {/* Status row — mt-auto pins it to the bottom of the card, so every footer
+                in a row sits on the same line no matter what's above it. (The metrics
+                block above carries the minimum gap; mt-auto only adds slack.) */}
+            <div className="flex items-center gap-2.5 mt-auto pt-2.5 border-t border-slate-100 dark:border-slate-700/50">
                 {/* Aggregation status */}
-                <div className="flex items-center gap-1.5 text-[11px]">
+                <div className="flex items-center gap-1.5 text-[11px] shrink-0">
                     <span className={cn('w-2 h-2 rounded-full shrink-0', aggMeta.dot)} />
                     <span className="text-slate-500 dark:text-slate-400">{aggMeta.label}</span>
                 </div>
 
                 {/* Ontology status */}
-                <div className="flex items-center gap-1 text-[11px]">
+                <div className="flex items-center gap-1 text-[11px] shrink-0">
                     {ds.ontologyId ? (
                         <>
                             <ShieldCheck className="w-3 h-3 text-emerald-500" />
@@ -413,15 +506,15 @@ function DataSourceCard({
 
                 {/* Last aggregated */}
                 {ds.lastAggregatedAt && (
-                    <div className="flex items-center gap-1 text-[11px] text-slate-400 ml-auto">
-                        <Clock className="w-3 h-3" />
-                        <span>{timeAgo(ds.lastAggregatedAt)}</span>
+                    <div className="flex items-center gap-1 text-[11px] text-slate-400 ml-auto min-w-0">
+                        <Clock className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{timeAgo(ds.lastAggregatedAt)}</span>
                     </div>
                 )}
             </div>
         </button>
     )
-}
+})
 
 // ─── Contextual Banners ────────────────────────────────────────────
 
@@ -635,7 +728,9 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
             onClick={selectable ? onSelect : undefined}
             aria-disabled={!selectable}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                // h-full: a card carrying an "offline" note must not be taller than its
+                // neighbours — the grid cell decides the height, not the content.
+                'relative flex h-full w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
                 selectable ? 'hover:shadow-md' : 'cursor-default',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
@@ -651,13 +746,13 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 w-full">
                 <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center shrink-0', meta.color)}>
                     <Logo className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5">
-                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
+                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
                         <span
                             className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
                             title={health.error ?? healthMeta.label}
@@ -702,7 +797,9 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
             type="button"
             onClick={onSelect}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
+                // h-full: a description of two lines must not make this card taller
+                // than the one beside it that has none.
+                'relative flex h-full w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
                     : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600',
@@ -713,13 +810,13 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 w-full">
                 <div className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 text-violet-500 bg-violet-500/10 border-violet-500/20">
                     <Sparkles className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
+                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
                         {ontology.isPublished && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                 <Check className="w-2.5 h-2.5" /> Published
@@ -892,7 +989,7 @@ function BlankScopePickers({
                                 cta="Manage connections"
                             />
                         ) : (
-                            <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="grid gap-3 sm:grid-cols-2 items-stretch">
                                 {visibleProviders.map(o => (
                                     <ProviderCard
                                         key={o.provider.id}
@@ -925,7 +1022,7 @@ function BlankScopePickers({
                         cta="Manage semantic layers"
                     />
                 ) : (
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-2 items-stretch">
                         {ontologies.map(o => (
                             <OntologyCard
                                 key={o.id}
@@ -943,7 +1040,14 @@ function BlankScopePickers({
 
 // ─── Main Component ────────────────────────────────────────────────
 
-const NO_FILTERS = { primary: false, ontology: false, ready: false }
+const NO_FILTERS = { ontology: false, ready: false }
+
+/** Exactly three rows at lg (3×3) — the tallest grid that still lets the whole
+ *  step fit on screen without the modal scrolling. */
+const DS_PAGE_SIZE = 9
+/** The rail's height drives the step's height, and the step has to fit. Eight rows
+ *  is what fits alongside three rows of cards without anything scrolling. */
+const WS_PAGE_SIZE = 8
 
 export function ScopeStep({
     availableWorkspaces,
@@ -974,6 +1078,8 @@ export function ScopeStep({
     const [dsSearch, setDsSearch] = useState('')
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
     const [dsFilters, setDsFilters] = useState(NO_FILTERS)
+    const [dsPage, setDsPage] = useState(0)
+    const [wsPage, setWsPage] = useState(0)
 
     // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
     const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -984,7 +1090,13 @@ export function ScopeStep({
         setDsSearch('')
         setDsSort('recommended')
         setDsFilters(NO_FILTERS)
+        setDsPage(0)
     }, [selectedWorkspaceId])
+
+    // Any search/sort/filter change re-slices the list — jump back to page 1.
+    useEffect(() => {
+        setDsPage(0)
+    }, [dsSearch, dsSort, dsFilters])
 
     // Single-workspace fast path: auto-select if only one exists
     const singleWorkspace = availableWorkspaces.length === 1
@@ -1015,18 +1127,45 @@ export function ScopeStep({
         [dataSources, selectedDataSourceId],
     )
 
-    // Filter workspaces by search
-    const filteredWorkspaces = useMemo(() => {
-        if (!wsSearch.trim()) return availableWorkspaces
-        const q = wsSearch.toLowerCase()
-        return availableWorkspaces.filter(ws => ws.name.toLowerCase().includes(q))
-    }, [availableWorkspaces, wsSearch])
+    // ── Workspace rail: server-paginated ─────────────────────────────────────
+    // The rail only DISPLAYS workspaces; selection still resolves against the
+    // store-provided `availableWorkspaces` (the wizard's scope, auto-select and
+    // deep-link paths all read from it), so paging can never strand a selection
+    // that lives on another page.
+    const [wsSearchDebounced, setWsSearchDebounced] = useState('')
+    useEffect(() => {
+        const t = setTimeout(() => setWsSearchDebounced(wsSearch), 250)
+        return () => clearTimeout(t)
+    }, [wsSearch])
+
+    // A new query means a new result set — start at its first page.
+    useEffect(() => { setWsPage(0) }, [wsSearchDebounced])
+
+    const {
+        workspaces: pagedWorkspaces,
+        totalCount: wsTotalCount,
+        isLoading: wsPageLoading,
+        isError: wsPageError,
+        refetch: refetchWorkspacePage,
+    } = useWorkspacePage({
+        page: wsPage,
+        pageSize: WS_PAGE_SIZE,
+        search: wsSearchDebounced,
+        enabled: !singleWorkspace,
+    })
+
+    // Prefer the store's copy of each row (it's the one the rest of the wizard
+    // resolves against) but fall back to the server's — a workspace can legally
+    // appear on a page before the store's full list has refreshed.
+    const railWorkspaces = useMemo(
+        () => pagedWorkspaces.map(ws => availableWorkspaces.find(w => w.id === ws.id) ?? ws),
+        [pagedWorkspaces, availableWorkspaces],
+    )
 
     // Filter + sort the data sources for display.
     const visibleDataSources = useMemo(() => {
         const q = dsSearch.trim().toLowerCase()
         const filtered = dataSources.filter(ds => {
-            if (dsFilters.primary && !ds.isPrimary) return false
             if (dsFilters.ontology && !ds.ontologyId) return false
             if (dsFilters.ready && ds.aggregationStatus !== 'ready') return false
             if (q) {
@@ -1054,8 +1193,10 @@ export function ScopeStep({
                     return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
                 case 'recommended':
                 default: {
-                    const aRec = isRecommended(a) ? -2 : a.isPrimary ? -1 : 0
-                    const bRec = isRecommended(b) ? -2 : b.isPrimary ? -1 : 0
+                    // Sources you can actually build on float up; primacy is no longer
+                    // a tiebreaker because it says nothing about that.
+                    const aRec = isRecommended(a) ? 0 : 1
+                    const bRec = isRecommended(b) ? 0 : 1
                     if (aRec !== bRec) return aRec - bRec
                     return dsName(a).localeCompare(dsName(b))
                 }
@@ -1063,12 +1204,24 @@ export function ScopeStep({
         })
     }, [dataSources, dsSearch, dsSort, dsFilters, resolveProvider])
 
-    // Fetch cached stats only for the visible sources of the selected workspace
+    // Clamp the page when the filtered list shrinks below the current page.
+    const dsPageCount = Math.max(1, Math.ceil(visibleDataSources.length / DS_PAGE_SIZE))
+    useEffect(() => {
+        if (dsPage > dsPageCount - 1) setDsPage(dsPageCount - 1)
+    }, [dsPage, dsPageCount])
+
+    // Current page of cards (grid renders one page at a time).
+    const pagedDataSources = useMemo(
+        () => visibleDataSources.slice(dsPage * DS_PAGE_SIZE, (dsPage + 1) * DS_PAGE_SIZE),
+        [visibleDataSources, dsPage],
+    )
+
+    // Fetch cached stats only for the current PAGE of the selected workspace
     // (not eagerly for every source across every workspace).
-    const visibleDsIds = useMemo(() => visibleDataSources.map(ds => ds.id), [visibleDataSources])
+    const visibleDsIds = useMemo(() => pagedDataSources.map(ds => ds.id), [pagedDataSources])
     const { statsMap, isLoading: statsLoading } = useDataSourceStats(selectedWorkspaceId, visibleDsIds)
 
-    const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.primary || dsFilters.ontology || dsFilters.ready
+    const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.ontology || dsFilters.ready
     const clearDsFilters = useCallback(() => {
         setDsSearch('')
         setDsFilters(NO_FILTERS)
@@ -1087,22 +1240,19 @@ export function ScopeStep({
     }
 
     return (
-        <div className="space-y-5">
-            {/* Intro */}
+        <div className="space-y-4">
+            {/* Intro — deliberately compact. Everything above the picker is height the
+                picker doesn't get, and the picker is the thing people came for. */}
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.12 }}
-                className="text-center mb-2"
+                className="text-center"
             >
-                <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-3">
-                    {isBlank ? <Sparkles className="w-4 h-4" /> : <Database className="w-4 h-4" />}
-                    {isBlank ? 'Start a blank lineage model' : 'Choose your data source'}
-                </div>
-                <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-1.5">
+                <h3 className="text-xl font-bold text-slate-900 dark:text-white">
                     Where should this view live?
                 </h3>
-                <p className="text-slate-500 dark:text-slate-400 text-sm">
+                <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
                     {isBlank
                         ? 'Pick a workspace, a FalkorDB connection, and a published semantic layer'
                         : 'Select the workspace and data source this view will be built from'}
@@ -1127,16 +1277,17 @@ export function ScopeStep({
                     'min-h-[360px]',
                 )}
             >
-                {/* Left: Workspace List (hidden for single workspace) */}
+                {/* Left: Workspace rail — server-paginated, so it stays a short
+                    list whether the estate has 5 workspaces or 5,000. */}
                 {!singleWorkspace && (
                     <div className="w-[240px] shrink-0 border-r border-slate-200 dark:border-slate-700 flex flex-col">
-                        {/* Search */}
+                        {/* Search (server-side, debounced) */}
                         <div className="p-2.5 border-b border-slate-100 dark:border-slate-700/50">
                             <div className="relative">
                                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                                 <input
                                     type="text"
-                                    placeholder="Filter workspaces..."
+                                    placeholder="Search workspaces..."
                                     value={wsSearch}
                                     onChange={e => setWsSearch(e.target.value)}
                                     className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/30 transition-colors"
@@ -1145,22 +1296,61 @@ export function ScopeStep({
                         </div>
 
                         {/* Workspace list */}
-                        <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
-                            {filteredWorkspaces.map(ws => (
-                                <WorkspaceItem
-                                    key={ws.id}
-                                    ws={ws}
-                                    isSelected={ws.id === selectedWorkspaceId}
-                                    isActive={ws.id === activeWorkspaceId}
-                                    dsCount={ws.dataSources?.length ?? 0}
-                                    onClick={() => handleSelectWorkspace(ws.id)}
-                                />
-                            ))}
-                            {filteredWorkspaces.length === 0 && (
-                                <div className="py-6 text-center text-xs text-slate-400">
-                                    No workspaces match "{wsSearch}"
+                        <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                            {wsPageLoading ? (
+                                Array.from({ length: 5 }).map((_, i) => (
+                                    <div key={i} className="px-3.5 py-3 rounded-xl animate-pulse">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-7 h-7 rounded-lg bg-slate-200 dark:bg-slate-700 shrink-0" />
+                                            <div className="flex-1 space-y-1.5">
+                                                <div className="h-2.5 w-2/3 bg-slate-200 dark:bg-slate-700 rounded" />
+                                                <div className="h-2 w-1/3 bg-slate-100 dark:bg-slate-800 rounded" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            ) : wsPageError ? (
+                                <div className="py-6 text-center">
+                                    <p className="text-xs text-slate-400">Couldn’t load workspaces</p>
+                                    <button
+                                        type="button"
+                                        onClick={refetchWorkspacePage}
+                                        className="mt-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                                    >
+                                        Try again
+                                    </button>
                                 </div>
+                            ) : (
+                                <>
+                                    {railWorkspaces.map(ws => (
+                                        <WorkspaceItem
+                                            key={ws.id}
+                                            ws={ws}
+                                            isSelected={ws.id === selectedWorkspaceId}
+                                            isActive={ws.id === activeWorkspaceId}
+                                            dsCount={ws.dataSources?.length ?? 0}
+                                            onClick={() => handleSelectWorkspace(ws.id)}
+                                        />
+                                    ))}
+                                    {railWorkspaces.length === 0 && (
+                                        <div className="py-6 text-center text-xs text-slate-400">
+                                            {wsSearch
+                                                ? `No workspaces match "${wsSearch}"`
+                                                : 'No workspaces available'}
+                                        </div>
+                                    )}
+                                </>
                             )}
+                        </div>
+
+                        {/* Pager (self-hides when everything fits on one page) */}
+                        <div className="border-t border-slate-100 dark:border-slate-700/50 px-2 py-1.5 flex justify-center">
+                            <TablePagination
+                                page={wsPage}
+                                pageSize={WS_PAGE_SIZE}
+                                total={wsTotalCount}
+                                onPageChange={setWsPage}
+                            />
                         </div>
                     </div>
                 )}
@@ -1220,17 +1410,19 @@ export function ScopeStep({
 
                                         {/* Sort */}
                                         <DataSourceSortControl sort={dsSort} onSortChange={setDsSort} />
+
+                                        {/* Page controls (hidden when one page fits) */}
+                                        <TablePagination
+                                            page={dsPage}
+                                            pageSize={DS_PAGE_SIZE}
+                                            total={visibleDataSources.length}
+                                            onPageChange={setDsPage}
+                                        />
                                     </div>
                                 )}
 
                                 {dataSources.length > 0 && (
                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                        <FilterChip
-                                            active={dsFilters.primary}
-                                            onClick={() => setDsFilters(f => ({ ...f, primary: !f.primary }))}
-                                            icon={<Star className="w-3 h-3" />}
-                                            label="Primary"
-                                        />
                                         <FilterChip
                                             active={dsFilters.ontology}
                                             onClick={() => setDsFilters(f => ({ ...f, ontology: !f.ontology }))}
@@ -1251,21 +1443,19 @@ export function ScopeStep({
                             {dataSources.length === 0 ? (
                                 <NoDataSourcesState workspaceName={selectedWorkspace.name} />
                             ) : visibleDataSources.length > 0 ? (
-                                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                                    <div className={cn(
-                                        'grid gap-3',
-                                        visibleDataSources.length === 1
-                                            ? 'grid-cols-1 max-w-md'
-                                            : visibleDataSources.length === 2
-                                                ? 'grid-cols-1 sm:grid-cols-2'
-                                                : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
-                                    )}>
-                                        {visibleDataSources.map((ds, i) => (
+                                <div className="flex-1 overflow-y-auto p-3.5 custom-scrollbar">
+                                    {/* A FIXED column count. It used to widen the cards when a
+                                        page happened to hold one or two sources — which meant the
+                                        last page of a paginated list rendered at a completely
+                                        different size from the first. */}
+                                    <div className="grid gap-2.5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 items-stretch">
+                                        {pagedDataSources.map((ds, i) => (
                                             <motion.div
                                                 key={ds.id}
                                                 initial={{ opacity: 0, y: 8 }}
                                                 animate={{ opacity: 1, y: 0 }}
                                                 transition={{ duration: 0.12, delay: Math.min(i * 0.01, 0.05) }}
+                                                className="h-full"
                                             >
                                                 <DataSourceCard
                                                     ds={ds}
@@ -1273,7 +1463,7 @@ export function ScopeStep({
                                                     statsLoading={statsLoading}
                                                     isSelected={ds.id === selectedDataSourceId}
                                                     providerInfo={resolveProvider(ds.id)}
-                                                    onClick={() => onSelectDataSource(ds.id)}
+                                                    onSelect={onSelectDataSource}
                                                 />
                                             </motion.div>
                                         ))}

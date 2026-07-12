@@ -21,7 +21,12 @@ import sqlalchemy as sa
 from backend.app.services.versioning import config as gv_config
 
 revision: str = "20260713_1200_restore_kind"
-down_revision: Union[str, None] = "20260712_1730_val_data_changed"
+# Re-pointed at merge time. This branch was cut before `20260713_1000_view_visits` landed on
+# the base branch, and that migration hangs off the SAME parent — so merging the two as-cut
+# gives alembic TWO HEADS and `upgrade head` refuses to run at all. Git does not warn: the
+# two migrations are different files with no textual conflict. Chaining onto it instead of
+# beside it keeps one linear history, and needs no merge migration.
+down_revision: Union[str, None] = "20260713_1000_view_visits"
 branch_labels = None
 depends_on = None
 

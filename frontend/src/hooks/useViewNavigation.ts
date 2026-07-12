@@ -190,6 +190,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
         viewId: viewConfig.id,
         viewName: viewConfig.name,
         viewType: viewConfig.layout?.type ?? 'graph',
+        icon: viewConfig.icon,
         workspaceId: viewConfig.workspaceId,
         workspaceName: viewConfig.workspaceName,
         dataSourceId: dsId,

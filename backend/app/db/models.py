@@ -111,6 +111,39 @@ class AssignmentRuleSetORM(Base):
 # view_favourites                                                      #
 # ------------------------------------------------------------------ #
 
+class ViewVisitORM(Base):
+    """Per-user 'recently viewed' — the server-side source of truth for the
+    Explorer's "Continue where you left off" strip.
+
+    Replaces a browser-local localStorage list, which (a) didn't follow the user
+    across devices/browsers, (b) wasn't user-scoped so a second user on a shared
+    browser inherited the first user's recents, and (c) cached stale name
+    snapshots that 404'd once a view was renamed/deleted. One row per
+    (user, view) — the visit timestamp is upserted — and the FK CASCADE means a
+    deleted view disappears from everyone's recents for free.
+    """
+    __tablename__ = "view_visits"
+
+    id = Column(Text, primary_key=True, default=lambda: f"vis_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(Text, nullable=False)
+    visited_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "user_id", name="uq_view_user_visit"),
+        # The read is always "this user's visits, newest first".
+        Index("idx_visits_user_time", "user_id", "visited_at"),
+        Index("idx_visits_view", "view_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewVisit user={self.user_id!r} view={self.view_id!r} at={self.visited_at!r}>"
+
+
 class ViewFavouriteORM(Base):
     __tablename__ = "view_favourites"
 

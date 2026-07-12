@@ -69,8 +69,9 @@ _READ_TIMEOUT_MS = int(1000 * min(170.0, max(
 async def _q(client, cypher: str, params: Optional[dict] = None,
              *, timeout_ms: int = _WRITE_TIMEOUT_MS):
     """Run one query with a server-side kill budget AND a client-side hang
-    net (the registry pools set no socket timeout). Falls back to the
-    timeout-less call for client fakes/libs without the kwarg."""
+    net (belt over the pool-level socket timeouts, and the bound for client
+    fakes without them). Falls back to the timeout-less call for client
+    fakes/libs without the kwarg."""
     try:
         coro = client.query(cypher, params=params, timeout=timeout_ms)
     except TypeError:
@@ -1335,22 +1336,18 @@ class FalkorProjector:
 
 
 def make_falkor_graph_factory() -> Callable[..., object]:
-    """Production ENV-instance client factory — one async FalkorDB handle, a graph per
-    name. ``provider_id`` is accepted (the factory contract is ``(name, provider_id=
-    None)``) but ignored: every graph lands on the single env-configured instance. For
-    per-provider routing inject ``backend.app.providers.falkor_graph_registry.
-    make_registry_graph_factory`` instead.
+    """Production ENV-instance client factory. ``provider_id`` is accepted (the factory
+    contract is ``(name, provider_id=None)``) but ignored: every graph lands on the
+    env-configured instance. For per-provider routing inject
+    ``backend.app.providers.falkor_graph_registry.make_registry_graph_factory`` instead.
 
-    Config: ``FALKORDB_HOST`` / ``FALKORDB_PORT`` / ``FALKORDB_POOL_SIZE``.
+    Topology comes from the env instance's OWN config (``FALKORDB_MODE`` +
+    ``FALKORDB_HOST`` / ``FALKORDB_PORT`` / ``FALKORDB_SENTINEL_*`` /
+    ``FALKORDB_CLUSTER_NODES``), resolved through the shared topology-aware client
+    cache — so an env-default graph on a Sentinel or Cluster instance is reached
+    correctly (and re-resolves after a node rotation) instead of being hard-wired to a
+    standalone pool.
     """
-    from redis.asyncio import ConnectionPool          # pragma: no cover - infra
-    from falkordb.asyncio import FalkorDB              # pragma: no cover - infra
-    import os
+    from backend.app.providers.falkordb_connection import make_env_graph_factory
 
-    pool = ConnectionPool(
-        host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")),
-        max_connections=int(os.getenv("FALKORDB_POOL_SIZE", "10")),
-    )
-    handle = FalkorDB(connection_pool=pool)
-    return lambda name, provider_id=None: handle.select_graph(name)
+    return make_env_graph_factory()

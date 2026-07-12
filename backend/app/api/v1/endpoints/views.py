@@ -760,3 +760,33 @@ async def get_workspace_view_activity(
     return await view_activity_repo.get_workspace_activity(
         session, workspace_id, limit=limit, offset=offset,
     )
+
+
+@router.get("/me/recent", response_model=List[view_repo.RecentViewEntry])
+async def list_my_recent_views(
+    limit: int = Query(5, le=20),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The signed-in user's recently visited views — "Continue where you left off".
+
+    Server-side and per-user, so it follows them across devices/browsers and is
+    joined against the LIVE views (never a stale name, deleted views drop out).
+    """
+    return await view_repo.list_recent_views(session, _user_id(user), limit=limit)
+
+
+@router.post("/{view_id}/visit", status_code=204)
+async def record_visit(
+    view_id: str = Path(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Record that the current user opened this view (drives the recents strip)."""
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, view_orm):
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    await view_repo.record_view_visit(session, view_id, _user_id(user))

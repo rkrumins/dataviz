@@ -7,16 +7,25 @@
  * (edit-mode hydrate + submit), not the step UIs (covered by their own tests).
  */
 import { useEffect, useRef } from 'react'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act, renderHook } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import type { View } from '@/services/viewApiService'
+import { useAutoOpenCountdown } from '../CreationPhase'
 
 const getViewMock = vi.fn()
 const createViewMock = vi.fn()
 const updateViewMock = vi.fn()
 const updateViewLayoutMock = vi.fn()
+const navigateMock = vi.fn()
+
+// The redirect to the new view is the whole point of the success step — assert it
+// directly rather than trusting the router.
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => navigateMock }
+})
 
 vi.mock('@/services/viewApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewApiService')>()
@@ -302,17 +311,205 @@ describe('ViewWizard — submit (create path) retry', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
 
+    // The failure is now shown as a stalled stage with a Retry, instead of a
+    // silent no-op behind the footer button.
+    const retry = await screen.findByRole('button', { name: /^retry$/i })
+
     // Retry: must NOT call createView again (would mint a second view); must
     // re-drive updateViewLayout against the SAME id captured from the first call.
     updateViewLayoutMock.mockResolvedValueOnce(makeView(baseConfig({ layers: [], assignments: {} })))
-    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+    fireEvent.click(retry)
 
     await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(2))
     expect(createViewMock).toHaveBeenCalledTimes(1)
     const [firstCallId] = updateViewLayoutMock.mock.calls[0]
     const [secondCallId] = updateViewLayoutMock.mock.calls[1]
     expect(secondCallId).toBe(firstCallId)
-    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+    // The view is saved, so the wizard hands over rather than vanishing: the
+    // success step offers to open it.
+    const openNow = await screen.findByRole('button', { name: /open view now/i })
+
+    // CRITICAL: onComplete is what CLOSES the wizard (AppLayout wires it to
+    // closeViewEditor). Firing it on save would unmount the success step and kill
+    // the redirect with it — which is exactly the bug this pins. Nothing leaves
+    // until the user does.
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalled()
+
+    fireEvent.click(openNow)
+
+    expect(navigateMock).toHaveBeenCalledWith('/views/v1')
+    expect(onComplete).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers to open the view itself, counting down', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    updateViewLayoutMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await screen.findByRole('button', { name: /open view now/i })
+    // The auto-open is advertised, not silent (the firing itself is pinned by the
+    // useAutoOpenCountdown tests at the bottom of this file). The seconds sit in
+    // their own element, so match on the whole line rather than a single text node.
+    expect(
+      screen.getByText(
+        (_content, el) =>
+          el?.tagName === 'P' && /opening automatically in \d+s/i.test(el.textContent ?? ''),
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('stays put (no redirect) when the user chooses to stay here', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    updateViewLayoutMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    const onComplete = vi.fn()
+    const onClose = vi.fn()
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={onClose}
+            onComplete={onComplete}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    fireEvent.click(await screen.findByRole('button', { name: /stay here/i }))
+
+    expect(navigateMock).not.toHaveBeenCalled()
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the autosaved draft once the view is fully saved', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    updateViewLayoutMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await screen.findByRole('button', { name: /open view now/i })
+    expect(removeItem).toHaveBeenCalledWith(
+      expect.stringContaining('viz-view-wizard-draft:ws1:ds1'),
+    )
+    removeItem.mockRestore()
+  })
+})
+
+/**
+ * The auto-open itself, unit-tested. Deliberately NOT exercised through the full
+ * wizard: installing fake timers around a React tree wedges React's own scheduler
+ * and silently breaks every test that follows it in the file.
+ */
+describe('useAutoOpenCountdown', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  /** Each tick must be its own act(): the next timeout is only scheduled once
+   *  React has re-rendered with the decremented value. */
+  const tick = (seconds: number) => {
+    for (let i = 0; i < seconds; i++) {
+      act(() => { vi.advanceTimersByTime(1000) })
+    }
+  }
+
+  it('opens the view once the countdown runs out — and only once', () => {
+    const onFire = vi.fn()
+    renderHook(() => useAutoOpenCountdown({ enabled: true, seconds: 3, onFire }))
+
+    tick(2)
+    expect(onFire).not.toHaveBeenCalled()
+
+    tick(1)
+    expect(onFire).toHaveBeenCalledTimes(1)
+
+    // A stray tick must never fire a second navigation.
+    tick(5)
+    expect(onFire).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs on its own — there is no hover-pause to stall it', () => {
+    // The pause used to make this hook useless in practice: after clicking
+    // "Create" the pointer is already over the modal, so the countdown started
+    // paused and the auto-open never happened. Cancelling is now an explicit act.
+    const onFire = vi.fn()
+    const { result } = renderHook(() => useAutoOpenCountdown({ enabled: true, seconds: 3, onFire }))
+
+    expect(result.current).not.toHaveProperty('setPaused')
+    tick(3)
+
+    expect(onFire).toHaveBeenCalledTimes(1)
+  })
+
+  it('never fires after the user takes over (cancel)', () => {
+    const onFire = vi.fn()
+    const { result } = renderHook(() => useAutoOpenCountdown({ enabled: true, seconds: 3, onFire }))
+
+    act(() => { result.current.cancel() })
+    tick(10)
+
+    expect(onFire).not.toHaveBeenCalled()
+  })
+
+  it('does nothing until the wizard actually reaches the success step', () => {
+    const onFire = vi.fn()
+    renderHook(() => useAutoOpenCountdown({ enabled: false, seconds: 3, onFire }))
+
+    tick(10)
+    expect(onFire).not.toHaveBeenCalled()
   })
 })

@@ -37,6 +37,14 @@ import type {
 
 const PAGE_SIZE = 50
 
+/** Bulk "load all" paging. The children endpoints have no route-level max
+ *  (graph.py children limit is only `ge=1`), so 500/page keeps payloads sane;
+ *  top-level IS capped at `le=1000` server-side. */
+const BULK_CHILD_PAGE_SIZE = 500
+const BULK_TOP_LEVEL_PAGE_SIZE = 1000
+/** Hard safety stop for "load all" loops (200 × 500 = 100k children/node). */
+const BULK_MAX_PAGES = 200
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface BrowserNode {
@@ -44,14 +52,46 @@ export interface BrowserNode {
     node: GraphNode
     /** URNs of direct children (from containment edges in the API response) */
     childIds: string[]
-    /** Approximate total children count (from API childCount or totalChildren) */
+    /**
+     * Best-known number of children.
+     *
+     * CAREFUL: a paged children response's `totalChildren` is NOT a count —
+     * every provider computes it as `offset + len(page) + (1 if has_more)`
+     * (see common/interfaces/provider.py, falkordb_provider.py), i.e. a paging
+     * heuristic that reads 51 for a node with 200 children. The node's own
+     * `childCount` IS a real count query. So this field is derived from
+     * `node.childCount` when we have it, and NEVER downgraded by a page load.
+     */
     totalChildren: number
+    /** True when `totalChildren` is a real count (not a floor we inferred). */
+    totalIsExact: boolean
     /** Whether more children exist beyond what's loaded */
     hasMore: boolean
     /** Cursor for the next page of children */
     nextCursor: string | null
     /** Whether children have been fetched at least once */
     loaded: boolean
+}
+
+/**
+ * Resolve the honest child total for a node.
+ *
+ * `node.childCount` is authoritative (a server-side count). Otherwise we only
+ * know a floor: what we've actually loaded — exact only once the last page is in.
+ */
+function resolveChildTotal(
+    node: GraphNode,
+    loadedCount: number,
+    hasMore: boolean,
+    prev?: BrowserNode,
+): { totalChildren: number; totalIsExact: boolean } {
+    const authoritative = node.childCount
+    if (typeof authoritative === 'number' && authoritative > 0) {
+        return { totalChildren: authoritative, totalIsExact: true }
+    }
+    // No count from the server: the most we can honestly claim is what we hold.
+    const floor = Math.max(loadedCount, prev?.totalIsExact ? prev.totalChildren : 0)
+    return { totalChildren: floor, totalIsExact: !hasMore && loadedCount > 0 }
 }
 
 export interface TopLevelMetadata {
@@ -84,6 +124,9 @@ export interface UseEntityBrowserResult {
     topLevelTotalCount: number
     topLevelMetadata: TopLevelMetadata
     parentMap: Map<string, string>
+    /** Fresh read of a node entry (ref-backed) — safe to call after an awaited
+     *  action inside the same callback, where the `nodes` state would be stale. */
+    peekNode: (urn: string) => BrowserNode | undefined
 
     // ─── Ontology-derived ───
     canTransitivelyContain: (ancestorType: string, targetType: string) => boolean
@@ -101,6 +144,15 @@ export interface UseEntityBrowserResult {
     loadMoreTopLevel: () => Promise<void>
     expandNode: (urn: string) => Promise<void>
     loadMoreChildren: (parentUrn: string) => Promise<void>
+    /**
+     * Page through ALL remaining children of a node (500/page) until exhausted,
+     * and RETURN the complete child list. The return value matters: React state
+     * is not yet updated when this resolves, so callers must use what they get
+     * back (or `peekNode`) rather than re-reading `nodes`.
+     */
+    loadAllChildren: (parentUrn: string) => Promise<string[]>
+    /** Page through ALL remaining top-level nodes (1000/page) until exhausted. */
+    loadAllTopLevel: () => Promise<void>
     setSearch: (query: string) => void
     setTypeFilter: (typeId: string | null) => void
     refresh: () => Promise<void>
@@ -131,19 +183,56 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // Refs — mutable, no re-render, no stale closure issues
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const providerRef = useRef<GraphDataProvider | null>(null)
-    // Use refs for state that callbacks need to read without re-creating closures
-    const nodesRef = useRef(nodes)
-    nodesRef.current = nodes
+
+    // ── The node map is REF-first, state-second ───────────────────────────────
+    // Callers do `await loadAllChildren(urn)` and then immediately read the
+    // result. React's automatic batching means `nodes` (and a ref synced during
+    // render) is still the PRE-load map at that moment — which is why "Select
+    // all N children" used to do nothing on the first click and work on the
+    // second. So the ref is the source of truth, updated synchronously on every
+    // write, and `setNodes` only mirrors it for rendering.
+    const nodesRef = useRef<Map<string, BrowserNode>>(nodes)
+    const commitNodes = useCallback(
+        (mutate: (prev: Map<string, BrowserNode>) => Map<string, BrowserNode>) => {
+            const next = mutate(nodesRef.current)
+            nodesRef.current = next
+            setNodes(next)
+        },
+        [],
+    )
+
+    // Same rule for the top-level page state the bulk loaders read after awaits.
+    const topLevelIdsRef = useRef<string[]>(topLevelIds)
+    const topLevelCursorRef = useRef<string | null>(topLevelCursor)
+    const topLevelHasMoreRef = useRef<boolean>(topLevelHasMore)
+    const parentMapRef = useRef<Map<string, string>>(parentMap)
+
     // Capture current filter/search inside loaders without retriggering the
     // callback identity every time the user types — the callback reads the
     // ref at call-time instead.
     const typeFilterRef = useRef(typeFilter)
     typeFilterRef.current = typeFilter
+    // Guards so concurrent "load all" loops never run twice for the same target.
+    const bulkInFlightRef = useRef<Set<string>>(new Set())
+
+    const commitParentMap = useCallback((edges: { sourceUrn: string; targetUrn: string }[]) => {
+        if (edges.length === 0) return
+        const next = new Map(parentMapRef.current)
+        for (const edge of edges) next.set(edge.targetUrn, edge.sourceUrn)
+        parentMapRef.current = next
+        setParentMap(next)
+    }, [])
 
     // Reset when provider changes (workspace/datasource switch)
     useEffect(() => {
         if (providerRef.current !== provider) {
             providerRef.current = provider
+            nodesRef.current = new Map()
+            topLevelIdsRef.current = []
+            topLevelCursorRef.current = null
+            topLevelHasMoreRef.current = false
+            parentMapRef.current = new Map()
+            bulkInFlightRef.current = new Set()
             setNodes(new Map())
             setTopLevelIds([])
             setTopLevelHasMore(false)
@@ -203,6 +292,16 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         setLoadingNodes(prev => { const next = new Set(prev); next.delete(id); return next })
     }, [])
 
+    /** A freshly-seen node, with its child total taken from the authoritative count. */
+    const freshEntry = useCallback((node: GraphNode, prev?: BrowserNode): BrowserNode => ({
+        node,
+        childIds: prev?.childIds ?? [],
+        ...resolveChildTotal(node, prev?.childIds.length ?? 0, prev?.hasMore ?? false, prev),
+        hasMore: prev?.hasMore ?? false,
+        nextCursor: prev?.nextCursor ?? null,
+        loaded: prev?.loaded ?? false,
+    }), [])
+
     const mergeTopLevelResult = useCallback(
         (
             result: Awaited<ReturnType<GraphDataProvider['getTopLevelNodes']>>,
@@ -212,44 +311,33 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 const newNodes = new Map<string, BrowserNode>()
                 const newIds: string[] = []
                 for (const node of result.nodes) {
-                    newNodes.set(node.urn, {
-                        node,
-                        childIds: [],
-                        totalChildren: node.childCount ?? 0,
-                        hasMore: false,
-                        nextCursor: null,
-                        loaded: false,
-                    })
+                    newNodes.set(node.urn, freshEntry(node))
                     newIds.push(node.urn)
                 }
+                nodesRef.current = newNodes
+                topLevelIdsRef.current = newIds
+                parentMapRef.current = new Map()
                 setNodes(newNodes)
                 setTopLevelIds(newIds)
                 setParentMap(new Map())
             } else {
-                setNodes(prev => {
+                commitNodes(prev => {
                     const next = new Map(prev)
                     for (const node of result.nodes) {
-                        if (!next.has(node.urn)) {
-                            next.set(node.urn, {
-                                node,
-                                childIds: [],
-                                totalChildren: node.childCount ?? 0,
-                                hasMore: false,
-                                nextCursor: null,
-                                loaded: false,
-                            })
-                        }
+                        if (!next.has(node.urn)) next.set(node.urn, freshEntry(node))
                     }
                     return next
                 })
-                setTopLevelIds(prev => {
-                    const existing = new Set(prev)
-                    const newIds = result.nodes
-                        .filter(n => !existing.has(n.urn))
-                        .map(n => n.urn)
-                    return [...prev, ...newIds]
-                })
+                const existing = new Set(topLevelIdsRef.current)
+                const appended = result.nodes
+                    .filter(n => !existing.has(n.urn))
+                    .map(n => n.urn)
+                const nextIds = [...topLevelIdsRef.current, ...appended]
+                topLevelIdsRef.current = nextIds
+                setTopLevelIds(nextIds)
             }
+            topLevelHasMoreRef.current = Boolean(result.hasMore)
+            topLevelCursorRef.current = result.nextCursor ?? null
             setTopLevelHasMore(Boolean(result.hasMore))
             setTopLevelCursor(result.nextCursor ?? null)
             setTopLevelTotalCount(result.totalCount ?? 0)
@@ -258,7 +346,56 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 orphanCount: result.orphanCount ?? 0,
             })
         },
-        [],
+        [commitNodes, freshEntry],
+    )
+
+    /**
+     * Fold one page of children into the parent entry.
+     *
+     * The parent's `totalChildren` is NEVER taken from `result.totalChildren`
+     * (a paging heuristic — see BrowserNode). It stays anchored to the node's
+     * own count; only when the server never gave us one do we fall back to the
+     * honest floor of what we've loaded.
+     */
+    const mergeChildrenPage = useCallback(
+        (
+            parentUrn: string,
+            result: Awaited<ReturnType<GraphDataProvider['getChildrenWithEdges']>>,
+            mode: 'replace' | 'append',
+        ): string[] => {
+            let childIdsAfter: string[] = []
+
+            commitNodes(prev => {
+                const next = new Map(prev)
+
+                for (const child of result.children) {
+                    next.set(child.urn, freshEntry(child, next.get(child.urn)))
+                }
+
+                const parent = next.get(parentUrn)
+                if (parent) {
+                    const pageIds = result.children.map(c => c.urn)
+                    const merged = mode === 'replace'
+                        ? pageIds
+                        : [...parent.childIds, ...pageIds.filter(id => !new Set(parent.childIds).has(id))]
+                    childIdsAfter = merged
+
+                    next.set(parentUrn, {
+                        ...parent,
+                        childIds: merged,
+                        ...resolveChildTotal(parent.node, merged.length, Boolean(result.hasMore), parent),
+                        hasMore: Boolean(result.hasMore),
+                        nextCursor: result.nextCursor ?? null,
+                        loaded: true,
+                    })
+                }
+                return next
+            })
+
+            commitParentMap(result.containmentEdges)
+            return childIdsAfter
+        },
+        [commitNodes, commitParentMap, freshEntry],
     )
 
     // ─── loadTopLevel ───
@@ -325,55 +462,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 offset: 0,
                 includeLineageEdges: false,
             })
-
-            setNodes(prev => {
-                const next = new Map(prev)
-
-                // Collect child IDs inside the updater to avoid closure issues
-                const childIds: string[] = []
-                for (const child of result.children) {
-                    childIds.push(child.urn)
-                    // Always update the child node data (fresh from API)
-                    const existingChild = next.get(child.urn)
-                    next.set(child.urn, {
-                        node: child,
-                        childIds: existingChild?.childIds ?? [],
-                        totalChildren: child.childCount ?? 0,
-                        hasMore: existingChild?.hasMore ?? false,
-                        nextCursor: existingChild?.nextCursor ?? null,
-                        loaded: existingChild?.loaded ?? false,
-                    })
-                }
-
-                // Update parent with children info
-                const parentEntry = next.get(urn)
-                if (parentEntry) {
-                    next.set(urn, {
-                        ...parentEntry,
-                        childIds,
-                        totalChildren: result.totalChildren,
-                        hasMore: result.hasMore,
-                        nextCursor: result.nextCursor ?? null,
-                        loaded: true,
-                    })
-                }
-                return next
-            })
-
-            // Update parent map from containment edges
-            setParentMap(prev => {
-                const next = new Map(prev)
-                for (const edge of result.containmentEdges) {
-                    next.set(edge.targetUrn, edge.sourceUrn)
-                }
-                return next
-            })
+            mergeChildrenPage(urn, result, 'replace')
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to expand ${urn}:`, err)
         } finally {
             removeLoading(urn)
         }
-    }, [provider, containmentEdgeTypes, addLoading, removeLoading])
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
     // NOTE: no `nodes` in deps — uses nodesRef instead to prevent infinite re-creation
 
     // ─── loadMoreChildren ───
@@ -391,53 +486,103 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 cursor: parentEntry.nextCursor,
                 includeLineageEdges: false,
             })
-
-            setNodes(prev => {
-                const next = new Map(prev)
-                const newChildIds: string[] = []
-
-                for (const child of result.children) {
-                    newChildIds.push(child.urn)
-                    if (!next.has(child.urn)) {
-                        next.set(child.urn, {
-                            node: child,
-                            childIds: [],
-                            totalChildren: child.childCount ?? 0,
-                            hasMore: false,
-                            nextCursor: null,
-                            loaded: false,
-                        })
-                    }
-                }
-
-                const entry = next.get(parentUrn)
-                if (entry) {
-                    const existingSet = new Set(entry.childIds)
-                    const appendIds = newChildIds.filter(id => !existingSet.has(id))
-                    next.set(parentUrn, {
-                        ...entry,
-                        childIds: [...entry.childIds, ...appendIds],
-                        totalChildren: result.totalChildren,
-                        hasMore: result.hasMore,
-                        nextCursor: result.nextCursor ?? null,
-                    })
-                }
-                return next
-            })
-
-            setParentMap(prev => {
-                const next = new Map(prev)
-                for (const edge of result.containmentEdges) {
-                    next.set(edge.targetUrn, edge.sourceUrn)
-                }
-                return next
-            })
+            mergeChildrenPage(parentUrn, result, 'append')
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to load more children for ${parentUrn}:`, err)
         } finally {
             removeLoading(parentUrn)
         }
-    }, [provider, containmentEdgeTypes, addLoading, removeLoading])
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
+
+    // ─── loadAllChildren: page through EVERY remaining child of a node ───
+    // Resumes from the current cursor when children are partially loaded, so
+    // work already done by expand/load-more is never re-fetched. Cursor state
+    // is tracked locally from API results (React state is stale inside the loop).
+
+    const loadAllChildren = useCallback(async (parentUrn: string): Promise<string[]> => {
+        const alreadyComplete = (urn: string) => {
+            const e = nodesRef.current.get(urn)
+            return !!e?.loaded && !e.hasMore
+        }
+        if (bulkInFlightRef.current.has(parentUrn)) return nodesRef.current.get(parentUrn)?.childIds ?? []
+        if (alreadyComplete(parentUrn)) return nodesRef.current.get(parentUrn)?.childIds ?? []
+
+        bulkInFlightRef.current.add(parentUrn)
+        addLoading(parentUrn)
+
+        try {
+            const first = nodesRef.current.get(parentUrn)
+            // Resume from where paging left off rather than re-fetching page 1.
+            let cursor: string | null = first?.loaded ? (first.nextCursor ?? null) : null
+            let mode: 'replace' | 'append' = first?.loaded ? 'append' : 'replace'
+            let childIds: string[] = first?.childIds ?? []
+
+            for (let page = 0; page < BULK_MAX_PAGES; page++) {
+                const result = await provider.getChildrenWithEdges(parentUrn, {
+                    edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                    limit: BULK_CHILD_PAGE_SIZE,
+                    ...(cursor ? { cursor } : { offset: 0 }),
+                    includeLineageEdges: false,
+                })
+
+                // Returns the merged child list — the caller must never have to
+                // re-read React state to find out what it just loaded.
+                childIds = mergeChildrenPage(parentUrn, result, mode)
+                mode = 'append'
+
+                if (!result.hasMore) break
+                cursor = result.nextCursor ?? null
+                if (!cursor) break // defensive: server claims more but gave no cursor
+            }
+
+            return childIds
+        } catch (err) {
+            console.error(`[useEntityBrowser] Failed to load all children for ${parentUrn}:`, err)
+            return nodesRef.current.get(parentUrn)?.childIds ?? []
+        } finally {
+            bulkInFlightRef.current.delete(parentUrn)
+            removeLoading(parentUrn)
+        }
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
+
+    // ─── loadAllTopLevel: page through EVERY remaining top-level node ───
+    // Mirrors loadMoreTopLevel's context (current type filter, no search param —
+    // same as the existing load-more path) and appends until exhausted.
+
+    const loadAllTopLevel = useCallback(async () => {
+        if (!topLevelHasMoreRef.current) return
+        if (bulkInFlightRef.current.has('__top-level')) return
+
+        bulkInFlightRef.current.add('__top-level')
+        addLoading('__top-level')
+
+        try {
+            let cursor = topLevelCursorRef.current
+            for (let page = 0; page < BULK_MAX_PAGES; page++) {
+                const activeFilter = typeFilterRef.current
+                const result = await provider.getTopLevelNodes({
+                    entityTypes: activeFilter ? [activeFilter] : undefined,
+                    limit: BULK_TOP_LEVEL_PAGE_SIZE,
+                    cursor,
+                    includeChildCount: true,
+                })
+                mergeTopLevelResult(result, 'append')
+
+                if (!result.hasMore) break
+                cursor = result.nextCursor ?? null
+                if (!cursor) break
+            }
+        } catch (err) {
+            console.error('[useEntityBrowser] Failed to load all top-level nodes:', err)
+        } finally {
+            bulkInFlightRef.current.delete('__top-level')
+            removeLoading('__top-level')
+        }
+    }, [provider, mergeTopLevelResult, addLoading, removeLoading])
+
+    // ─── peekNode: ref-backed fresh read ───
+
+    const peekNode = useCallback((urn: string) => nodesRef.current.get(urn), [])
 
     // ─── setSearch: debounced server-side search ───
 
@@ -514,6 +659,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         topLevelTotalCount,
         topLevelMetadata,
         parentMap,
+        peekNode,
         canTransitivelyContain,
         typesOnPathTo,
         isLoading,
@@ -525,6 +671,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         loadMoreTopLevel,
         expandNode,
         loadMoreChildren,
+        loadAllChildren,
+        loadAllTopLevel,
         setSearch,
         setTypeFilter,
         refresh,

@@ -63,6 +63,63 @@ FALKORDB_SLOW_QUERY_MS: int = int(os.getenv("FALKORDB_SLOW_QUERY_MS", "500"))
 # Short because these run during _ensure_connected() on the critical path.
 FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
 
+# ── Provider instance cache (ProviderManager) ───────────────────────
+# One provider instance is cached per (provider_id, graph_name) — i.e. per data
+# source — and each holds its own connection pool. redis-py pools have NO idle
+# reaper: once a socket is opened it is returned to the pool and kept open, so a
+# data source touched once at 3am holds its sockets until the pod restarts.
+#
+# The ceiling this protects: sockets ≈ (data sources) × (peak concurrency per
+# provider, capped by PROVIDER_MAX_CONCURRENCY) × (pods). At full HPA fan-out that
+# approaches FalkorDB's `maxclients` (10k default), and exhausting it is not a
+# graceful degradation — FalkorDB refuses new connections fleet-wide, which reads
+# as a total graph outage.
+#
+# Max cached provider instances per process. When exceeded, the least-recently-used
+# IDLE instance is closed (in-flight ones are never touched). Generous by design:
+# this is a safety net, not a behavior change.
+PROVIDER_CACHE_MAX: int = int(os.getenv("PROVIDER_CACHE_MAX", "256"))
+# Close a cached provider after this many seconds without use, reclaiming its
+# sockets and memory. 0 disables idle reaping. Swept on the warmup loop's cycle
+# (~30s), so both the web tier and the aggregation worker get it.
+PROVIDER_CACHE_IDLE_TTL_SECS: float = float(
+    os.getenv("PROVIDER_CACHE_IDLE_TTL_SECS", "900"))
+
+# ── FalkorDB socket hygiene (every raw ConnectionPool) ──────────────
+# These four apply to ALL FalkorDB/Redis connection pools the backend
+# builds (provider read path, graph registry, versioning projector) via
+# falkordb_connection.resilient_pool_kwargs(). They exist so a rotated/
+# rescheduled FalkorDB pod (e.g. a GKE node upgrade) can never wedge a
+# request on a black-holed TCP connection.
+#
+# TCP connect deadline for one pool connection — bounds dialing a dead
+# or rescheduled pod.
+FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS: float = float(
+    os.getenv("FALKORDB_SOCKET_CONNECT_TIMEOUT", "2"))
+# Socket recv/send deadline — the last-resort HANG NET for established
+# sockets black-holed by a node rotation (kernel retransmit can otherwise
+# stall 15+ minutes). NOT the query budget: server-side `timeout` and
+# caller asyncio.wait_for own that. Per-tier values come from the
+# deployment configmaps (viz 10 / worker 60 / controlplane 5).
+FALKORDB_SOCKET_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+# Enable TCP keepalive on pooled sockets (kernel-default timers; belt
+# over the timeouts above). Set "0"/"false" to disable.
+FALKORDB_SOCKET_KEEPALIVE: bool = (
+    os.getenv("FALKORDB_SOCKET_KEEPALIVE", "1").strip().lower()
+    in ("1", "true", "yes", "on"))
+# Idle seconds after which redis-py PINGs a pooled connection before
+# reuse, transparently replacing sockets that died while the pool sat
+# idle (pod rotation) instead of each costing one failed operation.
+# 0 disables the check.
+FALKORDB_HEALTH_CHECK_INTERVAL_SECS: int = int(
+    os.getenv("FALKORDB_HEALTH_CHECK_INTERVAL", "30"))
+# Extra socket headroom above PROJECTION_FALKOR_WRITE_TIMEOUT_S for
+# projection-capable pools (graph registry / env graph factory), so the
+# socket hang-net can never fire before a legitimately long server-side
+# projection write completes.
+PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS: float = float(
+    os.getenv("PROJECTION_SOCKET_TIMEOUT_MARGIN_S", "15"))
+
 # ── HTTP request timeouts (ASGI middleware, per-path) ───────────────
 # Health/readiness probes — must respond fast for K8s.
 HTTP_TIMEOUT_HEALTH_SECS: float = float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))

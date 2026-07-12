@@ -107,6 +107,7 @@ def fake_redis_and_falkor(monkeypatch):
 
         def master_for(self, name, **kwargs):
             captured["master_for"] = name
+            captured["master_for_kwargs"] = kwargs
             return FakeMaster()
 
     class FakeFalkorDB:
@@ -178,6 +179,82 @@ async def test_build_graph_client_sentinel(fake_redis_and_falkor):
     assert db.connection_pool is pool
     assert fake_redis_and_falkor["master_for"] == "mymaster"
     assert fake_redis_and_falkor["sentinel_nodes"] == [("s1", 26379), ("s2", 26379)]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_master_pool_keeps_the_resilience_kwargs(fake_redis_and_falkor):
+    """AUDIT FIX: the sentinel branch used to hand master_for() only
+    max_connections + auth, silently dropping socket_keepalive and
+    health_check_interval — so after a failover stale sockets stalled to the
+    caller's asyncio.TimeoutError (never retried, by design) instead of a retryable
+    redis ConnectionError, and the breaker opened where a transparent retry was
+    intended. It also force-set decode_responses=True, giving Sentinel callers `str`
+    where standalone/cluster give the same callers `bytes`."""
+    cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("s1", 26379)],
+    )
+    pool_kwargs = {
+        "max_connections": 24, "socket_timeout": 10.0,
+        "socket_connect_timeout": 2.0, "socket_keepalive": True,
+        "health_check_interval": 30,
+    }
+    await build_graph_client(cfg, graph_name="g", pool_kwargs=pool_kwargs)
+
+    kw = fake_redis_and_falkor["master_for_kwargs"]
+    assert kw["socket_keepalive"] is True
+    assert kw["health_check_interval"] == 30
+    assert kw["socket_timeout"] == 10.0
+    assert kw["max_connections"] == 24
+    # Bytes-mode preserved: the caller decides, not the topology.
+    assert "decode_responses" not in kw
+
+
+@pytest.mark.asyncio
+async def test_sentinel_daemons_get_no_auth_by_default(fake_redis_and_falkor):
+    """AUDIT FIX: the FalkorDB password was sent to the Sentinel DAEMONS. Against
+    unauthenticated sentinels (the common k8s shape) redis-py raises on the AUTH
+    reply, so discover_master fails and sentinel mode cannot connect AT ALL."""
+    cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster", sentinel_nodes=[("s1", 26379)],
+        username="graphuser", password="graphpass",
+    )
+    await build_graph_client(
+        cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0, "max_connections": 8},
+    )
+
+    sentinel_kwargs = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
+    assert "password" not in sentinel_kwargs        # no data-plane secret leaked
+    assert "username" not in sentinel_kwargs
+    # …but the MASTER (data plane) still authenticates.
+    assert fake_redis_and_falkor["master_for_kwargs"]["password"] == "graphpass"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_daemons_use_explicit_credentials(fake_redis_and_falkor):
+    cfg = load_connection_config(
+        {"mode": "sentinel",
+         "sentinel": {"masterName": "m", "nodes": [["s1", 26379]],
+                      "username": "sentineluser", "password": "sentinelpass"}},
+        host="h", port=6379, username="graphuser", password="graphpass",
+    )
+    await build_graph_client(
+        cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0},
+    )
+    sk = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
+    assert sk["username"] == "sentineluser" and sk["password"] == "sentinelpass"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_auth_enabled_reuses_data_plane_credentials(fake_redis_and_falkor):
+    cfg = load_connection_config(
+        {"mode": "sentinel",
+         "sentinel": {"masterName": "m", "nodes": [["s1", 26379]], "authEnabled": True}},
+        host="h", port=6379, username="graphuser", password="graphpass",
+    )
+    await build_graph_client(cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0})
+    sk = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
+    assert sk["password"] == "graphpass"
 
 
 @pytest.mark.asyncio

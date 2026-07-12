@@ -539,7 +539,17 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
         ptype, host, port, tls = (
             prov_row.provider_type, prov_row.host, prov_row.port, prov_row.tls_enabled,
         )
-    return provider_registry._create_provider_instance(ptype, host, port, asset_name, tls, creds)
+        # extra_config carries the connection topology (falkordbConnection: mode +
+        # sentinel/cluster nodes). Dropping it built a STANDALONE client for a
+        # Sentinel/Cluster provider — the sibling /test endpoint always passed it,
+        # so the two paths had drifted.
+        try:
+            extra = json.loads(prov_row.extra_config) if prov_row.extra_config else None
+        except Exception:
+            extra = None
+    return provider_registry._create_provider_instance(
+        ptype, host, port, asset_name, tls, creds, extra,
+    )
 
 
 # ── Cache-only discovery endpoints moved to endpoints/insights.py ─────

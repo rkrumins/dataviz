@@ -98,7 +98,9 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     }
 ]
 
-const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
+/** Shared layer palette — also used by the Layer Studio's in-step "Add layer"
+ *  so colours never drift between the two places layers can be created. */
+export const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
 
 // ============================================
 // Blank-model Quick Start template gallery

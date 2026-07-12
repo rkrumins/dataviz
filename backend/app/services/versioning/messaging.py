@@ -8,7 +8,6 @@ same instance the aggregation worker uses for dispatch).
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -22,13 +21,27 @@ _client: Optional[aioredis.Redis] = None
 
 
 def get_broker_redis() -> aioredis.Redis:
-    """Singleton async Redis client for the projection wake-up stream."""
+    """Singleton async Redis client for the projection wake-up stream.
+
+    Built by ``build_bus_redis`` — the SAME builder the aggregation/insights bus
+    uses — so topology (single node or Sentinel), auth and TLS are resolved from the
+    same env vars for every bus consumer. This used to call ``from_url(REDIS_URL)``
+    directly, which ignored ``REDIS_PASSWORD``, the ``REDIS_TLS_*`` settings and
+    ``REDIS_SENTINEL_*``: the day the coordination bus gained auth/TLS or moved
+    behind Sentinel, every other consumer would have followed and this one client
+    alone would have started failing — costing the projector its wake-up signal (the
+    Postgres queue + 5s poll loop remain the correctness backstop, so the price is
+    latency and error noise, not data loss — but it is an avoidable landmine).
+    """
     global _client
     if _client is None:
-        url = os.getenv("REDIS_URL", "redis://localhost:6380/0")
-        _client = aioredis.from_url(
-            url, decode_responses=True, max_connections=10,
-            socket_connect_timeout=5, socket_timeout=10,
+        from backend.common.adapters.redis_bus import build_bus_redis
+
+        _client = build_bus_redis(
+            decode_responses=True,
+            max_connections=10,
+            socket_connect_timeout=5,
+            socket_timeout=10,
         )
     return _client
 
