@@ -9,7 +9,7 @@ FalkorDB>=1.6.1
 redis>=5.0
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0.51
 asyncpg>=0.29.0          # PostgreSQL async driver — runtime
 psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
 alembic>=1.13.0          # Schema migrations
