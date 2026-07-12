@@ -345,6 +345,38 @@ export async function getView(viewId: string, branchId?: string): Promise<View> 
     return apiFetch<View>(`/api/v1/views/${viewId}${qs}`)
 }
 
+export type ViewActivityAction =
+    | 'created' | 'updated' | 'visibility_changed' | 'shared' | 'unshared'
+    | 'favourited' | 'unfavourited' | 'deleted' | 'restored'
+
+/** One entry in a view's activity timeline. Field diffs live in ``changes``
+ *  (e.g. { name: { from, to }, viewType: { from, to }, content: true }). */
+export interface ViewActivityEntry {
+    id: string
+    viewId: string
+    action: ViewActivityAction
+    actor: string | null
+    actorName: string | null
+    actorEmail: string | null
+    summary: string | null
+    changes: Record<string, unknown> | null
+    createdAt: string
+    /** True for a synthesized anchor on a legacy view with no recorded rows. */
+    synthetic: boolean
+}
+
+/** A view's activity timeline, newest first. */
+export async function getViewActivity(
+    viewId: string,
+    opts?: { action?: string; limit?: number },
+): Promise<ViewActivityEntry[]> {
+    const sp = new URLSearchParams()
+    if (opts?.action) sp.set('action', opts.action)
+    if (opts?.limit) sp.set('limit', String(opts.limit))
+    const qs = sp.toString()
+    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/${viewId}/activity${qs ? `?${qs}` : ''}`)
+}
+
 /** Update an existing view */
 export async function updateView(viewId: string, data: ViewUpdateRequest): Promise<View> {
     return apiFetch<View>(`/api/v1/views/${viewId}`, {

@@ -3,9 +3,10 @@
  * lifecycle actions: Delete, Change Visibility, Share.
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, History } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
+import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -20,7 +21,7 @@ interface ViewCardOverflowMenuProps {
 
 export function ViewCardOverflowMenu({
   viewId,
-  viewName: _viewName,
+  viewName,
   visibility,
   onEdit,
   editDisabled,
@@ -30,6 +31,7 @@ export function ViewCardOverflowMenu({
 }: ViewCardOverflowMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close on click outside
@@ -64,6 +66,12 @@ export function ViewCardOverflowMenu({
 
   return (
     <div ref={menuRef} className="relative">
+      <ViewActivityDrawer
+        viewId={activityOpen ? viewId : null}
+        viewName={viewName}
+        isOpen={activityOpen}
+        onClose={() => setActivityOpen(false)}
+      />
       <button
         onClick={e => { e.preventDefault(); e.stopPropagation(); setIsOpen(!isOpen) }}
         className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
@@ -118,6 +126,14 @@ export function ViewCardOverflowMenu({
               >
                 <Eye className="w-3.5 h-3.5" />
                 Change Visibility
+              </button>
+              <button
+                onClick={() => { setActivityOpen(true); setIsOpen(false) }}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                style={{ width: 'calc(100% - 4px)' }}
+              >
+                <History className="w-3.5 h-3.5" />
+                Activity
               </button>
               <div className="border-t border-glass-border/50 my-1" />
               <button

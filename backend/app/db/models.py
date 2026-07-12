@@ -683,6 +683,46 @@ class ViewORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# view_activity_log — immutable per-view change timeline               #
+# ------------------------------------------------------------------ #
+class ViewActivityLogORM(Base):
+    """Immutable activity trail for a single view.
+
+    Each row captures one action (created, updated, visibility_changed,
+    shared, unshared, favourited, unfavourited, deleted, restored) with who
+    did it and a human summary / structured diff. This is the DURABLE source
+    of truth for the per-view timeline UI — deliberately decoupled from the
+    ``outbox_events`` relay (which is transient). Every mutation ALSO emits a
+    ``visualization.view.<action>`` outbox event in the same transaction for
+    app-wide consistency; the timeline reads only this table.
+    """
+    __tablename__ = "view_activity_log"
+
+    id = Column(Text, primary_key=True, default=lambda: f"val_{uuid.uuid4().hex[:12]}")
+    view_id = Column(Text, nullable=False, index=True)
+    workspace_id = Column(Text, nullable=True, index=True)   # scoping / cross-view feeds
+    action = Column(Text, nullable=False)
+    actor = Column(Text, nullable=True)                       # principal id who acted
+    summary = Column(Text, nullable=True)                     # human-readable
+    changes = Column(Text, nullable=True, default=None)       # JSON: field-level diff
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_val_view", "view_id"),
+        Index("idx_val_view_created", "view_id", "created_at"),
+        Index("idx_val_created", "created_at"),
+        CheckConstraint(
+            "action IN ('created', 'updated', 'visibility_changed', 'shared', "
+            "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored')",
+            name="ck_val_action_enum",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewActivityLog id={self.id!r} action={self.action!r} view={self.view_id!r}>"
+
+
+# ------------------------------------------------------------------ #
 # view_layout_overlays (Branch-Scoped Layout)                          #
 # ------------------------------------------------------------------ #
 class ViewLayoutOverlayORM(Base):

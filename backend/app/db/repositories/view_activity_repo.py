@@ -1,0 +1,177 @@
+"""Per-view activity log — durable timeline + shared Event Log emit.
+
+Records one immutable row per view mutation into ``view_activity_log`` (the
+timeline's source of truth) AND emits a ``visualization.view.<action>`` event
+to the shared outbox in the SAME transaction. The two are deliberately
+decoupled: the timeline read path (:func:`get_view_activity`) touches only
+``view_activity_log``; the outbox carries the same event for any app-wide
+consumer. If the outbox contract ever changes, the timeline is unaffected.
+
+Mirrors the proven ``ontology_audit_log`` pattern (a dedicated per-entity
+audit table with a recorder called at each mutation + a reader).
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Optional
+
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db.models import ViewActivityLogORM, ViewORM
+from backend.app.db.repositories import outbox_event_repo
+from backend.app.db.repositories.view_repo import resolve_user_ids
+
+logger = logging.getLogger(__name__)
+
+# Kept in sync with the ck_val_action_enum CHECK constraint and the outbox
+# ``visualization.view.<action>`` verbs.
+ACTIONS = frozenset({
+    "created", "updated", "visibility_changed", "shared", "unshared",
+    "favourited", "unfavourited", "deleted", "restored",
+})
+
+
+class ViewActivityEntry(BaseModel):
+    id: str
+    viewId: str
+    action: str
+    actor: Optional[str] = None
+    actorName: Optional[str] = None
+    actorEmail: Optional[str] = None
+    summary: Optional[str] = None
+    changes: Optional[Any] = None
+    createdAt: str
+    # True for synthesized legacy anchors (no real row existed).
+    synthetic: bool = False
+
+
+async def record_view_activity(
+    session: AsyncSession,
+    *,
+    view_id: str,
+    workspace_id: Optional[str],
+    action: str,
+    actor: Optional[str] = None,
+    summary: Optional[str] = None,
+    changes: Optional[dict] = None,
+) -> None:
+    """Append a durable activity row AND emit the shared Event Log event.
+
+    Best-effort: a recording failure must never break the underlying view
+    mutation (the timeline is an audit aid, not part of the write contract).
+    Both writes are ``session.add`` — durability follows the caller's commit.
+    """
+    if action not in ACTIONS:
+        logger.warning("record_view_activity: unknown action %r for view %s", action, view_id)
+        return
+    try:
+        session.add(ViewActivityLogORM(
+            view_id=view_id,
+            workspace_id=workspace_id,
+            action=action,
+            actor=actor,
+            summary=summary,
+            changes=json.dumps(changes) if changes else None,
+        ))
+        # Shared, consistent app-wide capture — same transaction, no coupling
+        # of the read path. `emit` only session.add's, so it won't do I/O here.
+        await outbox_event_repo.emit(
+            session,
+            event_type=f"visualization.view.{action}",
+            aggregate_id=view_id,
+            aggregate_type="view",
+            payload={
+                "workspaceId": workspace_id,
+                "actor": actor,
+                "summary": summary,
+                "changes": changes,
+            },
+        )
+        await session.flush()
+    except Exception:  # noqa: BLE001 — never fail the mutation on audit error
+        logger.exception("record_view_activity failed (view=%s action=%s)", view_id, action)
+
+
+async def get_view_activity(
+    session: AsyncSession,
+    view_id: str,
+    *,
+    action: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[ViewActivityEntry]:
+    """Return a view's activity, newest first, actors resolved to names.
+
+    When no rows exist (legacy views that pre-date activity tracking) a single
+    synthesized ``created`` anchor is derived from the view's own stamps so the
+    timeline is never blank.
+    """
+    q = (
+        select(ViewActivityLogORM)
+        .where(ViewActivityLogORM.view_id == view_id)
+    )
+    if action:
+        q = q.where(ViewActivityLogORM.action == action)
+    q = q.order_by(ViewActivityLogORM.created_at.desc()).limit(limit).offset(offset)
+    rows = (await session.execute(q)).scalars().all()
+
+    if not rows and offset == 0 and not action:
+        anchor = await _synthetic_anchor(session, view_id)
+        return anchor
+
+    actor_map = await resolve_user_ids(session, {r.actor for r in rows})
+    return [_to_entry(r, actor_map) for r in rows]
+
+
+def _to_entry(
+    r: ViewActivityLogORM,
+    actor_map: dict,
+    *,
+    synthetic: bool = False,
+) -> ViewActivityEntry:
+    name, email = actor_map.get(r.actor or "", (None, None))
+    return ViewActivityEntry(
+        id=r.id,
+        viewId=r.view_id,
+        action=r.action,
+        actor=r.actor,
+        actorName=name,
+        actorEmail=email,
+        summary=r.summary,
+        changes=json.loads(r.changes) if r.changes else None,
+        createdAt=r.created_at,
+        synthetic=synthetic,
+    )
+
+
+async def _synthetic_anchor(
+    session: AsyncSession, view_id: str,
+) -> list[ViewActivityEntry]:
+    """Derive a 'created' (and optional 'updated') anchor from the view's own
+    created_by/updated_by stamps so a legacy view isn't a blank timeline."""
+    row = (await session.execute(
+        select(ViewORM).where(ViewORM.id == view_id)
+    )).scalar_one_or_none()
+    if row is None:
+        return []
+    actor_map = await resolve_user_ids(session, {row.created_by, row.updated_by})
+    out: list[ViewActivityEntry] = []
+    if row.updated_by and row.updated_at and row.updated_at != row.created_at:
+        un, ue = actor_map.get(row.updated_by, (None, None))
+        out.append(ViewActivityEntry(
+            id=f"{view_id}:anchor-updated", viewId=view_id, action="updated",
+            actor=row.updated_by, actorName=un, actorEmail=ue,
+            summary="Last edited before activity tracking",
+            createdAt=row.updated_at, synthetic=True,
+        ))
+    cn, ce = actor_map.get(row.created_by or "", (None, None))
+    out.append(ViewActivityEntry(
+        id=f"{view_id}:anchor-created", viewId=view_id, action="created",
+        actor=row.created_by, actorName=cn, actorEmail=ce,
+        summary="Created before activity tracking",
+        createdAt=row.created_at, synthetic=True,
+    ))
+    return out

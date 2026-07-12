@@ -31,6 +31,8 @@ from typing import Any, Optional
 
 import httpx
 
+from backend.app.services.aggregation.internal_auth import internal_auth_headers
+
 logger = logging.getLogger(__name__)
 
 # ── Internal service URLs (compose DNS defaults; k8s Service DNS in GKE) ──
@@ -995,7 +997,8 @@ async def probe_aggregation_jobs(app_state) -> Optional[dict]:
                     summary = await svc.get_jobs_summary(session)
             else:
                 resp = await _http().get(
-                    f"{_aggregation_service_url()}/aggregation/jobs/summary")
+                    f"{_aggregation_service_url()}/aggregation/jobs/summary",
+                    headers=internal_auth_headers())
                 if resp.status_code == 200:
                     summary = resp.json()
     except Exception as exc:

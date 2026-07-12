@@ -41,6 +41,8 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .internal_auth import log_auth_mode, require_internal_token
+
 logger = logging.getLogger(__name__)
 
 # Control Plane uses SHORT FalkorDB timeout — API responsiveness > completeness.
@@ -76,6 +78,7 @@ async def lifespan(app: FastAPI):
     )
 
     logger.info("=== Aggregation Control Plane starting ===")
+    log_auth_mode()
 
     # 1. Initialize aggregation DB (schema + tables, no Alembic needed)
     await init_aggregation_db()
@@ -204,6 +207,10 @@ app = FastAPI(
     description="Aggregation job lifecycle, scheduling, and status API.",
     version="0.1.0",
     lifespan=lifespan,
+    # Internal service auth on every route except the exempt set (health +
+    # docs). No-op when AGGREGATION_INTERNAL_TOKEN is unset, so a dev stack
+    # with no token configured keeps working (see internal_auth.py).
+    dependencies=[Depends(require_internal_token)],
 )
 
 

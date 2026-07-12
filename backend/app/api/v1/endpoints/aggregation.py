@@ -35,6 +35,7 @@ from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
+from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import ResumeOverrides
 from backend.app.services.permission_service import (
     PermissionClaims,
@@ -68,6 +69,10 @@ def _get_proxy_client() -> httpx.AsyncClient:
         _httpx_client = httpx.AsyncClient(
             base_url=_PROXY_BASE_URL,
             timeout=httpx.Timeout(30.0, connect=5.0),
+            # Internal service auth: attach the shared-secret bearer token so
+            # the control plane accepts this proxied call. Empty dict when no
+            # token is configured (dev) — the CP has auth disabled then too.
+            headers=internal_auth_headers(),
         )
     return _httpx_client
 

@@ -35,6 +35,7 @@ from backend.app.auth.dependencies import (
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, ViewORM
 from backend.app.db.repositories import grant_repo, group_repo, user_repo
+from backend.app.db.repositories import view_activity_repo
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
@@ -259,6 +260,16 @@ async def create_grant(
         },
     )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
+    subject_label = (
+        getattr(subject, "name", None) or getattr(subject, "display_name", None)
+        or body.subject_id
+    )
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view.workspace_id,
+        action="shared", actor=user.id,
+        summary=f"Shared with {subject_label} ({body.role})",
+        changes={"subjectType": body.subject_type, "subjectId": body.subject_id, "role": body.role},
+    )
     return ViewGrantResponse(
         grant_id=grant.id,
         role=grant.role_name,
@@ -302,6 +313,12 @@ async def delete_grant(
             "role": target.role_name,
             "actor_id": user.id,
         },
+    )
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view.workspace_id,
+        action="unshared", actor=user.id,
+        summary=f"Revoked {target.subject_type} access",
+        changes={"subjectType": target.subject_type, "subjectId": target.subject_id},
     )
     logger.info(
         "Grant %s removed from view %s by %s", grant_id, view_id, user.id,
