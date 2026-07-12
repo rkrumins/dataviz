@@ -80,6 +80,20 @@ _MAX_PROVIDER_CONCURRENCY = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
 # trouble and we'd rather shed load than queue.
 _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.25"))
 
+# Inline reachability preflight (WS0.1). Bounds the FIRST request to a
+# just-went-down provider: get_provider runs a fast, deadline-bounded
+# TCP+PING probe before handing the provider to a caller, so an unreachable
+# host fast-fails in ~1.5s instead of every consumer (graph read, readiness,
+# vocab-alignment, stats, …) independently burning ~25s of query timeouts
+# while pinning a WEB DB connection the whole time (which drains the pool and
+# stalls unrelated endpoints). The probe checks REACHABILITY, not query
+# speed — a healthy provider mid-trace answers PING instantly and passes, so
+# legitimate long-running reads are unaffected. Warmup-confirmed-healthy
+# providers skip the probe entirely (zero added latency on the hot path).
+_REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "1.5"))
+_REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
+_REACHABLE_TRUST_HEALTHY_S = float(os.getenv("PROVIDER_PREFLIGHT_TRUST_HEALTHY_S", "45"))
+
 
 class HealthState(str, Enum):
     """Observable health of a provider from the manager's perspective."""
@@ -147,6 +161,11 @@ class ProviderManager:
         # immediately rather than queueing.
         self._provider_semaphores: Dict[Tuple[str, str], asyncio.Semaphore] = {}
 
+        # Short-lived inline reachability verdicts (WS0.1). See the
+        # _REACHABLE_PROBE_* constants + _ensure_reachable below.
+        # (provider_id, graph_name) -> (ok, monotonic_ts).
+        self._reachable_probe: Dict[Tuple[str, str], Tuple[bool, float]] = {}
+
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
@@ -178,8 +197,21 @@ class ProviderManager:
         cache_key = (ds.provider_id, ds.graph_name or "")
 
         # Fast path: already cached and healthy.
+        #
+        # NOTE: a cached provider is returned WITHOUT consulting the warmup
+        # gate below (which guards only the slow instantiation path). This is
+        # deliberate — real traffic through the cached provider's own operation
+        # breaker is ground truth, and gating the cache on a single warmup
+        # observation would fast-fail a healthy provider for up to 60s on one
+        # transient probe blip. A cached provider whose FalkorDB has since gone
+        # down fast-fails via its operation breaker instead (which now opens
+        # cleanly thanks to the _ensure_connected zombie-handle rollback), and
+        # is bulkheaded by the GRAPH_READ DB pool so it can't starve the WEB
+        # pool while the breaker is opening.
         if cache_key in self._providers:
-            return self._providers[cache_key]
+            provider = self._providers[cache_key]
+            await self._ensure_reachable(cache_key, provider)
+            return provider
 
         # P1.2 — Warmup-cache fast-fail gate.
         # Before consulting the breaker (which costs a lock acquisition) and
@@ -276,7 +308,9 @@ class ProviderManager:
                 cache_key, state_after,
             )
 
-        return self._providers[cache_key]
+        provider = self._providers[cache_key]
+        await self._ensure_reachable(cache_key, provider)
+        return provider
 
     # Alias for backward compatibility during migration. ContextEngine,
     # aggregation worker, and health-check endpoint call this name.
@@ -287,6 +321,76 @@ class ProviderManager:
         data_source_id: Optional[str] = None,
     ) -> GraphDataProvider:
         return await self.get_provider(workspace_id, session, data_source_id)
+
+    async def _ensure_reachable(
+        self, cache_key: Tuple[str, str], provider: GraphDataProvider,
+    ) -> None:
+        """Bounded reachability gate (WS0.1) run before handing a provider to a
+        caller. Fast-fails in ~1.5s when the provider is unreachable, instead
+        of letting the caller burn ~25s of query timeouts against a down host
+        while pinning a DB connection (which drains the pool and stalls
+        unrelated endpoints — the app-wide freeze).
+
+        SAFE for long-running queries: this probes REACHABILITY (a fast
+        TCP+PING), NOT query duration — a healthy provider mid-trace answers
+        PING instantly and passes, so legitimate long reads run their full
+        budget. Warmup-confirmed-healthy providers skip the probe entirely, and
+        providers without a preflight() (non-FalkorDB) are never gated.
+        """
+        cp = f"{cache_key[0]}:{cache_key[1]}"
+        state = self._provider_states.get(cache_key)
+        if state is not None:
+            if state.is_recent_unhealthy(max_age_s=60.0):
+                obs = state.last_observation
+                raise ProviderUnavailable(
+                    provider_name=cp,
+                    reason=f"provider unreachable: {obs.reason if obs else 'unhealthy'}",
+                    retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+                )
+            if state.is_recent_healthy(max_age_s=_REACHABLE_TRUST_HEALTHY_S):
+                return  # warmup confirms reachable — trust it, skip the probe
+
+        # Only FalkorDB-class providers expose a bounded preflight; others are
+        # not gated here (their own timeouts apply).
+        preflight = getattr(provider, "preflight", None)
+        if preflight is None:
+            return
+
+        now = time.monotonic()
+        cached = self._reachable_probe.get(cache_key)
+        if cached is not None and (now - cached[1]) < _REACHABLE_PROBE_CACHE_S:
+            if not cached[0]:
+                raise ProviderUnavailable(
+                    provider_name=cp,
+                    reason="provider unreachable (recent preflight failed)",
+                    retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+                )
+            return
+
+        ok = False
+        try:
+            pf = await asyncio.wait_for(
+                preflight(deadline_s=_REACHABLE_PROBE_DEADLINE_S),
+                timeout=_REACHABLE_PROBE_DEADLINE_S + 1.0,
+            )
+            ok = bool(getattr(pf, "ok", False))
+        except Exception:
+            ok = False
+        self._reachable_probe[cache_key] = (ok, now)
+        if not ok:
+            # Record so the warmup gate + status endpoints agree and concurrent
+            # callers fast-fail via state without each running a probe.
+            try:
+                await self.record_probe_failure(
+                    cache_key[0], reason="inline_preflight_unreachable", source="traffic",
+                )
+            except Exception:
+                pass
+            raise ProviderUnavailable(
+                provider_name=cp,
+                reason="provider unreachable (preflight failed)",
+                retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+            )
 
     def get_health(self, provider_id: str, graph_name: str) -> HealthState:
         """Return the observable health state of a specific provider."""

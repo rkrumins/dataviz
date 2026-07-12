@@ -32,6 +32,7 @@ import {
   Settings2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import { listViews, type View } from '@/services/viewApiService'
@@ -642,10 +643,10 @@ export function OntologyContextBanner({
       </div>
 
       {/* ── Deployment reassignment confirmation ── */}
+      <Backdrop open={!!confirmTarget} onClick={() => setConfirmTarget(null)} zClassName="z-50" className="bg-black/40" />
       {confirmTarget && onAssignToDataSource && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setConfirmTarget(null)} />
-          <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+          <div className="relative pointer-events-auto w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5 text-amber-500" />
@@ -692,10 +693,10 @@ export function OntologyContextBanner({
       )}
 
       {/* ── Unassign confirmation ── */}
+      <Backdrop open={!!unassignTarget} onClick={() => setUnassignTarget(null)} zClassName="z-50" className="bg-black/40" />
       {unassignTarget && onUnassignFromDataSource && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setUnassignTarget(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+          <div className="relative pointer-events-auto w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <h3 className="text-sm font-bold text-ink mb-2">Unassign schema?</h3>
             <p className="text-xs text-ink-muted mb-4">
               Remove this schema from <span className="font-semibold text-ink">{unassignTarget.dsLabel}</span>?
@@ -714,10 +715,10 @@ export function OntologyContextBanner({
       )}
 
       {/* ── Banner re-assignment confirmation dialog ── */}
+      <Backdrop open={!!bannerConfirmTarget} onClick={handleCancelBannerAssign} zClassName="z-50" className="bg-black/40" />
       {bannerConfirmTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={handleCancelBannerAssign} />
-          <div className="relative w-full max-w-lg mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+          <div className="relative pointer-events-auto w-full max-w-lg mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
             <button onClick={handleCancelBannerAssign} className="absolute top-4 right-4 p-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
               <X className="w-4 h-4" />
             </button>

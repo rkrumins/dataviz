@@ -16,6 +16,7 @@ import {
     RefreshCw, Activity,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { mapWithConcurrency } from '@/lib/concurrency'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
@@ -100,23 +101,33 @@ export function WorkspaceAggregationDashboard({
 
     const pollReadiness = useCallback(async () => {
         const updates: Record<string, DataSourceReadinessResponse> = {}
-        await Promise.all(
-            dataSources.map(async ds => {
-                try {
-                    const r = await aggregationService.getReadiness(ds.id)
-                    updates[ds.id] = r
-                } catch { /* ignore */ }
-            })
-        )
+        // WS0.4: cap the per-source fan-out so a down provider can't fire one
+        // unbounded (30s) request per source and saturate the browser's
+        // HTTP/1.1 connection budget.
+        await mapWithConcurrency(dataSources, 4, async ds => {
+            try {
+                updates[ds.id] = await aggregationService.getReadiness(ds.id)
+            } catch { /* ignore */ }
+        })
         if (Object.keys(updates).length > 0) {
             setLiveReadiness(prev => ({ ...prev, ...updates }))
         }
     }, [dataSources])
 
+    // WS0.4: self-scheduling poll with BACKPRESSURE — the next tick is armed
+    // only AFTER the previous wave settles, so a hung/slow provider delays the
+    // next poll instead of stacking new waves on top of in-flight ones (the
+    // setInterval(4s) form stacked ~7 waves before the first timed out).
     useEffect(() => {
         if (!hasActiveJobs) return
-        const interval = setInterval(pollReadiness, 4000)
-        return () => clearInterval(interval)
+        let cancelled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const tick = async () => {
+            await pollReadiness()
+            if (!cancelled) timer = setTimeout(tick, 4000)
+        }
+        timer = setTimeout(tick, 4000)
+        return () => { cancelled = true; if (timer) clearTimeout(timer) }
     }, [hasActiveJobs, pollReadiness])
 
     // Compute status counts from live data

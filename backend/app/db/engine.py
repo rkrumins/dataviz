@@ -65,6 +65,13 @@ class PoolRole(str, Enum):
       refresh storm can fire many concurrent probes; a dedicated pool
       means it cannot contend with WEB-pool request handlers or with
       READONLY-pool dashboard polls. Read-only by construction.
+    * ``GRAPH_READ`` — Graph/canvas read endpoints that hold a DB session
+      across an outbound FalkorDB call (bulkhead, WS0.2). When a provider
+      is slow/down, these requests can pin their session for the provider
+      budget; isolating them means a single unhealthy provider cannot
+      starve the WEB pool that serves auth / navigation / everything else.
+      Read-WRITE (the ContextEngine session is reused for graph writes),
+      so NOT opened read-only.
     * ``ADMIN`` — Alembic runner, lifespan seed/init. Small pool; used
       only at startup and during migrations.
     """
@@ -73,6 +80,7 @@ class PoolRole(str, Enum):
     JOBS = "jobs"
     READONLY = "readonly"
     PROVIDER_PROBE = "provider_probe"
+    GRAPH_READ = "graph_read"
     ADMIN = "admin"
 
 
@@ -91,6 +99,12 @@ _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
     PoolRole.JOBS:           {"pool_size": 8,  "max_overflow": 4},
     PoolRole.READONLY:       {"pool_size": 10, "max_overflow": 5},
     PoolRole.PROVIDER_PROBE: {"pool_size": 4,  "max_overflow": 2},
+    # GRAPH_READ absorbs the per-source fan-out (a workspace can open many
+    # data sources at once); sized generously since it must NOT queue graph
+    # reads behind each other, but bounded so it can't exhaust Postgres.
+    # Env override: DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_MAX_OVERFLOW.
+    # Keep POSTGRES_MAX_CONNECTIONS in sync (see the note above).
+    PoolRole.GRAPH_READ:     {"pool_size": 15, "max_overflow": 15},
     PoolRole.ADMIN:          {"pool_size": 2,  "max_overflow": 0},
 }
 
@@ -383,6 +397,20 @@ async def get_readonly_db_session() -> AsyncGenerator[AsyncSession, None]:
     depth.
     """
     async with _session_scope(PoolRole.READONLY) as session:
+        yield session
+
+
+async def get_graph_read_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency — yields a GRAPH_READ-pool session per request.
+
+    Use for graph/canvas endpoints that hold a DB session across an
+    outbound FalkorDB call (WS0.2 bulkhead). Isolating them means a slow
+    or down provider — which pins these sessions for the provider budget —
+    cannot starve the WEB pool that serves auth / navigation / everything
+    else. The pool is read-WRITE (the ContextEngine session is reused for
+    graph writes), unlike READONLY / PROVIDER_PROBE.
+    """
+    async with _session_scope(PoolRole.GRAPH_READ) as session:
         yield session
 
 

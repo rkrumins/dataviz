@@ -13,7 +13,7 @@
 # Failover drill: `docker kill falkordb-master` then re-run — the provider's
 # sentinel client transparently follows the promoted replica.
 x-falkor-common: &falkor-common
-  image: falkordb/falkordb:latest
+  image: falkordb/falkordb:v4.18.11
   restart: unless-stopped
 
 services:

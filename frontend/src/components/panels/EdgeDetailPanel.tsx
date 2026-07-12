@@ -52,6 +52,7 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { patchEdge, deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
 import { cn } from '@/lib/utils'
+import { MOTION } from '@/lib/motion'
 
 // ============================================
 // Types
@@ -250,10 +251,12 @@ export function EdgeDetailPanel({
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: 'clamp(400px, 28vw, 520px)', opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
-            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+            transition={MOTION.drawerSlide}
             className={cn(
                 "relative h-full flex-shrink-0 overflow-hidden",
-                "bg-canvas-elevated/95 backdrop-blur-lg border-l border-glass-border",
+                // Opaque, no backdrop-blur: push-aside flex sibling (nothing
+                // paints behind it) — the blur was re-rasterized every frame.
+                "bg-canvas-elevated border-l border-glass-border",
                 "shadow-lg",
                 className
             )}
@@ -745,7 +748,6 @@ function EdgeCard({
 
     return (
         <motion.div
-            layout
             className={cn(
                 "rounded-lg border transition-colors duration-150 cursor-pointer",
                 "bg-canvas hover:shadow-sm",

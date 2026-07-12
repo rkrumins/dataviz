@@ -47,7 +47,7 @@ spec:
     spec:
       containers:
         - name: falkordb
-          image: falkordb/falkordb:v4.16.0
+          image: falkordb/falkordb:v4.18.11
           env:
             - name: FALKORDB_ARGS
               value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"

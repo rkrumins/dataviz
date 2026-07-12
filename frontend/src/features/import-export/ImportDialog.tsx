@@ -12,6 +12,7 @@ import {
   RefreshCw, ShieldAlert, Sparkles, Trash2, UploadCloud, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import {
   createImport, detectFormat, getImport, getImportPreview, pollJob, templateDownloadUrl,
   triggerBrowserDownload,
@@ -110,9 +111,10 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={phase === 'running' ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+    <>
+    <Backdrop open={true} onClick={phase === 'running' ? undefined : onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden pointer-events-auto">
         {/* Header */}
         <div className="border-b border-glass-border/50 px-8 py-5 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-4">
@@ -182,6 +184,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
         </div>
       </div>
     </div>
+    </>
   )
 }
 

@@ -9,6 +9,7 @@ import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, X, Loader2, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishBranch, useOpenMergeRequest } from '../hooks/useVersioning'
@@ -82,9 +83,10 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in flex flex-col">
+    <>
+    <Backdrop open={true} onClick={busy ? undefined : onClose} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
+    <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+      <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in flex flex-col pointer-events-auto">
         <div className="px-6 pt-6 pb-4 flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-accent-lineage/10 flex items-center justify-center border border-accent-lineage/20">
             <GitPullRequest className="w-5 h-5 text-accent-lineage" />
@@ -178,5 +180,6 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
         </div>
       </div>
     </div>
+    </>
   )
 }

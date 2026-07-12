@@ -18,6 +18,7 @@ import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceRe
 import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { accessRequestsService } from '@/services/accessRequestsService'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
@@ -617,10 +618,10 @@ export function WorkspaceDetailPage() {
                 completionLabel="Add Source"
             />
 
+            <Backdrop open={!!deleteTarget} onClick={() => !loadingImpact && setDeleteTarget(null)} zClassName="z-[60]" className="bg-black/60" />
             {deleteTarget && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center">
-                    <div className="absolute inset-0 bg-black/60" onClick={() => !loadingImpact && setDeleteTarget(null)} />
-                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+                <div className="fixed inset-0 z-[60] flex items-center justify-center pointer-events-none">
+                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200 pointer-events-auto">
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
                                 <Trash2 className="w-5 h-5 text-red-500" />

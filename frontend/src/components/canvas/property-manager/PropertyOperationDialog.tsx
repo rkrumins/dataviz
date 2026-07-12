@@ -19,6 +19,7 @@ import {
 import { createPortal } from 'react-dom'
 
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useAffectedSample, useValueDistribution } from '@/hooks/usePropertyInsights'
 import { cn, generateId } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
@@ -192,18 +193,18 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
 
     if (typeof document === 'undefined') return null
     return createPortal(
+        <>
+        <Backdrop open={true} onClick={onClose} zClassName="z-[80]" className="bg-black/50" />
         <div
-            className="fixed inset-0 z-[80] flex items-center justify-center p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+            className="fixed inset-0 z-[80] flex items-center justify-center p-4 pointer-events-none"
             onKeyDown={onKeyDown}
         >
-            <div className="absolute inset-0 bg-black/50" aria-hidden />
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.15 }}
                 className={cn(
-                    'relative w-full max-w-lg rounded-2xl overflow-hidden flex flex-col max-h-[88vh]',
+                    'pointer-events-auto relative w-full max-w-lg rounded-2xl overflow-hidden flex flex-col max-h-[88vh]',
                     'bg-canvas-elevated border border-slate-200 dark:border-glass-border',
                     'shadow-2xl shadow-black/40',
                 )}
@@ -441,7 +442,8 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                     </div>
                 </div>
             </motion.div>
-        </div>,
+        </div>
+        </>,
         document.body,
     )
 }

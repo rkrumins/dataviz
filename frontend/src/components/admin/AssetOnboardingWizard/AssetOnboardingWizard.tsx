@@ -534,20 +534,19 @@ export function AssetOnboardingWizard({
     const isLast = currentStepIndex === STEPS.length - 1
 
     return (
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
-            >
+        <>
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={true} zClassName="z-[60]" className="bg-black/60" />
+            <div className="fixed inset-0 z-[61] flex items-center justify-center pointer-events-none">
+                <AnimatePresence>
                 <motion.div
                     ref={modalRef}
                     initial={{ scale: 0.95, opacity: 0, y: 20 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 20 }}
                     transition={{ duration: 0.12 }}
-                    className="w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
+                    className="pointer-events-auto w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
                 >
                     {/* Header — aligned with ViewWizard */}
                     <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 shrink-0">
@@ -776,52 +775,53 @@ export function AssetOnboardingWizard({
                         </div>
                     )}
                 </motion.div>
+                </AnimatePresence>
+            </div>
 
-                {/* Unsaved changes confirmation overlay */}
-                {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
-                    StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
-                <Backdrop open={showCloseConfirm} zClassName="z-[70]" className="bg-black/40" />
-                <div className="fixed inset-0 z-[71] flex items-center justify-center pointer-events-none">
-                    <AnimatePresence>
-                        {showCloseConfirm && (
-                            <motion.div
-                                key="onboarding-close-confirm"
-                                initial={{ scale: 0.95, opacity: 0 }}
-                                animate={{ scale: 1, opacity: 1 }}
-                                exit={{ scale: 0.95, opacity: 0 }}
-                                className="pointer-events-auto bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 max-w-sm mx-4 space-y-4"
-                            >
-                                <div className="flex items-start gap-3">
-                                    <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
-                                        <AlertTriangle className="w-5 h-5 text-amber-500" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-sm font-semibold text-ink">Discard onboarding progress?</h3>
-                                        <p className="text-xs text-ink-muted mt-1 leading-relaxed">
-                                            You have unsaved onboarding progress. Closing will discard all selections.
-                                        </p>
-                                    </div>
+            {/* Unsaved changes confirmation overlay */}
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={showCloseConfirm} zClassName="z-[70]" className="bg-black/40" />
+            <div className="fixed inset-0 z-[71] flex items-center justify-center pointer-events-none">
+                <AnimatePresence>
+                    {showCloseConfirm && (
+                        <motion.div
+                            key="onboarding-close-confirm"
+                            initial={{ scale: 0.95, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.95, opacity: 0 }}
+                            className="pointer-events-auto bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 max-w-sm mx-4 space-y-4"
+                        >
+                            <div className="flex items-start gap-3">
+                                <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+                                    <AlertTriangle className="w-5 h-5 text-amber-500" />
                                 </div>
-                                <div className="flex items-center justify-end gap-3">
-                                    <button
-                                        onClick={() => setShowCloseConfirm(false)}
-                                        className="px-4 py-2 rounded-lg text-sm font-medium text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                                    >
-                                        Continue Editing
-                                    </button>
-                                    <button
-                                        onClick={confirmClose}
-                                        className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
-                                    >
-                                        Discard & Close
-                                    </button>
+                                <div>
+                                    <h3 className="text-sm font-semibold text-ink">Discard onboarding progress?</h3>
+                                    <p className="text-xs text-ink-muted mt-1 leading-relaxed">
+                                        You have unsaved onboarding progress. Closing will discard all selections.
+                                    </p>
                                 </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-                </div>
-            </motion.div>
-        </AnimatePresence>
+                            </div>
+                            <div className="flex items-center justify-end gap-3">
+                                <button
+                                    onClick={() => setShowCloseConfirm(false)}
+                                    className="px-4 py-2 rounded-lg text-sm font-medium text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                >
+                                    Continue Editing
+                                </button>
+                                <button
+                                    onClick={confirmClose}
+                                    className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
+                                >
+                                    Discard & Close
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </div>
+        </>
     )
 }
 

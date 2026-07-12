@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, FileDiff, GitPullRequest, GitCommit, PencilLine, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import * as api from '@/services/versioningApiService'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchDiffSummary } from '../hooks/useVersioning'
@@ -97,16 +98,9 @@ export function ViewVersioningPanel({
   )
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        key="scrim"
-        className="fixed inset-0 z-[60] bg-black/40"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.2 }}
-        onClick={onClose}
-      />
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-[60]" className="bg-black/40" />
+      <AnimatePresence>
       <motion.aside
         key="panel"
         className="fixed right-0 top-0 h-full w-[560px] max-w-[94vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
@@ -179,7 +173,8 @@ export function ViewVersioningPanel({
           {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} />}
         </div>
       </motion.aside>
-    </AnimatePresence>,
+      </AnimatePresence>
+    </>,
     document.body,
   )
 }

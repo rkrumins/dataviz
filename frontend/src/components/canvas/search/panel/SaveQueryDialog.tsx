@@ -24,6 +24,7 @@ import {
 import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { RecentQueryEntry } from '@/store/searchStore'
 
 
@@ -68,24 +69,15 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
     // it, but stay defensive).
     if (typeof document === 'undefined') return null
     return createPortal(
-        <div
-            className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-            onClick={(e) => {
-                // Backdrop click cancels — only if the click landed on
-                // the overlay itself, not propagated from the card.
-                if (e.target === e.currentTarget) onCancel()
-            }}
-        >
-            {/* Backdrop — solid-ish dim with subtle blur. Works in
-                both themes because rgba black darkens whatever it
-                sits over. */}
-            <div className="absolute inset-0 bg-black/50" aria-hidden />
+        <>
+        <Backdrop open={true} onClick={onCancel} zClassName="z-[60]" className="bg-black/50" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 pointer-events-none">
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.15 }}
                 className={cn(
-                    'relative w-full max-w-md rounded-2xl overflow-hidden',
+                    'pointer-events-auto relative w-full max-w-md rounded-2xl overflow-hidden',
                     // Solid bg in both themes — no /98 transparency.
                     // ``canvas-elevated`` is white in light mode,
                     // #161b22 in dark mode, both fully opaque.
@@ -251,7 +243,8 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
                     </button>
                 </div>
             </motion.div>
-        </div>,
+        </div>
+        </>,
         document.body,
     )
 }

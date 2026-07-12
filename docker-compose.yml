@@ -32,11 +32,11 @@ name: synodic
 
 services:
 
-  # ── FalkorDB (Graph Database) — pre-loaded with sample data ───────
+  # ── FalkorDB (Graph Database) — vanilla image, no baked data ──────
   falkordb:
-    build:
-      context: ./data/quickstart
-      dockerfile: Dockerfile.falkordb
+    # Vanilla upstream image (no baked data). Demo data via the `seed` service
+    # (`docker compose --profile seed up`); real data via import.
+    image: falkordb/falkordb:v4.18.11
     restart: unless-stopped
     ports:
       - "${FALKORDB_PORT:-6379}:6379"
@@ -209,7 +209,11 @@ services:
       redis:
         condition: service_healthy
       falkordb:
-        condition: service_healthy
+        # WS1.1 decoupling: wait only for the container to START, not for its
+        # healthcheck (which requires the full dataset to finish LOADING). A
+        # loading/unhealthy FalkorDB must not block the rest of the stack from
+        # starting — services connect lazily and fast-fail while it warms.
+        condition: service_started
       # Schema must be at head before any backend service initialises.
       upgrade:
         condition: service_completed_successfully
@@ -274,13 +278,14 @@ services:
       # CORS — allow the frontend container + local dev
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://localhost:5173,http://localhost:3000}
 
-      # Versioned-graph read layer: run the reconciling projection worker
-      # in-process so the FalkorDB cache continuously self-heals toward the
-      # Postgres source of truth (missed post-publish syncs, failed rebuilds).
-      # Without it, a graph that misses its one-shot interactive sync stays
-      # behind until someone opens Data health. Set 0 when running the
-      # standalone worker (`python -m backend.app.services.versioning`).
-      GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-1}"
+      # WS1.1: versioned-graph projection runs in the DEDICATED
+      # versioning-worker container, NOT in-process. Its full-seed build is
+      # CPU-bound and, on the web event loop, wedged the loop
+      # (event_loop_lag CRITICAL) and froze EVERY request (auth, /docs,
+      # health) while FalkorDB loaded/projected. Keep 0 here — the
+      # versioning-worker service owns projection. Only set 1 for a
+      # single-process dev run with no worker container.
+      GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-0}"
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -349,7 +354,50 @@ services:
       aggregation-controlplane:
         condition: service_healthy
       falkordb:
+        # WS1.1 decoupling: wait only for the container to START, not for its
+        # healthcheck (which requires the full dataset to finish LOADING). A
+        # loading/unhealthy FalkorDB must not block the rest of the stack from
+        # starting — services connect lazily and fast-fail while it warms.
+        condition: service_started
+      redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Versioning Projection Worker (Data Plane) ─────────────────────
+  # WS1.1: headless worker that projects each versioned graph's committed
+  # state into FalkorDB (reconciling poll loop + Redis-stream consumer).
+  # Extracted from the web tier — run in-process, its CPU-bound full-seed
+  # build wedged the shared event loop (event_loop_lag CRITICAL) and froze
+  # every request while FalkorDB loaded. Own pools + circuit breakers; a
+  # provider outage here cannot affect the web tier. Does NOT gate on
+  # FalkorDB — connects lazily and retries, so it starts even when the graph
+  # is down/loading. Scale: docker compose up --scale versioning-worker=2
+  versioning-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.aggregation
+    command: ["python", "-m", "backend.app.services.versioning"]
+    environment:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_REDIS_URL: redis://redis:6379/1
+      FALKORDB_HOST: falkordb
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
+      FALKORDB_PORT: "6379"
+      FALKORDB_SOCKET_TIMEOUT: "60"
+      SYNODIC_ROLE: worker
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Headless projector: no HTTP health server yet, so disable the inherited
+    # Dockerfile healthcheck (which probes the aggregation worker's port 8090)
+    # rather than flap to "unhealthy". restart: unless-stopped covers crashes;
+    # a dedicated liveness endpoint is a follow-up.
+    healthcheck:
+      disable: true
+    depends_on:
+      upgrade:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -444,7 +492,11 @@ services:
       redis:
         condition: service_healthy
       falkordb:
-        condition: service_healthy
+        # WS1.1 decoupling: wait only for the container to START, not for its
+        # healthcheck (which requires the full dataset to finish LOADING). A
+        # loading/unhealthy FalkorDB must not block the rest of the stack from
+        # starting — services connect lazily and fast-fail while it warms.
+        condition: service_started
       # Schema must be at head before stats-service initialises.
       upgrade:
         condition: service_completed_successfully
@@ -478,7 +530,11 @@ services:
       FALKORDB_PORT: "6379"
     depends_on:
       falkordb:
-        condition: service_healthy
+        # WS1.1 decoupling: wait only for the container to START, not for its
+        # healthcheck (which requires the full dataset to finish LOADING). A
+        # loading/unhealthy FalkorDB must not block the rest of the stack from
+        # starting — services connect lazily and fast-fail while it warms.
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
       interval: 10s
@@ -531,7 +587,11 @@ services:
       # SEED_FORCE: "true"                    # uncomment to re-seed on every run
     depends_on:
       falkordb:
-        condition: service_healthy
+        # WS1.1 decoupling: wait only for the container to START, not for its
+        # healthcheck (which requires the full dataset to finish LOADING). A
+        # loading/unhealthy FalkorDB must not block the rest of the stack from
+        # starting — services connect lazily and fast-fail while it warms.
+        condition: service_started
     restart: "no"
 
 volumes:

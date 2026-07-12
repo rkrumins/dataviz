@@ -8,7 +8,7 @@ import { providerService, type ProviderResponse } from '@/services/providerServi
 import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { deriveWorkspaceHealth } from './WorkspaceHealthBadge'
-import { withTimeout } from '@/lib/concurrency'
+import { withTimeout, mapWithConcurrency } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 
 /** Resolved provider info for a data source (derived from catalogItem → provider). */
@@ -123,10 +123,15 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
             }
           }
         }).catch(() => {}),
-        ...((ws.dataSources || []).map(async (ds) => {
+        // WS0.4 bulkhead: cap the per-source readiness fan-out. A workspace
+        // with many sources must not fire one unbounded request per source —
+        // when a provider is down each hangs to the fetch timeout and the
+        // batch saturates the browser's ~6 HTTP/1.1 connections, stalling
+        // every other request (the app-wide "storm").
+        mapWithConcurrency(ws.dataSources || [], 4, async (ds) => {
           const ready = await aggregationService.getReadiness(ds.id).catch(() => null)
           if (ready) readiness[ds.id] = ready
-        })),
+        }),
         listViews({ workspaceId: wsId }).then(v => { views = v.items }).catch(() => {}),
       ])
       if (signal?.cancelled) return

@@ -5,6 +5,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { AlertTriangle, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 interface DeleteConfirmDialogProps {
@@ -38,12 +39,13 @@ export function DeleteConfirmDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <>
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/40" />
 
       {/* Dialog */}
-      <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
         {/* Close button */}
         <button
           onClick={onClose}
@@ -132,6 +134,7 @@ export function DeleteConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

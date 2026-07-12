@@ -9,6 +9,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
+import { MOTION } from '@/lib/motion'
 import {
   X,
   Heart,
@@ -345,7 +346,7 @@ export function ExplorerPreviewDrawer({
             initial={{ x: 440 }}
             animate={{ x: 0 }}
             exit={{ x: 440 }}
-            transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+            transition={MOTION.drawerSlide}
           >
             {/* ── Header ── */}
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-5 border-b border-glass-border/50">

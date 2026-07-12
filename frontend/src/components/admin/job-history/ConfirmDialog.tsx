@@ -2,6 +2,7 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 export function ConfirmDialog({
     open,
@@ -26,24 +27,19 @@ export function ConfirmDialog({
 }) {
     if (!open) return null
     return createPortal(
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-                onClick={() => !loading && onCancel()}
-                role="dialog"
-                aria-modal="true"
-            >
+        <>
+            <Backdrop open={open} onClick={() => !loading && onCancel()} zClassName="z-50" className="bg-black/50" />
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <AnimatePresence>
                 <motion.div
                     initial={{ scale: 0.96, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.96, opacity: 0 }}
                     transition={{ duration: 0.12 }}
                     onClick={e => e.stopPropagation()}
-                    className="w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden"
+                    className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden"
+                    role="dialog"
+                    aria-modal="true"
                 >
                     <div className="h-1 bg-gradient-to-r from-red-500 to-red-400" />
                     <div className="p-6">
@@ -68,8 +64,9 @@ export function ConfirmDialog({
                         </button>
                     </div>
                 </motion.div>
-            </motion.div>
-        </AnimatePresence>,
+            </AnimatePresence>
+            </div>
+        </>,
         document.body,
     )
 }

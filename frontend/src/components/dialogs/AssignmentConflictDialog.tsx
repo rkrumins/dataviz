@@ -9,6 +9,7 @@ import React, { useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, X, ArrowRight, GitMerge, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useReferenceModelStore, useLayers } from '@/store/referenceModelStore'
 import type { AssignmentConflict } from '@/types/schema'
 
@@ -91,19 +92,15 @@ export function AssignmentConflictDialog({
     ]
 
     return (
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-                onClick={onCancel}
-            >
+        <>
+            <Backdrop open={true} onClick={onCancel} zClassName="z-50" className="bg-black/50" />
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.95, opacity: 0 }}
-                    className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl max-w-md w-full p-6"
+                    className="pointer-events-auto bg-white dark:bg-slate-900 rounded-xl shadow-2xl max-w-md w-full p-6"
                     onClick={e => e.stopPropagation()}
                 >
                     {/* Header */}
@@ -197,8 +194,9 @@ export function AssignmentConflictDialog({
                         </button>
                     </div>
                 </motion.div>
-            </motion.div>
-        </AnimatePresence>
+                </AnimatePresence>
+            </div>
+        </>
     )
 }
 

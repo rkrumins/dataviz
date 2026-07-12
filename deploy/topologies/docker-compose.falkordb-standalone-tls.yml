@@ -13,7 +13,7 @@
 #   pytest backend/tests/integration/test_topologies.py -v
 services:
   falkordb:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb:v4.18.11
     ports:
       - "6379:6379"
     environment:

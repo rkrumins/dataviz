@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
 import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
 
@@ -439,10 +440,10 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
         )}
       </section>
 
+      <Backdrop open={confirmRebuild} onClick={() => setConfirmRebuild(false)} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
       {confirmRebuild && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setConfirmRebuild(false)} />
-          <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+          <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in pointer-events-auto">
             <div className="px-6 pt-6 pb-4 flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center border border-amber-500/20 shrink-0">
                 <RotateCcw className="w-5 h-5 text-amber-600 dark:text-amber-400" />

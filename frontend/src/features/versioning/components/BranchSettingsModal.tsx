@@ -9,6 +9,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, GitBranch, Link2, Check, Loader2, Lock, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useToast } from '@/components/ui/toast'
 import type { Branch } from '@/services/versioningApiService'
 import { useUpdateBranch } from '../hooks/useVersioning'
@@ -67,15 +68,13 @@ export function BranchSettingsModal({
   }
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        key="branch-settings"
-        className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-black/50"
-        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-        onClick={onClose}
-      >
+    <>
+      <Backdrop open onClick={onClose} zClassName="z-[75]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[75] flex items-center justify-center p-4 pointer-events-none">
+      <AnimatePresence>
         <motion.div
-          className="w-full max-w-md rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
+          key="branch-settings"
+          className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
           initial={{ scale: 0.96, y: 8 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 8 }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -179,8 +178,9 @@ export function BranchSettingsModal({
             </button>
           </div>
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

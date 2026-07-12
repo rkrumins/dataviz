@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Cpu, Loader2, Settings2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import {
     aggregationService,
     type AggregationTuning,
@@ -105,9 +106,11 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
     }
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+        <>
+        <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/40" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
             <div
-                className="w-full max-w-lg rounded-2xl border border-glass-border bg-canvas p-5 shadow-xl space-y-4"
+                className="pointer-events-auto w-full max-w-lg rounded-2xl border border-glass-border bg-canvas p-5 shadow-xl space-y-4"
                 onClick={e => e.stopPropagation()}
             >
                 <div className="flex items-center justify-between">
@@ -189,6 +192,7 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
                 )}
             </div>
         </div>
+        </>
     )
 }
 
@@ -204,10 +208,18 @@ export function AggregationFleetPanel() {
         } catch { /* endpoint unavailable (e.g. non-admin) — hide panel */ }
     }, [])
 
+    // WS0.4: self-scheduling poll with BACKPRESSURE — the next tick arms only
+    // after the previous settles, so a hung workers endpoint (e.g. fleet
+    // unavailable while a provider is down) can't stack requests every 10s.
     useEffect(() => {
-        poll()
-        const interval = setInterval(poll, 10_000)
-        return () => clearInterval(interval)
+        let cancelled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const tick = async () => {
+            await poll()
+            if (!cancelled) timer = setTimeout(tick, 10_000)
+        }
+        tick()
+        return () => { cancelled = true; if (timer) clearTimeout(timer) }
     }, [poll])
 
     return (

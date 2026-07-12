@@ -26,7 +26,7 @@ version: "3.9"
 
 services:
   spanner-emulator:
-    image: gcr.io/cloud-spanner-emulator/emulator:latest
+    image: gcr.io/cloud-spanner-emulator/emulator:1.5.55
     container_name: synodic-spanner-emulator
     ports:
       - "9010:9010"   # gRPC
@@ -54,7 +54,7 @@ services:
   #     chmod +x /tmp/falkordb.so
   #     redis-server --port 6379 --loadmodule /tmp/falkordb.so
   falkordb:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb:v4.18.11
     container_name: synodic-test-falkordb
     ports:
       - "${FALKORDB_PORT:-6379}:6379"
@@ -74,7 +74,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16
+    image: postgres:16.14-alpine
     container_name: synodic-test-postgres
     environment:
       POSTGRES_USER: synodic

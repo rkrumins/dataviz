@@ -5,6 +5,7 @@ import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import type { ViewConfiguration } from '@/types/schema'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 // Dynamic icon component
 function DynamicIcon({ name, className }: { name: string; className?: string }) {
@@ -117,13 +118,13 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
         )}
       </AnimatePresence>
 
-      {/* Backdrop */}
-      {isExpanded && (
-        <div
-          className="fixed inset-0 z-[99]"
-          onClick={() => setIsExpanded(false)}
-        />
-      )}
+      {/* Backdrop — strand-proof primitive (was a raw fixed-inset click-catcher) */}
+      <Backdrop
+        open={isExpanded}
+        onClick={() => setIsExpanded(false)}
+        zClassName="z-[99]"
+        className="bg-transparent"
+      />
     </div>
   )
 }

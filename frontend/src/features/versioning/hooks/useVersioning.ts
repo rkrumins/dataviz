@@ -75,8 +75,14 @@ export function useResolveGraph(wsId?: string, dataSourceId?: string | null, vie
     // staleTime collapses them to one lookup per scope per 5 min.
     staleTime: 300_000,
     gcTime: 300_000,
-    // A 404 means this data source has no versioned graph — don't hammer it.
-    retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 2,
+    // Don't retry terminal / retry-won't-help cases: a 404 (no versioned
+    // graph for this data source) or, per WS0.4, a request timeout / provider
+    // unavailable — when a provider is down, retrying just triples the
+    // per-source fan-out and helps saturate the browser connection budget.
+    retry: (n, e) =>
+      !/404|not found|timed out|unavailable|provider_(un|loading)/i.test(
+        String((e as Error)?.message),
+      ) && n < 2,
   })
 }
 

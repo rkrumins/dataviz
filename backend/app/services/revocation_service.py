@@ -40,6 +40,19 @@ REVOCATION_TTL_SECONDS: int = int(
     os.getenv("RBAC_REVOCATION_TTL_SECONDS", str(_DEFAULT_REVOCATION_TTL_SECONDS))
 )
 
+# ``is_revoked`` runs on EVERY authenticated request and on the 60s
+# ``/me/permissions`` poll, so a slow or unreachable Redis here must fail
+# FAST (fail-open, honouring the JWT) rather than hang the request until the
+# 30s middleware deadline — which is what forces a user logout on refresh.
+# Keep both the connect and per-command budgets tight and env-tunable.
+_DEFAULT_REVOCATION_SOCKET_TIMEOUT_S = 2.0
+REVOCATION_SOCKET_TIMEOUT_S: float = float(
+    os.getenv(
+        "RBAC_REVOCATION_SOCKET_TIMEOUT_S",
+        str(_DEFAULT_REVOCATION_SOCKET_TIMEOUT_S),
+    )
+)
+
 _KEY_PREFIX = "rbac:revoked:"
 _USER_SIDS_PREFIX = "rbac:user_sids:"
 
@@ -79,7 +92,15 @@ class RedisBackend:
         # if the dependency is missing in some environments (e.g.
         # static analysis pre-install).
         import redis.asyncio as redis_async  # noqa: WPS433
-        self._client = redis_async.from_url(url, decode_responses=True)
+        # Bounded timeouts so a slow/unreachable Redis fails fast → fail-open
+        # (see REVOCATION_SOCKET_TIMEOUT_S). Without these the client waits on
+        # the OS TCP timeout and hangs auth on every request.
+        self._client = redis_async.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=REVOCATION_SOCKET_TIMEOUT_S,
+            socket_timeout=REVOCATION_SOCKET_TIMEOUT_S,
+        )
 
     async def exists(self, key: str) -> bool:
         try:

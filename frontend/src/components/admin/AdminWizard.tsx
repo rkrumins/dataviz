@@ -5,6 +5,7 @@
 import { useState, useCallback, type ReactNode } from 'react'
 import { X, ChevronLeft, ChevronRight, Check, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 export interface WizardStep {
     id: string
@@ -80,8 +81,10 @@ export function AdminWizard({
     const activeStep = steps[currentStep]
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
-            <div className="bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
+        <>
+        <Backdrop open={true} zClassName="z-[100]" className="bg-black/80" />
+        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+            <div className="pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
                 {/* Header */}
                 <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border shrink-0">
                     <div>
@@ -173,5 +176,6 @@ export function AdminWizard({
                 </div>
             </div>
         </div>
+        </>
     )
 }

@@ -25,6 +25,7 @@ import {
     X
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useSchemaStore } from '@/store/schema'
 import type { ViewLayerConfig, LayerAssignmentRuleConfig } from '@/types/schema'
 import type { SmartRule } from './SmartRuleBuilder'
@@ -301,19 +302,19 @@ export function EnhancedLayerCard({
                     >
                         <Palette className="w-4 h-4 text-white/70 mx-auto" />
                     </button>
+                    <Backdrop
+                        open={showColorPicker}
+                        onClick={() => setShowColorPicker(false)}
+                        zClassName="z-40"
+                        className="bg-transparent"
+                    />
                     <AnimatePresence>
                         {showColorPicker && (
-                            <>
-                                <div
-                                    className="fixed inset-0 z-40"
-                                    onClick={() => setShowColorPicker(false)}
-                                />
-                                <ColorPicker
-                                    value={layerColor}
-                                    onChange={color => onUpdate({ color })}
-                                    onClose={() => setShowColorPicker(false)}
-                                />
-                            </>
+                            <ColorPicker
+                                value={layerColor}
+                                onChange={color => onUpdate({ color })}
+                                onClose={() => setShowColorPicker(false)}
+                            />
                         )}
                     </AnimatePresence>
                 </div>

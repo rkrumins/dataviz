@@ -13,6 +13,7 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
 import { useBranchStore } from '@/store/branchStore'
 import { useBranches, useOpenDraft, VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
@@ -49,21 +50,16 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <motion.div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={openDraft.isPending ? undefined : onClose}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-      />
+    <>
+      <Backdrop open={true} onClick={openDraft.isPending ? undefined : onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
       <motion.div
         role="dialog"
         aria-modal="true"
         initial={{ opacity: 0, y: 8, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="relative w-full max-w-xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl shadow-black/25 overflow-hidden"
+        className="pointer-events-auto relative w-full max-w-xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl shadow-black/25 overflow-hidden"
       >
         <div className="flex items-start justify-between px-8 pt-7 pb-4">
           <div className="flex items-center gap-3.5">
@@ -155,7 +151,8 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
           </div>
         </div>
       </motion.div>
-    </div>,
+      </div>
+    </>,
     document.body,
   )
 }

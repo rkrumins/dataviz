@@ -9,6 +9,7 @@ import { useNavigate } from 'react-router-dom'
 import { Layers, Database, Loader2, Unlink, ExternalLink, ChevronDown, Box, GitBranch, Eye, FileText, Plus, X, Search, AlertTriangle } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { workspaceService } from '@/services/workspaceService'
@@ -391,9 +392,10 @@ export function UsagePanel({ ontology, workspaces, ontologies }: UsagePanelProps
       </div>
 
       {/* Reassignment confirmation dialog */}
+      <Backdrop open={!!confirmTarget} zClassName="z-50" className="bg-black/40 dark:bg-black/60" />
       {confirmTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-gray-900 rounded-2xl border border-glass-border shadow-2xl w-full max-w-md mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+          <div className="pointer-events-auto bg-white dark:bg-gray-900 rounded-2xl border border-glass-border shadow-2xl w-full max-w-md mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="p-6">
               <div className="flex items-start gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center flex-shrink-0">

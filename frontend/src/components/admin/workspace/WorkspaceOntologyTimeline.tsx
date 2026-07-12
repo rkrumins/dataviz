@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { ontologyDefinitionService, type OntologyAuditEntry } from '@/services/ontologyDefinitionService'
+import { mapWithConcurrency } from '@/lib/concurrency'
 
 interface WorkspaceOntologyTimelineProps {
     dataSources: DataSourceResponse[]
@@ -33,11 +34,17 @@ export function WorkspaceOntologyTimeline({ dataSources, ontologyMap }: Workspac
         const ontologyIds = [...new Set(dataSources.map(ds => ds.ontologyId).filter(Boolean))] as string[]
         if (ontologyIds.length === 0) { setIsLoading(false); return }
 
-        Promise.all(ontologyIds.map(id =>
-            ontologyDefinitionService.auditLog(id).then(entries => ({ id, entries })).catch(() => ({ id, entries: [] as OntologyAuditEntry[] }))
-        )).then(results => {
+        // WS0.4: cap the per-ontology audit fan-out so it can't storm the
+        // browser connection budget when a workspace has many ontologies.
+        mapWithConcurrency(ontologyIds, 4, id =>
+            ontologyDefinitionService.auditLog(id)
+                .then(entries => ({ id, entries }))
+                .catch(() => ({ id, entries: [] as OntologyAuditEntry[] })),
+        ).then(results => {
             const logs: Record<string, OntologyAuditEntry[]> = {}
-            results.forEach(r => { logs[r.id] = r.entries })
+            for (const r of results) {
+                if (r.status === 'fulfilled') logs[r.value.id] = r.value.entries
+            }
             setAuditLogs(logs)
             setIsLoading(false)
         })

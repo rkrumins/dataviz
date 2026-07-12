@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
+import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
@@ -233,7 +234,7 @@ export function DataSourceDetailPanel({
                         initial={{ x: 480 }}
                         animate={{ x: 0 }}
                         exit={{ x: 480 }}
-                        transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                        transition={MOTION.drawerSlide}
                     >
                         {/* ── Header ─────────────────────────────────────── */}
                         <div className="px-6 pt-6 pb-4 border-b border-glass-border/50 shrink-0">

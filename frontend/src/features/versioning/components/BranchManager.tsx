@@ -15,6 +15,7 @@ import {
   ArrowRight, Eye, Inbox, Layers,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
 import { useToast } from '@/components/ui/toast'
 import type { Branch } from '@/services/versioningApiService'
@@ -102,15 +103,11 @@ export function BranchManager({
 
   return createPortal(
     <>
-      <AnimatePresence>
-      <motion.div
-        key="branch-manager"
-        className="fixed inset-0 z-[70] flex justify-end bg-black/40 backdrop-blur-[2px]"
-        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-        onClick={onClose}
-      >
+      <Backdrop open={true} onClick={onClose} zClassName="z-[70]" className="bg-black/40 backdrop-blur-[2px]" />
+      <div className="fixed inset-0 z-[71] flex justify-end pointer-events-none">
+        <AnimatePresence>
         <motion.aside
-          className="relative h-full w-full max-w-md bg-canvas border-l border-glass-border shadow-2xl flex flex-col"
+          className="pointer-events-auto relative h-full w-full max-w-md bg-canvas border-l border-glass-border shadow-2xl flex flex-col"
           initial={{ x: 32, opacity: 0.6 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 32, opacity: 0 }}
           transition={{ type: 'spring', stiffness: 380, damping: 38 }}
           onClick={(e) => e.stopPropagation()}
@@ -241,8 +238,8 @@ export function BranchManager({
             </div>
           )}
         </motion.aside>
-      </motion.div>
-      </AnimatePresence>
+        </AnimatePresence>
+      </div>
 
       {/* Per-draft sub-flows — each owns its own portal/animation, kept outside the drawer's presence. */}
       {settingsBranch && (
@@ -384,11 +381,14 @@ function PublishDraftDialog({
   )
   if (diffQ.isLoading) {
     return createPortal(
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm">
-        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-canvas-elevated border border-glass-border text-sm text-ink-muted">
-          <Loader2 className="w-4 h-4 animate-spin" /> Preparing publish…
+      <>
+        <Backdrop open={diffQ.isLoading} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
+        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+          <div className="pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-xl bg-canvas-elevated border border-glass-border text-sm text-ink-muted">
+            <Loader2 className="w-4 h-4 animate-spin" /> Preparing publish…
+          </div>
         </div>
-      </div>,
+      </>,
       document.body,
     )
   }
@@ -421,13 +421,11 @@ function ArchiveConfirm({
     })
   }
   return createPortal(
-    <motion.div
-      className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50"
-      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      onClick={onClose}
-    >
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-[110]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 pointer-events-none">
       <motion.div
-        className="w-full max-w-sm rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
+        className="pointer-events-auto w-full max-w-sm rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
         initial={{ scale: 0.96, y: 8 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 8 }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -458,7 +456,8 @@ function ArchiveConfirm({
           </button>
         </div>
       </motion.div>
-    </motion.div>,
+      </div>
+    </>,
     document.body,
   )
 }

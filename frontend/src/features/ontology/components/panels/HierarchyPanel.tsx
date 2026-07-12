@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { EntityTypeSchema } from '@/types/schema'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
@@ -370,7 +371,7 @@ export function HierarchyTreeNode({
               </button>
               {showNestPicker && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowNestPicker(false)} />
+                  <Backdrop open={showNestPicker} onClick={() => setShowNestPicker(false)} zClassName="z-40" className="bg-transparent" />
                   <div className="absolute right-0 top-full mt-1 w-56 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-60 overflow-y-auto">
                     <p className="px-3 py-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Also contain under...</p>
                     {potentialParents.map(p => {
@@ -510,7 +511,7 @@ export function OrphanTypeRow({
               </button>
               {showPicker && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowPicker(false)} />
+                  <Backdrop open={showPicker} onClick={() => setShowPicker(false)} zClassName="z-40" className="bg-transparent" />
                   <div className="absolute right-0 top-full mt-1 w-56 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-60 overflow-y-auto">
                     <p className="px-3 py-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Choose parent</p>
                     {potentialParents.map(p => {

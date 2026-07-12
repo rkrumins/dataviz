@@ -2,6 +2,7 @@
  * UnsavedChangesDialog — shown when the user tries to navigate away with pending changes.
  */
 import { AlertTriangle, Save, Trash2 } from 'lucide-react'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 interface UnsavedChangesDialogProps {
   onSave: () => void
@@ -17,9 +18,10 @@ export function UnsavedChangesDialog({
   isSaving,
 }: UnsavedChangesDialogProps) {
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40" onClick={onCancel} />
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <>
+      <Backdrop open={true} onClick={onCancel} zClassName="z-[100]" className="bg-black/40" />
+      <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="px-6 pt-6 pb-4">
           <div className="flex items-center gap-3 mb-3">
@@ -61,6 +63,7 @@ export function UnsavedChangesDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

@@ -11,6 +11,7 @@ import {
 } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function WorkspaceViewsManager() {
@@ -182,9 +183,10 @@ export function WorkspaceViewsManager() {
         )}
 
         {/* Delete confirmation */}
+        <Backdrop open={!!deleteConfirm} zClassName="z-50" className="bg-black/40" />
         {deleteConfirm && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="glass-panel rounded-xl p-6 max-w-sm w-full mx-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+            <div className="glass-panel rounded-xl p-6 max-w-sm w-full mx-4 pointer-events-auto">
               <h3 className="text-sm font-semibold text-ink-primary mb-2">Delete View</h3>
               <p className="text-xs text-ink-secondary mb-4">
                 Are you sure? This will remove the view and break any shared links.

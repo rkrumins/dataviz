@@ -1,5 +1,6 @@
 import { X, Copy, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 
 interface SuggestDialogProps {
@@ -20,9 +21,10 @@ export function SuggestDialog({
   onClose,
 }: SuggestDialogProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-lg mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-lg mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
         <div className="flex items-center justify-between mb-1">
           <h3 className="text-lg font-bold text-ink">Existing Ontologies Match Your Graph</h3>
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted">
@@ -117,6 +119,7 @@ export function SuggestDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

@@ -11,6 +11,7 @@ import {
   AlertTriangle, ArrowRight, Search, BarChart3,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -125,9 +126,10 @@ export function FindDataSourcesDialog({
   const doneCount = results.filter(r => r.status === 'done').length
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={isAssigning ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-xl mx-4 max-h-[80vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+    <>
+      <Backdrop open={true} onClick={isAssigning ? undefined : onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-xl mx-4 max-h-[80vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
 
         {/* Header */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4 flex-shrink-0">
@@ -305,6 +307,7 @@ export function FindDataSourcesDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

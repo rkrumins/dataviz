@@ -42,7 +42,7 @@ from backend.app.services.stats_cache import (
     build_synthetic_schema, read_stats_cache,
 )
 from backend.app.auth.dependencies import requires
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.auth.dependencies import get_optional_user
 from backend.app.services.top_level_cache import try_serve_top_level
@@ -71,7 +71,12 @@ async def get_context_engine(
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
-    session: AsyncSession = Depends(get_db_session),
+    # WS0.2 bulkhead: the ContextEngine holds this session for the whole
+    # request, including the outbound FalkorDB call. Use the isolated
+    # GRAPH_READ pool so a slow/down provider can't starve the WEB pool that
+    # serves auth / navigation. Read-write (some graph endpoints reuse
+    # engine._db_session for writes), so NOT the READONLY pool.
+    session: AsyncSession = Depends(get_graph_read_db_session),
     user=Depends(get_optional_user),
 ) -> ContextEngine:
     """
