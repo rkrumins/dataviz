@@ -33,6 +33,7 @@ from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_repo
+from backend.app.db.repositories import view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
@@ -120,6 +121,46 @@ _ANONYMOUS_USER = "anonymous"
 def _user_id(user) -> str:
     """Extract user_id from the optional user dependency, or fall back to anonymous."""
     return user.id if user else _ANONYMOUS_USER
+
+
+def _view_update_changes(old, req) -> dict:
+    """Field-level diff between a view and an update request, for the activity
+    log. Only human-meaningful top-level fields; ``config`` (filters/layers) is
+    flagged as changed, not deep-diffed."""
+    ch: dict = {}
+    if req.name is not None and req.name != old.name:
+        ch["name"] = {"from": old.name, "to": req.name}
+    if req.description is not None and (req.description or None) != (old.description or None):
+        ch["description"] = {"from": old.description, "to": req.description}
+    if req.view_type is not None and req.view_type != old.view_type:
+        ch["viewType"] = {"from": old.view_type, "to": req.view_type}
+    if req.visibility is not None and req.visibility != old.visibility:
+        ch["visibility"] = {"from": old.visibility, "to": req.visibility}
+    if req.tags is not None and sorted(req.tags or []) != sorted(old.tags or []):
+        ch["tags"] = {"from": old.tags, "to": req.tags}
+    if req.is_pinned is not None and req.is_pinned != old.is_pinned:
+        ch["pinned"] = {"from": old.is_pinned, "to": req.is_pinned}
+    if req.config is not None:
+        ch["content"] = True
+    return ch
+
+
+def _update_summary(changes: dict) -> str:
+    """Human one-liner for an 'updated' activity entry from its diff."""
+    if "name" in changes:
+        return f'Renamed to "{changes["name"]["to"]}"'
+    parts = []
+    if "viewType" in changes:
+        parts.append("layout")
+    if "description" in changes:
+        parts.append("description")
+    if "tags" in changes:
+        parts.append("tags")
+    if "content" in changes:
+        parts.append("content")
+    if "pinned" in changes:
+        parts.append("pinned" if changes["pinned"]["to"] else "unpinned")
+    return "Edited " + ", ".join(parts) if parts else "Edited settings"
 
 
 async def _compute_ontology_digest(
@@ -385,9 +426,14 @@ async def create_view(
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
-    return await view_repo.create_view(
+    view = await view_repo.create_view(
         session, req, ontology_digest=digest, user_id=_user_id(user),
     )
+    await view_activity_repo.record_view_activity(
+        session, view_id=view.id, workspace_id=view.workspace_id,
+        action="created", actor=_user_id(user), summary=f'Created "{view.name}"',
+    )
+    return view
 
 
 @router.get("/{view_id}", response_model=ViewResponse)
@@ -454,6 +500,13 @@ async def update_view(
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    changes = _view_update_changes(existing, req)
+    if changes:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view.id, workspace_id=view.workspace_id,
+            action="updated", actor=_user_id(user),
+            summary=_update_summary(changes), changes=changes,
+        )
     return view
 
 
@@ -533,12 +586,19 @@ async def delete_view(
         if not allowed:
             raise HTTPException(status_code=403, detail=f"Missing permission: {need}")
 
+    existing = await view_repo.get_view(session, view_id)
     if permanent:
         deleted = await view_repo.permanently_delete_view(session, view_id)
     else:
         deleted = await view_repo.delete_view(session, view_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    # Soft-delete only: a hard-deleted view has no timeline to show anyway.
+    if not permanent and existing:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=existing.workspace_id,
+            action="deleted", actor=_user_id(user), summary=f'Deleted "{existing.name}"',
+        )
 
 
 @router.post("/{view_id}/restore", response_model=ViewResponse)
@@ -562,6 +622,11 @@ async def restore_view(
     if not restored:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found or not deleted")
     view = await view_repo.get_view_enriched(session, view_id, user_id=_user_id(user))
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view.workspace_id if view else None,
+        action="restored", actor=_user_id(user),
+        summary=f'Restored "{view.name}"' if view else "Restored",
+    )
     return view
 
 
@@ -589,11 +654,19 @@ async def update_view_visibility(
                 detail="Only the creator or a workspace admin can change visibility",
             )
 
+    existing = await view_repo.get_view(session, view_id)
     view = await view_repo.update_visibility(
         session, view_id, visibility, user_id=_user_id(user),
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    if existing and existing.visibility != visibility:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=view.workspace_id,
+            action="visibility_changed", actor=_user_id(user),
+            summary=f"Visibility {existing.visibility} → {visibility}",
+            changes={"visibility": {"from": existing.visibility, "to": visibility}},
+        )
     return view
 
 
@@ -608,6 +681,11 @@ async def favourite_view(
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     created = await view_repo.favourite_view(session, view_id, _user_id(user))
+    if created:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=view.workspace_id,
+            action="favourited", actor=_user_id(user), summary="Favourited",
+        )
     return {"favourited": True, "created": created}
 
 
@@ -621,3 +699,32 @@ async def unfavourite_view(
     removed = await view_repo.unfavourite_view(session, view_id, _user_id(user))
     if not removed:
         raise HTTPException(status_code=404, detail="Favourite not found")
+    view = await view_repo.get_view(session, view_id)
+    if view:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=view.workspace_id,
+            action="unfavourited", actor=_user_id(user), summary="Unfavourited",
+        )
+
+
+@router.get("/{view_id}/activity", response_model=List[view_activity_repo.ViewActivityEntry])
+async def get_view_activity(
+    view_id: str = Path(...),
+    action: Optional[str] = Query(None),
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Per-view activity timeline, newest first. Gated by view-read access —
+    whoever can see the view can see how it changed. Legacy views with no
+    recorded activity get a synthesized 'created' anchor from their stamps."""
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, view_orm):
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    return await view_activity_repo.get_view_activity(
+        session, view_id, action=action, limit=limit, offset=offset,
+    )
