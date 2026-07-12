@@ -512,41 +512,10 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # ── Graph Service (Port 8001) ─────────────────────────────────────
-  # Stateless: provider discovery & connectivity testing.
-  # No DB access — takes connection params in request body.
-  graph-service:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.graph
-    ports:
-      - "${GRAPH_PORT:-8001}:8001"
-    environment:
-      FALKORDB_HOST: falkordb
-      # Docker reality: a provider stored with host localhost/127.0.0.1 points
-      # at THIS container, not FalkorDB. Redirect any loopback host to the
-      # reachable Docker service so every such provider works without
-      # per-provider edits. Override (or set empty) to disable.
-      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
-      FALKORDB_PORT: "6379"
-    depends_on:
-      falkordb:
-        # WS1.1 decoupling: wait only for the container to START, not for its
-        # healthcheck (which requires the full dataset to finish LOADING). A
-        # loading/unhealthy FalkorDB must not block the rest of the stack from
-        # starting — services connect lazily and fast-fail while it warms.
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-    restart: unless-stopped
-
   # ── Frontend (Nginx + React SPA) ──────────────────────────────────
-  # Serves the built React app and reverse-proxies /api/* and /graph/*
-  # to the backend services.
+  # Serves the built React app and reverse-proxies /api/* to viz-service.
+  # (The former graph-service was retired — provider connection-testing lives
+  # in viz-service, already bulkheaded; only backend/graph/adapters remains.)
   frontend:
     build:
       context: .
@@ -555,8 +524,6 @@ services:
       - "${FRONTEND_PORT:-3080}:80"
     depends_on:
       viz-service:
-        condition: service_healthy
-      graph-service:
         condition: service_healthy
     restart: unless-stopped
 

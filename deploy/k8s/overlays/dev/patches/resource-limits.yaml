@@ -52,23 +52,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: graph-service
-spec:
-  template:
-    spec:
-      containers:
-        - name: graph-service
-          resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: frontend
 spec:
   template:

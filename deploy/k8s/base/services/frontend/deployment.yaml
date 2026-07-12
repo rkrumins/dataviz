@@ -33,8 +33,6 @@ spec:
             - |
               echo "Waiting for viz-service..."
               until nc -z viz-service 8000; do sleep 2; done
-              echo "Waiting for graph-service..."
-              until nc -z graph-service 8001; do sleep 2; done
               echo "All dependencies ready."
       containers:
         - name: frontend

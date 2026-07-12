@@ -121,20 +121,6 @@ services:
     # No --reload (headless process, not a uvicorn app). Pick up
     # code changes with:  ./dev.sh restart stats-service
 
-  graph-service:
-    volumes:
-      - ./backend:/app/backend
-    command:
-      - uvicorn
-      - backend.graph.main:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8001"
-      - --reload
-      - --reload-dir
-      - /app/backend
-
   frontend:
     build:
       target: development
@@ -159,7 +145,6 @@ services:
       - /app/node_modules
     environment:
       VITE_PROXY_TARGET: http://viz-service:8000
-      VITE_GRAPH_PROXY_TARGET: http://graph-service:8001
 
 volumes:
   # Override the auto-prefixed names (synodic-dev_postgres_data etc.) with
