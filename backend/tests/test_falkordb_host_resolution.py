@@ -116,20 +116,22 @@ def test_manager_create_provider_instance_routes_through_resolve_falkordb_target
     assert "apply_local_dev_falkordb_override(" not in src
 
 
-def test_registry_factory_resolve_routes_through_resolve_falkordb_target():
-    # _resolve is a closure nested in make_registry_graph_factory; inspect
-    # the enclosing function's source to reach it.
-    src = inspect.getsource(frg.make_registry_graph_factory)
+def test_registry_provider_resolution_routes_through_resolve_falkordb_target():
+    # Both the registry graph factory and list_graph_keys now resolve a pinned
+    # provider through the ONE function below (it also builds the provider's
+    # FalkorDBConnConfig, so topology and host resolution can't drift apart).
+    src = inspect.getsource(frg.resolve_provider_conn_config)
     assert "resolve_falkordb_target(" in src
     assert "apply_local_dev_falkordb_override(" not in src
     assert "_normalize_falkordb_host(" not in src
 
 
-def test_list_graph_keys_routes_through_resolve_falkordb_target():
-    src = inspect.getsource(frg.list_graph_keys)
-    assert "resolve_falkordb_target(" in src
-    assert "apply_local_dev_falkordb_override(" not in src
-    assert "_normalize_falkordb_host(" not in src
+def test_registry_call_sites_do_not_resolve_hosts_themselves():
+    for fn in (frg.make_registry_graph_factory, frg.list_graph_keys):
+        src = inspect.getsource(fn)
+        assert "resolve_provider_conn_config(" in src
+        assert "apply_local_dev_falkordb_override(" not in src
+        assert "_normalize_falkordb_host(" not in src
 
 
 if __name__ == "__main__":
@@ -141,6 +143,6 @@ if __name__ == "__main__":
     test_resolve_falkordb_passthrough()
     test_resolve_remote_host_unchanged()
     test_manager_create_provider_instance_routes_through_resolve_falkordb_target()
-    test_registry_factory_resolve_routes_through_resolve_falkordb_target()
-    test_list_graph_keys_routes_through_resolve_falkordb_target()
+    test_registry_provider_resolution_routes_through_resolve_falkordb_target()
+    test_registry_call_sites_do_not_resolve_hosts_themselves()
     print("host resolution + routing (no-env cases): OK")

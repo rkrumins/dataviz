@@ -3,12 +3,12 @@
 # owner-death re-resolve, owner-probing preflight). The three -0 pods are
 # the seed list — any one alive is enough for discovery.
 #
-# FALKORDB_HOST is repointed at a seed pod for the legacy env-default
-# (unrouted) graph paths; per-provider traffic ignores it. NOTE: the
-# env-default registry/projection factories build STANDALONE connections,
-# which in cluster mode only reach graphs whose slots live on that seed —
-# route production graphs through provider rows with
-# falkordbConnection.mode=cluster before cutover (see README).
+# FALKORDB_HOST is repointed at a seed pod: env-default (unrouted) graphs
+# resolve their topology from FALKORDB_MODE + FALKORDB_CLUSTER_NODES below
+# (the registry/projection/worker factories all go through the same
+# topology-aware client as the read path), so they route to the OWNING shard
+# rather than to whatever slots live on the seed. Per-provider graphs declare
+# their own topology on the provider row (see README).
 apiVersion: v1
 kind: ConfigMap
 metadata:

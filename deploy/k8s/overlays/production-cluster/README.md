@@ -29,18 +29,27 @@ make apply OVERLAY=production-cluster                      # deploy (same envsub
    production `managed-data-tier` patch). Cluster mode cannot host the provider
    cache (ADR-020, doc §7.3).
 
-3. **Provider rows route through cluster config.** The `ProviderManager` read
-   path is fully cluster-aware, but the env-default **registry/projection
-   factories build standalone connections** — in cluster mode a standalone
-   connection only reaches graphs whose slots live on that one seed node.
-   Before cutover, production FalkorDB provider rows must carry
-   `extra_config.falkordbConnection = {"mode": "cluster", "cluster":
-   {"startupNodes": [["falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local", 6379], ...]}}`
-   so reads resolve the owning shard — and graphs pinned to a provider project
-   through `resolve_falkordb_target(row.host, row.port)`, so keep `row.host`
-   pointing at a seed node. Unrouted (env-default) versioned graphs are the
-   remaining standalone-only path — treat closing that as a pre-cutover code
-   task if any production graph is unrouted.
+3. **Provider rows declare their own topology.** Every FalkorDB consumer (read
+   path, versioning registry, projector, workers, `GRAPH.LIST`) resolves the
+   connection from the instance's own config through one shared topology-aware
+   client, so a standalone, a Sentinel and a Cluster instance can coexist. For
+   graphs pinned to a provider, set on the provider row:
+
+   ```json
+   "falkordbConnection": {
+     "mode": "cluster",
+     "cluster": {"startupNodes": [
+       ["falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local", 6379],
+       ["falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local", 6379],
+       ["falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local", 6379]
+     ]}
+   }
+   ```
+
+   Keep `row.host` pointing at a seed node (it is still used for host
+   resolution + preflight fallback). Unrouted (env-default) graphs need no row:
+   they follow `FALKORDB_MODE=cluster` + `FALKORDB_CLUSTER_NODES` from
+   `common-config`, which this overlay sets.
 
 4. **Eviction budgets** (doc §7.3): set `GRAPHVER_FALKOR_BUDGETS` /
    `GRAPHVER_FALKOR_MAX_RESIDENT` ≈ 0.8 × shard `maxmemory` (32gb) per provider

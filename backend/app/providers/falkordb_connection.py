@@ -24,10 +24,11 @@ Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_SENTINEL_MASTER``, ``FALKORDB_SENTINEL_NODES``,
 ``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port").
 """
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from backend.app.config import resilience as _resilience
 from backend.common.adapters.redis_tls import (
@@ -427,3 +428,327 @@ def build_cache_redis_fallback(
     """:func:`build_cache_client` with no dedicated URL. Always ``None`` now:
     the provider cache is never co-located on FalkorDB (WS2.1 decoupling)."""
     return build_cache_client(cfg, cache_url=None, pool_kwargs=pool_kwargs)
+
+
+# ============================================================================
+# Topology-aware graph clients (shared by EVERY FalkorDB consumer)
+# ============================================================================
+#
+# ``build_graph_client`` above knows how to reach a standalone host, follow a
+# Sentinel master, or pin a graph to its owning Cluster node — but only the
+# read path (``ProviderManager`` → ``FalkorDBProvider``) used to go through it.
+# The versioning registry / projector / worker factories each hand-rolled a
+# plain ``ConnectionPool(host, port)``, i.e. they ALWAYS spoke standalone. On a
+# Sentinel instance they pinned whatever node was master at boot (a failover
+# then wrote to a replica → errors), and on a Cluster instance they could only
+# reach graphs whose slots happened to live on that one seed node.
+#
+# Everything below is the single, shared way to obtain a graph handle for ANY
+# instance, in ANY topology. The instance's OWN configuration decides the
+# topology, so one deployment can host a standalone, a Sentinel, and a Cluster
+# provider side by side and every service reaches each of them correctly.
+
+
+def build_graph_pool_kwargs(
+    cfg: FalkorDBConnConfig,
+    *,
+    socket_timeout: float,
+    max_connections: Optional[int] = None,
+) -> dict:
+    """Pool kwargs for a topology-aware graph client: sizing + auth + socket
+    hygiene. TLS is applied inside ``build_graph_client`` (raw pools need
+    ``connection_class=SSLConnection``, which the high-level clients reject).
+
+    Deliberately NOT ``decode_responses`` — the registry/projection callers
+    have always run bytes-mode and decode at their own boundaries.
+    """
+    kw: dict = {
+        "max_connections": (
+            max_connections
+            or cfg.graph_pool_size
+            or int(os.getenv("FALKORDB_POOL_SIZE", "10"))
+        ),
+        **resilient_pool_kwargs(socket_timeout=socket_timeout),
+    }
+    if cfg.username:
+        kw["username"] = cfg.username
+    if cfg.password:
+        kw["password"] = cfg.password
+    return kw
+
+
+def env_conn_config() -> FalkorDBConnConfig:
+    """Connection config for the ENV-configured default instance.
+
+    Resolves ``FALKORDB_MODE`` / ``FALKORDB_SENTINEL_*`` / ``FALKORDB_CLUSTER_NODES``
+    exactly like a provider row would — so the env-default (unrouted) graphs a
+    deployment still has are reached over the right topology instead of being
+    hard-wired to standalone. The env instance carries no credentials (there are
+    no ``FALKORDB_USERNAME`` / ``_PASSWORD`` vars anywhere in the stack); an
+    authenticated instance must be registered as a provider row.
+    """
+    return load_connection_config(
+        None,
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        username=None,
+        password=None,
+    )
+
+
+def _is_retryable_client_error(exc: BaseException) -> bool:
+    """Connection drop / cluster redirect / nulled handle — i.e. 'the client we
+    cached is stale', not 'the query is wrong'. Reuses the read path's
+    classifiers verbatim so both paths agree on what is retryable (imported
+    lazily: ``falkordb_provider`` imports this module)."""
+    try:
+        from backend.app.providers.falkordb_provider import (
+            _is_cluster_routing_error,
+            _is_null_handle_error,
+            _is_transient_connection_error,
+        )
+    except Exception:                            # pragma: no cover - defensive
+        return False
+    return (
+        _is_transient_connection_error(exc)
+        or _is_cluster_routing_error(exc)
+        or _is_null_handle_error(exc)
+    )
+
+
+def _decode_key(k: Any) -> str:
+    return k.decode() if isinstance(k, bytes) else k
+
+
+class ResilientGraph:
+    """A graph handle that re-resolves its client once on a stale-client error.
+
+    The registry/projector paths have no ``ProviderManager`` breaker and no
+    ``_run_guarded``: a cached handle pinned to a rotated Cluster node (or a
+    failed-over Sentinel master, or a dropped socket) would otherwise fail for
+    the process lifetime. On a connection/redirect error this drops the cached
+    client — forcing a fresh topology resolve, which finds the promoted replica
+    or new owner — and retries the call ONCE. Query errors (bad Cypher) and
+    everything else propagate untouched.
+
+    Reads are idempotent; a retried projector write re-applies at most one
+    chunk via ``MERGE``, which is the same bounded, self-healing property
+    ``_run_guarded`` relies on.
+    """
+
+    def __init__(self, clients: "TopologyGraphClients", cfg: FalkorDBConnConfig,
+                 name: str, graph: Any):
+        self._clients = clients
+        self._cfg = cfg
+        self._name = name
+        self._graph = graph
+
+    async def query(self, *args, **kwargs):
+        return await self._call("query", *args, **kwargs)
+
+    async def ro_query(self, *args, **kwargs):
+        return await self._call("ro_query", *args, **kwargs)
+
+    async def delete(self, *args, **kwargs):
+        return await self._call("delete", *args, **kwargs)
+
+    async def _call(self, method: str, *args, **kwargs):
+        try:
+            return await getattr(self._graph, method)(*args, **kwargs)
+        except Exception as exc:
+            if not _is_retryable_client_error(exc):
+                raise
+            logger.warning(
+                "falkordb graph %r: %s during %s on %s — re-resolving the client "
+                "and retrying once.",
+                self._name, type(exc).__name__, method, self._cfg.describe(),
+            )
+            await self._clients.invalidate(self._cfg, self._name)
+            self._graph = await self._clients.resolve_graph(self._cfg, self._name)
+            return await getattr(self._graph, method)(*args, **kwargs)
+
+    def __getattr__(self, item):
+        # Anything not wrapped above (e.g. ``.name``) delegates unchanged.
+        return getattr(self._graph, item)
+
+
+class TopologyGraphClients:
+    """Process-wide cache of FalkorDB clients, keyed by connection identity.
+
+    Cache key = the instance's connection identity + (in CLUSTER mode only) the
+    graph name: a graph key lives entirely on one cluster node, so its client is
+    pinned to that node, while standalone/Sentinel instances share one client
+    per instance. ``invalidate`` drops a client so the next call re-resolves —
+    the hook a rotated cluster node or a Sentinel failover needs.
+    """
+
+    def __init__(self, *, socket_timeout: Optional[float] = None):
+        self._clients: dict = {}     # key -> (FalkorDB, pool)
+        self._locks: dict = {}       # key -> asyncio.Lock (per-key: a slow
+                                     # cluster discovery must not block others)
+        self._socket_timeout = socket_timeout
+
+    @staticmethod
+    def cache_key(cfg: FalkorDBConnConfig, graph_name: str) -> tuple:
+        identity = (
+            cfg.mode, cfg.host, cfg.port, cfg.username,
+            cfg.sentinel_master,
+            tuple(cfg.sentinel_nodes), tuple(cfg.cluster_nodes),
+            cfg.tls_enabled,
+        )
+        return (identity, graph_name if cfg.mode == "cluster" else None)
+
+    def _pool_kwargs(self, cfg: FalkorDBConnConfig) -> dict:
+        # The socket timeout here is a HANG NET for these long-lived pools
+        # (projector writes run to PROJECTION_FALKOR_WRITE_TIMEOUT_S), never the
+        # query budget — callers keep their own asyncio.wait_for. A provider row
+        # asking for a LONGER timeout is honored; a shorter one must not clip a
+        # legitimate projection write.
+        st = self._socket_timeout or projection_socket_timeout()
+        if cfg.socket_timeout:
+            st = max(st, float(cfg.socket_timeout))
+        return build_graph_pool_kwargs(cfg, socket_timeout=st)
+
+    async def _client_for(self, cfg: FalkorDBConnConfig, graph_name: str):
+        key = self.cache_key(cfg, graph_name)
+        entry = self._clients.get(key)
+        if entry is not None:
+            return entry[0]
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            entry = self._clients.get(key)          # another task may have built it
+            if entry is None:
+                db, pool = await build_graph_client(
+                    cfg, graph_name=graph_name, pool_kwargs=self._pool_kwargs(cfg),
+                )
+                self._clients[key] = entry = (db, pool)
+                logger.info(
+                    "falkordb: built graph client for %s (graph=%r)",
+                    cfg.describe(), graph_name,
+                )
+        return entry[0]
+
+    async def resolve_graph(self, cfg: FalkorDBConnConfig, graph_name: str):
+        """The raw ``falkordb`` graph object (no resilience wrapper)."""
+        db = await self._client_for(cfg, graph_name)
+        return db.select_graph(graph_name)
+
+    async def get_graph(self, cfg: FalkorDBConnConfig, graph_name: str) -> ResilientGraph:
+        """The graph handle every consumer should use: correct for the
+        instance's topology, and self-healing across a node rotation."""
+        return ResilientGraph(
+            self, cfg, graph_name, await self.resolve_graph(cfg, graph_name),
+        )
+
+    async def invalidate(self, cfg: FalkorDBConnConfig, graph_name: str) -> None:
+        key = self.cache_key(cfg, graph_name)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            entry = self._clients.pop(key, None)
+        if entry is not None:
+            try:
+                await entry[1].aclose()
+            except Exception:                        # pragma: no cover - best effort
+                pass
+
+    async def aclose(self) -> None:
+        entries, self._clients = list(self._clients.values()), {}
+        for _db, pool in entries:
+            try:
+                await pool.aclose()
+            except Exception:                        # pragma: no cover - best effort
+                pass
+
+
+# One cache per process: the registry factory, the env factory, the projector
+# and the versioning read path all share these pools.
+_GRAPH_CLIENTS = TopologyGraphClients()
+
+
+def graph_clients() -> TopologyGraphClients:
+    return _GRAPH_CLIENTS
+
+
+def make_env_graph_factory() -> Callable[..., Any]:
+    """``(name, provider_id=None) -> awaitable[graph]`` for the ENV-configured
+    default instance, over whatever topology ``FALKORDB_MODE`` selects.
+
+    ``provider_id`` is accepted (the factory contract) but ignored — every graph
+    lands on the env instance. For per-provider routing use
+    ``falkor_graph_registry.make_registry_graph_factory``.
+    """
+    async def graph(name: str, provider_id: Optional[str] = None):
+        # graph_clients() is resolved per call (not captured) so the cache is a
+        # single, patchable seam for every consumer.
+        return await graph_clients().get_graph(env_conn_config(), name)
+
+    return graph
+
+
+async def cluster_primary_nodes(
+    cfg: FalkorDBConnConfig, socket_timeout: float,
+) -> List[Tuple[str, int]]:
+    """Every primary in the cluster (the nodes that own slots)."""
+    from redis.asyncio.cluster import RedisCluster
+    from redis.cluster import ClusterNode
+
+    nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
+    if not nodes:
+        raise ProviderConfigurationError(
+            "FalkorDB cluster mode requires cluster.startupNodes (or "
+            "FALKORDB_CLUSTER_NODES)."
+        )
+    cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
+    try:
+        if hasattr(cluster, "initialize"):
+            await cluster.initialize()
+        return [(n.host, int(n.port)) for n in cluster.get_primaries()]
+    finally:
+        try:
+            await cluster.aclose()
+        except Exception:                            # pragma: no cover - best effort
+            try:
+                await cluster.close()
+            except Exception:
+                pass
+
+
+async def list_graph_keys_for_config(
+    cfg: FalkorDBConnConfig, *, socket_timeout: Optional[float] = None,
+) -> set:
+    """``GRAPH.LIST`` for a whole instance, topology-aware.
+
+    CLUSTER is the reason this exists: a node only holds the graph keys whose
+    slots it owns, so a single-node ``GRAPH.LIST`` silently UNDER-reports — and
+    callers use this to decide whether a graph name is free. Fan out over every
+    primary and union. Standalone/Sentinel list from the (current) master.
+    """
+    from falkordb.asyncio import FalkorDB
+    from redis.asyncio import ConnectionPool
+
+    st = socket_timeout or float(_resilience.FALKORDB_SOCKET_TIMEOUT_SECS)
+    pool_kwargs = build_graph_pool_kwargs(cfg, socket_timeout=st, max_connections=2)
+
+    if cfg.mode == "cluster":
+        keys: set = set()
+        tls = tls_pool_kwargs(cfg.tls_settings())
+        for host, port in await cluster_primary_nodes(cfg, st):
+            pool = ConnectionPool(host=host, port=port, **pool_kwargs, **tls)
+            try:
+                db = FalkorDB(connection_pool=pool)
+                keys |= {_decode_key(k) for k in await db.list_graphs()}
+            finally:
+                try:
+                    await pool.aclose()
+                except Exception:                    # pragma: no cover - best effort
+                    pass
+        return keys
+
+    db, pool = await build_graph_client(cfg, graph_name="", pool_kwargs=pool_kwargs)
+    try:
+        return {_decode_key(k) for k in await db.list_graphs()}
+    finally:
+        try:
+            await pool.aclose()
+        except Exception:                            # pragma: no cover - best effort
+            pass
