@@ -55,6 +55,16 @@ spec:
                 secretKeyRef:
                   name: db-credentials
                   key: MANAGEMENT_DB_URL
+            # WS2.3: internal-auth shared secret. optional:true so a missing
+            # key never blocks startup — the control plane then runs with
+            # auth disabled (still functional), exactly like an unset dev
+            # token. Set the key in app-secrets to enforce.
+            - name: AGGREGATION_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: AGGREGATION_INTERNAL_TOKEN
+                  optional: true
           resources:
             requests:
               cpu: 200m

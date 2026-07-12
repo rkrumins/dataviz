@@ -203,6 +203,12 @@ services:
 
       AGGREGATION_API_PORT: "8091"
       SYNODIC_ROLE: controlplane
+      # Internal service auth (WS2.3). Shared secret the control plane
+      # requires on every route except health/docs. UNSET by default ->
+      # auth DISABLED (dev works with no token, logs a warning); set it to
+      # enforce. In k8s it is supplied by the app-secrets Secret. The same
+      # value must be set on every client (viz-service, stats-service).
+      AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
@@ -274,6 +280,10 @@ services:
       # worker.  Set to 'false' for single-process dev mode.
       AGGREGATION_PROXY_ENABLED: "true"
       AGGREGATION_SERVICE_URL: http://aggregation-controlplane:8091
+      # Internal service auth (WS2.3): token the proxy attaches to reach the
+      # control plane. UNSET -> no header sent (and the CP has auth disabled
+      # too), so dev works. Must match the control plane's value.
+      AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev
@@ -428,6 +438,9 @@ services:
       # localhost:8091 (unreachable in-container) and the trigger
       # silently no-ops.
       AGGREGATION_SERVICE_URL: http://aggregation-controlplane:8091
+      # Internal service auth (WS2.3): token the post-purge trigger attaches
+      # to reach the control plane. UNSET -> no header (CP auth disabled too).
+      AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
       # Management DB (polling configs + stats cache + data source catalog)
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 

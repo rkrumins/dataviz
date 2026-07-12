@@ -467,8 +467,12 @@ async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
     base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
     try:
         import httpx
+        from backend.app.services.aggregation.internal_auth import (
+            internal_auth_headers,
+        )
         async with httpx.AsyncClient(
             base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
+            headers=internal_auth_headers(),
         ) as client:
             resp = await client.post(
                 f"/aggregation/data-sources/{job.data_source_id}/jobs",
