@@ -9,14 +9,11 @@
  * only requires changing the data source, not this component.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
     Search,
-    Star,
-    CircleDot,
-    ArrowRightLeft,
     Layers,
     Check,
     AlertTriangle,
@@ -93,8 +90,50 @@ const AGG_STATUS_META: Record<string, { dot: string; label: string }> = {
     none:    { dot: 'bg-slate-300 dark:bg-slate-600', label: 'Not run' },
 }
 
+/**
+ * "Ready to build on": it has a semantic layer and its lineage has been rolled up.
+ *
+ * Deliberately no longer keyed off `isPrimary` — being the workspace's primary
+ * source says nothing about whether a view built on it will actually work, and
+ * we no longer surface primacy anywhere in this picker.
+ */
 function isRecommended(ds: DataSourceResponse): boolean {
-    return ds.isPrimary && !!ds.ontologyId && ds.aggregationStatus === 'ready'
+    return !!ds.ontologyId && ds.aggregationStatus === 'ready'
+}
+
+/** One pill, one shape. Provenance and readiness used to be styled three different
+ *  ways on the same row (a bare amber "★ Primary" beside two uppercase pills), which
+ *  is what made the badge row look unsettled. */
+function CardBadge({
+    icon,
+    label,
+    tone,
+    title,
+}: {
+    icon: ReactNode
+    label: string
+    tone: 'managed' | 'federated' | 'ready'
+    title?: string
+}) {
+    const tones = {
+        managed: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+        federated: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+        ready: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+    }[tone]
+
+    return (
+        <span
+            title={title}
+            className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-md border',
+                'text-[10px] font-semibold leading-none whitespace-nowrap',
+                tones,
+            )}
+        >
+            {icon}
+            {label}
+        </span>
+    )
 }
 
 // ─── Data source sort ──────────────────────────────────────────────
@@ -235,7 +274,10 @@ function WorkspaceItem({
         <button
             onClick={onClick}
             className={cn(
-                'w-full text-left px-3.5 py-3 rounded-xl transition-colors duration-150',
+                // Comfortable, not cramped: this is a primary navigation surface, and a
+                // squeezed row reads as an afterthought. Eight of these still fit the
+                // step without scrolling, which is the constraint that matters.
+                'w-full text-left px-3 py-2.5 rounded-xl transition-colors duration-150',
                 'border',
                 isSelected
                     ? 'bg-blue-600/8 dark:bg-blue-500/10 border-blue-500/30 shadow-sm'
@@ -244,7 +286,7 @@ function WorkspaceItem({
         >
             <div className="flex items-center gap-2.5">
                 <div className={cn(
-                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-bold',
+                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-[11px] font-bold',
                     isSelected
                         ? 'bg-blue-600 text-white'
                         : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
@@ -260,17 +302,15 @@ function WorkspaceItem({
                             {ws.name}
                         </span>
                         {ws.isDefault && (
-                            <span className="px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+                            <span className="px-1.5 py-0.5 text-[9px] font-semibold rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0 leading-none">
                                 Default
                             </span>
                         )}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[11px] text-slate-400 dark:text-slate-500">
-                            {dsCount} source{dsCount !== 1 ? 's' : ''}
-                        </span>
+                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">
+                        <span>{dsCount} source{dsCount !== 1 ? 's' : ''}</span>
                         {isActive && (
-                            <span className="text-[10px] text-emerald-500 font-medium">active</span>
+                            <span className="text-emerald-500 font-medium">active</span>
                         )}
                     </div>
                 </div>
@@ -284,37 +324,26 @@ function WorkspaceItem({
 
 // ─── Data Source Card ───────────────────────────────────────────────
 
-/** One metric, stacked value-over-label so three of them always fit a card
- *  column at the same height — inline they wrapped for some cards and not
- *  others, which is what made the grid ragged. */
-function StatCell({ icon, value, label }: { icon: ReactNode; value: string; label: string }) {
-    return (
-        <div className="min-w-0">
-            <div className="flex items-center gap-1">
-                {icon}
-                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 tabular-nums truncate">
-                    {value}
-                </span>
-            </div>
-            <p className="mt-0.5 text-[10px] text-slate-400 truncate">{label}</p>
-        </div>
-    )
-}
-
-function DataSourceCard({
+/**
+ * memo + a stable `onSelect(id)` (rather than a fresh `() => select(ds.id)` arrow per
+ * render): typing in the search box, or a stats query resolving, used to re-render
+ * every card on the page — each of which runs a provider-health store subscription
+ * and a logo lookup. Now only the cards whose own data changed re-render.
+ */
+const DataSourceCard = memo(function DataSourceCard({
     ds,
     stats,
     statsLoading,
     isSelected,
     providerInfo,
-    onClick,
+    onSelect,
 }: {
     ds: DataSourceResponse
     stats?: DataSourceStats
     statsLoading: boolean
     isSelected: boolean
     providerInfo?: DataSourceProviderInfo
-    onClick: () => void
+    onSelect: (id: string) => void
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
     const recommended = isRecommended(ds)
@@ -329,11 +358,11 @@ function DataSourceCard({
 
     return (
         <button
-            onClick={onClick}
+            onClick={() => onSelect(ds.id)}
             className={cn(
                 // h-full + flex-col: the card fills its grid cell, so every card in a
                 // row is the same height and their footers line up (mt-auto below).
-                'relative flex h-full w-full flex-col text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                'relative flex h-full w-full flex-col text-left rounded-xl border-2 p-3.5 transition-colors duration-150',
                 'hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
@@ -342,33 +371,33 @@ function DataSourceCard({
         >
             {/* Selection checkmark */}
             {isSelected && (
-                <div className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
+                <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
 
             {/* Header */}
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-2.5">
                 {/* Branded provider tile — identifies WHICH connection this source
                     lives on at a glance (three FalkorDB instances stop looking
                     identical). Falls back to the neutral Database tile when the
                     provider registry isn't readable (non-admin). */}
                 <div className={cn(
-                    'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
+                    'w-8 h-8 rounded-lg border flex items-center justify-center shrink-0',
                     Logo && provMeta
                         ? provMeta.color
                         : isSelected
                             ? 'border-transparent bg-blue-500/15 text-blue-600 dark:text-blue-400'
                             : 'border-transparent bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
                 )}>
-                    {Logo ? <Logo className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+                    {Logo ? <Logo className="w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5" />}
                 </div>
-                <div className="min-w-0 flex-1 pr-6">
-                    {/* Two lines are reserved whether the name needs them or not, so a
-                        wrapping name never pushes this card's provider line, badges and
-                        metrics out of step with its neighbours'. */}
-                    <div className="flex items-start gap-1.5 min-h-[2.5rem]">
-                        <h4 className="min-w-0 text-sm font-bold leading-tight text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
+                <div className="min-w-0 flex-1 pr-5">
+                    {/* Two lines are reserved whether the name needs them or not: a
+                        wrapping name would otherwise push this card's provider line,
+                        badges and metrics out of step with its neighbours'. */}
+                    <div className="flex items-start gap-1.5 min-h-[2.1rem]">
+                        <h4 className="min-w-0 text-sm font-bold leading-[1.15] text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
                             {ds.label || ds.catalogItemId || 'Unnamed'}
                         </h4>
                         <span
@@ -377,7 +406,7 @@ function DataSourceCard({
                         />
                     </div>
                     <div
-                        className="text-[11px] text-slate-500 dark:text-slate-400 truncate min-h-[1rem]"
+                        className="text-[11px] leading-4 text-slate-500 dark:text-slate-400 truncate"
                         title={providerInfo ? `${providerInfo.providerName} · ${providerInfo.providerType}` : undefined}
                     >
                         {providerInfo && (
@@ -391,75 +420,68 @@ function DataSourceCard({
             </div>
 
             {/* Badges — their own row (not squeezed beside the logo), so they wrap
-                predictably instead of shoving the header around. */}
-            <div className="flex items-center gap-1.5 mt-2 flex-wrap min-h-[18px]">
-                {ds.isPrimary && (
-                    <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
-                        <Star className="w-2.5 h-2.5" />
-                        Primary
-                    </span>
-                )}
+                predictably instead of shoving the header around. Every card carries
+                exactly one provenance pill, so the row reads as a column. */}
+            <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                 {sourceMode === 'managed' ? (
-                    <span
-                        title="Fully managed — created and versioned in this app"
-                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20"
-                    >
-                        <Sparkles className="w-2.5 h-2.5" />
-                        Fully managed
-                    </span>
+                    <CardBadge
+                        tone="managed"
+                        icon={<Sparkles className="w-3 h-3 shrink-0" />}
+                        label="Fully managed"
+                        title="Created and versioned in this app — we own the graph"
+                    />
                 ) : (
-                    <span
-                        title={`Federated — external source of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
-                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
-                    >
-                        <Server className="w-2.5 h-2.5" />
-                        Federated
-                    </span>
+                    <CardBadge
+                        tone="federated"
+                        icon={<Server className="w-3 h-3 shrink-0" />}
+                        label="Federated"
+                        title={`External system of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
+                    />
                 )}
                 {recommended && (
-                    <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                        Recommended
-                    </span>
+                    <CardBadge
+                        tone="ready"
+                        icon={<Check className="w-3 h-3 shrink-0" />}
+                        label="Ready"
+                        title="Has a semantic layer and its lineage is rolled up"
+                    />
                 )}
             </div>
 
-            {/* Stats — a fixed three-column block. Inline, they wrapped to two lines
-                for busy sources and one for quiet ones, which is most of why the grid
-                looked ragged. */}
-            <div className="mt-3 min-h-[38px]">
+            {/* Metrics — ONE line that can never wrap. Three stacked columns cost two
+                lines and read like a dashboard; this is a summary, so it reads as a
+                sentence. Full values live in the tooltip. */}
+            <div className="mt-2 mb-2.5 h-4 flex items-center text-[11px] leading-none">
                 {statsLoading && !stats ? (
-                    <div className="flex items-center gap-2 h-[38px] text-xs text-slate-400">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Loading stats…
-                    </div>
+                    <span className="flex items-center gap-1.5 text-slate-400">
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                        Loading metrics…
+                    </span>
                 ) : stats ? (
-                    <div className="grid grid-cols-3 gap-2">
-                        <StatCell
-                            icon={<CircleDot className="w-3 h-3 text-indigo-500 shrink-0" />}
-                            value={compactNum(stats.nodeCount)}
-                            label="nodes"
-                        />
-                        <StatCell
-                            icon={<ArrowRightLeft className="w-3 h-3 text-violet-500 shrink-0" />}
-                            value={compactNum(stats.edgeCount)}
-                            label="edges"
-                        />
-                        <StatCell
-                            icon={<Layers className="w-3 h-3 text-emerald-500 shrink-0" />}
-                            value={String(stats.entityTypes.length)}
-                            label={stats.entityTypes.length === 1 ? 'type' : 'types'}
-                        />
-                    </div>
+                    <span
+                        className="min-w-0 truncate whitespace-nowrap text-slate-400"
+                        title={`${stats.nodeCount.toLocaleString()} nodes · ${stats.edgeCount.toLocaleString()} edges · ${stats.entityTypes.length} entity types`}
+                    >
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{compactNum(stats.nodeCount)}</b>
+                        {' nodes '}
+                        <span className="text-slate-300 dark:text-slate-600">·</span>
+                        {' '}
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{compactNum(stats.edgeCount)}</b>
+                        {' edges '}
+                        <span className="text-slate-300 dark:text-slate-600">·</span>
+                        {' '}
+                        <b className="font-semibold text-slate-700 dark:text-slate-300 tabular-nums">{stats.entityTypes.length}</b>
+                        {stats.entityTypes.length === 1 ? ' type' : ' types'}
+                    </span>
                 ) : (
-                    <p className="flex items-center h-[38px] text-[11px] text-slate-400">
-                        No statistics available
-                    </p>
+                    <span className="text-slate-400">No metrics yet</span>
                 )}
             </div>
 
             {/* Status row — mt-auto pins it to the bottom of the card, so every footer
-                in a row sits on the same line no matter what's above it. */}
-            <div className="flex items-center gap-3 mt-auto pt-3 border-t border-slate-100 dark:border-slate-700/50">
+                in a row sits on the same line no matter what's above it. (The metrics
+                block above carries the minimum gap; mt-auto only adds slack.) */}
+            <div className="flex items-center gap-2.5 mt-auto pt-2.5 border-t border-slate-100 dark:border-slate-700/50">
                 {/* Aggregation status */}
                 <div className="flex items-center gap-1.5 text-[11px] shrink-0">
                     <span className={cn('w-2 h-2 rounded-full shrink-0', aggMeta.dot)} />
@@ -491,7 +513,7 @@ function DataSourceCard({
             </div>
         </button>
     )
-}
+})
 
 // ─── Contextual Banners ────────────────────────────────────────────
 
@@ -1017,12 +1039,14 @@ function BlankScopePickers({
 
 // ─── Main Component ────────────────────────────────────────────────
 
-const NO_FILTERS = { primary: false, ontology: false, ready: false }
+const NO_FILTERS = { ontology: false, ready: false }
 
-/** 3×3 at lg inside the 1180px wizard modal — full rows in 3/2/1-col layouts. */
+/** Exactly three rows at lg (3×3) — the tallest grid that still lets the whole
+ *  step fit on screen without the modal scrolling. */
 const DS_PAGE_SIZE = 9
-/** Rail rows per page — one screenful, no endless scroll. */
-const WS_PAGE_SIZE = 10
+/** The rail's height drives the step's height, and the step has to fit. Eight rows
+ *  is what fits alongside three rows of cards without anything scrolling. */
+const WS_PAGE_SIZE = 8
 
 export function ScopeStep({
     availableWorkspaces,
@@ -1135,7 +1159,6 @@ export function ScopeStep({
     const visibleDataSources = useMemo(() => {
         const q = dsSearch.trim().toLowerCase()
         const filtered = dataSources.filter(ds => {
-            if (dsFilters.primary && !ds.isPrimary) return false
             if (dsFilters.ontology && !ds.ontologyId) return false
             if (dsFilters.ready && ds.aggregationStatus !== 'ready') return false
             if (q) {
@@ -1163,8 +1186,10 @@ export function ScopeStep({
                     return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
                 case 'recommended':
                 default: {
-                    const aRec = isRecommended(a) ? -2 : a.isPrimary ? -1 : 0
-                    const bRec = isRecommended(b) ? -2 : b.isPrimary ? -1 : 0
+                    // Sources you can actually build on float up; primacy is no longer
+                    // a tiebreaker because it says nothing about that.
+                    const aRec = isRecommended(a) ? 0 : 1
+                    const bRec = isRecommended(b) ? 0 : 1
                     if (aRec !== bRec) return aRec - bRec
                     return dsName(a).localeCompare(dsName(b))
                 }
@@ -1189,7 +1214,7 @@ export function ScopeStep({
     const visibleDsIds = useMemo(() => pagedDataSources.map(ds => ds.id), [pagedDataSources])
     const { statsMap, isLoading: statsLoading } = useDataSourceStats(selectedWorkspaceId, visibleDsIds)
 
-    const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.primary || dsFilters.ontology || dsFilters.ready
+    const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.ontology || dsFilters.ready
     const clearDsFilters = useCallback(() => {
         setDsSearch('')
         setDsFilters(NO_FILTERS)
@@ -1208,22 +1233,19 @@ export function ScopeStep({
     }
 
     return (
-        <div className="space-y-5">
-            {/* Intro */}
+        <div className="space-y-4">
+            {/* Intro — deliberately compact. Everything above the picker is height the
+                picker doesn't get, and the picker is the thing people came for. */}
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.12 }}
-                className="text-center mb-2"
+                className="text-center"
             >
-                <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-3">
-                    {isBlank ? <Sparkles className="w-4 h-4" /> : <Database className="w-4 h-4" />}
-                    {isBlank ? 'Start a blank lineage model' : 'Choose your data source'}
-                </div>
-                <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-1.5">
+                <h3 className="text-xl font-bold text-slate-900 dark:text-white">
                     Where should this view live?
                 </h3>
-                <p className="text-slate-500 dark:text-slate-400 text-sm">
+                <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
                     {isBlank
                         ? 'Pick a workspace, a FalkorDB connection, and a published semantic layer'
                         : 'Select the workspace and data source this view will be built from'}
@@ -1265,7 +1287,7 @@ export function ScopeStep({
                         </div>
 
                         {/* Workspace list */}
-                        <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
+                        <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                             {wsPageLoading ? (
                                 Array.from({ length: 5 }).map((_, i) => (
                                     <div key={i} className="px-3.5 py-3 rounded-xl animate-pulse">
@@ -1393,12 +1415,6 @@ export function ScopeStep({
                                 {dataSources.length > 0 && (
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                         <FilterChip
-                                            active={dsFilters.primary}
-                                            onClick={() => setDsFilters(f => ({ ...f, primary: !f.primary }))}
-                                            icon={<Star className="w-3 h-3" />}
-                                            label="Primary"
-                                        />
-                                        <FilterChip
                                             active={dsFilters.ontology}
                                             onClick={() => setDsFilters(f => ({ ...f, ontology: !f.ontology }))}
                                             icon={<ShieldCheck className="w-3 h-3" />}
@@ -1418,12 +1434,12 @@ export function ScopeStep({
                             {dataSources.length === 0 ? (
                                 <NoDataSourcesState workspaceName={selectedWorkspace.name} />
                             ) : visibleDataSources.length > 0 ? (
-                                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                                <div className="flex-1 overflow-y-auto p-3.5 custom-scrollbar">
                                     {/* A FIXED column count. It used to widen the cards when a
                                         page happened to hold one or two sources — which meant the
                                         last page of a paginated list rendered at a completely
                                         different size from the first. */}
-                                    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 items-stretch">
+                                    <div className="grid gap-2.5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 items-stretch">
                                         {pagedDataSources.map((ds, i) => (
                                             <motion.div
                                                 key={ds.id}
@@ -1438,7 +1454,7 @@ export function ScopeStep({
                                                     statsLoading={statsLoading}
                                                     isSelected={ds.id === selectedDataSourceId}
                                                     providerInfo={resolveProvider(ds.id)}
-                                                    onClick={() => onSelectDataSource(ds.id)}
+                                                    onSelect={onSelectDataSource}
                                                 />
                                             </motion.div>
                                         ))}

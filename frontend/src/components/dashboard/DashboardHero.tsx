@@ -114,7 +114,7 @@ export function DashboardHero({
     }
 
     return (
-        <section className="relative w-full flex flex-col items-center justify-center pt-14 pb-10 px-4 text-center overflow-visible">
+        <section className="relative w-full flex flex-col items-center justify-center pt-14 pb-10 text-center overflow-visible">
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="w-[900px] h-[400px] bg-accent-business/8 blur-[140px] rounded-[100%]" />
             </div>

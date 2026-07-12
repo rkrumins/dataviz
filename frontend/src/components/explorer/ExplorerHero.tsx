@@ -9,15 +9,11 @@ import {
     Star,
     Tag,
     Sparkles,
-    Network,
-    GitBranch,
-    Layers,
-    Table2,
-    LayoutGrid,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { View } from '@/services/viewApiService'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 
 // ─── Interface ──────────────────────────────────────────────────────────────
 interface ExplorerHeroProps {
@@ -26,50 +22,11 @@ interface ExplorerHeroProps {
     onPreview?: (view: View) => void
 }
 
-// ─── View-type mappings ─────────────────────────────────────────────────────
-const VIEW_TYPE_LABELS: Record<string, string> = {
-    graph: 'Graph',
-    hierarchy: 'Hierarchy',
-    lineage: 'Lineage',
-    table: 'Table',
-    context: 'Context',
-}
-
-const VIEW_TYPE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-    graph: Network,
-    hierarchy: Layers,
-    lineage: GitBranch,
-    table: Table2,
-    context: LayoutGrid,
-}
-
-const VIEW_TYPE_COLORS: Record<string, { icon: string; gradient: string }> = {
-    graph: {
-        icon: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-        gradient: 'from-indigo-500/20 to-indigo-500/0',
-    },
-    hierarchy: {
-        icon: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-        gradient: 'from-amber-500/20 to-amber-500/0',
-    },
-    lineage: {
-        icon: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-        gradient: 'from-violet-500/20 to-violet-500/0',
-    },
-    table: {
-        icon: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
-        gradient: 'from-emerald-500/20 to-emerald-500/0',
-    },
-    context: {
-        icon: 'bg-cyan-500/10 text-cyan-500 border-cyan-500/20',
-        gradient: 'from-cyan-500/20 to-cyan-500/0',
-    },
-}
-
-const FALLBACK_COLOR = {
-    icon: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-    gradient: 'from-indigo-500/20 to-indigo-500/0',
-}
+// View type icon + label + colour come from the SHARED resolver in
+// lib/viewUtils. The local maps here were keyed on 'lineage'/'context' —
+// types that don't exist (they're 'layered-lineage'/'reference') — so every
+// Context View fell through to a Network icon, and 'hierarchy' was mapped to
+// the wrong icon+colour entirely. Same drift the recents strip had.
 
 // ─── Component ──────────────────────────────────────────────────────────────
 export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHeroProps) {
@@ -90,8 +47,8 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
             {/* Grid: 1 col mobile, 2 md, 3 lg */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {featured.map((view) => {
-                    const typeColor = VIEW_TYPE_COLORS[view.viewType] ?? FALLBACK_COLOR
-                    const TypeIcon = VIEW_TYPE_ICONS[view.viewType] ?? Network
+                    const meta = viewTypeMeta(view.viewType)
+                    const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
 
                     return (
                         <div
@@ -110,8 +67,8 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
                             {/* Gradient hover overlay */}
                             <div
                                 className={cn(
-                                    'absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none',
-                                    typeColor.gradient,
+                                    'absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none',
+                                    meta.gradient,
                                 )}
                             />
 
@@ -122,10 +79,10 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
                                     <div
                                         className={cn(
                                             'w-9 h-9 rounded-xl border flex items-center justify-center shrink-0',
-                                            typeColor.icon,
+                                            meta.iconBg,
                                         )}
                                     >
-                                        <TypeIcon className="w-4.5 h-4.5" />
+                                        <DynamicIcon name={iconName} className="w-[18px] h-[18px]" />
                                     </div>
 
                                     <div className="flex items-center gap-2 min-w-0 flex-wrap">
@@ -137,7 +94,7 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
                                             size="md"
                                         />
                                         <span className="inline-flex items-center rounded-full bg-black/5 dark:bg-white/5 border border-glass-border px-2 py-0.5 text-[11px] font-medium text-ink-muted">
-                                            {VIEW_TYPE_LABELS[view.viewType] ?? view.viewType}
+                                            {meta.label}
                                         </span>
                                     </div>
                                 </div>

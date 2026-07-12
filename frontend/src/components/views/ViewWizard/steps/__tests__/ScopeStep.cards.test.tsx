@@ -21,10 +21,12 @@ vi.mock('@/hooks/useDataSourceStats', () => ({
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({ map: {}, resolve: () => undefined }),
 }))
+const workspacePageSpy = vi.fn()
 vi.mock('@/hooks/useWorkspacePage', () => ({
-  useWorkspacePage: () => ({
-    workspaces: [], totalCount: 1, isLoading: false, isError: false, refetch: vi.fn(),
-  }),
+  useWorkspacePage: (params: unknown) => {
+    workspacePageSpy(params)
+    return { workspaces: [], totalCount: 1, isLoading: false, isError: false, refetch: vi.fn() }
+  },
 }))
 vi.mock('@/store/providerHealthModel', () => ({
   useProviderHealth: () => ({ state: 'unknown' }),
@@ -52,20 +54,24 @@ function makeDataSource(over: Partial<DataSourceResponse> = {}): DataSourceRespo
   } as DataSourceResponse
 }
 
-function renderScope(dataSources: DataSourceResponse[]) {
-  const workspace: WorkspaceResponse = {
-    id: 'ws1',
-    name: 'Major Refactor Agg',
+function makeWorkspace(id: string, name: string, dataSources: DataSourceResponse[] = []): WorkspaceResponse {
+  return {
+    id,
+    name,
     dataSources,
     isDefault: false,
     isActive: true,
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
   } as WorkspaceResponse
+}
+
+function renderScope(dataSources: DataSourceResponse[], workspaces?: WorkspaceResponse[]) {
+  const workspace = makeWorkspace('ws1', 'Major Refactor Agg', dataSources)
 
   return render(
     <ScopeStep
-      availableWorkspaces={[workspace]}
+      availableWorkspaces={workspaces ?? [workspace]}
       schemaAvailability={{ hasOntology: true, status: 'ready', message: null }}
       selectedWorkspaceId="ws1"
       selectedDataSourceId={null}
@@ -118,15 +124,18 @@ describe('ScopeStep — every card is the same size', () => {
     expect(footer?.textContent).toContain('Not run')
   })
 
-  it('reserves the name and metric blocks so short and long cards stay in step', () => {
+  it('reserves the name block and fixes the metrics to one line', () => {
     renderScope([makeDataSource({ label: 'Pipeline' })])
     const card = cardFor('Pipeline')
 
-    // Two lines of name are reserved whether or not the name needs them...
-    expect(card.querySelector('.min-h-\\[2\\.5rem\\]')).not.toBeNull()
-    // ...and the metrics are a fixed 3-column block rather than an inline row that
-    // wraps for busy sources and not for quiet ones.
-    expect(card.querySelector('.grid-cols-3, .min-h-\\[38px\\]')).not.toBeNull()
+    // Two lines of name are reserved whether or not the name needs them, so a
+    // wrapping name can't shove its own badges and metrics out of step.
+    expect(card.querySelector('.min-h-\\[2\\.1rem\\]')).not.toBeNull()
+    // Metrics get exactly one line and can never wrap — as three stacked columns
+    // they cost two lines and read like a dashboard rather than a summary.
+    const metrics = card.querySelector('.h-4')
+    expect(metrics).not.toBeNull()
+    expect(metrics?.textContent).toMatch(/No metrics yet|nodes/)
   })
 
   it('keeps the SAME column count regardless of how many sources a page holds', () => {
@@ -134,8 +143,26 @@ describe('ScopeStep — every card is the same size', () => {
     // columns for a pair — so a last page holding 1–2 sources rendered cards at a
     // completely different width from the full pages before it.
     const { container: single } = renderScope([makeDataSource({ label: 'Only One' })])
-    const singleGrid = single.querySelector('.grid.gap-3')
-    expect(singleGrid?.className).toContain('lg:grid-cols-3')
+    const singleGrid = single.querySelector('[class*="lg:grid-cols-3"]')
+    expect(singleGrid).not.toBeNull()
     expect(singleGrid?.className).not.toContain('max-w-md')
+  })
+})
+
+describe('ScopeStep — the step fits without scrolling', () => {
+  it('asks for 8 workspaces a page, not 10', () => {
+    // The rail's own height is what drives the height of the whole step, so ten
+    // rows pushed the modal into a scroll. Eight is what fits beside three rows
+    // of cards. Card paging stays at 9 = exactly three rows.
+    workspacePageSpy.mockClear()
+    renderScope(
+      [makeDataSource({ label: 'Pipeline' })],
+      // Two workspaces so the rail renders at all (one auto-selects and hides it).
+      [makeWorkspace('ws1', 'Major Refactor Agg', [makeDataSource()]), makeWorkspace('ws2', 'Other')],
+    )
+
+    expect(workspacePageSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ pageSize: 8 }),
+    )
   })
 })
