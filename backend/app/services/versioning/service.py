@@ -316,10 +316,10 @@ class GraphVersioningService:
         So the gate covers **failed** jobs too, not just in-flight ones: a failed enablement
         must be resumed or abandoned, never edited around. One indexed lookup
         (``ix_jobs_graph_status``)."""
-        unfinished = (await s.execute(select(JobORM.status).where(
+        unfinished = await s.scalar(select(JobORM.status).where(
             JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
             JobORM.status.in_(("pending", "running", "failed")),
-        ).limit(1))).scalars().first()
+        ).limit(1))
         if unfinished == "failed":
             raise ConcurrencyError(
                 "enabling version control for this data source didn't finish — resume it "

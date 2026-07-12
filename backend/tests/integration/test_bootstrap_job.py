@@ -157,13 +157,17 @@ async def _run() -> None:
     assert BOOTSTRAP_JOB_TYPE == "bootstrap" != "ingest"
     import_graph = "graph_import_" + os.urandom(4).hex()
     async with db.graphver_session() as s:
-        s.add(JobORM(job_type="ingest", graph_id=import_graph, status="pending",
-                     current_phase="parse"))                  # a file import, mid-flight
+        job = JobORM(job_type="ingest", graph_id=import_graph, status="pending",
+                     current_phase="parse")                   # a file import, mid-flight
+        s.add(job)
+        await s.flush()
+        import_job_id = job.id
+    # (This runs against the shared dev DB, so an unrelated bootstrap job may legitimately
+    # be claimable — the invariant is that the FILE-IMPORT job is never one of them.)
     claimed = await BootstrapRunner(lambda name, provider_id=None: _graph()).claim_one()
-    assert claimed is None, "the bootstrap worker claimed a file-import job"
+    assert claimed != import_job_id, "the bootstrap worker claimed a file-import job"
     async with db.graphver_session() as s:
-        untouched = (await s.execute(select(JobORM).where(
-            JobORM.graph_id == import_graph))).scalars().one()
+        untouched = await s.get(JobORM, import_job_id)
         assert untouched.status == "pending" and untouched.current_phase == "parse", \
             "the file-import job was mutated by the bootstrap worker"
 
