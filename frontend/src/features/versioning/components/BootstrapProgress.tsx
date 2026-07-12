@@ -40,6 +40,32 @@ function stepIndex(phase: BootstrapPhase | null): number {
 
 const num = (n: unknown) => (typeof n === 'number' ? n.toLocaleString() : '—')
 
+/** Phases where the item counter actually advances — the only ones we can honestly time. */
+const COUNTING_PHASES: BootstrapPhase[] = ['nodes', 'edges']
+
+/**
+ * "About 12 minutes left", from the throughput we have actually observed on this job.
+ *
+ * Deliberately narrow. Only the two scanning phases move the item counter, so only they can
+ * be timed; during checking/writing/finishing the counter is frozen and any "estimate" would
+ * be a number we invented. A large graph really can take the better part of an hour, and a
+ * bare percentage leaves someone unable to decide whether to wait or come back after lunch —
+ * but a confidently wrong ETA is worse than none, so we return null rather than guess.
+ */
+function timeLeft(job: BootstrapJob): string | null {
+  if (job.status !== 'running' || !job.phase || !COUNTING_PHASES.includes(job.phase)) return null
+  if (!job.startedAt || job.processed <= 0 || job.total <= job.processed) return null
+  const elapsedMs = Date.now() - new Date(job.startedAt).getTime()
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 30_000) return null   // too early to be honest
+  const perMs = job.processed / elapsedMs
+  const mins = Math.round((job.total - job.processed) / perMs / 60_000)
+  if (!Number.isFinite(mins) || mins < 1) return 'less than a minute left'
+  if (mins === 1) return 'about a minute left'
+  if (mins < 60) return `about ${mins} minutes left`
+  const hrs = Math.round(mins / 60)
+  return hrs === 1 ? 'about an hour left' : `about ${hrs} hours left`
+}
+
 export function BootstrapProgress({
   job, wsId, dataSourceId, variant = 'bar', canManage = true, onDismiss,
 }: {
@@ -61,6 +87,7 @@ export function BootstrapProgress({
   const running = job.status === 'pending' || job.status === 'running'
   const failed = job.status === 'failed'
   const done = job.status === 'completed'
+  const eta = timeLeft(job)
   const active = stepIndex(job.phase)
 
   const downloadReport = () => {
@@ -123,6 +150,7 @@ export function BootstrapProgress({
               ? <>{num(job.processed)} of {num(job.total)} items copied</>
               : <>Working out how big this graph is…</>}
             {job.status === 'pending' && ' · queued'}
+            {eta && <> · <span className="text-ink-secondary">{eta}</span></>}
           </p>
         </>
       )}

@@ -52,6 +52,28 @@ describe('while the copy is running', () => {
     expect(screen.getByText(/queued/)).toBeInTheDocument()
     expect(screen.getByText(/how big this graph is/)).toBeInTheDocument()
   })
+
+  // ── time remaining: a big graph can run the better part of an hour, and a bare
+  //    percentage leaves someone unable to decide whether to wait or come back later.
+  //    But a confidently WRONG estimate is worse than none, so it must refuse to guess.
+
+  it('estimates the time left from the throughput actually observed', () => {
+    // 6.4M of 9.8M in 10 minutes => ~5.3 min for the remaining 3.4M.
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString()
+    render_({ startedAt })
+    expect(screen.getByText(/about 5 minutes left/)).toBeInTheDocument()
+  })
+
+  it('says nothing while the counter is frozen — checking and writing cannot be timed', () => {
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString()
+    render_({ startedAt, phase: 'validate' })
+    expect(screen.queryByText(/left/)).not.toBeInTheDocument()
+  })
+
+  it('says nothing in the first seconds, when it would only be guessing', () => {
+    render_({ startedAt: new Date(Date.now() - 3_000).toISOString() })
+    expect(screen.queryByText(/left/)).not.toBeInTheDocument()
+  })
 })
 
 describe('when the copy lands', () => {
