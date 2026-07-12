@@ -25,6 +25,7 @@ import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
@@ -338,7 +339,21 @@ export function WorkspaceDetailPage() {
 
     // ── Render ─────────────────────────────────────────────
     if (isLoading) {
-        return <div className="flex items-center justify-center h-full"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
+        // Skeleton card grid (matches the data-source grid below) instead of a
+        // lone centered spinner — reads as "content loading" and cuts the
+        // perceived wait. isLoading is keep-previous across the same wsId, so
+        // this only shows on the first load of a new workspace.
+        return (
+            <div className="w-full h-full overflow-y-auto custom-scrollbar">
+                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {Array.from({ length: 6 }).map((_, i) => (
+                            <WorkspaceCardSkeleton key={i} />
+                        ))}
+                    </div>
+                </div>
+            </div>
+        )
     }
 
     if (!workspace) {
