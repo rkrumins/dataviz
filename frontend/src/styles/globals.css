@@ -688,9 +688,12 @@
  * `.reduce-motion` class on <html>, toggled from AppLayout). Framer-motion
  * animations are gated globally by `<MotionConfig reducedMotion>` in main.tsx;
  * this block quiets the always-on *CSS* keyframes so nothing loops in the
- * background. Loading spinners (`animate-spin`) are intentionally preserved —
- * a frozen spinner reads as a hang. Unlayered + !important so it wins over
- * every component/utility rule regardless of source order.
+ * background. It also covers `animate-in`/`animate-out` — the tailwindcss-animate
+ * entrance utilities — which went live app-wide when that plugin was added, so
+ * reduced-motion users don't suddenly get 90+ new entrance animations. Loading
+ * spinners (`animate-spin`) are intentionally preserved — a frozen spinner reads
+ * as a hang. Unlayered + !important so it wins over every component/utility rule
+ * regardless of source order.
  * ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   .nx-edge-animated,
@@ -700,6 +703,8 @@
   .lineage-pulse::after,
   .pulse-soft,
   .animate-pulse,
+  .animate-in,
+  .animate-out,
   [data-trace-active="true"] [data-trace-focus="true"]::after {
     animation: none !important;
   }
@@ -711,6 +716,8 @@
 :root.reduce-motion .lineage-pulse::after,
 :root.reduce-motion .pulse-soft,
 :root.reduce-motion .animate-pulse,
+:root.reduce-motion .animate-in,
+:root.reduce-motion .animate-out,
 :root.reduce-motion [data-trace-active="true"] [data-trace-focus="true"]::after {
   animation: none !important;
 }

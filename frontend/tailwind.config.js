@@ -1,3 +1,5 @@
+import tailwindcssAnimate from 'tailwindcss-animate'
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
@@ -89,6 +91,9 @@ export default {
       },
     },
   },
-  plugins: [],
+  // Powers the `animate-in` / `animate-out` entrance utilities (fade-in,
+  // zoom-in-95, slide-in-from-*) already used across ~59 files. Without the
+  // plugin those classes are inert — they were animating nothing.
+  plugins: [tailwindcssAnimate],
 }
 
