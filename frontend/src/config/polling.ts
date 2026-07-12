@@ -73,13 +73,30 @@ export const POLLING_INTERVALS = {
     const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_INTERVAL_MS)
     return Number.isFinite(env) && env >= 2_000 ? env : 10_000
   })(),
+  /**
+   * Slow background retry cadence AFTER the fast auto-retry budget
+   * (PROVIDER_RETRY_MAX_ATTEMPTS) is exhausted while the provider is hard
+   * unavailable. A node rotation + dataset reload routinely outlasts the
+   * fast window (~1 min); without a slow floor the canvas latched on the
+   * overlay until a manual Retry or page reload. Jittered, and paused
+   * while the tab is hidden — the same order of load as the existing
+   * 60s provider-health polls. Warming retries never drop to this cadence
+   * (they stay on providerRetry — the backend explicitly said Retry-After).
+   * Overridable per-deployment via VITE_PROVIDER_RETRY_SLOW_INTERVAL_MS.
+   */
+  providerRetrySlow: (() => {
+    const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_SLOW_INTERVAL_MS)
+    return Number.isFinite(env) && env >= 10_000 ? env : 60_000
+  })(),
 } as const
 
 /**
- * How many times the canvas auto-retries a warming/unavailable provider
- * before it stops and shows an explicit "Retry" button. Bounded on purpose:
- * unbounded background retries across 100s of users is exactly the load
- * spike we must avoid. Overridable via VITE_PROVIDER_RETRY_MAX_ATTEMPTS.
+ * How many FAST auto-retries (providerRetry cadence) the canvas makes while
+ * the provider is hard-unavailable before degrading to the slow background
+ * cadence (providerRetrySlow) — it never stops entirely, so recovery from a
+ * node rotation doesn't require a user click. Warming (503 + Retry-After)
+ * never counts against this budget: the backend explicitly said "retry
+ * later". Overridable via VITE_PROVIDER_RETRY_MAX_ATTEMPTS.
  */
 export const PROVIDER_RETRY_MAX_ATTEMPTS = (() => {
   const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_MAX_ATTEMPTS)

@@ -20,7 +20,8 @@ import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCr
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
-import { getCircuitBreaker } from '@/services/circuitBreaker'
+import { resetCircuitBreakers } from '@/services/circuitBreaker'
+import { useProviderHealthStore } from '@/store/providerHealth'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -186,14 +187,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const provider = useGraphProvider()
     const { providerVersion, workspaceId: providerWsId, dataSourceId: providerDsId } = useGraphProviderContext()
 
-    // Force the client-side circuit breaker closed so a re-attempt actually
+    // Force the client-side circuit breakers closed so a re-attempt actually
     // probes the provider. Without this, an OPEN breaker (it opens for ~15s
     // after failures, longer with a Retry-After) makes every retry throw
     // "circuit open" WITHOUT a network call — which is exactly why clicking
     // "Retry now" did nothing until a full page refresh (which builds a fresh
-    // provider + breaker). Same singleton the provider uses.
+    // provider + breaker). Same singletons the provider uses. Resets EVERY
+    // endpoint class for this scope, not just 'default': hydration also
+    // fetches through 'children' (/edges/between, /children-with-edges), and
+    // a stale open breaker on that class would fast-fail the recovery retry.
     const forceReprobe = useCallback(() => {
-        getCircuitBreaker(providerWsId ?? undefined, providerDsId ?? undefined).reset()
+        resetCircuitBreakers(providerWsId ?? undefined, providerDsId ?? undefined)
     }, [providerWsId, providerDsId])
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
     const lineageEdgeTypes = useViewLineageEdgeTypes()
@@ -668,23 +672,31 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     //    load across every affected user with no faster recovery;
     //  • JITTERED, so 100s of users hitting the same outage don't retry in
     //    lockstep (thundering herd);
-    //  • BOUNDED to PROVIDER_RETRY_MAX_ATTEMPTS (default 5) — after that the
-    //    canvas stops auto-retrying and the overlay shows an explicit Retry;
+    //  • NEVER stops. 'warming' means the backend answered 503 + Retry-After
+    //    ("I exist, I'm loading the dataset") — a pod rotation + AOF replay
+    //    legitimately takes minutes, so warming polls stay on the fast
+    //    cadence indefinitely. 'unavailable' (hard down) gets
+    //    PROVIDER_RETRY_MAX_ATTEMPTS fast attempts, then degrades to the slow
+    //    background cadence (providerRetrySlow, default 60s) — a completed
+    //    node rotation must self-heal without a user click or page reload;
     //  • PAUSED entirely while the tab is hidden (no background-tab hammering).
     // A retry NEVER clears the status/overlay — only a SUCCESSFUL load
     // (markReady) flips to 'ready', so the overlay can't blink to "Start
     // building" between attempts. retryEpoch is a dep so this re-evaluates after
-    // each attempt and schedules the next while still failed and under budget.
+    // each attempt and schedules the next while still failed.
     useEffect(() => {
         if (!enableHydration) return
         if (hydrationStatus !== 'warming' && hydrationStatus !== 'unavailable') {
             retryCountRef.current = 0
             return
         }
-        if (retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS) return
         if (typeof document !== 'undefined' && document.hidden) return
+        const exhausted = hydrationStatus === 'unavailable'
+            && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS
         const attempt = retryCountRef.current + 1
-        const delay = withJitter(POLLING_INTERVALS.providerRetry)
+        const delay = withJitter(exhausted
+            ? POLLING_INTERVALS.providerRetrySlow
+            : POLLING_INTERVALS.providerRetry)
         const t = setTimeout(() => {
             forceReprobe()                     // close the breaker so the retry actually probes
             retryCountRef.current = attempt
@@ -707,6 +719,28 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         document.addEventListener('visibilitychange', onVisible)
         return () => document.removeEventListener('visibilitychange', onVisible)
     }, [enableHydration, retryHydration])
+
+    // Re-hydrate the moment the provider-health store flips unhealthy→healthy
+    // for THIS provider scope. That store learns of recovery independently of
+    // this hook's retry loop (the 60s /health/providers poll, plus sub-second
+    // via the X-Provider-Health header on any successful request), so a
+    // completed node rotation re-hydrates the canvas immediately instead of
+    // riding out the slow retry cadence. Complementary to the loop above:
+    // the loop is the floor when no health signal arrives at all.
+    useEffect(() => {
+        if (!enableHydration || !providerWsId || !providerDsId) return
+        const key = `${providerWsId}:${providerDsId}`
+        let prev = useProviderHealthStore.getState().providers.get(key)?.status
+        return useProviderHealthStore.subscribe((state) => {
+            const curr = state.providers.get(key)?.status
+            const was = prev
+            prev = curr
+            if (was === 'unhealthy' && curr === 'healthy') {
+                const s = useCanvasStore.getState().hydrationStatus
+                if (s === 'warming' || s === 'unavailable') retryHydration()
+            }
+        })
+    }, [enableHydration, providerWsId, providerDsId, retryHydration])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
