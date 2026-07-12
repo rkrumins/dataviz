@@ -142,6 +142,7 @@ export function ViewHistoryTimeline({
         commit={revertTarget}
         wsId={wsId}
         graphId={graphId}
+        userNames={q.data?.userNames}
         onClose={() => setRevertTarget(null)}
         onRestoreInstead={(target) => {
           setRevertTarget(null)
@@ -153,6 +154,7 @@ export function ViewHistoryTimeline({
         commit={restoreTarget}
         wsId={wsId}
         graphId={graphId}
+        userNames={q.data?.userNames}
         onClose={() => setRestoreTarget(null)}
       />
     </div>

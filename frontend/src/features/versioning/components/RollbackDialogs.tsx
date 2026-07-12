@@ -22,15 +22,19 @@ import { useToast } from '@/components/ui/toast'
 import { MergeConflictError } from '@/services/versioningApiService'
 import { useRestoreCommit, useRestorePreview, useRevertCommit } from '../hooks/useVersioning'
 import { kindMeta } from '../model/commitKind'
+import { ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
 
 type CommitLike = Record<string, unknown>
 
 const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
-function CommitSummary({ commit }: { commit: CommitLike }) {
+function CommitSummary({ commit, userNames }: { commit: CommitLike; userNames?: Record<string, string> }) {
   const kind = kindMeta(commit.kind)
   const stats = (commit.stats ?? {}) as Record<string, unknown>
+  const actor = typeof commit.actor === 'string' && commit.actor
+    ? ownerName(commit.actor, userNames)
+    : 'system'
   return (
     <div className="mx-6 mb-4 rounded-xl border border-glass-border bg-canvas-overlay/40 px-4 py-3">
       <p className="text-sm text-ink font-medium leading-snug flex items-center gap-1.5 min-w-0">
@@ -43,7 +47,7 @@ function CommitSummary({ commit }: { commit: CommitLike }) {
       </p>
       <p className="text-[11px] text-ink-muted mt-1 flex items-center gap-1.5 flex-wrap">
         <User className="w-3 h-3" />
-        {(commit.actor as string) || 'system'}
+        {actor}
         <span>·</span>
         <span>{timeAgo(commit.created_at as string)}</span>
         <span className="inline-flex items-center gap-1 ml-1">
@@ -76,7 +80,7 @@ function ModalShell({
 // ─── Revert ──────────────────────────────────────────────────────────────────
 
 export function RevertDialog({
-  open, commit, wsId, graphId, onClose, onRestoreInstead,
+  open, commit, wsId, graphId, onClose, onRestoreInstead, userNames,
 }: {
   open: boolean
   commit: CommitLike | null
@@ -85,6 +89,8 @@ export function RevertDialog({
   onClose: () => void
   /** Open the RestoreDialog targeting the commit just before this one (escape hatch). */
   onRestoreInstead?: (restoreTarget: CommitLike) => void
+  /** actor id → display name (the commit log wrapper's map). */
+  userNames?: Record<string, string>
 }) {
   const { showToast } = useToast()
   const revert = useRevertCommit(wsId, graphId)
@@ -136,7 +142,7 @@ export function RevertDialog({
             </div>
             <h3 className="text-base font-semibold text-ink tracking-tight">Undo this change?</h3>
           </div>
-          <CommitSummary commit={commit} />
+          <CommitSummary commit={commit} userNames={userNames} />
           <p className="px-6 pb-5 text-[13px] text-ink-muted leading-relaxed">
             Everything this revision changed goes back to how it was.{' '}
             <span className="font-semibold text-ink">Later changes are kept.</span>{' '}
@@ -207,13 +213,15 @@ export function RevertDialog({
 // ─── Restore ─────────────────────────────────────────────────────────────────
 
 export function RestoreDialog({
-  open, commit, wsId, graphId, onClose,
+  open, commit, wsId, graphId, onClose, userNames,
 }: {
   open: boolean
   commit: CommitLike | null
   wsId: string
   graphId: string
   onClose: () => void
+  /** actor id → display name (the commit log wrapper's map). */
+  userNames?: Record<string, string>
 }) {
   const { showToast } = useToast()
   const restore = useRestoreCommit(wsId, graphId)
@@ -260,7 +268,7 @@ export function RestoreDialog({
         </div>
         <h3 className="text-base font-semibold text-ink tracking-tight">Restore the graph to this point?</h3>
       </div>
-      <CommitSummary commit={commit} />
+      <CommitSummary commit={commit} userNames={userNames} />
       <div className="px-6 pb-3 text-[13px] text-ink-muted leading-relaxed min-h-[2.5rem]">
         {preview.isLoading ? (
           <span className="inline-flex items-center gap-2 text-ink-muted">

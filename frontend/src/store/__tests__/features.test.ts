@@ -22,6 +22,7 @@ const fetchMock = vi.mocked(fetchPublicFeatureValues)
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
   useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES }, loaded: false })
 })
 
@@ -68,5 +69,15 @@ describe('features store', () => {
     await useFeaturesStore.getState().loadFeatures()
 
     expect(featureEnabled('versioningEnabled')).toBe(true)
+  })
+
+  it('caches served values so the next boot seeds from them (no flash)', async () => {
+    fetchMock.mockResolvedValue({ versioningEnabled: false })
+
+    await useFeaturesStore.getState().loadFeatures()
+
+    expect(JSON.parse(localStorage.getItem('nx-features-cache') ?? '{}')).toEqual({
+      versioningEnabled: false,
+    })
   })
 })

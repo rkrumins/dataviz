@@ -19,6 +19,30 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
 }
 
+/** Last served values, cached so a returning visitor's first paint reflects the
+ *  admin's real settings instead of flashing the seeds until the fetch lands
+ *  (same trick as the branding cache). Best-effort on both sides. */
+const FEATURES_CACHE_KEY = 'nx-features-cache'
+
+function readCachedValues(): Record<string, unknown> | null {
+    try {
+        const raw = localStorage.getItem(FEATURES_CACHE_KEY)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+    } catch {
+        return null
+    }
+}
+
+function writeCachedValues(values: Record<string, unknown>): void {
+    try {
+        localStorage.setItem(FEATURES_CACHE_KEY, JSON.stringify(values))
+    } catch {
+        // private mode / quota — the flash fix simply won't apply.
+    }
+}
+
 interface FeaturesState {
     values: Record<string, unknown>
     loaded: boolean
@@ -29,17 +53,21 @@ interface FeaturesState {
 }
 
 export const useFeaturesStore = create<FeaturesState>()((set) => ({
-    values: { ...DEFAULT_FEATURES },
+    values: { ...DEFAULT_FEATURES, ...(readCachedValues() ?? {}) },
     loaded: false,
     loadFeatures: async () => {
         const served = await fetchPublicFeatureValues()
         if (served) {
+            writeCachedValues(served)
             set({ values: { ...DEFAULT_FEATURES, ...served }, loaded: true })
         } else {
-            set({ loaded: true }) // keep seeds — fail-open
+            set({ loaded: true }) // keep seeds/cache — fail-open
         }
     },
-    setValues: (v) => set({ values: { ...DEFAULT_FEATURES, ...v } }),
+    setValues: (v) => {
+        writeCachedValues(v)
+        set({ values: { ...DEFAULT_FEATURES, ...v } })
+    },
 }))
 
 function coerce(values: Record<string, unknown>, key: string): boolean {

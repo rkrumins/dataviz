@@ -505,6 +505,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             }}
             wsId={wsId}
             graphId={pr.graphId}
+            userNames={pr.userNames}
             onClose={() => setReverting(false)}
           />
         )}
