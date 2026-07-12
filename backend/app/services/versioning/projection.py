@@ -69,8 +69,9 @@ _READ_TIMEOUT_MS = int(1000 * min(170.0, max(
 async def _q(client, cypher: str, params: Optional[dict] = None,
              *, timeout_ms: int = _WRITE_TIMEOUT_MS):
     """Run one query with a server-side kill budget AND a client-side hang
-    net (the registry pools set no socket timeout). Falls back to the
-    timeout-less call for client fakes/libs without the kwarg."""
+    net (belt over the pool-level socket timeouts, and the bound for client
+    fakes without them). Falls back to the timeout-less call for client
+    fakes/libs without the kwarg."""
     try:
         coro = client.query(cypher, params=params, timeout=timeout_ms)
     except TypeError:
@@ -1345,12 +1346,15 @@ def make_falkor_graph_factory() -> Callable[..., object]:
     """
     from redis.asyncio import ConnectionPool          # pragma: no cover - infra
     from falkordb.asyncio import FalkorDB              # pragma: no cover - infra
+    from backend.app.providers.falkordb_connection import (
+        projection_socket_timeout, resilient_pool_kwargs)
     import os
 
     pool = ConnectionPool(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
         max_connections=int(os.getenv("FALKORDB_POOL_SIZE", "10")),
+        **resilient_pool_kwargs(socket_timeout=projection_socket_timeout()),
     )
     handle = FalkorDB(connection_pool=pool)
     return lambda name, provider_id=None: handle.select_graph(name)

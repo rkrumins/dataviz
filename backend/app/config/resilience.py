@@ -63,6 +63,41 @@ FALKORDB_SLOW_QUERY_MS: int = int(os.getenv("FALKORDB_SLOW_QUERY_MS", "500"))
 # Short because these run during _ensure_connected() on the critical path.
 FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
 
+# ── FalkorDB socket hygiene (every raw ConnectionPool) ──────────────
+# These four apply to ALL FalkorDB/Redis connection pools the backend
+# builds (provider read path, graph registry, versioning projector) via
+# falkordb_connection.resilient_pool_kwargs(). They exist so a rotated/
+# rescheduled FalkorDB pod (e.g. a GKE node upgrade) can never wedge a
+# request on a black-holed TCP connection.
+#
+# TCP connect deadline for one pool connection — bounds dialing a dead
+# or rescheduled pod.
+FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS: float = float(
+    os.getenv("FALKORDB_SOCKET_CONNECT_TIMEOUT", "2"))
+# Socket recv/send deadline — the last-resort HANG NET for established
+# sockets black-holed by a node rotation (kernel retransmit can otherwise
+# stall 15+ minutes). NOT the query budget: server-side `timeout` and
+# caller asyncio.wait_for own that. Per-tier values come from the
+# deployment configmaps (viz 10 / worker 60 / controlplane 5).
+FALKORDB_SOCKET_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+# Enable TCP keepalive on pooled sockets (kernel-default timers; belt
+# over the timeouts above). Set "0"/"false" to disable.
+FALKORDB_SOCKET_KEEPALIVE: bool = (
+    os.getenv("FALKORDB_SOCKET_KEEPALIVE", "1").strip().lower()
+    in ("1", "true", "yes", "on"))
+# Idle seconds after which redis-py PINGs a pooled connection before
+# reuse, transparently replacing sockets that died while the pool sat
+# idle (pod rotation) instead of each costing one failed operation.
+# 0 disables the check.
+FALKORDB_HEALTH_CHECK_INTERVAL_SECS: int = int(
+    os.getenv("FALKORDB_HEALTH_CHECK_INTERVAL", "30"))
+# Extra socket headroom above PROJECTION_FALKOR_WRITE_TIMEOUT_S for
+# projection-capable pools (graph registry / env graph factory), so the
+# socket hang-net can never fire before a legitimately long server-side
+# projection write completes.
+PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS: float = float(
+    os.getenv("PROJECTION_SOCKET_TIMEOUT_MARGIN_S", "15"))
+
 # ── HTTP request timeouts (ASGI middleware, per-path) ───────────────
 # Health/readiness probes — must respond fast for K8s.
 HTTP_TIMEOUT_HEALTH_SECS: float = float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))

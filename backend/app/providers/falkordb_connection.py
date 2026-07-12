@@ -29,6 +29,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
+from backend.app.config import resilience as _resilience
 from backend.common.adapters.redis_tls import (
     TLSSettings,
     tls_client_kwargs,
@@ -222,11 +223,51 @@ def _coerce_int(v: Any) -> Optional[int]:
         return None
 
 
+def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
+    """Socket-hygiene kwargs every raw FalkorDB/Redis ``ConnectionPool`` must
+    carry. ``socket_timeout`` is a HANG NET for black-holed sockets (a GKE
+    node rotation leaves established connections pointing at a dead pod —
+    the kernel can retransmit for 15+ minutes), not the query budget:
+    server-side ``timeout`` / caller ``asyncio.wait_for`` own that.
+    ``health_check_interval`` makes redis-py PING a pooled connection that
+    sat idle longer than the interval before reuse, so stale sockets are
+    replaced transparently instead of each costing one failed operation.
+    (A PING against a LOADING server raises BusyLoadingError, which the
+    provider path already classifies as retryable ProviderLoading.)
+    No ``socket_keepalive_options`` — TCP_KEEPIDLE etc. aren't portable to
+    macOS dev; kernel-default keepalive timers are fine as a last resort.
+
+    All values are env-tunable with documented defaults — see the
+    "FalkorDB socket hygiene" section of ``backend/app/config/resilience.py``
+    (``FALKORDB_SOCKET_CONNECT_TIMEOUT`` / ``FALKORDB_SOCKET_TIMEOUT`` /
+    ``FALKORDB_SOCKET_KEEPALIVE`` / ``FALKORDB_HEALTH_CHECK_INTERVAL``)."""
+    if socket_timeout is None:
+        socket_timeout = _resilience.FALKORDB_SOCKET_TIMEOUT_SECS
+    return {
+        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_timeout": socket_timeout,
+        "socket_keepalive": _resilience.FALKORDB_SOCKET_KEEPALIVE,
+        "health_check_interval": _resilience.FALKORDB_HEALTH_CHECK_INTERVAL_SECS,
+    }
+
+
+def projection_socket_timeout() -> float:
+    """Hang net for projection-capable pools (graph registry / env graph
+    factory): must exceed the largest server-side write budget or long
+    batched merges get killed client-side mid-write. Derived from the same
+    env var the projector's write budget uses (``PROJECTION_FALKOR_WRITE_
+    TIMEOUT_S``, default 60) so the two can't drift, plus a margin
+    (``PROJECTION_SOCKET_TIMEOUT_MARGIN_S``, default 15 — documented in
+    ``backend/app/config/resilience.py``)."""
+    write_budget = float(os.getenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "60"))
+    return write_budget + _resilience.PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS
+
+
 def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
     """Connection kwargs shared by the high-level Sentinel/Cluster clients —
     auth + timeouts + TLS (``ssl=True`` + cert paths when enabled)."""
     kw: dict = {
-        "socket_connect_timeout": 2.0,
+        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
         "socket_timeout": socket_timeout,
         "decode_responses": True,
     }

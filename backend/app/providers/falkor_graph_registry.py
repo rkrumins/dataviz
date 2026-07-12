@@ -40,11 +40,14 @@ def _env_handle_factory():
     """One lazily-built handle for the env-configured (default) instance."""
     from redis.asyncio import ConnectionPool           # pragma: no cover - infra
     from falkordb.asyncio import FalkorDB              # pragma: no cover - infra
+    from backend.app.providers.falkordb_connection import (
+        projection_socket_timeout, resilient_pool_kwargs)
 
     pool = ConnectionPool(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
         max_connections=int(os.getenv("FALKORDB_POOL_SIZE", "10")),
+        **resilient_pool_kwargs(socket_timeout=projection_socket_timeout()),
     )
     return FalkorDB(connection_pool=pool)
 
@@ -110,11 +113,15 @@ def make_registry_graph_factory(session_factory=None) -> Callable[[str, Optional
         return conn
 
     def _handle_for(conn):
+        from backend.app.providers.falkordb_connection import (
+            projection_socket_timeout, resilient_pool_kwargs)
+
         host, port, username, password = conn
         key = (host, port, username)
         if key not in handles:
             kw = {"host": host, "port": port,
-                  "max_connections": int(os.getenv("FALKORDB_POOL_SIZE", "10"))}
+                  "max_connections": int(os.getenv("FALKORDB_POOL_SIZE", "10")),
+                  **resilient_pool_kwargs(socket_timeout=projection_socket_timeout())}
             if username:
                 kw["username"] = username
             if password:
@@ -171,8 +178,10 @@ async def list_graph_keys(provider_id: Optional[str] = None,
     try:
         from falkordb.asyncio import FalkorDB          # pragma: no cover - infra
         from redis.asyncio import ConnectionPool       # pragma: no cover - infra
+        from backend.app.providers.falkordb_connection import resilient_pool_kwargs
 
-        kw = {"host": host, "port": port, "max_connections": 2}
+        kw = {"host": host, "port": port, "max_connections": 2,
+              **resilient_pool_kwargs()}
         if username:
             kw["username"] = username
         if password:

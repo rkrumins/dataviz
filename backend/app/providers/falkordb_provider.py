@@ -850,11 +850,12 @@ class FalkorDBProvider(GraphDataProvider):
             (self._conn_cfg.graph_pool_size if self._conn_cfg else None)
             or int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
         )
+        from backend.app.providers.falkordb_connection import resilient_pool_kwargs
+
         kw: dict = {
             "max_connections": graph_pool_size,
-            "socket_connect_timeout": 2.0,
-            "socket_timeout": socket_timeout,
             "decode_responses": True,
+            **resilient_pool_kwargs(socket_timeout=socket_timeout),
         }
         # P1.6 — auth so the pool issues AUTH transparently (else NOAUTH is
         # mis-classified as a network failure and trips a false breaker).
