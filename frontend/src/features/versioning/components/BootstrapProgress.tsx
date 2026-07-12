@@ -116,7 +116,9 @@ export function BootstrapProgress({
             label="Copying the graph into version history"
             className={variant === 'bar' ? 'mt-2' : 'mt-3'}
           />
-          <p className="mt-1.5 text-[11px] text-ink-muted">
+          {/* Politely announced, not asserted: a job this long would otherwise be entirely
+              silent to a screen reader, but it must not interrupt what the user is doing. */}
+          <p className="mt-1.5 text-[11px] text-ink-muted" aria-live="polite" aria-atomic="true">
             {job.total > 0
               ? <>{num(job.processed)} of {num(job.total)} items copied</>
               : <>Working out how big this graph is…</>}

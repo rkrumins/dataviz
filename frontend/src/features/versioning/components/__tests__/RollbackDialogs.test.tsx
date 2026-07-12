@@ -131,4 +131,29 @@ describe('RestoreDialog', () => {
     render(<RestoreDialog open commit={COMMIT} wsId="ws1" graphId="g1" onClose={() => {}} />)
     expect(screen.getByText(/already matches this point/)).toBeInTheDocument()
   })
+
+  // ── keyboard: a dialog that is about to rewrite a graph must be operable and escapable ──
+
+  it('closes on Escape', async () => {
+    const onClose = vi.fn()
+    render(<RestoreDialog open commit={COMMIT} wsId="ws1" graphId="g1" onClose={onClose} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('is announced as a modal dialog and labelled by its heading', () => {
+    render(<RestoreDialog open commit={COMMIT} wsId="ws1" graphId="g1" onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog).toHaveAttribute('aria-labelledby', 'restore-dialog-title')
+    expect(document.getElementById('restore-dialog-title')).toHaveTextContent(/Restore the graph/)
+  })
+
+  it('moves focus into the dialog, not onto its destructive button', () => {
+    render(<RestoreDialog open commit={COMMIT} wsId="ws1" graphId="g1" onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    expect(document.activeElement).toBe(dialog)
+    expect(document.activeElement).not.toBe(screen.getByRole('button', { name: /^Restore$/ }))
+  })
 })
+

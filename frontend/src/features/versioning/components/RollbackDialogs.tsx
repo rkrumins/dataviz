@@ -18,6 +18,7 @@ import { History, Loader2, RotateCcw, TriangleAlert, Undo2, User } from 'lucide-
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useModalA11y } from '@/hooks/useModalA11y'
 import { useToast } from '@/components/ui/toast'
 import { MergeConflictError } from '@/services/versioningApiService'
 import { useRestoreCommit, useRestorePreview, useRevertCommit } from '../hooks/useVersioning'
@@ -61,14 +62,22 @@ function CommitSummary({ commit, userNames }: { commit: CommitLike; userNames?: 
 }
 
 function ModalShell({
-  open, onClose, children,
-}: { open: boolean; onClose: () => void; children: React.ReactNode }) {
+  open, onClose, titleId, children,
+}: { open: boolean; onClose: () => void; titleId: string; children: React.ReactNode }) {
+  const ref = useModalA11y(open, onClose)
   return (
     <>
       <Backdrop open={open} onClick={onClose} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
       {open && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-          <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in pointer-events-auto">
+          <div
+            ref={ref}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            tabIndex={-1}
+            className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in pointer-events-auto outline-none"
+          >
             {children}
           </div>
         </div>
@@ -133,14 +142,14 @@ export function RevertDialog({
     .filter(Boolean)
 
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={onClose} titleId="revert-dialog-title">
       {conflicts === null ? (
         <>
           <div className="px-6 pt-6 pb-4 flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-rose-500/10 flex items-center justify-center border border-rose-500/20 shrink-0">
               <Undo2 className="w-5 h-5 text-rose-500" />
             </div>
-            <h3 className="text-base font-semibold text-ink tracking-tight">Undo this change?</h3>
+            <h3 id="revert-dialog-title" className="text-base font-semibold text-ink tracking-tight">Undo this change?</h3>
           </div>
           <CommitSummary commit={commit} userNames={userNames} />
           <p className="px-6 pb-5 text-[13px] text-ink-muted leading-relaxed">
@@ -168,7 +177,7 @@ export function RevertDialog({
             <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center border border-amber-500/20 shrink-0">
               <TriangleAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" />
             </div>
-            <h3 className="text-base font-semibold text-ink tracking-tight">
+            <h3 id="revert-dialog-title" className="text-base font-semibold text-ink tracking-tight">
               This change can't be undone on its own
             </h3>
           </div>
@@ -261,12 +270,12 @@ export function RestoreDialog({
   }
 
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={onClose} titleId="restore-dialog-title">
       <div className="px-6 pt-6 pb-4 flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center border border-amber-500/20 shrink-0">
           <History className="w-5 h-5 text-amber-600 dark:text-amber-400" />
         </div>
-        <h3 className="text-base font-semibold text-ink tracking-tight">Restore the graph to this point?</h3>
+        <h3 id="restore-dialog-title" className="text-base font-semibold text-ink tracking-tight">Restore the graph to this point?</h3>
       </div>
       <CommitSummary commit={commit} userNames={userNames} />
       <div className="px-6 pb-3 text-[13px] text-ink-muted leading-relaxed min-h-[2.5rem]">

@@ -675,7 +675,7 @@ class BootstrapRunner:
             "stored": {"nodes": written.get("nodes", 0), "edges": written.get("edges", 0)},
             "labels": src_labels,
             "edgeTypes": src_types,
-            "sampleChecked": len(sample_urns),
+            "sampleChecked": len(sampled),
             "sampleMismatched": mismatched[:10],
             "mergedDuplicateConnections": int(summary.get("collapsedParallelEdges", 0)),
             # Not copied because the app can't see them either (no identifier) — stated

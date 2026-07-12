@@ -12,6 +12,7 @@
 import { useState } from 'react'
 import { Check, GitBranch, History, Loader2, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useModalA11y } from '@/hooks/useModalA11y'
 import { useToast } from '@/components/ui/toast'
 import { useBootstrapGraph } from '../hooks/useVersioning'
 
@@ -70,12 +71,21 @@ export function EnableVersioningFlow({
     ? `about ${itemCount.toLocaleString()} items`
     : 'everything currently in this graph'
 
+  const dialogRef = useModalA11y(open, onClose)
+
   return (
     <>
       <Backdrop open={open} onClick={onClose} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
       {open && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-          <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-fade-in pointer-events-auto">
+          <div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="enable-vc-title"
+            tabIndex={-1}
+            className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-fade-in pointer-events-auto outline-none"
+          >
             <button
               onClick={onClose}
               aria-label="Close"
@@ -89,7 +99,7 @@ export function EnableVersioningFlow({
                 <Sparkles className="w-5 h-5 text-indigo-500" />
               </div>
               <div>
-                <h3 className="text-base font-semibold text-ink tracking-tight">Turn on version control</h3>
+                <h3 id="enable-vc-title" className="text-base font-semibold text-ink tracking-tight">Turn on version control</h3>
                 <p className="text-[12px] text-ink-muted">Drafts, reviews and full history for this data source.</p>
               </div>
             </div>
