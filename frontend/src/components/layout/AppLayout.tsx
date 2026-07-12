@@ -21,7 +21,6 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useRouteSync } from '@/hooks/useRouteSync'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { ToastContainer } from '@/components/ui/toast'
@@ -54,9 +53,6 @@ export function AppLayout() {
     setEditingViewId(undefined)
     setInitialScope({})
   }
-
-  // Sync React Router location with Zustand navigation store
-  useRouteSync()
 
   // Auto-recover data when backend comes back from an outage
   useBackendRecovery()

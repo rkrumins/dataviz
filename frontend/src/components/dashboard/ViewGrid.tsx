@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { useNavigationStore } from '@/store/navigation'
+import { useNavigate } from 'react-router-dom'
 import { useSchemaStore } from '@/store/schema'
 import { type ViewConfiguration } from '@/types/schema'
 import { motion } from 'framer-motion'
@@ -10,20 +10,20 @@ import { cn } from '@/lib/utils'
 import { LAYOUT_ICONS, LAYOUT_COLORS } from './dashboard-constants'
 
 function useOpenView() {
+    const navigate = useNavigate()
     const setActiveView = useSchemaStore(s => s.setActiveView)
-    const setActiveTab = useNavigationStore(s => s.setActiveTab)
     return useCallback((viewId: string) => {
         setActiveView(viewId)
-        setActiveTab('explore')
-    }, [setActiveView, setActiveTab])
+        navigate(`/views/${viewId}`)
+    }, [setActiveView, navigate])
 }
 
 export function ViewGrid({ title, subtitle, views, icon: Icon, emptyMessage = 'No items found' }: {
     title: string; subtitle?: string; views: ViewConfiguration[]
     icon: React.ComponentType<{ className?: string }>; emptyMessage?: string
 }) {
+    const navigate = useNavigate()
     const openView = useOpenView()
-    const setActiveTab = useNavigationStore(s => s.setActiveTab)
     const activeViewId = useSchemaStore(s => s.activeViewId)
 
     return (
@@ -38,7 +38,7 @@ export function ViewGrid({ title, subtitle, views, icon: Icon, emptyMessage = 'N
                         {subtitle && <p className="text-xs text-ink-muted mt-0.5">{subtitle}</p>}
                     </div>
                 </div>
-                <button onClick={() => setActiveTab('explore')} className="text-sm font-medium text-ink-muted hover:text-ink flex items-center gap-1 transition-colors">
+                <button onClick={() => navigate('/explorer')} className="text-sm font-medium text-ink-muted hover:text-ink flex items-center gap-1 transition-colors">
                     All views <ChevronRight className="w-4 h-4" />
                 </button>
             </div>
@@ -50,7 +50,7 @@ export function ViewGrid({ title, subtitle, views, icon: Icon, emptyMessage = 'N
                     </div>
                     <h3 className="text-sm font-semibold text-ink mb-1">No views yet</h3>
                     <p className="text-sm text-ink-muted text-center max-w-xs">{emptyMessage}</p>
-                    <button onClick={() => setActiveTab('explore')} className="mt-4 flex items-center gap-2 px-4 py-2 rounded-xl bg-accent-business/10 border border-accent-business/20 text-accent-business text-sm font-semibold hover:bg-accent-business/20 transition-colors">
+                    <button onClick={() => navigate('/explorer')} className="mt-4 flex items-center gap-2 px-4 py-2 rounded-xl bg-accent-business/10 border border-accent-business/20 text-accent-business text-sm font-semibold hover:bg-accent-business/20 transition-colors">
                         <Sparkles className="w-4 h-4" /> Explore canvas
                     </button>
                 </div>

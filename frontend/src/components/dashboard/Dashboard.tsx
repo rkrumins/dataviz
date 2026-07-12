@@ -6,7 +6,6 @@ import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
-import { useNavigationStore } from '@/store/navigation'
 import { DashboardHero } from './DashboardHero'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
@@ -36,7 +35,6 @@ export function Dashboard() {
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
     const setActiveDataSource = useWorkspacesStore(s => s.setActiveDataSource)
     const setActiveView = useSchemaStore(s => s.setActiveView)
-    const setActiveTab = useNavigationStore(s => s.setActiveTab)
 
     // Onboarding state
     const onboardingCompletedSteps = usePreferencesStore(s => s.onboardingCompletedSteps)
@@ -131,8 +129,8 @@ export function Dashboard() {
                 <div className="px-6 md:px-10 lg:px-12 pb-28">
                     <DashboardOnboarding
                         completedSteps={onboardingCompletedSteps}
-                        onCreateWorkspace={() => setActiveTab('admin')}
-                        onBrowseTemplates={() => setActiveTab('schema')}
+                        onCreateWorkspace={() => navigate('/workspaces')}
+                        onBrowseTemplates={() => navigate('/schema')}
                         onDismiss={dismissOnboarding}
                     />
 
@@ -247,7 +245,7 @@ export function Dashboard() {
                             subtitle="Published semantic schemas powering your data graph"
                             items={ontologies}
                             icon={BookOpen}
-                            onBrowseAll={() => setActiveTab('schema')}
+                            onBrowseAll={() => navigate('/schema')}
                         />
                     </motion.div>
                 )}
