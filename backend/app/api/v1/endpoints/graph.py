@@ -234,7 +234,40 @@ async def _pin_projection_target(session: AsyncSession, data_source_id: str, ws_
     ``projection_target.repair_projection_target`` self-heals to) so the import's
     projection is a fast-forward, not a drop-and-reseed of data we just copied."""
     ds = await _data_source_in_workspace(session, data_source_id, ws_id)
+    await _assert_copyable(session, getattr(ds, "provider_id", None))
     return getattr(ds, "provider_id", None), getattr(ds, "graph_name", None)
+
+
+async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) -> None:
+    """Refuse a provider whose graph we cannot copy — BEFORE anything durable is written.
+
+    The copy is FalkorDB-shaped end to end: it windows over ``ID(n)`` ranges and decodes rows
+    with the FalkorDB property/label readers. Pointed at a Neo4j, Spanner or DataHub source it
+    cannot work — and without this check it fails in the worst possible way: the route answers
+    202, a graph shell + genesis + a seq-2 import commit are already committed, and only then
+    does the worker die on ``ProviderConfigurationError`` — reported as a transient
+    "infrastructure" fault inviting a resume that can never succeed. Worse, a FAILED copy
+    blocks writes to that graph, so the data source is left read-only until an admin abandons
+    a job that was never possible. Fail at the door instead, with the reason.
+
+    ``supports_copy`` already encodes exactly this and was, until now, consulted by nothing.
+    """
+    if provider_id in (None, "", "default"):
+        return                                     # env-default instance: FalkorDB by definition
+    from backend.app.db.repositories import provider_repo
+    from backend.common.interfaces.provider import capability_for
+
+    prov = await provider_repo.get_provider_orm(session, provider_id)
+    ptype = getattr(prov, "provider_type", None)
+    if prov is None or not ptype:
+        raise HTTPException(status_code=404, detail="unknown provider")
+    if not capability_for(ptype).supports_copy:
+        raise HTTPException(status_code=422, detail={
+            "type": "provider_unsupported",
+            "message": (f"Version control can't be enabled for a '{ptype}' data source yet — "
+                        "copying its graph into version history is only supported for "
+                        "FalkorDB sources."),
+        })
 
 
 @router.post("/resync")

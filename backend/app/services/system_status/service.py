@@ -90,12 +90,13 @@ async def _assemble(app_state) -> dict:
         probes.probe_outbox(app_state),
         probes.probe_overview(app_state),
         probes.probe_graph_providers(app_state),
+        probes.probe_bootstrap_jobs(),
         return_exceptions=True,
     )
     (viz, mgmt_db, gv_db, bus_redis, cache_redis, falkordb,
      controlplane, worker, stats_svc, graph_svc,
      streams, projection, agg_jobs, stats_polling, outbox, overview,
-     graph_providers) = results
+     graph_providers, bootstrap_jobs) = results
 
     services = [
         _coerce_service(viz, "vizService", "Viz Service"),
@@ -142,6 +143,8 @@ async def _assemble(app_state) -> dict:
     if (insights_dlq.get("len") or 0) > 0:
         _degrade(stats_tile, f"DLQ {insights_dlq['len']}")
 
+    bootstrap_jobs = _coerce_data(bootstrap_jobs)
+
     # ── Rollup ──
     if by_key["managementDb"]["status"] == "down":
         overall = "down"
@@ -149,6 +152,14 @@ async def _assemble(app_state) -> dict:
         overall = "degraded"
     else:
         overall = "healthy"
+
+    # A failed or stalled "enable version control" job is invisible to every other probe —
+    # its graph deliberately reports a parked, in-sync watermark — yet it BLOCKS WRITES to
+    # that data source until someone resumes or abandons it. Left out of the rollup, the
+    # dashboard would keep saying "projections in sync" over a data source nobody can edit.
+    if bootstrap_jobs and overall == "healthy" and (
+            bootstrap_jobs.get("failed") or bootstrap_jobs.get("stalled")):
+        overall = "degraded"
 
     return {
         "status": overall,
@@ -159,6 +170,7 @@ async def _assemble(app_state) -> dict:
         "streams": streams,
         "projection": projection,
         "aggregationJobs": agg_jobs,
+        "bootstrapJobs": bootstrap_jobs,
         "statsPolling": stats_polling,
         "outbox": outbox,
     }

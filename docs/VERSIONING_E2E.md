@@ -206,6 +206,35 @@ Properties worth knowing:
   nodes without a `urn` and edges whose endpoints have none, so those are counted and
   disclosed in the report rather than copied. Derived artifacts (`:AGGREGATED`,
   `_GVRollupMeta`, `_AggMeta`, `_Projection`) are never imported.
+- **Survives the infrastructure.** A copy of a 10M-entity graph runs for tens of minutes —
+  long enough to span a FalkorDB restart, a Postgres failover, a node rotation or a network
+  blip. Those are waited out with backoff (`BOOTSTRAP_RETRY_BUDGET_SECS`), not treated as
+  fatal; a *fault that shrinking can fix* (a window too fat for the server's query budget)
+  shrinks the window instead. The number of interruptions ridden out is recorded on the job.
+  Beyond the budget the job fails honestly and stays resumable from its cursor.
+- **FalkorDB only, and it says so up front.** The scan is FalkorDB-shaped (`ID(n)` windows,
+  FalkorDB row decoding). A data source on any other provider is refused at the door with
+  `422 provider_unsupported` — before a graph shell exists — rather than accepted with a 202
+  and failed later, which would leave the data source write-blocked behind an impossible job.
+
+#### Tuning (all optional; defaults are sized for a 10M-entity graph)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `GRAPHVER_BOOTSTRAP_SCAN_WIDTH` | 100000 | Node-id span per scan window (`config.py:235`). |
+| `GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH` | 10000 | Floor the halve-on-oversize ladder stops at (`config.py:236`). |
+| `GRAPHVER_BOOTSTRAP_EDGE_TARGET` | 50000 | Edges per window. Node ids cluster by type, so the edge phase counts a window's edges first and shrinks the node span until it fits (`config.py:242`). |
+| `GRAPHVER_BOOTSTRAP_WINDOW` | 50000 | Rows per Postgres write transaction (`config.py:244`). |
+| `GRAPHVER_BOOTSTRAP_SAMPLE_K` | 64 | Entities re-read from the source and content-hash-compared during validation (`config.py:246`). |
+| `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | 1000000 | Above this the import commit's Merkle root is left NULL and the report says `merkle: deferred`, rather than building a 10M-entity tree in memory (`config.py:250`). |
+| `GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS` | 600 | How long an OUTAGE may last before the job gives up. Per unit of work — a successful window resets it — so it does not bound how long the job may take (`config.py:270`). |
+| `GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS` | 30 | Ceiling on the exponential backoff between retries (`config.py:271`). |
+| `GRAPHVER_INGEST_POLL_SECS` | 5 | Worker pickup cadence (`config.py:253`). |
+| `GRAPHVER_INGEST_STALE_SECS` | 120 | Heartbeat age after which a `running` job is presumed dead and taken over (`config.py:254`). |
+| `GRAPHVER_INGEST_HEARTBEAT_SECS` | 30 | How often a running worker says "still alive" — a TIMER, not a per-window commit. Must stay well under the stale window: a scan halving down its ladder, or a validate anti-joining a 10M-row commit, works for minutes without committing anything, and a worker that only beat on commit would be declared dead by a colleague while perfectly healthy (`config.py:262`). |
+
+Operationally: the k8s worker takes these via `envFrom: worker-config` (edit the ConfigMap and
+restart the pod — no image rebuild). Note that ConfigMap is shared with the aggregation worker.
 
 ### The `versioningEnabled` admin flag
 

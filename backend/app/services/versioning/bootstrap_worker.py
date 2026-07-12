@@ -52,11 +52,18 @@ import asyncio
 import inspect
 import logging
 import random
+import time
 from hashlib import blake2b
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import (
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyError,
+)
 
 from . import config, db
 from .merkle import content_hash
@@ -228,6 +235,7 @@ class BootstrapRunner:
         self._svc = GraphVersioningService()
         self._merkle = MerkleStore()
         self._epoch: Dict[str, int] = {}     # job_id → the claim we hold (see _own)
+        self._logged: Dict[str, float] = {}  # job_id → last progress log (see _due)
 
     # ---------------------------------------------------------------- infra --
     async def _client(self, ps: ProjectionStateORM):
@@ -286,6 +294,7 @@ class BootstrapRunner:
         """Drive a claimed job to a terminal state. Each phase is individually
         resumable; a raised error marks the job failed with a plain-language reason
         and leaves everything it wrote intact (a retry resumes from the cursor)."""
+        beat = asyncio.create_task(self._heartbeat(job_id))
         try:
             while True:
                 async with self._session() as s:
@@ -296,7 +305,7 @@ class BootstrapRunner:
                     phase = job.current_phase or "counting"
                     graph_id = job.graph_id
                 runner = getattr(self, f"_phase_{phase}")
-                done = await runner(job_id, graph_id)
+                done = await self._run_phase(runner, job_id, graph_id, phase)
                 if done:
                     nxt = _next_phase(phase)
                     async with self._session() as s:
@@ -328,6 +337,100 @@ class BootstrapRunner:
             logger.exception("bootstrap %s crashed", job_id)
             await self._fail(job_id, _friendly_infra_error(exc), "infrastructure")
             return {"job_id": job_id, "status": "failed"}
+        finally:
+            beat.cancel()
+
+    async def _heartbeat(self, job_id: str) -> None:
+        """Say "still alive" on a timer, not just at window boundaries.
+
+        `claim_one` takes over any `running` job whose heartbeat is older than
+        INGEST_STALE_SECS. Beating only when a window COMMITS makes that a trap: a scan that
+        halves its way down the ladder, or a validate pass anti-joining a 10M-row commit, is
+        working hard and saying nothing — so a second worker declares it dead and steals the
+        job. Fencing means the theft costs no data (the loser's write rolls back), but the
+        loser then re-claims in turn, and two healthy workers hand the same slow window back
+        and forth forever. The job is safe and never finishes.
+
+        A timer decouples "alive" from "made progress", which is what the stale check actually
+        wants to know. It stops the moment we no longer own the job — a superseded worker that
+        kept beating would fight the new owner for it.
+        """
+        while True:
+            try:
+                await asyncio.sleep(config.INGEST_HEARTBEAT_SECS)
+                async with self._session() as s:
+                    job = await s.get(JobORM, job_id)
+                    if job is None or job.status != "running":
+                        return
+                    mine = self._epoch.get(job_id)
+                    if mine is not None and job.retry_count != mine:
+                        return                          # not ours any more — go quiet
+                    job.updated_at = _now()
+            except asyncio.CancelledError:
+                raise
+            except Exception:                           # pragma: no cover - infra
+                # Postgres is unreachable. Nothing to beat with, and nothing to do about it:
+                # a takeover needs the same Postgres, so nobody can steal the job either.
+                logger.debug("bootstrap %s: heartbeat skipped", job_id)
+
+    async def _run_phase(self, runner, job_id: str, graph_id: str, phase: str) -> bool:
+        """Run one unit of a phase, waiting out transient infrastructure faults.
+
+        Copying a 10M-entity graph takes tens of minutes — long enough to span a FalkorDB
+        restart, a Postgres failover, a node rotation or a network blip. None of those may
+        destroy a job that is most of the way done, so the worker RETRIES them with backoff
+        instead of failing. What makes that safe is the window transaction: a window's rows,
+        tallies and cursor commit together, so re-entering a phase runner either re-scans a
+        window that rolled back (clean) or reads a cursor that already moved past one that
+        landed (also clean). It can neither double-write nor mistake a replay for a duplicate.
+
+        A fresh client is built per attempt, so a retry never reuses a dead connection.
+        The budget is per unit of work — a successful window resets it — so it bounds how
+        long an OUTAGE may last, not how long the job may take. Past it the job fails
+        honestly and stays resumable from its cursor; nothing is lost either way.
+        """
+        deadline = time.monotonic() + config.BOOTSTRAP_RETRY_BUDGET_SECS
+        delay, attempt = 1.0, 0
+        while True:
+            try:
+                return await runner(job_id, graph_id)
+            except (BootstrapSuperseded, BootstrapFailure):
+                raise                                  # ours, and deliberate — never retried
+            except Exception as exc:
+                if not _is_transient(exc) or time.monotonic() + delay > deadline:
+                    raise
+                attempt += 1
+                logger.warning(
+                    "bootstrap %s: %s hit a transient fault (%s: %s); retrying in %.0fs "
+                    "(attempt %d, %.0fs of budget left)",
+                    job_id, phase, type(exc).__name__, str(exc)[:120], delay, attempt,
+                    max(0.0, deadline - time.monotonic()))
+                await self._note_interruption(job_id, phase, exc)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, config.BOOTSTRAP_RETRY_MAX_DELAY_SECS)
+
+    async def _note_interruption(self, job_id: str, phase: str, exc: Exception) -> None:
+        """Heartbeat through the outage and record it.
+
+        The heartbeat matters: without it a patient worker looks dead to `claim_one`, and
+        a second worker takes the job over mid-wait. Best-effort by design — if Postgres is
+        the thing that is down, there is nothing to write and nothing to be done about it.
+        The count is surfaced in the report, so "we hit turbulence and rode it out" is
+        something the user is TOLD, not something we quietly paper over.
+        """
+        try:
+            async with self._session() as s:
+                job = await s.get(JobORM, job_id)
+                if job is None:
+                    return
+                summary = dict(job.summary or {})
+                seen = list(summary.get("interruptions") or [])
+                seen.append({"phase": phase, "error": type(exc).__name__, "at": _now()})
+                summary["interruptions"] = seen[-20:]        # a tail, not a log
+                job.summary = summary
+                job.updated_at = _now()                      # ← the heartbeat
+        except Exception:                                    # pragma: no cover - infra
+            logger.debug("bootstrap %s: could not record the interruption", job_id)
 
     async def _fail(self, job_id: str, reason: str, code: str) -> None:
         async with self._session() as s:
@@ -340,6 +443,15 @@ class BootstrapRunner:
             summary = dict(job.summary or {})
             summary["failure"] = {"code": code, "reason": reason, "phase": job.current_phase}
             job.summary = summary
+            # An integrity failure (duplicate urns, dangling edges) raises BootstrapFailure,
+            # which is CAUGHT — so without this line the most important event this worker can
+            # report would be written to a table and to nothing else. Carry the identifiers an
+            # on-call actually greps by; the job id alone means a Postgres round-trip.
+            logger.error(
+                "bootstrap %s FAILED in %s [%s]: %s (graph=%s data_source=%s workspace=%s "
+                "cursor=%s processed=%s/%s)",
+                job_id, job.current_phase, code, reason, job.graph_id, job.data_source_id,
+                job.workspace_id, job.last_cursor, job.processed, job.total)
 
     # ---------------------------------------------------------------- phases --
     async def _phase_counting(self, job_id: str, graph_id: str) -> bool:
@@ -459,7 +571,24 @@ class BootstrapRunner:
                 job.batch_size = width                     # see the width note above
             job.updated_at = _now()
             job.last_sequence = job.last_sequence + 1
+            done, total = job.processed, job.total
+        # Copying 7.7M entities is thousands of windows and, without this, hours of total
+        # silence between "source has N nodes" and "integrity checks passed" — from which an
+        # on-call cannot tell a stuck job from a slow one. Throttled, so it stays a progress
+        # line and not a log flood.
+        if self._due(job_id):
+            logger.info("bootstrap %s: %s %s/%s (%d%%) cursor=%s:%d window=%d graph=%s",
+                        job_id, kind, done, total, _percent(kind, done, total),
+                        kind, hi, width, graph_id)
         return False                                           # more windows may remain
+
+    def _due(self, job_id: str, every: float = 30.0) -> bool:
+        """True at most once every `every` seconds, per job."""
+        now = time.monotonic()
+        if now - self._logged.get(job_id, 0.0) < every:
+            return False
+        self._logged[job_id] = now
+        return True
 
     async def _phase_validate(self, job_id: str, graph_id: str) -> bool:
         """Prove the copy before ANY of it becomes visible.
@@ -533,11 +662,11 @@ class BootstrapRunner:
 
         # 6. Re-read a random sample from the SOURCE and compare content hashes —
         #    counts alone can't catch a mangled payload.
-        sample_urns = list((summary.get("sample") or {}).get("nodes") or [])
+        sampled = list((summary.get("sample") or {}).get("nodes") or [])
         matched, mismatched = await self._verify_sample(
-            graph_id, commit.id, ps, sample_urns, await _ontology_rules(job_id))
+            graph_id, commit.id, ps, sampled, await _ontology_rules(job_id))
         check("sample_matches", not mismatched,
-              f"{matched} of {len(sample_urns)} re-checked items match exactly")
+              f"{matched} of {len(sampled)} re-checked items match exactly")
 
         blocking = [c for c in checks if c["blocking"] and not c["ok"]]
         report = {
@@ -629,6 +758,17 @@ class BootstrapRunner:
                 job.updated_at = _now()
                 logger.info("bootstrap %s: merkle deferred (%d entities > cap)", job_id, total)
                 return True
+            # Replay-safety. Every other phase is idempotent through ON CONFLICT DO NOTHING;
+            # `commit_tree` is not — it INSERTs bare, and its parent lookup is as-of
+            # commit_seq-1, so it cannot see rows this commit already wrote. The phase body
+            # and the phase ADVANCE commit in separate transactions, so a crash in between
+            # re-enters merkle for the same commit and hits a duplicate key on
+            # (graph_id, commit_id, path) — failing the job, and failing it again on every
+            # resume. Clearing this commit's own tree first makes the rebuild total, and the
+            # tree is a pure function of the commit's rows, so rebuilding is free of meaning.
+            await s.execute(text(
+                f'DELETE FROM {_t("merkle_nodes")} WHERE graph_id = :g AND commit_id = :c'
+            ).bindparams(g=graph_id, c=commit.id))
             changes: Dict[str, Optional[str]] = {}
             for table in ("node_versions", "edge_versions"):
                 rows = (await s.execute(text(
@@ -748,14 +888,18 @@ class BootstrapRunner:
         property payloads, can blow the server's per-query budget).
 
         Returns the width that actually WORKED so the caller can remember it: rediscovering
-        it from scratch every window means paying a failed query per window forever."""
+        it from scratch every window means paying a failed query per window forever.
+
+        Only shrinks for faults shrinking can FIX. An outage is re-raised untouched for the
+        phase-level retry to wait out — halving a window is no answer to a broken connection,
+        and it would burn the ladder down to its floor and then fail a perfectly good job."""
         while True:
             try:
                 res = await _q(client, _SCAN_NODES if kind == "nodes" else _SCAN_EDGES,
                                {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
                 return list(getattr(res, "result_set", None) or []), width
-            except Exception:
-                if width <= config.BOOTSTRAP_SCAN_MIN_WIDTH:
+            except Exception as exc:
+                if _is_transient(exc) or width <= config.BOOTSTRAP_SCAN_MIN_WIDTH:
                     raise
                 width = max(config.BOOTSTRAP_SCAN_MIN_WIDTH, width // 2)
                 logger.warning("bootstrap scan window shrank to %d (lo=%d)", width, lo)
@@ -806,7 +950,10 @@ class BootstrapRunner:
             ch = content_hash(payload)
             tallies[str(payload.get("entityType") or "unknown")] = \
                 tallies.get(str(payload.get("entityType") or "unknown"), 0) + 1
-            sample.offer(eid)
+            # Carry the PHYSICAL label, not the canonicalised entityType: validation re-reads
+            # these from the SOURCE graph, and only the source's own spelling can seek its
+            # index (canonicalisation may have re-spelled or aliased the type).
+            sample.offer([_label_of(labels) or "", eid])
             dicts.append(dict(
                 graph_id=graph_id, id=_vid("nvb", commit.id, eid), entity_id=eid,
                 commit_id=commit.id, commit_seq=commit.commit_seq, branch_id=main_id,
@@ -857,17 +1004,54 @@ class BootstrapRunner:
             ))
         return dicts, tallies, rejects, None, dupes
 
-    async def _verify_sample(self, graph_id, commit_id, ps, urns, rules) -> Tuple[int, List[dict]]:
+    async def _verify_sample(self, graph_id, commit_id, ps, samples, rules) -> Tuple[int, List[dict]]:
         """Re-read sampled entities from the SOURCE and compare content hashes with what
-        we stored — the check that catches a mangled payload, which counts cannot."""
-        if not urns:
+        we stored — the check that catches a mangled payload, which counts cannot.
+
+        SEEK, don't scan. `MATCH (n {urn: $u})` names no label, so FalkorDB cannot use the
+        per-label `urn` index and answers it by scanning every node — once per sampled urn.
+        On the 2.08M-node model that is 64 full scans in a single query: measured at ~28s,
+        against a 30s read budget, and it duly timed out and killed a copy that had just
+        written all 7,093,010 rows perfectly. Seeking `(n:`Label` {urn: $u})` uses the index
+        (measured 145× faster) and turns the whole check into a handful of milliseconds.
+
+        The label must be the SOURCE's own spelling — which is why the scan stashes it in the
+        sample rather than us reading `entity_type` back from Postgres, where canonicalisation
+        may have re-spelled or aliased it into something the source graph never had.
+        """
+        if not samples:
             return 0, []
         from backend.app.providers.falkordb_provider import _node_from_props
         from backend.app.providers.versioned_bootstrap import canonicalize_rows
         client = await self._client(ps)
-        res = await _q(client, _SAMPLE_NODES, {"urns": list(urns)}, timeout_ms=_READ_TIMEOUT_MS)
+
+        # A job that started before the sample carried labels resumes with bare urns; those
+        # fall back to the unlabelled scan, in small chunks so no single query can blow the
+        # budget. New jobs never take this path.
+        by_label: Dict[str, List[str]] = {}
+        unlabelled: List[str] = []
+        urns: List[str] = []
+        for item in samples:
+            label, urn = ("", item) if isinstance(item, str) else (item[0] or "", item[1])
+            urns.append(urn)
+            if label:
+                by_label.setdefault(label, []).append(urn)
+            else:
+                unlabelled.append(urn)
+
+        rows: List[tuple] = []
+        for label, group in by_label.items():
+            cypher = (f"UNWIND $urns AS u MATCH (n:`{label.replace('`', '``')}` {{urn: u}}) "
+                      "RETURN labels(n), properties(n)")
+            res = await _q(client, cypher, {"urns": group}, timeout_ms=_READ_TIMEOUT_MS)
+            rows.extend(getattr(res, "result_set", None) or [])
+        for chunk in _chunks(unlabelled, 8):
+            res = await _q(client, _SAMPLE_NODES, {"urns": list(chunk)},
+                           timeout_ms=_READ_TIMEOUT_MS)
+            rows.extend(getattr(res, "result_set", None) or [])
+
         fresh: Dict[str, str] = {}
-        for labels, props in (getattr(res, "result_set", None) or []):
+        for labels, props in rows:
             node = _node_from_props(dict(props or {}), _label_of(labels))
             if node is None or not node.urn:
                 continue
@@ -1147,7 +1331,67 @@ def _explain_failed_checks(failed: List[dict]) -> str:
     return "The copy didn't match the source graph exactly, so it was not applied."
 
 
+# ---------------------------------------------------------------------------- #
+# Transient vs. terminal                                                        #
+# ---------------------------------------------------------------------------- #
+# Which faults a long copy should WAIT OUT, and which mean something is really wrong.
+# The distinction is load-bearing in two directions:
+#   * a broken pipe must be waited out — the window was fine, the connection wasn't, and
+#     shrinking the window fixes nothing;
+#   * an oversized-query timeout must SHRINK the window — waiting fixes nothing, because
+#     the same query will blow the same budget again.
+# Get it backwards and you either wedge a 40-minute job on a one-second blip, or retry an
+# impossible query until the budget runs out.
+_TRANSIENT_TYPES: Tuple[type, ...] = (
+    ConnectionError,          # builtin: ConnectionReset/Refused/Aborted
+    asyncio.TimeoutError,     # `_q`'s client-side hang net tripped
+    OSError,                  # socket layer: EPIPE, ECONNRESET, DNS, host unreachable
+)
+try:                          # pragma: no cover - depends on the installed client
+    # redis-py shadows the builtins with its OWN ConnectionError/TimeoutError, and they do
+    # NOT subclass them — catching only the builtins would miss every FalkorDB fault there is.
+    from redis.exceptions import BusyLoadingError as _RedisBusy
+    from redis.exceptions import ConnectionError as _RedisConnErr
+    from redis.exceptions import TimeoutError as _RedisTimeout
+    _TRANSIENT_TYPES = _TRANSIENT_TYPES + (_RedisConnErr, _RedisTimeout, _RedisBusy)
+except Exception:                                              # pragma: no cover
+    pass
+
+# The server killed OUR query for being too expensive. Not an outage — the scan's halving
+# ladder owns this one, and must see it rather than have it retried behind its back.
+_OVERSIZED = ("query timed out", "query's execution time exceeded")
+# Text fallbacks, for clients that signal an outage with a plain error string.
+_TRANSIENT_TEXT = (
+    "loading",                # FalkorDB/Redis replaying its RDB/AOF after a restart
+    "masterdown", "clusterdown", "readonly", "try again",
+    "connection reset", "broken pipe", "connection refused", "connection closed",
+    "server closed the connection", "not connected", "no route to host",
+    "temporarily unavailable", "too many connections", "the database system is",
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True if waiting and reconnecting is a sane response to `exc`."""
+    blurb = f"{type(exc).__name__}: {exc}".lower()
+    if any(t in blurb for t in _OVERSIZED):
+        return False                                   # shrink the window, don't wait
+    if isinstance(exc, _TRANSIENT_TYPES):
+        return True
+    if isinstance(exc, SQLAlchemyError):
+        # A restarted / failed-over Postgres surfaces as one of these, or as an invalidated
+        # DBAPI connection. A constraint violation is an IntegrityError and is NOT any of
+        # them — it must fail loudly rather than be retried into the same wall.
+        return (isinstance(exc, (DisconnectionError, InterfaceError, OperationalError))
+                or bool(getattr(exc, "connection_invalidated", False)))
+    return any(t in blurb for t in _TRANSIENT_TEXT)
+
+
 def _friendly_infra_error(exc: Exception) -> str:
+    mins = max(1, config.BOOTSTRAP_RETRY_BUDGET_SECS // 60)
+    if _is_transient(exc):
+        return (f"The graph service stayed unreachable for over {mins} minutes, so we stopped "
+                "waiting. Nothing was lost — resume to pick up exactly where this left off. "
+                f"({type(exc).__name__})")
     return ("We couldn't finish reading the source graph — the graph service may be busy or "
             f"unavailable. You can resume this safely. ({type(exc).__name__})")
 
