@@ -15,6 +15,7 @@ import {
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
 import { MergeConflictError, NotUpToDateError, type ResolutionMap } from '@/services/versioningApiService'
 import {
@@ -180,8 +181,9 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   }, [pr])
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div className="fixed inset-0 z-[60] bg-black/40" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} onClick={onClose} />
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-[60]" className="bg-black/40" />
+      <AnimatePresence>
       <motion.aside
         className="fixed right-0 top-0 h-full w-[520px] max-w-[92vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
         initial={{ x: 520 }} animate={{ x: 0 }} exit={{ x: 520 }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
@@ -480,7 +482,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           />
         )}
       </motion.aside>
-    </AnimatePresence>,
+      </AnimatePresence>
+    </>,
     document.body,
   )
 }

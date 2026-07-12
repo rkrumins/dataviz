@@ -58,6 +58,7 @@ import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
+import { MOTION } from '@/lib/motion'
 
 // ============================================
 // Types
@@ -420,10 +421,13 @@ export function EntityDrawer({
         initial={{ width: 0, opacity: 0 }}
         animate={{ width: 'clamp(420px, 32vw, 560px)', opacity: 1 }}
         exit={{ width: 0, opacity: 0 }}
-        transition={{ type: 'spring', stiffness: 400, damping: 35 }}
+        transition={MOTION.drawerSlide}
         className={cn(
           "relative h-full flex-shrink-0 overflow-hidden",
-          "bg-canvas-elevated/98 backdrop-blur-2xl",
+          // Opaque, no backdrop-blur: this drawer is a flex sibling that pushes
+          // the canvas aside, so nothing paints behind it — the blur was
+          // invisible yet re-rasterized every frame of the width spring.
+          "bg-canvas-elevated",
           "border-l border-glass-border shadow-lg shadow-black/20"
         )}
       >

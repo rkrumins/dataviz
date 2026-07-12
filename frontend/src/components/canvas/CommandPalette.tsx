@@ -12,6 +12,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useEntityTypes, useSchemaViews } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 
@@ -314,17 +315,12 @@ export function CommandPalette({
     if (!isOpen) return null
     
     return (
-        <AnimatePresence>
-            <div className="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh]">
-                {/* Backdrop */}
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    className="absolute inset-0 bg-black/40"
-                    onClick={onClose}
-                />
-                
+        <>
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={true} onClick={onClose} zClassName="z-[300]" className="bg-black/40" />
+            <AnimatePresence>
+            <div className="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh] pointer-events-none">
                 {/* Palette */}
                 <motion.div
                     ref={containerRef}
@@ -333,7 +329,7 @@ export function CommandPalette({
                     exit={{ opacity: 0, scale: 0.95, y: -20 }}
                     transition={{ duration: 0.15, ease: 'easeOut' }}
                     className={cn(
-                        "relative w-full max-w-[560px]",
+                        "pointer-events-auto relative w-full max-w-[560px]",
                         "bg-canvas-elevated/98 backdrop-blur-xl",
                         "border border-glass-border rounded-2xl shadow-lg",
                         "overflow-hidden"
@@ -464,7 +460,8 @@ export function CommandPalette({
                     </div>
                 </motion.div>
             </div>
-        </AnimatePresence>
+            </AnimatePresence>
+        </>
     )
 }
 

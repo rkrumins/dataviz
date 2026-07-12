@@ -36,6 +36,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
@@ -640,9 +641,10 @@ function UnregisterDialog({
 }) {
     const hasImpact = impact && (impact.workspaces.length > 0 || impact.views.length > 0)
     return (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/60" onClick={() => !loading && onCancel()} />
-            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+        <>
+        <Backdrop open={true} onClick={() => !loading && onCancel()} zClassName="z-[70]" className="bg-black/60" />
+        <div className="fixed inset-0 z-[70] flex items-center justify-center pointer-events-none">
+            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200 pointer-events-auto">
                 <div className="flex items-center gap-3 mb-4">
                     <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
                         <Trash2 className="w-5 h-5 text-red-500" />
@@ -725,6 +727,7 @@ function UnregisterDialog({
                 </div>
             </div>
         </div>
+        </>
     )
 }
 

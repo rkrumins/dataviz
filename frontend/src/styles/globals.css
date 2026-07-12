@@ -160,15 +160,25 @@
      useTraceFilteredHierarchy already removes them from the render tree
      in ContextViewCanvas. */
   [data-trace-active="true"] [data-trace-focus="true"] {
+    /* Static accent ring — painted once. The breathing halo lives on ::after
+       and animates opacity/scale only (compositor), so there's no per-frame
+       box-shadow repaint. Same premium "pulsing focus" look. */
+    position: relative;
+    box-shadow: 0 0 0 3px var(--nx-accent-lineage);
+  }
+  [data-trace-active="true"] [data-trace-focus="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: 0 0 30px 2px rgba(99, 102, 241, 0.7);
+    will-change: opacity, transform;
     animation: trace-pulse 2.4s ease-in-out infinite;
   }
   @keyframes trace-pulse {
-    0%, 100% {
-      box-shadow: 0 0 0 3px var(--nx-accent-lineage), 0 0 22px rgba(99, 102, 241, 0.45);
-    }
-    50% {
-      box-shadow: 0 0 0 3px var(--nx-accent-lineage), 0 0 36px rgba(99, 102, 241, 0.75);
-    }
+    0%, 100% { opacity: 0.55; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.05); }
   }
   .nx-edge-trace {
     /* Tighter glow — original `0 0 6px ... 0.7` extended visibly past the
@@ -194,9 +204,10 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    [data-trace-active="true"] [data-trace-focus="true"] {
+    [data-trace-active="true"] [data-trace-focus="true"]::after {
       animation: none;
-      box-shadow: 0 0 0 3px var(--nx-accent-lineage), 0 0 28px rgba(99, 102, 241, 0.6);
+      opacity: 0.85;
+      transform: none;
     }
   }
 
@@ -530,46 +541,39 @@
    (attention cue) + a brief scale overshoot so the node "lands" with
    weight rather than fading in. Higher saturation / wider spread than
    the prior version so it's spottable even in dense canvases. */
-@keyframes lineagePulseAnim {
-  0% {
-    box-shadow:
-      0 0 0 0 rgba(139, 92, 246, 0.85),
-      0 0 0 0 rgba(139, 92, 246, 0.65),
-      0 0 0 0 rgba(255, 255, 255, 0.0);
-    transform: scale(1);
-  }
-  25% {
-    box-shadow:
-      0 0 0 4px rgba(139, 92, 246, 0.55),
-      0 0 24px 8px rgba(139, 92, 246, 0.55),
-      0 0 0 1px rgba(255, 255, 255, 0.4);
-    transform: scale(1.04);
-  }
-  60% {
-    box-shadow:
-      0 0 0 14px rgba(139, 92, 246, 0.18),
-      0 0 36px 12px rgba(139, 92, 246, 0.28),
-      0 0 0 0 rgba(255, 255, 255, 0);
-    transform: scale(1.015);
-  }
-  100% {
-    box-shadow:
-      0 0 0 22px rgba(139, 92, 246, 0),
-      0 0 0 0 rgba(139, 92, 246, 0),
-      0 0 0 0 rgba(255, 255, 255, 0);
-    transform: scale(1);
-  }
+/* Node "landing" scale overshoot — transform only (compositor). */
+@keyframes lineagePulseScale {
+  0%   { transform: scale(1); }
+  25%  { transform: scale(1.04); }
+  60%  { transform: scale(1.015); }
+  100% { transform: scale(1); }
+}
+/* Expanding halo ring — painted once on ::after, then grown + faded via
+   transform/opacity (compositor). Replaces the old animated box-shadow
+   spread so the arrival pulse costs no per-frame paint, same premium look. */
+@keyframes lineagePulseRing {
+  0%   { opacity: 0.85; transform: scale(1); }
+  100% { opacity: 0;    transform: scale(1.4); }
 }
 
 .lineage-pulse {
-  /* Custom easing with overshoot at the start, settle at the end. Pops
-     the node forward, then eases out so trailing pulses don't feel
-     mechanical. */
-  animation: lineagePulseAnim 900ms cubic-bezier(0.16, 1, 0.3, 1) 1;
-  /* Lift the pulsing node above neighbours so its glow isn't clipped
+  animation: lineagePulseScale 900ms cubic-bezier(0.16, 1, 0.3, 1) 1;
+  /* Lift the pulsing node above neighbours so its halo isn't clipped
      by overlapping siblings during the brief animation window. */
   position: relative;
   z-index: 20;
+}
+.lineage-pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 2px rgba(139, 92, 246, 0.7),
+    0 0 26px 8px rgba(139, 92, 246, 0.5);
+  will-change: opacity, transform;
+  animation: lineagePulseRing 900ms cubic-bezier(0.16, 1, 0.3, 1) 1;
 }
 
 /* === React Flow Dot Pattern Background === */
@@ -677,4 +681,36 @@
 }
 .search-match-pulse {
   animation: search-match-pulse 1.6s ease-in-out 4;
+}
+
+/* === Calm mode (reduced motion) =============================================
+ * Driven by the OS "Reduce motion" setting AND the in-app preference (the
+ * `.reduce-motion` class on <html>, toggled from AppLayout). Framer-motion
+ * animations are gated globally by `<MotionConfig reducedMotion>` in main.tsx;
+ * this block quiets the always-on *CSS* keyframes so nothing loops in the
+ * background. Loading spinners (`animate-spin`) are intentionally preserved —
+ * a frozen spinner reads as a hang. Unlayered + !important so it wins over
+ * every component/utility rule regardless of source order.
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .nx-edge-animated,
+  .nx-edge-expanding,
+  .skeleton,
+  .lineage-pulse,
+  .lineage-pulse::after,
+  .pulse-soft,
+  .animate-pulse,
+  [data-trace-active="true"] [data-trace-focus="true"]::after {
+    animation: none !important;
+  }
+}
+:root.reduce-motion .nx-edge-animated,
+:root.reduce-motion .nx-edge-expanding,
+:root.reduce-motion .skeleton,
+:root.reduce-motion .lineage-pulse,
+:root.reduce-motion .lineage-pulse::after,
+:root.reduce-motion .pulse-soft,
+:root.reduce-motion .animate-pulse,
+:root.reduce-motion [data-trace-active="true"] [data-trace-focus="true"]::after {
+  animation: none !important;
 }

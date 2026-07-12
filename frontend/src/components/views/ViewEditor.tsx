@@ -16,6 +16,7 @@ import { useSchemaStore } from '@/store/schema'
 import { generateIconFallback } from '@/lib/type-visuals'
 import type { ViewConfiguration, EntityTypeSchema, ViewLayerConfig, LayerAssignmentRuleConfig, LogicalNodeConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { EntityAssignmentPanel } from './EntityAssignmentPanel'
 import { LayerDropZoneRow } from './LayerDropZone'
 import { ReferenceModelBuilder } from './ReferenceModelBuilder'
@@ -220,10 +221,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50"
-        onClick={onClose}
-      />
+      <Backdrop open={true} onClick={onClose} zClassName="" className="bg-black/50" />
 
       {/* Modal */}
       <motion.div

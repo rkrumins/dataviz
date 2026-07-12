@@ -21,6 +21,7 @@ import { ChevronDown, Eye, Layers as LayersIcon, Globe2, AlertTriangle } from 'l
 import { useEffect, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useSearchStore } from '@/store/searchStore'
 
 
@@ -248,9 +249,11 @@ function ScopeConfirmModal({
 }) {
     const m = MODES[mode]
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <>
+        <Backdrop open={true} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
             <div className={cn(
-                'w-[420px] max-w-[90vw] rounded-2xl',
+                'pointer-events-auto w-[420px] max-w-[90vw] rounded-2xl',
                 'bg-canvas-elevated border border-amber-500/40 shadow-2xl',
                 'p-5 flex flex-col gap-4',
             )}>
@@ -296,5 +299,6 @@ function ScopeConfirmModal({
                 </div>
             </div>
         </div>
+        </>
     )
 }

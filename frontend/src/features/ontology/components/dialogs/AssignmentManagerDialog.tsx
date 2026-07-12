@@ -9,6 +9,7 @@ import {
   HelpCircle, RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
@@ -275,9 +276,10 @@ export function AssignmentManagerDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={isAssigning ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+    <>
+      <Backdrop open={true} onClick={isAssigning ? undefined : onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
 
         <div className="h-1 w-full bg-gradient-to-r from-emerald-500 via-indigo-500 to-purple-500 flex-shrink-0" />
 
@@ -438,12 +440,14 @@ export function AssignmentManagerDialog({
           </button>
         </div>
       </div>
+      </div>
 
       {/* ── Replace Confirmation Dialog ──────────────────────────── */}
       {confirmReplace && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setConfirmReplace(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 overflow-hidden">
+        <>
+        <Backdrop open={!!confirmReplace} onClick={() => setConfirmReplace(null)} zClassName="z-[60]" className="bg-black/30" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center pointer-events-none">
+          <div className="relative pointer-events-auto w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 overflow-hidden">
             <div className="h-1 w-full bg-gradient-to-r from-amber-500 to-orange-500" />
             <div className="p-6">
               <div className="flex items-center gap-3 mb-4">
@@ -496,13 +500,15 @@ export function AssignmentManagerDialog({
             </div>
           </div>
         </div>
+        </>
       )}
 
       {/* ── Assign-All Confirmation ──────────────────────────────── */}
       {confirmRollout && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setConfirmRollout(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
+        <>
+        <Backdrop open={!!confirmRollout} onClick={() => setConfirmRollout(null)} zClassName="z-[60]" className="bg-black/30" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center pointer-events-none">
+          <div className="relative pointer-events-auto w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5 text-amber-500" />
@@ -532,7 +538,8 @@ export function AssignmentManagerDialog({
             </div>
           </div>
         </div>
+        </>
       )}
-    </div>
+    </>
   )
 }

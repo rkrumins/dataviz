@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { X, FileEdit, Sparkles, PenLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 interface CreateOntologyDialogProps {
@@ -26,9 +27,10 @@ export function CreateOntologyDialog({
   }, [name, ontologies])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header with accent bar */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4">
           <div className="flex items-center justify-between">
@@ -139,6 +141,7 @@ export function CreateOntologyDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

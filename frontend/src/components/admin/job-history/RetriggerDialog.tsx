@@ -21,6 +21,7 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play, RotateCcw, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import {
     AggregationOverridesForm,
     type AggregationOverridesValue,
@@ -106,25 +107,20 @@ export function RetriggerDialog({
     }
 
     return createPortal(
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-                onClick={() => !isLoading && onClose()}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="retrigger-dialog-title"
-            >
+        <>
+            <Backdrop open={isOpen} onClick={() => !isLoading && onClose()} zClassName="z-50" className="bg-black/50" />
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <AnimatePresence>
                 <motion.div
                     initial={{ scale: 0.96, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.96, opacity: 0 }}
                     transition={{ duration: 0.12 }}
                     onClick={e => e.stopPropagation()}
-                    className="w-full max-w-2xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
+                    className="pointer-events-auto w-full max-w-2xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="retrigger-dialog-title"
                 >
                     {/* Accent bar */}
                     <div className="h-1 bg-gradient-to-r from-indigo-500 to-violet-500" />
@@ -199,8 +195,9 @@ export function RetriggerDialog({
                         </button>
                     </div>
                 </motion.div>
-            </motion.div>
-        </AnimatePresence>,
+            </AnimatePresence>
+            </div>
+        </>,
         document.body,
     )
 }

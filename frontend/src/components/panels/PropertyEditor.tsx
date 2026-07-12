@@ -14,6 +14,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
+import { Backdrop } from '@/components/ui/Backdrop'
 import {
   ChevronDown,
   ChevronRight,
@@ -1232,20 +1233,16 @@ function RawJsonEditor({
   }
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
-        onClick={onClose}
-      >
+    <>
+      <Backdrop open={isOpen} onClick={onClose} zClassName="z-[60]" className="bg-black/40 backdrop-blur-sm" />
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 pointer-events-none">
+      <AnimatePresence>
         <motion.div
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-2xl rounded-xl border border-glass-border bg-canvas-elevated shadow-xl p-5"
+          className="pointer-events-auto w-full max-w-2xl rounded-xl border border-glass-border bg-canvas-elevated shadow-xl p-5"
         >
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-sm font-semibold text-ink">{readOnly ? 'View JSON' : 'Edit as JSON'}</h4>
@@ -1255,8 +1252,9 @@ function RawJsonEditor({
           </div>
           {body}
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateId } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useSchemaStore } from '@/store/schema'
 import {
     useReferenceModelStore,
@@ -423,17 +424,14 @@ export function ReferenceModelBuilder({
     if (!isOpen) return null
 
     return (
-        <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
-        >
+        <>
+            <Backdrop open={true} zClassName="z-50" className="bg-black/60" />
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
             <motion.div
                 initial={{ scale: 0.95, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
+                className="pointer-events-auto bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
             >
                 {/* Header */}
                 <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
@@ -611,12 +609,13 @@ export function ReferenceModelBuilder({
                     </div>
                 </div>
             </motion.div>
+            </div>
 
             {/* Entity Assignment Panel */}
             <EntityAssignmentPanel
                 isOpen={showEntityPanel}
                 onClose={() => setShowEntityPanel(false)}
             />
-        </motion.div>
+        </>
     )
 }

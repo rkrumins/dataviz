@@ -5,6 +5,7 @@
 import { useState } from 'react'
 import { X, Upload, FileJson, AlertTriangle, CheckCircle2, Info, Loader2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { OntologyImportResponse } from '@/services/ontologyDefinitionService'
 
@@ -133,9 +134,10 @@ export function ImportDialog({
       : 'text-emerald-500 bg-emerald-50 dark:bg-emerald-950/30'
 
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center">
-        <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-        <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <>
+        <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/50" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+        <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
           <div className="px-6 pt-6 pb-4">
             <div className="flex items-start gap-4">
               <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0', accent)}>
@@ -185,15 +187,17 @@ export function ImportDialog({
             </button>
           </div>
         </div>
-      </div>
+        </div>
+      </>
     )
   }
 
   // ── Pre-import view (validation + mode selection) ────────────────
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+    <>
+      <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4">
           <div className="flex items-center justify-between">
@@ -332,6 +336,7 @@ export function ImportDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

@@ -1,5 +1,6 @@
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Backdrop } from '@/components/ui/Backdrop';
 
 interface SkipAggregationDialogProps {
   isOpen: boolean;
@@ -17,13 +18,15 @@ export function SkipAggregationDialog({
   if (!isOpen) return null;
 
   return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4">
-        <motion.div 
+    <>
+      <Backdrop open={isOpen} zClassName="z-[100]" className="bg-black/60" />
+      <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 pointer-events-none">
+      <AnimatePresence>
+        <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
-          className="bg-canvas-elevated w-full max-w-md rounded-2xl shadow-xl overflow-hidden"
+          className="pointer-events-auto bg-canvas-elevated w-full max-w-md rounded-2xl shadow-xl overflow-hidden"
         >
           <div className="p-6">
             <div className="w-12 h-12 bg-amber-500/10 rounded-full flex items-center justify-center mb-4">
@@ -63,7 +66,8 @@ export function SkipAggregationDialog({
             </div>
           </div>
         </motion.div>
+      </AnimatePresence>
       </div>
-    </AnimatePresence>
+    </>
   );
 }

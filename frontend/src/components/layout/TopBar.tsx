@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -40,9 +40,15 @@ function useSearchPlaceholder(): string {
 }
 
 export function TopBar({ onOpenCommandPalette }: TopBarProps) {
-  const { theme, setTheme } = usePreferencesStore()
+  // Selector subscriptions so this always-mounted bar doesn't re-render on
+  // unrelated preference/auth writes.
+  const theme = usePreferencesStore((s) => s.theme)
+  const setTheme = usePreferencesStore((s) => s.setTheme)
+  const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+  const setReducedMotion = usePreferencesStore((s) => s.setReducedMotion)
   const persona = usePersonaStore((s) => s.mode)
-  const { user, logout } = useAuthStore()
+  const user = useAuthStore((s) => s.user)
+  const logout = useAuthStore((s) => s.logout)
   const isSystemAdmin = usePermission('system:admin')
   const isOrgAdmin = usePermission('system:org-admin')
   const claims = usePermissionClaims()
@@ -264,6 +270,22 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                   <Pencil className="w-4 h-4" />
                   <span>Change Avatar</span>
                 </DropdownMenu.Item>
+
+                {/* Reduce motion — accessibility "calm mode". preventDefault
+                    keeps the menu open so it reads as a switch. Framer honours
+                    this via <MotionConfig> and CSS via the .reduce-motion class. */}
+                <DropdownMenu.CheckboxItem
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  checked={reducedMotion}
+                  onCheckedChange={setReducedMotion}
+                  onSelect={(e) => e.preventDefault()}
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span className="flex-1">Reduce motion</span>
+                  <DropdownMenu.ItemIndicator>
+                    <Check className="w-4 h-4" />
+                  </DropdownMenu.ItemIndicator>
+                </DropdownMenu.CheckboxItem>
 
                 <DropdownMenu.Separator className="h-px bg-glass-border my-1" />
 

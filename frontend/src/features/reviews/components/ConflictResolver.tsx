@@ -27,6 +27,7 @@ import {
   Layers, Loader2, Search, Trash2, Undo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { ResolutionMap } from '@/services/versioningApiService'
 import {
   type Conflict, type Side, normalizeConflict, conflictKey as ckey, groupByEntity,
@@ -164,17 +165,18 @@ export function ConflictResolver({
   }, [])
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
+    <>
+      <Backdrop open zClassName="z-[70]" className="bg-black/50" />
+      <div
         ref={rootRef}
-        key="conflict-resolver"
         role="dialog"
         aria-modal="true"
-        className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50"
-        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[70] flex items-center justify-center p-4"
         onClick={onCancel}
       >
+      <AnimatePresence>
         <motion.div
+          key="conflict-resolver"
           className="w-full max-w-[1180px] max-h-[90vh] flex flex-col rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
           initial={{ scale: 0.96, y: 8 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 8 }}
           onClick={(e) => e.stopPropagation()}
@@ -285,8 +287,9 @@ export function ConflictResolver({
             </div>
           </div>
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

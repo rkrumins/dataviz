@@ -19,6 +19,7 @@ import {
     Search, Loader2, Eye, Pencil, Trash2, AlertCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { updateViewVisibility } from '@/services/viewApiService'
 import {
     viewGrantsService,
@@ -182,20 +183,16 @@ export function ShareViewDialog({
     if (!isOpen) return null
 
     return (
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50"
-                onClick={onClose}
-            >
+        <>
+            <Backdrop open={true} onClick={onClose} zClassName="z-[70]" className="bg-black/50" />
+            <div className="fixed inset-0 z-[71] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.95, opacity: 0 }}
                     onClick={(e) => e.stopPropagation()}
-                    className="w-full max-w-xl bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
+                    className="pointer-events-auto w-full max-w-xl bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
                 >
                     {/* Header */}
                     <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border shrink-0">
@@ -416,8 +413,9 @@ export function ShareViewDialog({
                         </p>
                     </div>
                 </motion.div>
-            </motion.div>
-        </AnimatePresence>
+                </AnimatePresence>
+            </div>
+        </>
     )
 }
 

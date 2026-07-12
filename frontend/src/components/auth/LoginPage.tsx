@@ -5,6 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
@@ -91,15 +92,14 @@ function SsoButtons() {
  *  ``sso_error=1`` page. */
 function CollisionModal({ email, onClose }: { email: string; onClose: () => void }) {
     return (
-        <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-            onClick={onClose}
-        >
+        <>
+        <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/60" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 onClick={(e) => e.stopPropagation()}
-                className="max-w-md w-full p-6 rounded-2xl bg-canvas border border-white/15 shadow-xl"
+                className="pointer-events-auto max-w-md w-full p-6 rounded-2xl bg-canvas border border-white/15 shadow-xl"
             >
                 <div className="flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 mt-0.5 text-yellow-400 shrink-0" />
@@ -123,6 +123,7 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
                 </div>
             </motion.div>
         </div>
+        </>
     )
 }
 

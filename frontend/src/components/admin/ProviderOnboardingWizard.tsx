@@ -23,6 +23,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import {
   providerService,
@@ -439,11 +440,13 @@ function ConfirmCloseDialog({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 px-4">
+    <>
+      <Backdrop open={true} zClassName="z-[120]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[120] flex items-center justify-center px-4 pointer-events-none">
       <motion.div
         initial={{ opacity: 0, y: 12, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        className="w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
+        className="pointer-events-auto w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
       >
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
@@ -473,7 +476,8 @@ function ConfirmCloseDialog({
           </button>
         </div>
       </motion.div>
-    </div>
+      </div>
+    </>
   )
 }
 
@@ -1809,10 +1813,11 @@ export function ProviderOnboardingWizard({
 
   return (
     <>
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 px-4 py-6 animate-in fade-in duration-200">
+      <Backdrop open={true} zClassName="z-[100]" className="bg-black/80" />
+      <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 py-6 pointer-events-none">
         <div
           ref={modalRef}
-          className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-glass-border bg-canvas-elevated shadow-lg animate-in zoom-in-95 duration-200"
+          className="pointer-events-auto flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-glass-border bg-canvas-elevated shadow-lg animate-in zoom-in-95 duration-200"
         >
           <div className="flex items-center justify-between border-b border-glass-border px-6 py-4">
             <div>

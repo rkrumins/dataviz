@@ -6,6 +6,7 @@
 import { useMemo } from 'react'
 import { Plus, Minus, PenLine, X, Save, Loader2, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { humanizeId } from '../../lib/ontology-parsers'
 
@@ -224,12 +225,13 @@ export function ChangesReviewDialog({
   const totalRemoved = entityDiff.removed.length + relDiff.removed.length
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+    <>
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <Backdrop open={true} onClick={onClose} zClassName="z-[100]" className="bg-black/40" />
 
       {/* Dialog */}
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[80vh]">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+      <div className="relative pointer-events-auto bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[80vh]">
         {/* Header */}
         <div className="px-6 pt-6 pb-4 flex items-center gap-3 flex-shrink-0">
           <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
@@ -421,6 +423,7 @@ export function ChangesReviewDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

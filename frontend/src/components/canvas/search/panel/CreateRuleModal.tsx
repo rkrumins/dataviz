@@ -19,6 +19,7 @@ import { type FC, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { DisplayRuleEditor } from '@/components/canvas/property-manager/DisplayRuleEditor'
 import { cn, generateId } from '@/lib/utils'
 import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
@@ -65,17 +66,15 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
 
     if (typeof document === 'undefined') return null
     return createPortal(
-        <div
-            className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
-        >
-            <div className="absolute inset-0 bg-black/50" aria-hidden />
+        <>
+        <Backdrop open={true} onClick={onClose} zClassName="z-[60]" className="bg-black/50" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 pointer-events-none">
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.15 }}
                 className={cn(
-                    'relative w-full max-w-lg rounded-2xl overflow-hidden flex flex-col',
+                    'pointer-events-auto relative w-full max-w-lg rounded-2xl overflow-hidden flex flex-col',
                     'max-h-[88vh]',
                     'bg-canvas-elevated',
                     'border border-slate-200 dark:border-glass-border',
@@ -138,7 +137,8 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
                     />
                 </div>
             </motion.div>
-        </div>,
+        </div>
+        </>,
         document.body,
     )
 }

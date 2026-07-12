@@ -2,6 +2,7 @@ import React, { useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MotionConfig } from 'framer-motion'
 import { router } from './routes'
 import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
@@ -17,6 +18,8 @@ import {
   disablePermissionPolling,
 } from '@/store/permissionPoller'
 import { useBrandingStore } from '@/store/branding'
+import { usePreferencesStore } from '@/store/preferences'
+import { installRadixPointerEventsGuard } from '@/lib/radixPointerEventsGuard'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -94,12 +97,33 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+/**
+ * Applies the app-wide motion policy. ``reducedMotion="user"`` makes every
+ * framer-motion animation honour the OS "Reduce motion" setting — an
+ * accessibility win that leaves the default, fully-animated experience
+ * unchanged for everyone else. The persisted app preference can force
+ * ``"always"`` (in-app calm mode). Must wrap the whole tree so it also
+ * governs the always-mounted banners.
+ */
+function MotionRoot({ children }: { children: React.ReactNode }) {
+  const reduce = usePreferencesStore((s) => s.reducedMotion)
+  return (
+    <MotionConfig reducedMotion={reduce ? 'always' : 'user'}>{children}</MotionConfig>
+  )
+}
+
 // Branding is public and independent of auth — kick the fetch off at module
 // load so the tab title, favicon and accent colour resolve as early as
 // possible (the store is seeded with stock defaults, so first paint is
 // always correct even before this resolves). Fire-and-forget: a failure
 // keeps the seed in place.
 void useBrandingStore.getState().loadBranding()
+
+// App-wide safety net for the Radix body pointer-events freeze: a modal layer
+// (Dialog / modal DropdownMenu) that unmounts while open can otherwise leave
+// the entire app unclickable until a hard reload. Idempotent; lives for the
+// whole app lifetime, independent of auth/routing.
+installRadixPointerEventsGuard()
 
 // GraphProvider manages the RemoteGraphProvider lifecycle internally,
 // creating a workspace-scoped instance whenever the active workspace changes.
@@ -108,16 +132,18 @@ void useBrandingStore.getState().loadBranding()
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <AuthBootstrap>
-        <div className="h-screen w-screen flex flex-col overflow-hidden">
-          <BackendHealthBanner />
-          <div className="flex-1 overflow-hidden">
-            <GraphProvider>
-              <RouterProvider router={router} />
-            </GraphProvider>
+      <MotionRoot>
+        <AuthBootstrap>
+          <div className="h-screen w-screen flex flex-col overflow-hidden">
+            <BackendHealthBanner />
+            <div className="flex-1 overflow-hidden">
+              <GraphProvider>
+                <RouterProvider router={router} />
+              </GraphProvider>
+            </div>
           </div>
-        </div>
-      </AuthBootstrap>
+        </AuthBootstrap>
+      </MotionRoot>
     </QueryClientProvider>
   </React.StrictMode>,
 )

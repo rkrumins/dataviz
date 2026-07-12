@@ -13,6 +13,7 @@ import {
   Clock, RefreshCw, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyMatchResult, OntologyDefinitionResponse, MergedVariantSpelling } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { SchemaStatsFreshness } from '@/features/ontology/lib/ontology-utils'
@@ -251,10 +252,11 @@ export function SuggestConfirmDialog({
   const selectedOnt = selectedId ? getOntology(selectedId) : null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={isBusy ? undefined : onClose} />
+    <>
+      <Backdrop open={true} onClick={isBusy ? undefined : onClose} zClassName="z-50" className="bg-black/50" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
       <div className={cn(
-        'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden flex flex-col',
+        'relative pointer-events-auto bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden flex flex-col',
         phase === 'recommendations' ? 'max-w-3xl max-h-[85vh]' : 'max-w-2xl max-h-[85vh]',
       )}>
         {/* Gradient top bar */}
@@ -954,7 +956,8 @@ export function SuggestConfirmDialog({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
 

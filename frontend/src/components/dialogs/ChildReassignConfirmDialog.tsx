@@ -11,6 +11,7 @@ import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowRight, X, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
 
 // ============================================
@@ -73,17 +74,10 @@ export function ChildReassignConfirmDialog({
     const count = info.descendantsToMove.length
 
     return (
-        <AnimatePresence>
-            {/* Backdrop */}
-            <motion.div
-                key="backdrop"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
-                onClick={onCancel}
-            >
+        <>
+            <Backdrop open={true} onClick={onCancel} zClassName="z-[60]" className="bg-black/60" />
+            <div className="fixed inset-0 z-[61] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
                 {/* Dialog */}
                 <motion.div
                     key="dialog"
@@ -92,7 +86,7 @@ export function ChildReassignConfirmDialog({
                     exit={{ scale: 0.95, opacity: 0, y: 8 }}
                     transition={{ type: 'spring', damping: 28, stiffness: 350 }}
                     className={cn(
-                        'relative w-full max-w-[420px] rounded-2xl overflow-hidden',
+                        'pointer-events-auto relative w-full max-w-[420px] rounded-2xl overflow-hidden',
                         'bg-white dark:bg-slate-900',
                         'border border-slate-200 dark:border-slate-700/80',
                         'shadow-lg shadow-black/20'
@@ -214,7 +208,8 @@ export function ChildReassignConfirmDialog({
                         </div>
                     </div>
                 </motion.div>
-            </motion.div>
-        </AnimatePresence>
+                </AnimatePresence>
+            </div>
+        </>
     )
 }

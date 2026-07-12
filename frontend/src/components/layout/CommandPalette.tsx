@@ -28,6 +28,7 @@ import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useGlobalSearch, CATEGORY_ORDER, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { CATEGORY_COLORS } from '@/components/dashboard/dashboard-constants'
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
@@ -167,16 +168,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-[100]">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 animate-fade-in"
-        onClick={close}
-      />
-
+    <>
+    <Backdrop open={true} onClick={close} zClassName="z-[100]" className="bg-black/50" />
+    <div className="fixed inset-0 z-[100] pointer-events-none">
       {/* Command Dialog */}
       <div className="absolute inset-x-0 top-[15%] flex justify-center px-4">
-        <div className="relative w-full max-w-2xl">
+        <div className="relative w-full max-w-2xl pointer-events-auto">
           {/* Soft gradient halo to echo the Hero search aesthetic */}
           <div className="absolute -inset-1 rounded-3xl blur-md bg-gradient-to-r from-accent-business/30 via-accent-explore/20 to-accent-lineage/30 opacity-80 pointer-events-none" />
           <Command
@@ -414,6 +411,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         </div>
       </div>
     </div>
+    </>
   )
 }
 

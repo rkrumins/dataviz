@@ -17,6 +17,7 @@ import * as LucideIcons from 'lucide-react'
 import { type FC, useEffect, useMemo, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
 import { type EditorContext } from './editors'
@@ -299,7 +300,7 @@ function LeafPicker({
 
     return (
         <>
-            <div className="fixed inset-0 z-30" onClick={onDismiss} />
+            <Backdrop open onClick={onDismiss} zClassName="z-30" className="bg-transparent" />
             <div className={cn(
                 "absolute z-40 mt-1.5 w-[22rem] left-0",
                 "rounded-2xl border border-glass-border bg-canvas-elevated/95 backdrop-blur-xl",

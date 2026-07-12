@@ -21,6 +21,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { fetchSchemaStats, fetchSchemaStatsWithMeta, generateSuggestedName, triggerIntrospectionRefresh } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
 
@@ -1404,13 +1405,7 @@ export function OntologySchemaPage() {
                 </div>
 
                 {/* Backdrop — CSS transition with immediate pointer-events removal (fixes Safari AnimatePresence freeze) */}
-                <div
-                  className={cn(
-                    'fixed inset-0 bg-black/15 dark:bg-black/25 z-20 transition-opacity duration-200',
-                    editorPanel ? 'opacity-100' : 'opacity-0 pointer-events-none',
-                  )}
-                  onClick={() => setEditorPanel(null)}
-                />
+                <Backdrop open={!!editorPanel} onClick={() => setEditorPanel(null)} zClassName="z-20" className="bg-black/15 dark:bg-black/25" />
 
                 {/* Editor slide-in panel */}
                 <AnimatePresence>
@@ -1618,10 +1613,10 @@ export function OntologySchemaPage() {
       )}
 
       {/* Discard Confirmation */}
+      <Backdrop open={showDiscardConfirm} onClick={() => setShowDiscardConfirm(false)} zClassName="z-50" className="bg-black/40" />
       {showDiscardConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setShowDiscardConfirm(false)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6 pointer-events-auto">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center">
                 <Trash2 className="w-5 h-5 text-red-500" />

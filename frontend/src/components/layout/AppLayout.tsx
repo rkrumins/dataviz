@@ -32,7 +32,11 @@ export { useViewEditorModal }
 export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
-  const { theme } = usePreferencesStore()
+  // Selector subscriptions (not whole-store) so this always-mounted shell
+  // only re-renders when these specific fields change, not on every
+  // unrelated preference write (sidebar collapse, pinned views, …).
+  const theme = usePreferencesStore((s) => s.theme)
+  const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -77,20 +81,38 @@ export function AppLayout() {
     loadViews()
   }, [isAuthenticated])
 
-  // Apply theme
+  // Apply theme. Each class flip is wrapped in `.theme-transitioning` so the
+  // global `* { transition: color… }` rule (globals.css) does NOT cascade-
+  // animate every element in the DOM on a light/dark switch — that mass
+  // transition is a visible jank spike. Double-rAF: a single rAF fires before
+  // the browser flushes the new styles, so the guard would stick; waiting two
+  // frames guarantees the new colours have painted before transitions resume.
   useEffect(() => {
     const root = document.documentElement
+    const applyDark = (isDark: boolean) => {
+      root.classList.add('theme-transitioning')
+      root.classList.toggle('dark', isDark)
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => root.classList.remove('theme-transitioning'))
+      )
+    }
     if (theme === 'system') {
-      const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-      root.classList.toggle('dark', systemDark)
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-      const handler = (e: MediaQueryListEvent) => root.classList.toggle('dark', e.matches)
+      applyDark(mediaQuery.matches)
+      const handler = (e: MediaQueryListEvent) => applyDark(e.matches)
       mediaQuery.addEventListener('change', handler)
       return () => mediaQuery.removeEventListener('change', handler)
     } else {
-      root.classList.toggle('dark', theme === 'dark')
+      applyDark(theme === 'dark')
     }
   }, [theme])
+
+  // Mirror the reduced-motion preference onto <html> so the CSS calm-mode
+  // block (globals.css) can quiet always-on keyframes. Framer animations are
+  // gated separately by <MotionConfig> in main.tsx.
+  useEffect(() => {
+    document.documentElement.classList.toggle('reduce-motion', reducedMotion)
+  }, [reducedMotion])
 
   // While the cookie is being validated against the server, render a
   // neutral loader. This prevents a flash of /login on cold reload when

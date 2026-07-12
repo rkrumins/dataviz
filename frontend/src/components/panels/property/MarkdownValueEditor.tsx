@@ -31,6 +31,7 @@ import {
   Minimize2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { markdownComponents } from '@/components/docs/MarkdownComponents'
 
 // Lazy so TipTap (ProseMirror) code-splits out of the main bundle.
@@ -169,21 +170,17 @@ export function MarkdownValueModal({
   ), [deferredDraft])
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-6"
-        onClick={requestClose}
-      >
+    <>
+      <Backdrop open onClick={requestClose} zClassName="z-[60]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 pointer-events-none">
+      <AnimatePresence>
         <motion.div
           initial={{ scale: 0.96, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.96, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            "flex flex-col border border-glass-border bg-canvas-elevated shadow-xl",
+            "pointer-events-auto flex flex-col border border-glass-border bg-canvas-elevated shadow-xl",
             maximized
               ? "fixed inset-3 w-auto h-auto max-w-none rounded-xl"
               : "w-[92vw] max-w-[1200px] h-[90vh] rounded-2xl",
@@ -338,8 +335,9 @@ export function MarkdownValueModal({
             )}
           </div>
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }
