@@ -6,10 +6,10 @@ pydantic>=2.4.0          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
 FalkorDB>=1.6.1
-redis>=5.0
+redis>=8.0.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0.51
 asyncpg>=0.29.0          # PostgreSQL async driver — runtime
 psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
 alembic>=1.13.0          # Schema migrations
@@ -20,7 +20,7 @@ argon2-cffi>=23.1.0      # Argon2id password hashing (OWASP recommended)
 PyJWT>=2.13.0            # Stateless JWT token creation / verification; >=2.13.0: crit-header bypass, JWKS confusion, decode DoS (GHSA-752w-5fwx-jx9f et al.)
 Authlib>=1.6.12          # OIDC ID-token verification (JWKS) + OAuth client; >=1.6.12: algorithm confusion, JWS crit bypass, JWE decompression bomb (PYSEC-2024-52 et al.)
 zxcvbn-python>=4.4.24    # Server-side password strength validation
-slowapi>=0.1.9           # Rate limiting for auth endpoints
+slowapi>=0.1.10           # Rate limiting for auth endpoints
 
 # SAML 2.0 SP. Only the viz-service mounts the auth routes that need
 # it; other Dockerfiles skip this to avoid the libxmlsec1 system-dep
