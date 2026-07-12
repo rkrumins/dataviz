@@ -375,6 +375,13 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Standalone-only client, and this script issues GRAPH.DELETE + bulk writes: on a
+    # Sentinel instance it could land on a demoted replica, on a Cluster it would hit
+    # a single shard (partial wipe, partial import). Fail fast.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+
+    assert_standalone_env("import_solidatus.py")
+
     parser = argparse.ArgumentParser(
         description="Import a Solidatus JSON export into FalkorDB",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -458,9 +458,27 @@ async def probe_falkordb() -> dict:
     verdicts roll up: all up → healthy, some up → degraded (naming the dead shards),
     none up → down. Graph count is the sum across shards.
     """
-    from backend.app.providers.falkordb_connection import cluster_primary_nodes, env_conn_config
+    from backend.app.providers.falkordb_connection import (
+        cluster_primary_nodes, env_conn_config, resolve_sentinel_master,
+    )
 
     cfg = env_conn_config()
+
+    if cfg.mode == "sentinel":
+        # Probe the MASTER Sentinel currently names, not a Sentinel daemon: a
+        # sentinel answers PONG happily while the master it watches is dead, which
+        # would show the graph tier green through a whole master outage.
+        host, port = cfg.host, cfg.port
+        try:
+            async with asyncio.timeout(_BUDGET_FALKOR):
+                host, port = await resolve_sentinel_master(cfg, _BUDGET_FALKOR)
+        except Exception as exc:
+            return _svc("falkordb", "FalkorDB · Sentinel", "down",
+                        error=_err(exc), detail={"mode": "sentinel"})
+        result = await _falkor_node_probe(host, port, "FalkorDB · Sentinel")
+        result["detail"]["mode"] = "sentinel"
+        result["detail"]["master"] = f"{host}:{port}"
+        return result
 
     if cfg.mode != "cluster":
         return await _falkor_node_probe(cfg.host, cfg.port, "FalkorDB")

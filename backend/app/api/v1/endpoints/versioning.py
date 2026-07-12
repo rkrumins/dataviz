@@ -176,7 +176,12 @@ async def project_now(graph_id: str) -> None:
         await asyncio.wait_for(proj.project_graph(graph_id), _SYNC_PROJECTION_TIMEOUT_SECS)
         if orphan:                                       # the old gv_* copy is now unused — reclaim its RAM
             try:
-                await proj.drop_graph(orphan)
+                # Route the GRAPH.DELETE to the graph's PINNED instance. Without the
+                # provider_id the factory falls back to the env-default instance —
+                # the delete would miss the orphan (leaking its RAM) and, worse,
+                # could delete a same-named graph that exists over there.
+                wm = await get_versioning_service().projection_watermark(graph_id)
+                await proj.drop_graph(orphan, wm.get("falkor_provider"))
             except Exception as exc:
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
     except Exception as exc:

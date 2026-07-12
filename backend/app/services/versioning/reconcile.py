@@ -32,6 +32,18 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select
 
+
+def _bounded_query(client, cypher: str, params=None):
+    """The projector's bounded query helper: a server-side kill budget AND a
+    client-side asyncio.wait_for. Reconcile's queries used to be BARE
+    ``await client.query(...)``, bounded only by the pool's 75s socket hang-net — and
+    ResilientGraph retries once, so a black-holed socket could stall a single
+    reconcile query for ~150s. Imported lazily: projection imports this module during
+    its own init, so a module-level import is circular."""
+    from .projection import _READ_TIMEOUT_MS, _q
+
+    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
+
 from .models import (
     BranchORM,
     EntityHeadORM,
@@ -74,9 +86,11 @@ async def falkor_counts(client) -> Tuple[int, int]:
     The ``:AGGREGATED`` rollup layer and its ``_GVRollupMeta`` marker are derived (aggregation
     worker + projector's incremental maintenance), NOT committed-main entities — exclude them or
     every graph with rollups reads as "extra entities vs committed main"."""
-    fn = await client.query(
+    fn = await _bounded_query(
+        client,
         "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c")
-    fe = await client.query(
+    fe = await _bounded_query(
+        client,
         "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
@@ -322,7 +336,7 @@ class ProjectionReconciler:
         """Ascending stream of a FalkorDB scan's rows via SKIP/LIMIT paging (O(batch) memory)."""
         skip = 0
         while True:
-            res = await client.query(cypher, params={"s": skip, "l": _PG_BATCH})
+            res = await _bounded_query(client, cypher, params={"s": skip, "l": _PG_BATCH})
             rows = getattr(res, "result_set", None) or []
             for row in rows:
                 yield row
@@ -384,7 +398,8 @@ class ProjectionReconciler:
             nonlocal truncated
             if not batch:
                 return truncated
-            res = await client.query(_DEEP_FETCH, params={"urns": [n["urn"] for n in batch]})
+            res = await _bounded_query(
+                client, _DEEP_FETCH, params={"urns": [n["urn"] for n in batch]})
             fk_by_urn: Dict[str, tuple] = {}
             for urn, eid, dname, labels in (getattr(res, "result_set", None) or []):
                 fk_by_urn[urn] = (eid, dname, list(labels or []))
