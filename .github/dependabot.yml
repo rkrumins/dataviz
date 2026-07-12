@@ -1,0 +1,77 @@
+# Dependabot configuration for dataviz.
+#
+# Enables scheduled version-update PRs for every ecosystem in the repo.
+# When "Dependabot security updates" is turned on in the repo settings
+# (Settings -> Code security), Dependabot also opens CVE-fix PRs off this
+# same config, immediately and regardless of the schedule below.
+#
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+updates:
+  # ── Python (pip) ──────────────────────────────────────────────────
+  - package-ecosystem: pip
+    directories:
+      - /backend
+      - /loadtest
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ── Node (npm) ────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directories:
+      - /frontend
+      - /landing
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ── Docker base images ────────────────────────────────────────────
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+      - /landing
+      - /data/quickstart
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      docker-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ── GitHub Actions ────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
