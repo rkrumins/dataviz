@@ -77,6 +77,14 @@ services:
       SYNODIC_ROLE: dev
       AGGREGATION_PROXY_ENABLED: "false"
       AGGREGATION_DISPATCH_MODE: redis
+      # WS1.1: the versioning projection worker must NOT run inside the web
+      # process. Its full-seed build is CPU-bound and wedges the shared event
+      # loop (event_loop_lag CRITICAL) while FalkorDB loads/projects — which
+      # freezes EVERY request (auth, /docs, health), not just graph reads.
+      # Off here; projection is delegated to the standalone versioning-worker
+      # container (see below). Only set to "1" when running uvicorn standalone
+      # with no worker container.
+      GRAPHVER_PROJECTION_INPROCESS: "0"
 
   aggregation-controlplane:
     volumes:

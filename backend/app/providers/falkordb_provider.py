@@ -599,6 +599,18 @@ class FalkorDBProvider(GraphDataProvider):
         # Applies to the graph (all topologies), preflight, and the cache.
         self._tls_enabled = tls_enabled
         self._graph = None
+        # Per-instance connect cooldown (WS0.1). A recent connect failure
+        # short-circuits repeated connect attempts within (and across) a
+        # request: an unreachable / blackhole host would otherwise be
+        # re-probed for EVERY one of a request's ontology-introspection +
+        # read queries, each paying the full socket_connect_timeout and
+        # summing to tens of seconds before the request finally 503s.
+        # monotonic() deadline; 0.0 = no cooldown. The first attempt after
+        # it lapses is allowed through, so recovery self-heals.
+        self._connect_cooldown_until: float = 0.0
+        self._connect_cooldown_s: float = float(
+            os.getenv("FALKORDB_CONNECT_COOLDOWN_S", "5")
+        )
         # In-flight guarded-op count. The ProviderManager's recovery eviction
         # defers close() while this is > 0 so it cannot tear the pool out from
         # under a running aggregation job (the 'NoneType has no query' race).
@@ -863,6 +875,19 @@ class FalkorDBProvider(GraphDataProvider):
         """
         if self._graph is not None:
             return
+        # WS0.1 connect cooldown: if a very recent connect attempt already
+        # failed, fast-fail (<1ms) instead of re-paying the full
+        # socket_connect_timeout. Without this, a single request's ontology
+        # introspection (4-5 queries) + read + retries each re-probe an
+        # unreachable/blackhole host and the request takes tens of seconds to
+        # 503. The first attempt after the window lapses is allowed through.
+        _now = time.monotonic()
+        if _now < self._connect_cooldown_until:
+            from redis.exceptions import ConnectionError as _RedisConnErr
+            raise _RedisConnErr(
+                f"FalkorDB {self._graph_name}: unreachable "
+                f"(connect cooldown {self._connect_cooldown_until - _now:.1f}s)"
+            )
         try:
             # Non-blocking ConnectionPool: on exhaustion raises ConnectionError
             # immediately instead of blocking the caller (and, for asyncio
@@ -1042,6 +1067,22 @@ class FalkorDBProvider(GraphDataProvider):
                     await self._seed_from_file()
         except Exception as e:
             logger.error(f"FalkorDB connection failed: {e}")
+            # WS0.1: arm the connect cooldown so the rest of this request's
+            # queries (and immediately-following requests) fast-fail instead of
+            # each re-paying the connect timeout against an unreachable host.
+            self._connect_cooldown_until = time.monotonic() + self._connect_cooldown_s
+            # Roll back any half-initialised graph state so a FAILED connect
+            # does not leave a zombie handle. self._graph is assigned (line
+            # above) BEFORE the verifying PING, so without this the
+            # ``_graph is not None`` guard at the top of this method would make
+            # every later call believe it is connected, skip reconnect, and
+            # hammer a dead handle through the transient-retry stack
+            # (~8-12s/call) instead of failing clean (~2-3s) and letting the
+            # circuit breaker open. Next call does a fresh connect attempt.
+            self._graph = None
+            self._db = None
+            self._proj_graph = None
+            self._proj_db = None
             raise
 
     def _schedule_reconcile_once(self) -> None:
@@ -1234,10 +1275,17 @@ class FalkorDBProvider(GraphDataProvider):
                         try:
                             await self._ensure_connected()
                         except Exception as reconnect_exc:
+                            # Reconnect failed → the host is unreachable, not a
+                            # transient blip. Stop retrying and surface the
+                            # failure now so the breaker opens fast instead of
+                            # burning the remaining retries (each a fresh ~2-3s
+                            # connect attempt) against a dead host.
                             logger.warning(
-                                "FalkorDB %s: reconnect during retry failed (%s); "
-                                "retrying anyway.", self._graph_name, reconnect_exc,
+                                "FalkorDB %s: reconnect during retry failed (%s) — "
+                                "treating as unreachable, not retrying.",
+                                self._graph_name, reconnect_exc,
                             )
+                            raise reconnect_exc from exc
                         await asyncio.sleep(backoff)
                         continue
                     raise
