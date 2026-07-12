@@ -98,6 +98,12 @@ services:
       - ./backend:/app/backend
     # Same: `./dev.sh restart aggregation-worker` picks up changes.
 
+  versioning-worker:
+    volumes:
+      - ./backend:/app/backend
+    # Headless projection worker (WS1.1). Pick up code changes with:
+    #   ./dev.sh restart versioning-worker
+
   stats-service:
     volumes:
       - ./backend:/app/backend
