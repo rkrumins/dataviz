@@ -1,10 +1,15 @@
 /**
- * Dashboard — the application's operational home.
+ * Dashboard — the home page for the person who uses this day to day: someone who
+ * builds views, browses existing ones, and works across a few business areas.
  *
- * Structured around the three questions a user actually opens the app with:
- *   1. "What needs me?"     → DashboardAttention    (broken/stale views, offline providers)
- *   2. "Where do I resume?" → real recents          (server-side per-user visits)
- *   3. "What changed?"      → DashboardActivityFeed (the view activity log)
+ * It answers, in order:
+ *   1. "Where do I resume?"        → real recents (server-side per-user visits)
+ *   2. "What has my team done?"    → DashboardActivityFeed, scoped to the
+ *                                     workspaces this user is part of
+ *   3. "Where do I go next?"       → workspaces, views, templates, semantic layers
+ *
+ * Deliberately NOT an operator console: provider health, broken/stale sweeps and
+ * pipeline internals belong to an admin persona and live in Ingestion/Admin.
  *
  * Everything is now wired to real endpoints. This page previously shipped
  * several placeholders that LOOKED like data:
@@ -25,11 +30,11 @@ import { useViewStats } from '@/hooks/useViewStats'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
+import { useAuthStore, SYSTEM_ROLE_LABELS, type SystemRole } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
 import { DashboardSkeleton } from './DashboardSkeleton'
-import { DashboardAttention } from './DashboardAttention'
 import { DashboardActivityFeed } from './DashboardActivityFeed'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
@@ -45,6 +50,35 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 const EMPTY_STATS_PARAMS = {}
+
+/**
+ * The hero badge said "Data Intelligence Platform" — marketing copy that told the
+ * user nothing. It now carries who they are in BUSINESS terms, from data we
+ * already hold: their name, their role, their department (an IdP-mapped attribute,
+ * present only for SSO users) and how many business areas they work across.
+ * Every part is omitted when we don't actually know it — no invented context.
+ */
+function useBusinessContextLabel(workspaceCount: number): string | undefined {
+    const user = useAuthStore(s => s.user)
+    if (!user) return undefined
+
+    const department = typeof user.attributes?.department === 'string'
+        ? user.attributes.department
+        : undefined
+
+    // SYSTEM_ROLE_LABELS is keyed by the role SLUG ('org_admin' → 'Org Admin') —
+    // the same map the TopBar badge uses, so the two can't drift apart.
+    const parts = [
+        user.firstName || undefined,
+        SYSTEM_ROLE_LABELS[user.role as SystemRole] ?? undefined,
+        department,
+        workspaceCount > 0
+            ? `${workspaceCount} business area${workspaceCount === 1 ? '' : 's'}`
+            : undefined,
+    ].filter(Boolean)
+
+    return parts.length > 0 ? parts.join(' · ') : undefined
+}
 
 export function Dashboard() {
     useDocumentTitle('Dashboard')
@@ -69,6 +103,8 @@ export function Dashboard() {
     const onboardingCompletedSteps = usePreferencesStore(s => s.onboardingCompletedSteps)
     const onboardingDismissedAt = usePreferencesStore(s => s.onboardingDismissedAt)
     const dismissOnboarding = usePreferencesStore(s => s.dismissOnboarding)
+
+    const contextLabel = useBusinessContextLabel(workspaces?.length ?? 0)
 
     const [searchQuery, setSearchQuery] = useState('')
     const searchResult = useGlobalSearch(searchQuery)
@@ -190,23 +226,15 @@ export function Dashboard() {
                         recentSearches={recentSearches}
                         onRemoveRecentSearch={removeRecentSearch}
                         onClearRecentSearches={clearRecentSearches}
+                        contextLabel={contextLabel}
                     />
                 </motion.div>
 
-                {/* 2. What needs me — renders nothing when everything is healthy */}
+                {/* 2. Jump back in — REAL per-user visit history */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger, ...MOTION.sectionEntry }}
-                >
-                    <DashboardAttention />
-                </motion.div>
-
-                {/* 3. Where do I resume — REAL per-user visit history */}
-                <motion.div
-                    initial={{ opacity: 0, y: MOTION.sectionY }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
                 >
                     <ExplorerRecentStrip
                         title="Jump back in"
@@ -214,16 +242,25 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 4. What changed — the activity log */}
+                {/* 3. What the team has been doing, in the user's workspaces */}
+                <motion.div
+                    initial={{ opacity: 0, y: MOTION.sectionY }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
+                >
+                    <DashboardActivityFeed />
+                </motion.div>
+
+                {/* 4. Active environments (the user's business areas) */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 3, ...MOTION.sectionEntry }}
                 >
-                    <DashboardActivityFeed />
+                    <WorkspaceGrid workspaces={workspaces} dataSourceStats={dataSourceStats} />
                 </motion.div>
 
-                {/* 5. KPIs — live values, each a click-through */}
+                {/* 5. At-a-glance numbers — live values, each a click-through */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
@@ -232,25 +269,16 @@ export function Dashboard() {
                     <InsightCards
                         stats={stats}
                         viewsCount={viewStats.total}
-                        needsAttention={viewStats.needsAttention}
+                        semanticLayersCount={ontologies.length}
                     />
                 </motion.div>
 
-                {/* 6. Active environments */}
-                <motion.div
-                    initial={{ opacity: 0, y: MOTION.sectionY }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 5, ...MOTION.sectionEntry }}
-                >
-                    <WorkspaceGrid workspaces={workspaces} dataSourceStats={dataSourceStats} />
-                </motion.div>
-
-                {/* 7. Starter templates */}
+                {/* 6. Starter templates */}
                 <motion.div
                     id="dashboard-templates"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 6, ...MOTION.sectionEntry }}
+                    transition={{ delay: MOTION.sectionStagger * 5, ...MOTION.sectionEntry }}
                 >
                     <BlueprintGrid
                         title="Starter Templates"
@@ -260,16 +288,16 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 8. Semantic layers */}
+                {/* 7. Semantic layers — the shared business meaning of the data */}
                 {ontologies.length > 0 && (
                     <motion.div
                         initial={{ opacity: 0, y: MOTION.sectionY }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: MOTION.sectionStagger * 7, ...MOTION.sectionEntry }}
+                        transition={{ delay: MOTION.sectionStagger * 6, ...MOTION.sectionEntry }}
                     >
                         <BlueprintGrid
                             title="Semantic Layers"
-                            subtitle="Published semantic schemas powering your data graph"
+                            subtitle="The shared business meaning behind your data"
                             items={ontologies}
                             icon={BookOpen}
                             onBrowseAll={() => navigate('/schema')}

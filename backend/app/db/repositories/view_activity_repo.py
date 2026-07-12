@@ -181,6 +181,38 @@ async def get_workspace_activity(
     return out
 
 
+async def get_recent_activity(
+    session: AsyncSession,
+    *,
+    limit: int = 60,
+) -> list[tuple[ViewActivityEntry, ViewORM]]:
+    """Most recent activity across ALL live views — the dashboard's "What
+    changed" feed.
+
+    Returns each entry paired with its ViewORM so the CALLER can apply the same
+    per-view read check the views list uses (``view_access.can_read_view``). This
+    read is deliberately un-scoped; scoping is the endpoint's job, so a feed can
+    never surface a view the user isn't allowed to see.
+    """
+    rows = (await session.execute(
+        select(ViewActivityLogORM, ViewORM)
+        .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
+        .where(ViewORM.deleted_at.is_(None))
+        .order_by(ViewActivityLogORM.created_at.desc())
+        .limit(limit)
+    )).all()
+    if not rows:
+        return []
+
+    actor_map = await resolve_user_ids(session, {log.actor for log, _ in rows})
+    out: list[tuple[ViewActivityEntry, ViewORM]] = []
+    for log, view in rows:
+        entry = _to_entry(log, actor_map)
+        entry.viewName = view.name
+        out.append((entry, view))
+    return out
+
+
 async def _synthetic_anchor(
     session: AsyncSession, view_id: str,
 ) -> list[ViewActivityEntry]:
