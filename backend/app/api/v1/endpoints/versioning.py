@@ -578,6 +578,13 @@ class RevertRequest(_ApiModel):
     message: Optional[str] = None
 
 
+class RestorePreviewResponse(_ApiModel):
+    """Exact impact of restoring main to a commit (same compute as the write)."""
+    commits_undone: int = Field(alias="commitsUndone")
+    nodes: Dict[str, int]
+    edges: Dict[str, int]
+
+
 class RebaseRequest(_ApiModel):
     resolutions: Optional[Dict[str, Optional[dict]]] = None
 
@@ -1608,6 +1615,43 @@ async def revert_commit(
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": new_commit_id}
+
+
+@router.post("/graphs/{graph_id}/commits/{commit_id}/restore", response_model=CommitResponse)
+async def restore_to_commit(
+    ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
+    background: BackgroundTasks,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Reset main to its state at ``commit_id`` as ONE new ``restore`` commit
+    (point-in-time rollback). Unlike revert, a restore overrides everything after
+    the target by definition — no conflict path. Empty ``commitId`` no-op returns
+    ``""``. Flag-gated like every versioning write (router-level gate)."""
+    with _domain_errors():
+        new_commit_id = await svc.restore_to_commit(
+            graph_id=graph_id, commit_id=commit_id, actor=user.id, message=body.message,
+        )
+    await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
+    await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
+    background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async)
+    return {"commit_id": new_commit_id}
+
+
+@router.get("/graphs/{graph_id}/commits/{commit_id}/restore-preview",
+            response_model=RestorePreviewResponse)
+async def get_restore_preview(
+    ws_id: str, graph_id: str, commit_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Exact impact a restore to ``commit_id`` would have (per-kind create/update/
+    delete counts + how many commits roll back) — powers the confirm dialog.
+    Same bounded compute as the write, nothing persisted."""
+    with _domain_errors():
+        return await svc.restore_preview(graph_id=graph_id, commit_id=commit_id)
 
 
 # --------------------------------------------------------------------------- #

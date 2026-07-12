@@ -390,8 +390,10 @@ class CommitORM(VersioningBase):
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
         Index("ix_commits_idem", "graph_id", "idempotency_key"),
         CheckConstraint(
+            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind
+            # (create_all never alters live tables); keep the sets in sync.
             "kind IN ('genesis','edit','checkpoint','squash_publish','import',"
-            "'sync','revert')",
+            "'sync','revert','restore')",
             name="ck_commits_kind",
         ),
     )

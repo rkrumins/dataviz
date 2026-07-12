@@ -1085,6 +1085,125 @@ class GraphVersioningService:
                 ps.target_commit_seq = new_seq
             return revert.id
 
+    async def _restore_delta(self, s, graph, main_id, target):
+        """Shared compute for restore-to-commit (write) and its preview (read):
+        the net delta that returns main to its state at ``target``.
+
+        ``touched`` = entities changed in ``(k, head]`` — everything after the
+        target commit. Each returns to its value AT ``k`` (absent at k ⇒ None ⇒
+        tombstone, so entities created later are deleted and entities deleted
+        later are resurrected). Bounded O(touched) via ``_values_at`` for a
+        non-fork main; forks use the CoW-aware ``_state_as_of`` replay (their
+        base inherits from the parent graph). The same hydrate → cascade →
+        integrity guards as publish/revert run so the delta (and therefore the
+        preview counts) is exactly what a restore will write."""
+        graph_id = graph.id
+        k, head_seq = target.commit_seq, graph.main_head_commit_seq
+        touched = await self._changed_in_window(s, graph_id, main_id, k, head_seq)
+        if graph.fork_parent_graph_id:
+            before = await self._state_as_of(s, graph_id, main_id, k)
+            cur = await self._state_as_of(s, graph_id, main_id, head_seq)
+            merged = dict(cur)
+            for eid in touched:
+                merged[eid] = before.get(eid)          # restore (None ⇒ tombstone)
+            theirs = cur
+        else:
+            before = await self._values_at(s, graph_id, main_id, touched, k)
+            cur = await self._values_at(s, graph_id, main_id, touched, head_seq)
+            merged = {eid: before.get(eid) for eid in touched}   # restore (None ⇒ tombstone)
+            theirs = {eid: cur.get(eid) for eid in touched}
+
+        # Hydrate the live neighborhood for the in-dict cascade/integrity guards (sparse-safe).
+        await self._hydrate_merge_neighborhood(s, graph_id, main_id, merged, theirs)
+        self._cascade_incident_edges(merged)
+        self._assert_referential_integrity(merged)
+        return net_delta(theirs, merged)
+
+    async def restore_to_commit(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str] = None,
+    ) -> str:
+        """Reset main to its state at ``commit_id`` as ONE new ``restore``
+        commit — the point-in-time rollback counterpart of :meth:`revert_commit`
+        (which inverts a single commit and conflicts when later commits touched
+        the same entities). A restore overrides everything after the target by
+        definition, so there is NO conflict path; history is never rewritten and
+        the restore itself is revertable. Restoring to the genesis commit is the
+        well-defined "empty the graph". Ontology rules are deliberately not
+        applied (administrative path, same as revert — must be able to restore
+        pre-ontology states)."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            target = await s.get(CommitORM, (graph_id, commit_id))
+            if target is None or target.branch_id != main_id:
+                raise ValueError("commit is not on this graph's main")
+
+            deltas = await self._restore_delta(s, graph, main_id, target)
+            if not deltas:
+                return ""                              # already at (or equal to) the target
+
+            head_seq = graph.main_head_commit_seq
+            new_seq = head_seq + 1
+            main = await s.get(BranchORM, main_id)
+            restore = CommitORM(
+                graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="restore",
+                message=message or f"restore to {commit_id}", actor=actor,
+                source_commit_ids=[commit_id],         # provenance: the restore target
+            )
+            s.add(restore)
+            await s.flush()
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
+            await self._write_deltas(s, graph_id, main_id, restore, deltas, kind_by_entity, actor)
+            main.head_commit_id = restore.id
+            graph.main_head_commit_seq = new_seq
+            restore.merkle_root = await self._commit_merkle(s, graph_id, main_id, restore, deltas)
+            graph.updated_at = _now()
+            restore.stats = _delta_stats(deltas)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return restore.id
+
+    async def restore_preview(
+        self, *, graph_id: str, commit_id: str,
+    ) -> Dict[str, object]:
+        """What :meth:`restore_to_commit` would do — exact per-kind create/update/
+        delete counts (same compute, same cascade guards, nothing written) plus
+        how many later commits the restore rolls back. Bounded O(touched)."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            target = await s.get(CommitORM, (graph_id, commit_id))
+            if target is None or target.branch_id != main_id:
+                raise ValueError("commit is not on this graph's main")
+
+            deltas = await self._restore_delta(s, graph, main_id, target)
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)
+            counts = {"nodes": {"create": 0, "update": 0, "delete": 0},
+                      "edges": {"create": 0, "update": 0, "delete": 0}}
+            for d in deltas:
+                bucket = "edges" if kind_by_entity.get(d.entity_id) == "edge" else "nodes"
+                counts[bucket][d.op] = counts[bucket].get(d.op, 0) + 1
+            commits_undone = await s.scalar(
+                select(func.count()).select_from(CommitORM).where(
+                    CommitORM.graph_id == graph_id,
+                    CommitORM.branch_id == main_id,
+                    CommitORM.commit_seq > target.commit_seq,
+                    CommitORM.commit_seq <= graph.main_head_commit_seq,
+                )
+            )
+            return {"commitsUndone": int(commits_undone or 0),
+                    "nodes": counts["nodes"], "edges": counts["edges"]}
+
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
     # ------------------------------------------------------------------ #
