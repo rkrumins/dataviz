@@ -1,18 +1,18 @@
 # ── deps (shared) ──────────────────────────────────────────────────
-FROM node:26-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --ignore-scripts
 
 # ── development (dev overlay — source bind-mounted at runtime) ─────
-FROM node:26-alpine AS development
+FROM node:24-alpine AS development
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 EXPOSE 5173
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
 # ── build (prod static bundle) ─────────────────────────────────────
-FROM node:26-alpine AS build
+FROM node:24-alpine AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend/ .
