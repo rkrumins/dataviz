@@ -6,6 +6,8 @@
  * last synced, favourite count, and a mini preview for hierarchy/reference.
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { History } from 'lucide-react'
+import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -326,8 +328,15 @@ export function ExplorerPreviewDrawer({
   healthStatus,
   providerInfo,
 }: ExplorerPreviewDrawerProps) {
+  const [activityOpen, setActivityOpen] = useState(false)
   const content = (
     <>
+      <ViewActivityDrawer
+        viewId={activityOpen && view ? view.id : null}
+        viewName={view?.name}
+        isOpen={activityOpen}
+        onClose={() => setActivityOpen(false)}
+      />
       {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
           StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
       <Backdrop open={!!(isOpen && view)} onClick={onClose} zClassName="z-[60]" />
@@ -676,6 +685,12 @@ export function ExplorerPreviewDrawer({
                 <ExternalLink className="h-4 w-4" />
                 Open Full View
               </Link>
+              <button
+                onClick={() => setActivityOpen(true)}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 border border-glass-border text-sm font-medium text-ink-muted hover:text-ink hover:border-indigo-500/30 transition-colors"
+              >
+                <History className="h-4 w-4" /> View activity
+              </button>
               {/* Secondary actions row */}
               <div className="flex items-center gap-2">
                 {onEdit && (

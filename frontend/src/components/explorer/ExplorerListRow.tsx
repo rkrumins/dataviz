@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Heart,
@@ -16,6 +17,7 @@ import {
   Check,
   Trash2,
   RotateCcw,
+  History,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
@@ -24,6 +26,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -133,6 +136,7 @@ export function ExplorerListRow({
   const TypeIcon = typeMeta.icon
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
   const isDeleted = !!view.deletedAt
+  const [activityOpen, setActivityOpen] = useState(false)
 
   // Density → row padding. Comfortable is the visual default from before
   // the toggle existed, so existing screenshots stay unchanged at default.
@@ -142,6 +146,13 @@ export function ExplorerListRow({
     : 'py-2.5'
 
   return (
+    <>
+    <ViewActivityDrawer
+      viewId={activityOpen ? view.id : null}
+      viewName={view.name}
+      isOpen={activityOpen}
+      onClose={() => setActivityOpen(false)}
+    />
     <div
       className="block group cursor-pointer"
       onClick={() => onPreview?.()}
@@ -299,6 +310,14 @@ export function ExplorerListRow({
               >
                 <ExternalLink className="h-3.5 w-3.5" />
               </Link>
+              <button
+                type="button"
+                onClick={e => { e.stopPropagation(); setActivityOpen(true) }}
+                className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                title="Activity"
+              >
+                <History className="h-3.5 w-3.5" />
+              </button>
               {onEdit && (
                 editDisabled ? (
                   <span
@@ -351,5 +370,6 @@ export function ExplorerListRow({
         </div>
       </div>
     </div>
+    </>
   )
 }
