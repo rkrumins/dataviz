@@ -9,7 +9,7 @@ import { Star, Search, X } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { useNavigate } from 'react-router-dom'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
-import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeColor } from '@/lib/viewUtils'
 import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
@@ -206,7 +206,7 @@ function FavoriteRow({
   onClick: () => void
   onRemove: () => void
 }) {
-  const iconName = layoutTypeIcon(view.viewType)
+  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const colorClass = viewTypeColor(view.viewType)
   const wsColors = view.workspaceId ? workspaceColor(view.workspaceId) : null
 
@@ -253,7 +253,7 @@ function RecentRow({
   entry: RecentViewEntry
   onClick: () => void
 }) {
-  const iconName = layoutTypeIcon(entry.viewType)
+  const iconName = resolveViewIcon({ icon: entry.icon, viewType: entry.viewType })
   const colorClass = viewTypeColor(entry.viewType)
 
   return (

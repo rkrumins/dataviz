@@ -4,7 +4,7 @@
  * Clean, focused input with smart defaults and suggestions
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
 import {
     Layout,
@@ -28,8 +28,10 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useSchemaStore } from '@/store/schema'
 import { checkBlankGraphName } from '@/services/versioningApiService'
 import { GRAPH_NAME_RE, slugifyGraphName } from '../blankModel'
+import { buildNameSuggestions } from '../nameSuggestions'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
@@ -59,14 +61,9 @@ const ICON_OPTIONS = [
     { id: 'Box', icon: Box, label: 'Box' }
 ]
 
-const NAME_SUGGESTIONS = [
-    'Data Lineage',
-    'Impact Analysis',
-    'Data Pipeline',
-    'Domain Overview',
-    'Source to Target',
-    'Medallion Architecture'
-]
+// Name suggestions are context-catered — built from the resolved scope
+// (workspace / data source / ontology) + the schema's root entity types
+// via buildNameSuggestions (../nameSuggestions).
 
 // ============================================
 // Component
@@ -103,6 +100,18 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     const missingOntology = scopeContext ? !scopeContext.hasOntology : !activeDataSource?.ontologyId
     const displayWorkspaceName = scopeContext?.workspaceName ?? activeWorkspace?.name
     const displayDataSourceLabel = scopeContext?.dataSourceLabel ?? activeDataSource?.label ?? activeDataSource?.catalogItemId
+
+    // Context-catered suggestions: scope (workspace / data source / ontology)
+    // + root entity types from the schema store — hydrated in BOTH journeys
+    // (the blank journey mounts without a SchemaScope/provider, so this must
+    // not read useDataSourceSchema/useGraphProvider).
+    const schemaEntityTypes = useSchemaStore(s => s.schema?.entityTypes)
+    const nameSuggestions = useMemo(() => {
+        const scope = scopeContext ?? (displayWorkspaceName || displayDataSourceLabel
+            ? { workspaceName: displayWorkspaceName, dataSourceLabel: displayDataSourceLabel ?? undefined }
+            : undefined)
+        return buildNameSuggestions(scope, schemaEntityTypes ?? [])
+    }, [scopeContext, displayWorkspaceName, displayDataSourceLabel, schemaEntityTypes])
 
     const handleAddTag = useCallback(() => {
         const tag = tagInput.trim()
@@ -267,7 +276,9 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             <div className="px-4 py-2 text-xs font-medium text-slate-500 uppercase tracking-wide border-b border-slate-100 dark:border-slate-700">
                                 Suggestions
                             </div>
-                            {NAME_SUGGESTIONS.map(suggestion => (
+                            {nameSuggestions
+                                .filter(s => s.toLowerCase() !== formData.name.trim().toLowerCase())
+                                .map(suggestion => (
                                 <button
                                     key={suggestion}
                                     onClick={() => {

@@ -31,6 +31,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
@@ -255,7 +256,9 @@ export function ExplorerViewCard({
   const showTags = !compact
   const isDeleted = !!view.deletedAt
   const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
-  const TypeIcon = meta.icon
+  // Glyph = the user's chosen icon (config.icon) when set; tile color stays
+  // type identity so mixed grids remain colour-coded by view type.
+  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
   const VisIcon = vis.icon
   const tags = view.tags ?? []
@@ -425,7 +428,7 @@ export function ExplorerViewCard({
         {/* ── 1. Header: icon + type + name ── */}
         <div className={cn('flex items-center gap-3 pr-6', sectionGap)}>
           <div className={cn('border flex items-center justify-center shrink-0', typeBadgeSize, typeBadgeRound, meta.iconBg)}>
-            <TypeIcon className={cn(compact ? 'h-4 w-4' : 'h-[18px] w-[18px]')} />
+            <DynamicIcon name={iconName} className={cn(compact ? 'h-4 w-4' : 'h-[18px] w-[18px]')} />
           </div>
           <div className="min-w-0 flex-1">
             {!compact && (

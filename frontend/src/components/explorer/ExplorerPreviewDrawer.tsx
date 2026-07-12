@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
@@ -376,10 +377,11 @@ export function ExplorerPreviewDrawer({
               <div className="flex-1 min-w-0">
                 {(() => {
                   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE
-                  const TypeIcon = typeMeta.icon
+                  // Glyph = the user's chosen icon when set; pill color stays type identity.
+                  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
                   return (
                     <div className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold mb-3', typeMeta.color)}>
-                      <TypeIcon className="h-3 w-3" />
+                      <DynamicIcon name={iconName} className="h-3 w-3" />
                       {typeMeta.label} View
                     </div>
                   )

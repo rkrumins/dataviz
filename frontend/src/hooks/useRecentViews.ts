@@ -13,6 +13,10 @@ export interface RecentViewEntry {
   viewName: string
   /** View layout type — used to select the appropriate icon. */
   viewType: string
+  /** User-chosen view icon (config.icon) — wins over the type icon when set.
+   *  Optional: entries persisted before this field existed degrade to the
+   *  type-derived icon. */
+  icon?: string
   workspaceId?: string
   workspaceName?: string
   /** Datasource the view belongs to — used to switch context on click. */

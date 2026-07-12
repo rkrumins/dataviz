@@ -23,6 +23,7 @@ import {
     Hash,
     Box,
     GitBranch,
+    Layers,
     Sparkles,
     Info,
     ListTree
@@ -30,6 +31,8 @@ import {
 import { cn } from '@/lib/utils'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
+import { useWorkspacesStore } from '@/store/workspaces'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import type { WizardFormData, ActiveFilter } from '../ViewWizard'
 
@@ -59,6 +62,18 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
         containmentEdgeTypes,
         rootEntityTypes,
     } = useDataSourceSchema(dataSourceId)
+
+    // The semantic layer this view is built on. The ontologies endpoint is
+    // admin-gated (silently), so non-admins get `null` and we fall back to a
+    // compact card built from the schema we already loaded.
+    const ontologyId = useWorkspacesStore(s => {
+        for (const ws of s.workspaces) {
+            const ds = ws.dataSources?.find(d => d.id === dataSourceId)
+            if (ds) return ds.ontologyId
+        }
+        return undefined
+    })
+    const { ontology } = useOntologyDefinition(ontologyId)
 
     // Dynamic metadata and stats
     const [stats, setStats] = useState<GraphSchemaStats | null>(null)
@@ -139,45 +154,22 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
         })
     }, [dsRelationshipTypes, formData.visibleRelationshipTypes, stats, containmentEdgeTypes])
 
-    // Filter entity types by search and advanced filters
+    // Filter the TYPE picker by search only.
+    //
+    // The advanced filters used to also narrow this grid, which was a fiction:
+    // the "tag" filter substring-matched type IDs and the "property" filter just
+    // checked whether a field existed. What they actually do is travel with the
+    // view as fieldFilters and filter ENTITIES when the view loads — so they no
+    // longer pretend to change which types you can select.
     const filteredEntityTypes = useMemo(() => {
-        let types = entityTypesWithState
-
-        // 1. Search Query
-        if (searchQuery) {
-            const query = searchQuery.toLowerCase()
-            types = types.filter(et =>
-                et.name.toLowerCase().includes(query) ||
-                et.id.toLowerCase().includes(query) ||
-                et.pluralName.toLowerCase().includes(query)
-            )
-        }
-
-        // 2. Advanced Filters (Name, Tag, Property)
-        if (formData.advancedFilters.length > 0) {
-            formData.advancedFilters.forEach(filter => {
-                const val = String(filter.value).toLowerCase()
-                switch (filter.type) {
-                    case 'name':
-                        types = types.filter(et => et.name.toLowerCase().includes(val))
-                        break
-                    case 'tag':
-                        // In real scenario, would check if entity TYPE has this tag in schema
-                        // For now, filtering the selection list based on direct matches
-                        types = types.filter(et => et.id.toLowerCase().includes(val))
-                        break
-                    case 'property':
-                        if (val.includes('=')) {
-                            const [key] = val.split('=')
-                            types = types.filter(et => et.fields.some(f => f.id.toLowerCase() === key))
-                        }
-                        break
-                }
-            })
-        }
-
-        return types
-    }, [entityTypesWithState, searchQuery, formData.advancedFilters])
+        if (!searchQuery) return entityTypesWithState
+        const query = searchQuery.toLowerCase()
+        return entityTypesWithState.filter(et =>
+            et.name.toLowerCase().includes(query) ||
+            et.id.toLowerCase().includes(query) ||
+            et.pluralName.toLowerCase().includes(query)
+        )
+    }, [entityTypesWithState, searchQuery])
 
     // Toggle entity type
     const toggleEntityType = useCallback((typeId: string) => {
@@ -262,6 +254,62 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                 </p>
             </motion.div>
 
+            {/* Ontology context — the semantic layer these types come from.
+                Three tiers: full card (admin), compact schema-derived card
+                (non-admin / fetch failed), nothing (no ontology assigned — the
+                Scope step already warns about that). */}
+            {ontologyId && (
+                <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.04 }}
+                    className="rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 p-4"
+                >
+                    <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 text-violet-500 bg-violet-500/10 border-violet-500/20">
+                            <Layers className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                Ontology this view is built on
+                            </p>
+                            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">
+                                    {ontology?.name ?? 'Assigned semantic layer'}
+                                </h4>
+                                {ontology?.isPublished && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                                        <Check className="w-2.5 h-2.5" /> Published
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-3 mt-1">
+                                <div className="flex items-center gap-1 text-xs">
+                                    <Box className="w-3 h-3 text-emerald-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{dsEntityTypes.length}</span>
+                                    <span className="text-slate-400">entity types</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs">
+                                    <GitBranch className="w-3 h-3 text-violet-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{dsRelationshipTypes.length}</span>
+                                    <span className="text-slate-400">relationships</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs">
+                                    <ListTree className="w-3 h-3 text-amber-500" />
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{containmentEdgeTypes.length}</span>
+                                    <span className="text-slate-400">containment</span>
+                                </div>
+                            </div>
+                            {ontology?.description && (
+                                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500 line-clamp-2 leading-relaxed">
+                                    {ontology.description}
+                                </p>
+                            )}
+                        </div>
+                    </div>
+                </motion.div>
+            )}
+
             {/* Search and Filter Bar */}
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
@@ -289,7 +337,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                     )}
                 >
                     <Filter className="w-5 h-5" />
-                    Filters
+                    Data filters
                     {formData.advancedFilters.length > 0 && (
                         <span className="ml-1 px-2 py-0.5 text-xs font-bold bg-blue-600 text-white rounded-full">
                             {formData.advancedFilters.length}
@@ -308,9 +356,14 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         className="overflow-hidden"
                     >
                         <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 space-y-4">
-                            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300">
-                                <Sparkles className="w-4 h-4 text-blue-500" />
-                                Advanced Filters
+                            <div>
+                                <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                    <Sparkles className="w-4 h-4 text-blue-500" />
+                                    View data filters
+                                </div>
+                                <p className="text-xs text-slate-400 mt-0.5">
+                                    Applied to entities when the view loads — they don&apos;t change which types you can select below.
+                                </p>
                             </div>
 
                             <div className="grid grid-cols-3 gap-4">
