@@ -1,0 +1,168 @@
+# FalkorDB DR: periodic RDB snapshot → multi-region GCS (launch-scale §8).
+#
+# INVARIANT (doc §8): DR never treats FalkorDB as data. Every graph rebuilds from
+# Cloud SQL — if a snapshot and Cloud SQL disagree, Cloud SQL wins and the graph is
+# reseeded. These RDBs exist to SHORTEN a rebuild (RTO), not to be the source of
+# truth. That is why a 6-hourly cadence is enough: the effective RPO is Cloud SQL's.
+#
+# How the snapshot is taken: `redis-cli --rdb` issues a SYNC, so the server forks and
+# streams a consistent RDB over the wire (same fork cost as BGSAVE, no PVC access
+# needed — the RWO volume is already attached to the FalkorDB pod and cannot be
+# mounted here). It is streamed straight into gzip, so only the COMPRESSED image is
+# ever staged on disk (~3× smaller in practice).
+#
+# One pod per target (Indexed Job): each pod snapshots exactly one endpoint, so the
+# staging footprint is one shard's RDB — not the whole cluster's — and shards run in
+# parallel on different nodes. The production-cluster overlay patches
+# completions/parallelism and the target list to the three shard replicas.
+#
+# SETUP (once):
+#   1. Bucket:  gcloud storage buckets create gs://<BUCKET> --location=US \
+#                 --uniform-bucket-level-access
+#      Retention: attach a lifecycle rule (e.g. delete objects older than 30 days)
+#      rather than pruning here — GCS does it for free and it cannot silently break.
+#   2. Workload Identity for the backup SA below:
+#      gcloud iam service-accounts create synodic-backup
+#      gcloud storage buckets add-iam-policy-binding gs://<BUCKET> \
+#        --member=serviceAccount:synodic-backup@PROJECT_ID.iam.gserviceaccount.com \
+#        --role=roles/storage.objectCreator
+#      gcloud iam service-accounts add-iam-policy-binding \
+#        synodic-backup@PROJECT_ID.iam.gserviceaccount.com \
+#        --role=roles/iam.workloadIdentityUser \
+#        --member="serviceAccount:PROJECT_ID.svc.id.goog[synodic/synodic-backup]"
+#      …then uncomment the annotation on the ServiceAccount below.
+#   3. Set FALKORDB_BACKUP_BUCKET in .env.deploy (envsubst fills it at apply time).
+#
+# RESTORE: see docs/FALKORDB_DR_RUNBOOK.md.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: synodic-backup
+  namespace: synodic
+  annotations: {}
+    # iam.gke.io/gcp-service-account: synodic-backup@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: falkordb-dr-backup
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-dr-backup
+    app.kubernetes.io/component: disaster-recovery
+spec:
+  # Every 6h (doc §8: "every 4–6 h").
+  schedule: "0 */6 * * *"
+  # A run must never overlap the previous one: two concurrent SYNCs would fork the
+  # same server twice and double its copy-on-write memory.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One pod per backup target. The cluster overlay raises these to 3.
+      completionMode: Indexed
+      completions: 1
+      parallelism: 1
+      backoffLimit: 2
+      # A snapshot that cannot finish in 2h is a fault, not a slow disk — fail the
+      # run so it alerts instead of overlapping the next schedule.
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: falkordb-dr-backup
+        spec:
+          serviceAccountName: synodic-backup
+          restartPolicy: Never
+          # Deliberately NOT tolerating the falkordb taint: the backup pod pulls the
+          # RDB over the network and must not compete for the data tier's node.
+          volumes:
+            - name: staging
+              emptyDir:
+                # Compressed RDB of ONE endpoint. Raise if a shard's gzipped RDB
+                # approaches this (it is far below maxmemory in practice).
+                sizeLimit: 32Gi
+          initContainers:
+            - name: snapshot
+              # Has redis-cli + gzip; already pinned/retagged by kustomize.
+              image: REGISTRY/falkordb:latest
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  IDX="${JOB_COMPLETION_INDEX:-0}"
+                  TARGET=$(echo "$FALKORDB_BACKUP_TARGETS" | cut -d, -f$((IDX + 1)))
+                  if [ -z "$TARGET" ]; then
+                    echo "no target at index $IDX in '$FALKORDB_BACKUP_TARGETS'" >&2
+                    exit 1
+                  fi
+                  HOST="${TARGET%%:*}"
+                  PORT="${TARGET##*:}"
+                  TS=$(date -u +%Y%m%dT%H%M%SZ)
+                  OUT="/backup/${HOST}-${TS}.rdb.gz"
+                  echo "snapshotting ${HOST}:${PORT} -> ${OUT}"
+                  # SYNC streams a consistent RDB; gzip it inline so only the
+                  # compressed image is staged. pipefail makes a mid-stream failure
+                  # fail the step instead of shipping a truncated snapshot.
+                  set -o pipefail
+                  redis-cli -h "$HOST" -p "$PORT" --rdb - | gzip -c > "$OUT"
+                  if [ ! -s "$OUT" ]; then
+                    echo "snapshot is empty — refusing to upload" >&2
+                    exit 1
+                  fi
+                  ls -l "$OUT"
+              env:
+                - name: FALKORDB_BACKUP_TARGETS
+                  value: "falkordb:6379"
+                # Optional — set only when the instance requires AUTH. redis-cli
+                # reads this env var natively.
+                - name: REDISCLI_AUTH
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: FALKORDB_PASSWORD
+                      optional: true
+              volumeMounts:
+                - name: staging
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+          containers:
+            - name: upload
+              image: gcr.io/google.com/cloudsdktool/google-cloud-cli:575.0.1-slim
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  if [ -z "${FALKORDB_BACKUP_BUCKET:-}" ]; then
+                    echo "FALKORDB_BACKUP_BUCKET is unset — set it in .env.deploy" >&2
+                    exit 1
+                  fi
+                  DEST="gs://${FALKORDB_BACKUP_BUCKET}/falkordb/$(date -u +%Y/%m/%d)/"
+                  # Fails loudly if the init container produced nothing.
+                  ls /backup/*.rdb.gz >/dev/null
+                  gcloud storage cp /backup/*.rdb.gz "$DEST"
+                  echo "uploaded to ${DEST}:"
+                  gcloud storage ls -l "$DEST"
+              env:
+                - name: FALKORDB_BACKUP_BUCKET
+                  value: "${FALKORDB_BACKUP_BUCKET}"
+              volumeMounts:
+                - name: staging
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi

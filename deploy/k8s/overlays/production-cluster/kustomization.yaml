@@ -28,6 +28,8 @@ patches:
   - path: patches/remove-single-falkordb.yaml
   # FALKORDB_MODE=cluster + seed nodes for the topology-aware client.
   - path: patches/cluster-config.yaml
+  # DR: one backup pod per shard, snapshotting the shard's REPLICA.
+  - path: patches/dr-backup-cluster.yaml
 
 # Image retags from ../production apply only to ITS resources; the
 # cluster StatefulSets/Job added here need their own falkordb entry.
