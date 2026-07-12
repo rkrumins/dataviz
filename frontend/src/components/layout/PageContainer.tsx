@@ -32,10 +32,30 @@ import { cn } from '@/lib/utils'
  * through `className`.
  */
 
-/** How wide content may grow before it stops scanning comfortably. */
+/**
+ * How wide content may grow before it stops scanning comfortably.
+ *
+ * The default was 1440px, which was too tight for a data-dense tool. 1440 is a
+ * READING-width heuristic borrowed from marketing/SaaS sites whose content is
+ * prose and forms; this app is workspace grids, view catalogues and 6-column
+ * admin tables, which want horizontal room. Worse, the cap applies to the
+ * content area AFTER the 260px sidebar is gone, so on a 2560px monitor it left
+ * 860px — 37% of the available area — permanently empty.
+ *
+ * It was also self-justifying: the grids' `2xl:` column steps had been REMOVED
+ * because 1440 made extra columns cramped, which then made wide screens useless,
+ * which then justified the cap. Raising the cap without raising the grids just
+ * inflates the cards (at 1760, a 3-column workspace grid is 539px per card) —
+ * and fat cards are precisely what made full-width feel "overwhelming" the first
+ * time this was tuned. Width has to become MORE cards, not wider ones, so the
+ * `wide:` breakpoint (tailwind.config.js) is the other half of this change.
+ *
+ * 1760 keeps laptops identical (they are below the cap either way) and takes a
+ * QHD monitor from 58% to 72% content usage.
+ */
 const MAX_WIDTHS = {
   /** App-wide default — every top-level page. */
-  default: 'max-w-[1440px]',
+  default: 'max-w-[1760px]',
   /** Reading-width pages (account / settings forms), where full width hurts scannability. */
   narrow: 'max-w-3xl',
 } as const
