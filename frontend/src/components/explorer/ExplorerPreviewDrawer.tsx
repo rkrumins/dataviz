@@ -27,11 +27,6 @@ import {
   User,
   ExternalLink,
   Pencil,
-  Network,
-  GitBranch,
-  Layout,
-  Table2,
-  Layers,
   Database,
   Box,
   RefreshCw,
@@ -42,7 +37,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
@@ -78,15 +73,9 @@ const VISIBILITY_META: Record<string, { label: string; icon: React.ComponentType
   enterprise: { label: 'Enterprise', icon: Globe },
 }
 
-const VIEW_TYPE_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }>; color: string }> = {
-  graph: { label: 'Graph', icon: Network, color: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500' },
-  hierarchy: { label: 'Hierarchy', icon: GitBranch, color: 'bg-violet-500/10 border-violet-500/20 text-violet-500' },
-  'layered-lineage': { label: 'Lineage', icon: Layers, color: 'bg-amber-500/10 border-amber-500/20 text-amber-500' },
-  table: { label: 'Table', icon: Table2, color: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' },
-  reference: { label: 'Context View', icon: Layout, color: 'bg-rose-500/10 border-rose-500/20 text-rose-500' },
-}
-
-const DEFAULT_TYPE = { label: 'View', icon: Layout, color: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500' }
+// View type theme comes from the SHARED resolver — see viewTypeMeta() /
+// viewTypeLabel() in lib/viewUtils. No local map (that duplication is what let
+// the recents strip render a different icon+colour for the same view).
 
 // ─── Format date to readable string ─────────────────────────────
 
@@ -376,13 +365,15 @@ export function ExplorerPreviewDrawer({
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-5 border-b border-glass-border/50">
               <div className="flex-1 min-w-0">
                 {(() => {
-                  const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE
+                  const typeMeta = viewTypeMeta(view.viewType)
                   // Glyph = the user's chosen icon when set; pill color stays type identity.
                   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
                   return (
-                    <div className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold mb-3', typeMeta.color)}>
+                    <div className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold mb-3', typeMeta.iconBg)}>
                       <DynamicIcon name={iconName} className="h-3 w-3" />
-                      {typeMeta.label} View
+                      {/* No " View" suffix — the labels are already nouns, and
+                          appending it rendered "Context View View". */}
+                      {typeMeta.label}
                     </div>
                   )
                 })()}
@@ -539,12 +530,12 @@ export function ExplorerPreviewDrawer({
                       </span>
                       <div className="flex items-center gap-2">
                         {(() => {
-                          const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE
-                          const TypeIcon = typeMeta.icon
+                          const typeMeta = viewTypeMeta(view.viewType)
+                          const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
                           return (
                             <>
-                              <div className={cn('w-6 h-6 rounded-lg border flex items-center justify-center', typeMeta.color)}>
-                                <TypeIcon className="h-3 w-3" />
+                              <div className={cn('w-6 h-6 rounded-lg border flex items-center justify-center', typeMeta.iconBg)}>
+                                <DynamicIcon name={iconName} className="h-3 w-3" />
                               </div>
                               <span className="text-sm font-semibold text-ink">{typeMeta.label}</span>
                             </>
@@ -558,8 +549,11 @@ export function ExplorerPreviewDrawer({
                       </span>
                       <div className="flex items-center gap-2">
                         <LayoutDashboard className="h-4 w-4 text-ink-muted" />
-                        <span className="text-sm font-semibold text-ink capitalize">
-                          {view.config?.layout?.type ?? 'Default'}
+                        {/* Layout types share the view-type vocabulary, so resolve
+                            the SAME canonical label — the raw slug + CSS capitalize
+                            printed "Reference" next to a View Type of "Context View". */}
+                        <span className="text-sm font-semibold text-ink">
+                          {viewTypeLabel(view.config?.layout?.type)}
                         </span>
                       </div>
                     </div>

@@ -5,6 +5,7 @@
  * Extracted from SidebarNav.tsx to avoid duplication.
  */
 import * as LucideIcons from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 
 // ── Sidebar Workspace Avatar Gradient Colors ──────────────────────────
 export const WS_GRADIENT_COLORS = [
@@ -136,6 +137,28 @@ export function viewTypeMeta(viewType?: string | null): ViewTypeMeta {
   return VIEW_TYPE_META[viewType ?? ''] ?? DEFAULT_VIEW_TYPE_META
 }
 
+/**
+ * Human label for a view OR layout type.
+ *
+ * Layout types share the view-type vocabulary (`reference`, `layered-lineage`,
+ * …), so a raw slug rendered with CSS `capitalize` produced "Reference" in the
+ * preview drawer's Layout field while the View Type field right next to it said
+ * "Context View" — the same thing, named two different ways. Resolve both
+ * through here so they always agree.
+ *
+ * An unrecognised type degrades to a prettified slug ("layered-lineage" →
+ * "Layered Lineage") rather than the generic "View" fallback, so a future
+ * layout engine name still reads sensibly.
+ */
+export function viewTypeLabel(type?: string | null): string {
+  if (!type) return 'Default'
+  const known = VIEW_TYPE_META[type]
+  if (known) return known.label
+  return type
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
 // ── Dynamic Icon Component ────────────────────────────────────────────
 
 /** Renders a Lucide icon by string name. Falls back to Layout icon. */
@@ -143,4 +166,15 @@ export function DynamicIcon({ name, className }: { name: string; className?: str
   const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[name]
   if (!IconComponent) return <LucideIcons.Layout className={className} />
   return <IconComponent className={className} />
+}
+
+/**
+ * The canonical icon for a view type as a *component*, for APIs that want one
+ * rather than a name (e.g. the filter bar's `FilterOption.icon: LucideIcon`).
+ * Returns the Lucide component itself, so identity is stable across renders.
+ */
+export function viewTypeIconComponent(viewType?: string | null): LucideIcon {
+  const name = layoutTypeIcon(viewType ?? '')
+  const icon = (LucideIcons as unknown as Record<string, LucideIcon>)[name]
+  return icon ?? LucideIcons.Layout
 }

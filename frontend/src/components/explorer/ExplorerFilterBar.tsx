@@ -32,13 +32,9 @@ import {
   Tag,
   Shapes,
   UserCircle,
-  Network,
-  GitBranch,
-  Table2,
-  Layers as LayersIcon,
-  Layout as LayoutIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { viewTypeLabel, viewTypeColor, viewTypeIconComponent } from '@/lib/viewUtils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewFacets } from '@/hooks/useViewFacets'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
@@ -86,14 +82,8 @@ const VISIBILITY_OPTIONS = [
   { key: 'private', label: 'Private', icon: Lock },
 ] as const
 
-/** Per-view-type icon + colour, mirroring ``ExplorerListRow`` / card. */
-const VIEW_TYPE_META: Record<string, { icon: typeof Network; iconClass: string; label: string }> = {
-  graph: { icon: Network, iconClass: 'text-indigo-500', label: 'Graph' },
-  hierarchy: { icon: GitBranch, iconClass: 'text-violet-500', label: 'Hierarchy' },
-  table: { icon: Table2, iconClass: 'text-emerald-500', label: 'Table' },
-  'layered-lineage': { icon: LayersIcon, iconClass: 'text-amber-500', label: 'Lineage' },
-  reference: { icon: LayoutIcon, iconClass: 'text-rose-500', label: 'Context View' },
-}
+// Per-view-type icon + colour + label come from the SHARED resolver in
+// lib/viewUtils — no local copy (see viewTypeMeta/viewTypeLabel).
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -169,13 +159,12 @@ export function ExplorerFilterBar({
 
   const viewTypeOptions: FilterOption[] = useMemo(
     () => facets.viewTypes.map(vt => {
-      const meta = VIEW_TYPE_META[vt.value] ?? { icon: Shapes, iconClass: '', label: vt.value }
       return {
         id: vt.value,
-        label: meta.label,
+        label: viewTypeLabel(vt.value),
         sublabel: `${vt.count} view${vt.count !== 1 ? 's' : ''}`,
-        icon: meta.icon,
-        iconClassName: meta.iconClass,
+        icon: viewTypeIconComponent(vt.value),
+        iconClassName: viewTypeColor(vt.value),
       }
     }),
     [facets.viewTypes],
@@ -222,8 +211,7 @@ export function ExplorerFilterBar({
       chips.push({ key: 'ds', prefix: 'Source', value: ds?.label ?? dataSourceId })
     }
     for (const vt of viewTypes) {
-      const meta = VIEW_TYPE_META[vt]
-      chips.push({ key: `vt-${vt}`, prefix: 'Type', value: meta?.label ?? vt })
+      chips.push({ key: `vt-${vt}`, prefix: 'Type', value: viewTypeLabel(vt) })
     }
     for (const t of tags) {
       chips.push({ key: `tag-${t}`, prefix: 'Tag', value: t })
