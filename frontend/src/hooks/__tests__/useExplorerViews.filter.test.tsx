@@ -59,6 +59,25 @@ describe('useExplorerViews — filter/sort refetch', () => {
     )
   })
 
+  it('surfaces the server response ORDER in views (az → za reorders)', async () => {
+    const A = { id: 'a', name: 'Apple', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as import('@/services/viewApiService').View
+    const B = { id: 'b', name: 'Banana', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as import('@/services/viewApiService').View
+    mockListViews.mockImplementation((params: { sort?: string }) => {
+      const items = params?.sort === 'za' ? [B, A] : [A, B]
+      return Promise.resolve({ items, total: 2, hasMore: false, nextOffset: null, popular: [] } as never)
+    })
+
+    const { result, rerender } = renderHook(({ filters }) => useExplorerViews(filters), {
+      wrapper: makeWrapper(),
+      initialProps: { filters: baseFilters({ sort: 'az' }) },
+    })
+
+    await waitFor(() => expect(result.current.views.map(v => v.id)).toEqual(['a', 'b']))
+
+    rerender({ filters: baseFilters({ sort: 'za' }) })
+    await waitFor(() => expect(result.current.views.map(v => v.id)).toEqual(['b', 'a']))
+  })
+
   it('refetches with the new visibility when a filter changes', async () => {
     const { rerender } = renderHook(({ filters }) => useExplorerViews(filters), {
       wrapper: makeWrapper(),
