@@ -83,6 +83,7 @@ export function BootstrapProgress({
   const abandon = useAbandonBootstrap(wsId, dataSourceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
   const [showDetails, setShowDetails] = useState(false)
+  const [confirming, setConfirming] = useState<null | 'restart' | 'abandon'>(null)
 
   const running = job.status === 'pending' || job.status === 'running'
   const failed = job.status === 'failed'
@@ -236,7 +237,52 @@ export function BootstrapProgress({
               </p>
             </div>
           </div>
-          {canManage && (
+          {canManage && confirming && (
+            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
+              <p className="text-[12px] text-ink leading-relaxed">
+                {confirming === 'restart' ? (
+                  <>
+                    Starting over throws away the{' '}
+                    <span className="font-semibold">{num(job.processed)} items</span> already copied
+                    and begins again from nothing.{' '}
+                    <span className="font-semibold">Resuming keeps them</span> and picks up where it
+                    stopped — try that first unless the source graph has changed.
+                  </>
+                ) : (
+                  <>
+                    This stops the copy and removes everything it wrote.{' '}
+                    <span className="font-semibold">Your data source is not touched</span> — it stays
+                    exactly as it is now, just without version control.
+                  </>
+                )}
+              </p>
+              <div className="mt-2.5 flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const what = confirming
+                    setConfirming(null)
+                    if (what === 'restart') runRetry('restart')
+                    else runAbandon()
+                  }}
+                  className={cn(
+                    'px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white shadow-sm transition-colors',
+                    confirming === 'restart'
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-rose-600 hover:bg-rose-700',
+                  )}
+                >
+                  {confirming === 'restart' ? 'Yes, start over' : 'Yes, remove it'}
+                </button>
+                <button
+                  onClick={() => setConfirming(null)}
+                  className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted hover:text-ink transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {canManage && !confirming && (
             <div className="mt-3 flex items-center gap-2 flex-wrap">
               <button
                 onClick={() => runRetry('resume')}
@@ -246,15 +292,17 @@ export function BootstrapProgress({
                 {retry.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
                 Resume
               </button>
+              {/* Both of these DESTROY work, and they sit next to the safe one. They ask first —
+                  and say what they will cost, in the numbers this job actually has. */}
               <button
-                onClick={() => runRetry('restart')}
+                onClick={() => setConfirming('restart')}
                 disabled={retry.isPending}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-ink transition-colors disabled:opacity-60"
               >
                 Start over
               </button>
               <button
-                onClick={runAbandon}
+                onClick={() => setConfirming('abandon')}
                 disabled={abandon.isPending}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-rose-500 hover:border-rose-500/30 transition-colors disabled:opacity-60"
               >
