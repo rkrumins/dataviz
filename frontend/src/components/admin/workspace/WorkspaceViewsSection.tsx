@@ -223,6 +223,10 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
         providerInfo: resolveProvider(v.dataSourceId),
         isSelected: selectedIds.has(v.id),
         onToggleSelect: () => toggleSelect(v.id),
+        // Every view here is in this workspace — the workspace pill would be
+        // identical on every card/row, so drop it and give the scope column
+        // room for the data source + provider.
+        hideWorkspaceInScope: true,
     })
 
     return (
