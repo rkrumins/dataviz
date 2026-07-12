@@ -21,6 +21,7 @@ import pytest
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.bootstrap_worker import (
     BootstrapRunner,
+    BootstrapSuperseded,
     abandon_bootstrap,
     bootstrap_status,
     create_bootstrap_job,
@@ -310,6 +311,50 @@ async def _run() -> None:
     async with db.graphver_session() as s:
         assert await s.get(GraphORM, res["graph_id"]) is None
     assert await svc.get_graph_by_data_source(d) is None
+
+    # ══ D2. a FAILED copy must not leave the graph writable ══════════════════
+    # This is the sharpest edge in the whole design: a half-imported graph has its
+    # head parked at genesis and its projection watermark parked with it. A single
+    # canvas edit would advance the head PAST the partial import commit, un-park the
+    # watermark, and let the projector DROP the (pinned) source graph and reseed it
+    # from a main holding a fraction of the entities — destroying the user's data.
+    d = ds()
+    broken = FakeGraph([_node("urn:a"), _node("urn:a", displayName="clash")], [])
+    res = await _enable(d)
+    out = await _drive(_runner(broken), res["job_id"])
+    assert out["status"] == "failed"
+    with pytest.raises(ConcurrencyError):
+        await svc.open_draft(graph_id=res["graph_id"], owner="bob")
+    with pytest.raises(ConcurrencyError):
+        await svc.apply_ops(graph_id=res["graph_id"], actor="bob", message="edit", ops=[
+            {"op": "create", "entity_kind": "node", "entity_id": "X", "payload": {"displayName": "X"}}])
+    async with db.graphver_session() as s:
+        g = await s.get(GraphORM, res["graph_id"])
+        ps = await s.get(ProjectionStateORM, res["graph_id"])
+        assert g.main_head_commit_seq == 1, "a failed copy must never advance the head"
+        assert ps.projected_commit_seq == ps.target_commit_seq == 1, \
+            "the projection watermark must stay parked (else the projector wipes the source)"
+
+    # ══ D3. abandoning mid-copy fences the worker instead of racing it ═══════
+    d = ds()
+    fake = _graph(nodes=6, edges=3)
+    res = await _enable(d)
+    gid, job_id = res["graph_id"], res["job_id"]
+    runner = _runner(fake)
+    await runner._phase_counting(job_id, gid)
+    await _set_phase(job_id, "nodes")
+    async with db.graphver_session() as s:                  # the worker holds the claim
+        job = await s.get(JobORM, job_id)
+        job.status = "running"
+    runner._epoch[job_id] = 0
+    await abandon_bootstrap(data_source_id=d)               # user gives up mid-copy
+    with pytest.raises(BootstrapSuperseded):
+        await runner._phase_nodes(job_id, gid)              # the in-flight window aborts
+    async with db.graphver_session() as s:
+        assert await s.get(GraphORM, gid) is None
+        orphans = await s.scalar(select(func.count()).select_from(NodeVersionORM).where(
+            NodeVersionORM.graph_id == gid))
+        assert orphans == 0, "the fenced worker must not write rows into a deleted graph"
 
     # ══ E. duplicate identifiers fail; parallel connections merge + report ═══
     d = ds()

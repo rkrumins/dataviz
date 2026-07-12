@@ -937,11 +937,15 @@ export function restoreCommit(
   )
 }
 
-/** Exact impact a restore would have — powers the confirm dialog. */
+/** Impact a restore would have — powers the confirm dialog. Very large restores are
+ *  priced coarsely (`approximate`) rather than dragging millions of payloads through a
+ *  synchronous request just to render a dialog. */
 export interface RestorePreview {
   commitsUndone: number
   nodes: { create: number; update: number; delete: number }
   edges: { create: number; update: number; delete: number }
+  approximate?: boolean
+  touchedEstimate?: number
 }
 
 export function getRestorePreview(

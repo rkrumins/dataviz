@@ -302,16 +302,29 @@ class GraphVersioningService:
                     "imported": 0, "rows": 0}
 
     async def _assert_not_bootstrapping(self, s, graph_id: str) -> None:
-        """A graph whose "enable version control" job is still running has its head
-        parked at genesis and its import commit half-written — writing to it would
-        race the importer (and branch off an empty main). One indexed lookup
-        (``ix_jobs_graph_status``); the UI never gets here because the enable flow
-        shows progress instead of the editor."""
-        active = await s.scalar(select(func.count()).select_from(JobORM).where(
+        """A graph whose "enable version control" job hasn't COMPLETED is not a graph yet:
+        its head is parked at genesis, its seq-2 ``import`` commit is half-written, and its
+        projection watermark is parked so nothing reseeds the source.
+
+        Writing to it in that state is not merely racy — it is destructive. A commit would
+        advance ``main_head_commit_seq`` PAST the partial import commit, un-parking the
+        watermark; the projector would then see work to do, and (the graph being pinned to
+        the data source's real FalkorDB graph) DROP that graph and reseed it from a main
+        that holds a fraction of the entities. One stray canvas edit would destroy the
+        user's source data.
+
+        So the gate covers **failed** jobs too, not just in-flight ones: a failed enablement
+        must be resumed or abandoned, never edited around. One indexed lookup
+        (``ix_jobs_graph_status``)."""
+        unfinished = (await s.execute(select(JobORM.status).where(
             JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
-            JobORM.status.in_(("pending", "running")),
-        ))
-        if active:
+            JobORM.status.in_(("pending", "running", "failed")),
+        ).limit(1))).scalars().first()
+        if unfinished == "failed":
+            raise ConcurrencyError(
+                "enabling version control for this data source didn't finish — resume it "
+                "or cancel it before making changes")
+        if unfinished:
             raise ConcurrencyError(
                 "version control is still being enabled for this data source — "
                 "try again once it finishes")
@@ -1186,12 +1199,20 @@ class GraphVersioningService:
                 ps.target_commit_seq = new_seq
             return restore.id
 
+    # A preview is a synchronous web request, so it must not be allowed to materialize an
+    # arbitrarily large delta: restoring a freshly-enabled 7M-entity graph back to genesis
+    # touches every entity in it. Past this many touched entities we answer with the shape
+    # of the change (how many revisions roll back) and say the item counts are approximate,
+    # rather than dragging millions of payloads through the web tier to render a dialog.
+    _RESTORE_PREVIEW_MAX_TOUCHED = 200_000
+
     async def restore_preview(
         self, *, graph_id: str, commit_id: str,
     ) -> Dict[str, object]:
         """What :meth:`restore_to_commit` would do — exact per-kind create/update/
         delete counts (same compute, same cascade guards, nothing written) plus
-        how many later commits the restore rolls back. Bounded O(touched)."""
+        how many later commits the restore rolls back. Bounded O(touched), and
+        short-circuits to approximate counts above ``_RESTORE_PREVIEW_MAX_TOUCHED``."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
@@ -1200,6 +1221,23 @@ class GraphVersioningService:
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
                 raise ValueError("commit is not on this graph's main")
+
+            commits_undone = await s.scalar(
+                select(func.count()).select_from(CommitORM).where(
+                    CommitORM.graph_id == graph_id,
+                    CommitORM.branch_id == main_id,
+                    CommitORM.commit_seq > target.commit_seq,
+                    CommitORM.commit_seq <= graph.main_head_commit_seq,
+                )
+            )
+            touched_n = await self._count_changed_in_window(
+                s, graph_id, main_id, target.commit_seq, graph.main_head_commit_seq)
+            if touched_n > self._RESTORE_PREVIEW_MAX_TOUCHED:
+                # Too big to price exactly without hurting the request. Be honest about it.
+                return {"commitsUndone": int(commits_undone or 0),
+                        "approximate": True, "touchedEstimate": int(touched_n),
+                        "nodes": {"create": 0, "update": 0, "delete": 0},
+                        "edges": {"create": 0, "update": 0, "delete": 0}}
 
             deltas = await self._restore_delta(s, graph, main_id, target)
             kind_by_entity = await self._kind_map_multi(
@@ -1210,16 +1248,22 @@ class GraphVersioningService:
             for d in deltas:
                 bucket = "edges" if kind_by_entity.get(d.entity_id) == "edge" else "nodes"
                 counts[bucket][d.op] = counts[bucket].get(d.op, 0) + 1
-            commits_undone = await s.scalar(
-                select(func.count()).select_from(CommitORM).where(
-                    CommitORM.graph_id == graph_id,
-                    CommitORM.branch_id == main_id,
-                    CommitORM.commit_seq > target.commit_seq,
-                    CommitORM.commit_seq <= graph.main_head_commit_seq,
-                )
-            )
-            return {"commitsUndone": int(commits_undone or 0),
+            return {"commitsUndone": int(commits_undone or 0), "approximate": False,
                     "nodes": counts["nodes"], "edges": counts["edges"]}
+
+    async def _count_changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> int:
+        """How many entities commits in ``(from_seq, to_seq]`` touched — the size of the
+        restore, WITHOUT materializing the id set (which for a restore-to-genesis on a
+        freshly-enabled graph is every entity in it)."""
+        total = 0
+        for model in (NodeVersionORM, EdgeVersionORM):
+            total += int(await s.scalar(
+                select(func.count(func.distinct(model.entity_id))).where(
+                    model.graph_id == graph_id, model.branch_id == branch_id,
+                    model.commit_seq > from_seq, model.commit_seq <= to_seq,
+                )
+            ) or 0)
+        return total
 
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #

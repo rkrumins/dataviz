@@ -1297,16 +1297,16 @@ async def resolve_graph_get(
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
-    return await _with_bootstrap(res, data_source_id)
+    return await _with_bootstrap(res, data_source_id, ws_id)
 
 
-async def _with_bootstrap(res: dict, data_source_id: str) -> dict:
+async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str) -> dict:
     """Attach the enablement job when the graph is still at genesis — the only window in
     which one can exist, so the lookup costs nothing on a live graph."""
     if int(res.get("main_head_commit_seq") or 0) > 1:
         return res
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
-    job = await bootstrap_status(data_source_id=data_source_id)
+    job = await bootstrap_status(data_source_id=data_source_id, workspace_id=ws_id)
     if job is not None and job.get("status") in ("pending", "running", "failed"):
         return {**res, "bootstrap": job}
     return res

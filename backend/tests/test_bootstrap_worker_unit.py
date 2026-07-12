@@ -38,15 +38,21 @@ def test_version_id_differs_per_entity_and_per_commit():
 # ── phase machine ────────────────────────────────────────────────────────────
 
 def test_phase_order_validates_before_anything_becomes_visible():
-    # The whole safety story: prove the copy, THEN publish heads, THEN flip the head.
+    # The whole safety story: prove the copy, publish heads, stamp the projector's
+    # delete anchors — and only THEN flip the head, which is the one irreversible step.
     assert PHASES.index("validate") < PHASES.index("heads") < PHASES.index("finalize")
-    assert PHASES.index("backfill") > PHASES.index("finalize")
+    assert PHASES.index("backfill") < PHASES.index("finalize"), (
+        "finalize makes the graph live and writable; if the delete anchors (n.entityId, "
+        "r.id) aren't stamped yet, an edit duplicates nodes and a delete silently no-ops"
+    )
+    assert PHASES[-1] == "finalize"
 
 
 def test_next_phase_walks_to_the_end():
     assert _next_phase("counting") == "nodes"
     assert _next_phase("edges") == "validate"
-    assert _next_phase("backfill") is None
+    assert _next_phase("backfill") == "finalize"
+    assert _next_phase("finalize") is None
 
 
 def test_percent_tracks_the_scan_and_never_exceeds_its_span():

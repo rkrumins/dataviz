@@ -154,9 +154,10 @@ async def bootstrap_status_endpoint(
 ):
     """Live progress of the enablement job — phase, counts, percent, and (on a terminal
     job) the integrity report. Deliberately NOT flag-gated: a job started before an
-    admin turned versioning off must still be observable."""
+    admin turned versioning off must still be observable. Scoped to ``ws_id`` so a job
+    is never visible (nor its existence leaked) across tenants."""
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
-    status = await bootstrap_status(data_source_id=dataSourceId)
+    status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
     if status is None:
         raise HTTPException(status_code=404, detail="no enablement job for this data source")
     return status

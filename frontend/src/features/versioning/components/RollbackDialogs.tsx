@@ -274,6 +274,18 @@ export function RestoreDialog({
           <span className="inline-flex items-center gap-2 text-ink-muted">
             <Loader2 className="w-3.5 h-3.5 animate-spin" /> Working out the exact impact…
           </span>
+        ) : pv?.approximate ? (
+          <>
+            Rolls back{' '}
+            <span className="font-semibold text-ink">
+              {pv.commitsUndone.toLocaleString()} later revision{pv.commitsUndone === 1 ? '' : 's'}
+            </span>
+            , affecting roughly{' '}
+            <span className="font-semibold text-ink">
+              {(pv.touchedEstimate ?? 0).toLocaleString()} items
+            </span>
+            . This is a big change — it may take a few minutes.
+          </>
         ) : pv ? (
           pv.commitsUndone === 0 && parts.length === 0 ? (
             <>The graph already matches this point — restoring would change nothing.</>

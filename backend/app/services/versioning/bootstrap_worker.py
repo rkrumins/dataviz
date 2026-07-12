@@ -9,7 +9,7 @@ spinner with no idea whether anything survived.
 
 This module replaces it with a job:
 
-  counting → nodes → edges → validate → heads → merkle → finalize → backfill → done
+  counting → nodes → edges → validate → heads → merkle → backfill → finalize → done
 
 **Bounded memory.** The source is scanned in ID-RANGE windows (never OFFSET — deep
 offsets re-scan and go quadratic) and written in per-window transactions, so peak
@@ -41,7 +41,10 @@ fast-forwards the projection watermark instead of dropping and rewriting 10M
 entities (which would also wipe the `:AGGREGATED` rollups and force an hours-long
 re-aggregation). The one thing the projector needs that a raw source graph may lack
 is the delete-anchoring keys (`n.entityId`, `r.id`); `backfill` adds them in place,
-additively, before any write is allowed.
+additively — and it runs BEFORE `finalize`, so the graph is never live without them.
+
+`finalize` is therefore the only irreversible step, and it is last: until it runs the
+data source is simply un-versioned, and abandoning the job leaves no trace.
 """
 from __future__ import annotations
 
@@ -87,12 +90,21 @@ BOOTSTRAP_JOB_TYPE = "bootstrap"
 
 # Phase order. `last_cursor` is prefixed with the phase it belongs to, so a resume
 # re-enters exactly where it stopped.
-PHASES = ("counting", "nodes", "edges", "validate", "heads", "merkle", "finalize", "backfill")
+#
+# `finalize` is LAST for a reason: it is the single irreversible step (it flips the head,
+# which makes the graph live and writable). Everything that the live graph depends on must
+# already be true when it runs — including `backfill`, which stamps the projector's
+# delete/update anchors (`n.entityId`, `r.id`) onto the source graph. Finalizing first and
+# backfilling after would leave a window (and, if backfill then failed, a permanent state)
+# where the graph is editable but the projector cannot anchor: an edit would MERGE a
+# DUPLICATE node beside the original, and a delete would match nothing and silently leave
+# the entity on the canvas.
+PHASES = ("counting", "nodes", "edges", "validate", "heads", "merkle", "backfill", "finalize")
 
 # Percent shown to the user. Scanning dominates the wall clock, so it owns the bulk
 # of the bar; the tail phases are bounded work with honest, distinct labels.
 _PHASE_FLOOR = {"counting": 0, "nodes": 2, "edges": 2, "validate": 72,
-                "heads": 76, "merkle": 88, "finalize": 92, "backfill": 95}
+                "heads": 76, "merkle": 88, "backfill": 92, "finalize": 98}
 _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 
 
@@ -191,7 +203,7 @@ class _Reservoir:
 
 
 class BootstrapRunner:
-    """Executes bootstrap (`job_type='ingest'`) jobs. Hosted by the versioning worker."""
+    """Executes bootstrap (`job_type='bootstrap'`) jobs. Hosted by the versioning worker."""
 
     def __init__(self, graph_factory, *, session_factory=None, consumer: str = "boot-1"):
         self._factory = graph_factory
@@ -199,6 +211,7 @@ class BootstrapRunner:
         self._consumer = consumer
         self._svc = GraphVersioningService()
         self._merkle = MerkleStore()
+        self._epoch: Dict[str, int] = {}     # job_id → the claim we hold (see _own)
 
     # ---------------------------------------------------------------- infra --
     async def _client(self, ps: ProjectionStateORM):
@@ -208,10 +221,13 @@ class BootstrapRunner:
         return c
 
     async def claim_one(self) -> Optional[str]:
-        """Claim a pending job, or take over one whose worker died (stale heartbeat).
+        """Claim a pending job, or take over one whose worker looks dead (stale heartbeat).
 
-        `JobORM` IS the durable queue — no second Redis stream to keep alive. The
-        heartbeat is `updated_at`, refreshed on every window commit.
+        `JobORM` IS the durable queue — no second Redis stream to keep alive. The heartbeat
+        is `updated_at`, refreshed on every window commit. `retry_count` doubles as the
+        CLAIM EPOCH: a takeover bumps it, so the previous owner — which may be slow rather
+        than dead, e.g. stuck in a long scan retry — discovers on its next commit that it no
+        longer holds the job and stops instead of double-writing (see :meth:`_own`).
         """
         stale_before = _now_minus(config.INGEST_STALE_SECS)
         async with self._session() as s:
@@ -225,14 +241,29 @@ class BootstrapRunner:
             if row is None:
                 return None
             if row.status == "running":
-                row.retry_count += 1
+                row.retry_count += 1                    # fence out the previous owner
                 logger.warning("taking over stale bootstrap job %s (phase=%s cursor=%s)",
                                row.id, row.current_phase, row.last_cursor)
             row.status = "running"
             row.started_at = row.started_at or _now()
             row.updated_at = _now()
             row.error_message = None
+            self._epoch[row.id] = row.retry_count
             return row.id
+
+    def _own(self, job: JobORM) -> JobORM:
+        """Assert we still hold this job, INSIDE the transaction that is about to write.
+
+        Two things can pull the job out from under a running worker: another worker taking
+        it over (stale heartbeat), and the user abandoning it (which deletes the graph).
+        Checking here means the losing worker's write transaction aborts and rolls back
+        rather than committing rows into a job — or a graph — that is no longer its own.
+        """
+        if job.status == "cancelled":
+            raise BootstrapSuperseded("the job was cancelled")
+        if self._epoch.get(job.id) is not None and job.retry_count != self._epoch[job.id]:
+            raise BootstrapSuperseded("another worker took over this job")
+        return job
 
     # ---------------------------------------------------------------- driver --
     async def run_job(self, job_id: str) -> Dict[str, object]:
@@ -245,6 +276,7 @@ class BootstrapRunner:
                     job = await s.get(JobORM, job_id)
                     if job is None or job.status in ("completed", "cancelled"):
                         return {"job_id": job_id, "status": job.status if job else "missing"}
+                    self._own(job)
                     phase = job.current_phase or "counting"
                     graph_id = job.graph_id
                 runner = getattr(self, f"_phase_{phase}")
@@ -252,7 +284,7 @@ class BootstrapRunner:
                 if done:
                     nxt = _next_phase(phase)
                     async with self._session() as s:
-                        job = await s.get(JobORM, job_id)
+                        job = self._own(await s.get(JobORM, job_id))
                         if nxt is None:
                             job.status = "completed"
                             job.current_phase = None
@@ -267,6 +299,12 @@ class BootstrapRunner:
                         # different weight from node payloads).
                         job.batch_size = config.BOOTSTRAP_SCAN_WIDTH
                         job.updated_at = _now()
+        except BootstrapSuperseded as exc:
+            # Not an error: someone else owns this job now (a takeover, or the user
+            # abandoned it). Our last write rolled back; stop quietly.
+            logger.info("bootstrap %s handed off: %s", job_id, exc)
+            self._epoch.pop(job_id, None)
+            return {"job_id": job_id, "status": "superseded"}
         except BootstrapFailure as exc:
             await self._fail(job_id, exc.reason, exc.code)
             return {"job_id": job_id, "status": "failed", "error": exc.reason}
@@ -277,7 +315,7 @@ class BootstrapRunner:
 
     async def _fail(self, job_id: str, reason: str, code: str) -> None:
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             if job is None:
                 return
             job.status = "failed"
@@ -337,7 +375,10 @@ class BootstrapRunner:
         checkpoint tallies + cursor — all in ONE transaction, so the counters can
         never drift from the rows (and a crash rewinds both together)."""
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            # Own it before touching anything: if the job was abandoned, the graph and its
+            # import commit are already gone, and the honest answer is "not mine any more"
+            # — not "the import commit is missing".
+            job = self._own(await s.get(JobORM, job_id))
             ps = await s.get(ProjectionStateORM, graph_id)
             commit = await self._import_commit(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
@@ -367,15 +408,26 @@ class BootstrapRunner:
 
         model = NodeVersionORM if kind == "nodes" else EdgeVersionORM
         async with self._session() as s:
-            written = 0
+            job = self._own(await s.get(JobORM, job_id))    # abort before writing if fenced
+            # ON CONFLICT DO NOTHING is what makes a replayed window a no-op — but it also
+            # silently swallows a genuine duplicate identifier that first appeared in an
+            # EARLIER window (the in-window `seen` set can't see across windows). So trust
+            # the rowcount, not the batch size: whatever didn't insert is a duplicate, and
+            # duplicates fail the job. (Rows and cursor commit together, so a resume never
+            # re-scans a window that landed — a conflict here really is a duplicate.)
+            inserted = 0
             for batch in _chunks(dicts, _rows_per_insert(dicts)):
                 res = await s.execute(
                     pg_insert(model).values(batch).on_conflict_do_nothing(
                         index_elements=["graph_id", "id"]))
-                written += res.rowcount if res.rowcount and res.rowcount > 0 else len(batch)
-            job = await s.get(JobORM, job_id)
+                inserted += res.rowcount if res.rowcount is not None and res.rowcount >= 0 else len(batch)
+            cross_window_dupes = max(0, len(dicts) - inserted)
+            if kind == "nodes":
+                rejects["duplicateUrns"] = int(rejects.get("duplicateUrns", 0)) + cross_window_dupes
+            else:
+                dupes += cross_window_dupes
             summary = _merge_scan_summary(
-                dict(job.summary or {}), kind, scanned=len(rows), written=len(dicts),
+                dict(job.summary or {}), kind, scanned=len(rows), written=inserted,
                 tallies=tallies, rejects=rejects, sample=sample, dupes=dupes)
             job.summary = summary
             job.processed = int(summary["written"]["nodes"]) + int(summary["written"]["edges"])
@@ -386,7 +438,6 @@ class BootstrapRunner:
             job.batch_size = width
             job.updated_at = _now()
             job.last_sequence = job.last_sequence + 1
-        _ = written
         return False                                           # more windows may remain
 
     async def _phase_validate(self, job_id: str, graph_id: str) -> bool:
@@ -486,7 +537,7 @@ class BootstrapRunner:
             "merkle": "pending",
         }
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             summary = dict(job.summary or {})
             summary["report"] = report
             job.summary = summary
@@ -525,7 +576,7 @@ class BootstrapRunner:
                          kind=("node" if kind == "nodes" else "edge"),
                          now=_now(), w=config.BOOTSTRAP_WINDOW))).one()
             n, last = int(row[0]), row[1]
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             if n == 0:
                 if kind == "nodes":
                     job.last_cursor = "heads:edges:"
@@ -544,7 +595,7 @@ class BootstrapRunner:
         NULL (the column is expressly "async-filled for bulk") and the report SAYS so,
         rather than OOM-ing to produce a number nobody asked for yet."""
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             commit = await self._import_commit(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             total = int(job.total or 0)
@@ -582,7 +633,7 @@ class BootstrapRunner:
         every entity (and wipe the `:AGGREGATED` rollups) to arrive back where we are.
         """
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             graph = await s.get(GraphORM, graph_id)
             commit = await self._import_commit(s, graph_id)
             main = await s.get(BranchORM, await self._main_branch_id(s, graph_id))
@@ -622,7 +673,7 @@ class BootstrapRunner:
         if max_id is None or lo > max_id:
             if kind == "nodes":
                 async with self._session() as s:
-                    job = await s.get(JobORM, job_id)
+                    job = self._own(await s.get(JobORM, job_id))
                     job.last_cursor = "backfill:edges:0"
                     job.updated_at = _now()
                 return False
@@ -630,7 +681,7 @@ class BootstrapRunner:
         cypher = _BACKFILL_NODES if kind == "nodes" else _BACKFILL_EDGES
         await _q(client, cypher, {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = self._own(await s.get(JobORM, job_id))
             job.last_cursor = f"backfill:{kind}:{lo + width}"
             job.progress = _PHASE_FLOOR["backfill"]
             job.updated_at = _now()
@@ -875,11 +926,20 @@ async def create_bootstrap_job(
         return {"graph_id": gid, "job_id": job.id, "status": "pending"}
 
 
-async def bootstrap_status(*, data_source_id: str) -> Optional[Dict[str, object]]:
-    """The data source's latest enablement job, in the shape the UI polls."""
+async def bootstrap_status(
+    *, data_source_id: str, workspace_id: Optional[str] = None,
+) -> Optional[Dict[str, object]]:
+    """The data source's latest enablement job, in the shape the UI polls.
+
+    ``workspace_id`` scopes the lookup for tenant isolation — a graph must belong to the
+    workspace in the URL, and existence isn't leaked across tenants (the rest of the
+    versioning API enforces the same rule via ``graph_in_workspace``)."""
     async with db.graphver_session() as s:
-        job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
+        conds = [JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                 JobORM.data_source_id == data_source_id]
+        if workspace_id is not None:
+            conds.append(JobORM.workspace_id == workspace_id)
+        job = (await s.execute(select(JobORM).where(*conds
         ).order_by(JobORM.created_at.desc()))).scalars().first()
         if job is None:
             return None
@@ -930,19 +990,28 @@ async def retry_bootstrap(*, data_source_id: str, mode: str = "resume") -> Dict[
 
 
 async def abandon_bootstrap(*, data_source_id: str) -> Dict[str, object]:
-    """Give up on enablement and leave the data source exactly as it was: the graph
-    shell and everything the job imported are removed, so it reads as un-versioned
-    again. Refuses once the head has flipped (that graph is live — use the versioning
-    UI instead)."""
+    """Give up on enablement and leave the data source exactly as it was: the graph shell
+    and everything the job imported are removed, so it reads as un-versioned again.
+    Refuses once the head has flipped (that graph is live — use the versioning UI).
+
+    Safe to call while a worker is mid-copy. ``status='cancelled'`` and the deletes land in
+    ONE transaction, and every worker write re-reads the job in its own transaction and
+    aborts if the job is cancelled (``BootstrapRunner._own``) — so the worker either
+    committed its window before us (and we delete those rows too) or rolls back after us.
+    It cannot commit rows into a graph we have deleted."""
     async with db.graphver_session() as s:
         job = (await s.execute(select(JobORM).where(
             JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
-        ).order_by(JobORM.created_at.desc()))).scalars().first()
+        ).order_by(JobORM.created_at.desc()).with_for_update())).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
+        if job.status == "cancelled":
+            return {"jobId": job.id, "status": "cancelled"}
         graph = await s.get(GraphORM, job.graph_id)
         if graph is not None and graph.main_head_commit_seq > 1:
             raise ConcurrencyError("version control is already enabled for this data source")
+        job.status = "cancelled"                  # fences the worker (see _own)
+        job.updated_at = _now()
         gid = job.graph_id
         for table in ("node_versions", "edge_versions", "merkle_nodes", "working_changes"):
             await s.execute(text(f'DELETE FROM {_t(table)} WHERE graph_id = :g').bindparams(g=gid))
@@ -950,8 +1019,7 @@ async def abandon_bootstrap(*, data_source_id: str) -> Dict[str, object]:
             await s.execute(text(f'DELETE FROM {_t(table)} WHERE graph_id = :g').bindparams(g=gid))
         if graph is not None:
             await s.delete(graph)
-        job.status = "cancelled"
-        job.updated_at = _now()
+        logger.info("bootstrap %s abandoned; graph %s removed", job.id, gid)
         return {"jobId": job.id, "status": "cancelled"}
 
 
@@ -990,6 +1058,11 @@ class BootstrapFailure(Exception):
     def __init__(self, reason: str, code: str = "integrity"):
         super().__init__(reason)
         self.reason, self.code = reason, code
+
+
+class BootstrapSuperseded(Exception):
+    """We no longer own this job — another worker took it over, or the user abandoned it.
+    Not a failure: the write that discovered it rolls back, and we simply stop."""
 
 
 def _explain_failed_checks(failed: List[dict]) -> str:
