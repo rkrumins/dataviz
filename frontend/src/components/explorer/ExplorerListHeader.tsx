@@ -72,8 +72,8 @@ export function ExplorerListHeader({
         'border-b border-glass-border/50',
         'text-[10px] uppercase tracking-wider text-ink-muted font-bold',
         withCheckbox
-          ? 'grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]'
-          : 'grid-cols-[minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]',
+          ? 'grid-cols-[28px_minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]'
+          : 'grid-cols-[minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]',
       )}
     >
       {withCheckbox && <span />}

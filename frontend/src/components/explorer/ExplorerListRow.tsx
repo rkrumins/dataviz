@@ -105,6 +105,8 @@ export interface ExplorerListRowProps {
   density?: 'compact' | 'comfortable' | 'spacious'
   /** Provider the view's data source is built from (shown as a scope pill). */
   providerInfo?: DataSourceProviderInfo
+  /** Hide the (redundant) workspace pill when the whole list is one workspace. */
+  hideWorkspaceInScope?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -125,6 +127,7 @@ export function ExplorerListRow({
   onToggleSelect,
   density = 'comfortable',
   providerInfo,
+  hideWorkspaceInScope,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
@@ -150,8 +153,8 @@ export function ExplorerListRow({
         className={cn(
           'grid items-center gap-3',
           onToggleSelect
-            ? 'grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]'
-            : 'grid-cols-[minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]',
+            ? 'grid-cols-[28px_minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]'
+            : 'grid-cols-[minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]',
           'rounded-xl px-3',
           densityPaddingClass,
           'hover:bg-black/5 dark:hover:bg-white/5',
@@ -201,7 +204,7 @@ export function ExplorerListRow({
         </div>
 
         {/* ── Workspace + Data source pills ── */}
-        <div className="inline-flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
           <ViewScopeBadge
             workspaceId={view.workspaceId}
             workspaceName={view.workspaceName}
@@ -209,6 +212,7 @@ export function ExplorerListRow({
             dataSourceName={view.dataSourceName}
             providerName={providerInfo?.providerName}
             providerType={providerInfo?.providerType}
+            hideWorkspace={hideWorkspaceInScope}
           />
         </div>
 

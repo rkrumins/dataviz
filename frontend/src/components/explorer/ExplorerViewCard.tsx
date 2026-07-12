@@ -208,6 +208,8 @@ export interface ExplorerViewCardProps {
   density?: 'compact' | 'comfortable' | 'spacious'
   /** Provider the view's data source is built from (shown as a scope pill). */
   providerInfo?: DataSourceProviderInfo
+  /** Hide the (redundant) workspace pill when the grid is one workspace. */
+  hideWorkspaceInScope?: boolean
 }
 
 function initials(name?: string): string {
@@ -232,6 +234,7 @@ export function ExplorerViewCard({
   onToggleSelect,
   density = 'comfortable',
   providerInfo,
+  hideWorkspaceInScope,
 }: ExplorerViewCardProps) {
   // Density-derived classes. Compact noticeably reduces vertical rhythm
   // (padding, section margins, suppressed mini preview) so a dense grid
@@ -441,6 +444,7 @@ export function ExplorerViewCard({
             dataSourceName={view.dataSourceName}
             providerName={providerInfo?.providerName}
             providerType={providerInfo?.providerType}
+            hideWorkspace={hideWorkspaceInScope}
           />
           <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
             <VisIcon className="h-2.5 w-2.5" />
