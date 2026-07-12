@@ -44,7 +44,7 @@ spec:
               echo "Dependencies ready."
       containers:
         - name: versioning-worker
-          image: REGISTRY/synodic-worker:latest
+          image: REGISTRY/aggregation-worker:latest
           # The worker image bundles the whole backend; run the versioning
           # projection module instead of the aggregation one (Dockerfile CMD).
           command: ["python", "-m", "backend.app.services.versioning"]

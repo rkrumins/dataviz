@@ -46,7 +46,7 @@ spec:
               echo "All dependencies ready."
       containers:
         - name: stats-service
-          image: REGISTRY/synodic-stats-service:latest
+          image: REGISTRY/stats-service:latest
           ports:
             - containerPort: 8092
               name: health

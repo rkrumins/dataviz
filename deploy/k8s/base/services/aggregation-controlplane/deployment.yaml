@@ -40,7 +40,7 @@ spec:
               echo "All dependencies ready."
       containers:
         - name: aggregation-controlplane
-          image: REGISTRY/synodic-controlplane:latest
+          image: REGISTRY/aggregation-controlplane:latest
           ports:
             - containerPort: 8091
               name: http

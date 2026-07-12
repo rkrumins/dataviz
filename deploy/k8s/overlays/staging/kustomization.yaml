@@ -10,24 +10,24 @@ patches:
   - path: patches/ingress-patch.yaml
 
 images:
-  - name: REGISTRY/synodic-viz
-    newName: gcr.io/PROJECT_ID/synodic-viz
+  - name: REGISTRY/viz-service
+    newName: gcr.io/PROJECT_ID/viz-service
     newTag: staging-latest
-  - name: REGISTRY/synodic-controlplane
-    newName: gcr.io/PROJECT_ID/synodic-controlplane
+  - name: REGISTRY/aggregation-controlplane
+    newName: gcr.io/PROJECT_ID/aggregation-controlplane
     newTag: staging-latest
-  - name: REGISTRY/synodic-worker
-    newName: gcr.io/PROJECT_ID/synodic-worker
+  - name: REGISTRY/aggregation-worker
+    newName: gcr.io/PROJECT_ID/aggregation-worker
     newTag: staging-latest
-  - name: REGISTRY/synodic-stats-service
-    newName: gcr.io/PROJECT_ID/synodic-stats-service
+  - name: REGISTRY/stats-service
+    newName: gcr.io/PROJECT_ID/stats-service
     newTag: staging-latest
-  - name: REGISTRY/synodic-frontend
-    newName: gcr.io/PROJECT_ID/synodic-frontend
+  - name: REGISTRY/frontend
+    newName: gcr.io/PROJECT_ID/frontend
     newTag: staging-latest
-  - name: REGISTRY/synodic-falkordb
-    newName: gcr.io/PROJECT_ID/synodic-falkordb
+  - name: REGISTRY/falkordb
+    newName: gcr.io/PROJECT_ID/falkordb
     newTag: staging-latest
-  - name: REGISTRY/synodic-seed
-    newName: gcr.io/PROJECT_ID/synodic-seed
+  - name: REGISTRY/seed
+    newName: gcr.io/PROJECT_ID/seed
     newTag: staging-latest

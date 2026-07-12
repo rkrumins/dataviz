@@ -28,10 +28,10 @@ build-viz: ## Build viz-service image
 	docker build -t $(REGISTRY)/viz-service:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.viz $(REPO_ROOT)
 
 build-controlplane: ## Build controlplane image
-	docker build -t $(REGISTRY)/controlplane:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.controlplane $(REPO_ROOT)
+	docker build -t $(REGISTRY)/aggregation-controlplane:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.controlplane $(REPO_ROOT)
 
 build-worker: ## Build aggregation worker image
-	docker build -t $(REGISTRY)/worker:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.aggregation $(REPO_ROOT)
+	docker build -t $(REGISTRY)/aggregation-worker:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.aggregation $(REPO_ROOT)
 
 build-stats: ## Build stats/insights service image
 	docker build -t $(REGISTRY)/stats-service:$(TAG) -f $(REPO_ROOT)/backend/Dockerfile.insights $(REPO_ROOT)
@@ -53,10 +53,10 @@ push-viz: ## Push viz-service image
 	docker push $(REGISTRY)/viz-service:$(TAG)
 
 push-controlplane: ## Push controlplane image
-	docker push $(REGISTRY)/controlplane:$(TAG)
+	docker push $(REGISTRY)/aggregation-controlplane:$(TAG)
 
 push-worker: ## Push worker image
-	docker push $(REGISTRY)/worker:$(TAG)
+	docker push $(REGISTRY)/aggregation-worker:$(TAG)
 
 push-stats: ## Push stats/insights service image
 	docker push $(REGISTRY)/stats-service:$(TAG)
@@ -80,6 +80,7 @@ dry-run: ## Preview rendered manifests
 		sed "s|us-docker.pkg.dev/PROJECT_ID/synodic|$(REGISTRY)|g" | \
 		sed "s|:dev-latest|:$(TAG)|g" | \
 		sed "s|:staging-latest|:$(TAG)|g" | \
+		sed "s|:prod-latest|:$(TAG)|g" | \
 		sed "s|:v1.0.0|:$(TAG)|g"
 
 apply: ## Apply manifests to the cluster
@@ -88,6 +89,7 @@ apply: ## Apply manifests to the cluster
 		sed "s|us-docker.pkg.dev/PROJECT_ID/synodic|$(REGISTRY)|g" | \
 		sed "s|:dev-latest|:$(TAG)|g" | \
 		sed "s|:staging-latest|:$(TAG)|g" | \
+		sed "s|:prod-latest|:$(TAG)|g" | \
 		sed "s|:v1.0.0|:$(TAG)|g" | \
 		envsubst | kubectl apply -f -
 
@@ -97,7 +99,7 @@ deploy: build push apply ## Full pipeline: build → push → apply
 
 seed: ## Run the optional demo data seeder job
 	@cd $(CURDIR) && cat base/services/seed/job.yaml | \
-		sed "s|REGISTRY/synodic-seed:latest|$(REGISTRY)/seed:$(TAG)|g" | \
+		sed "s|REGISTRY/seed:latest|$(REGISTRY)/seed:$(TAG)|g" | \
 		kubectl apply -n synodic -f -
 
 # ── Utilities ──────────────────────────────────────────────────────

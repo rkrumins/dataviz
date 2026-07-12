@@ -22,7 +22,7 @@ spec:
         app.kubernetes.io/name: frontend
         app.kubernetes.io/component: ui
     spec:
-      serviceAccountName: synodic-frontend
+      serviceAccountName: frontend
       terminationGracePeriodSeconds: 15
       initContainers:
         - name: wait-for-deps
@@ -36,7 +36,7 @@ spec:
               echo "All dependencies ready."
       containers:
         - name: frontend
-          image: REGISTRY/synodic-frontend:latest
+          image: REGISTRY/frontend:latest
           # R-M2: drain before SIGTERM so nginx deregisters from the LB before
           # it stops accepting — avoids 502s on rollout / scale-down.
           lifecycle:
