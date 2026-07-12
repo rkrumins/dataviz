@@ -12,9 +12,12 @@ from typing import Dict, List, Optional, Sequence, Set
 from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import BaseModel
+
 from ..models import (
     ViewORM,
     ViewFavouriteORM,
+    ViewVisitORM,
     ViewLayoutOverlayORM,
     WorkspaceORM,
     ContextModelORM,
@@ -1023,6 +1026,85 @@ def _apply_view_filters(
         )
 
     return query
+
+
+class RecentViewEntry(BaseModel):
+    """One entry in the user's "Continue where you left off" strip. Shaped to
+    match the frontend's existing RecentViewEntry so consumers are unchanged."""
+    viewId: str
+    viewName: str
+    viewType: str
+    icon: Optional[str] = None
+    workspaceId: Optional[str] = None
+    workspaceName: Optional[str] = None
+    dataSourceId: Optional[str] = None
+    dataSourceName: Optional[str] = None
+    visitedAt: str
+
+
+async def record_view_visit(
+    session: AsyncSession, view_id: str, user_id: Optional[str],
+) -> None:
+    """Upsert this user's visit to a view. Anonymous is a no-op — recents are
+    per-identity by definition (the localStorage version leaked one user's
+    recents to the next user on a shared browser)."""
+    if not user_id or user_id == "anonymous":
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    existing = (await session.execute(
+        select(ViewVisitORM).where(
+            ViewVisitORM.view_id == view_id,
+            ViewVisitORM.user_id == user_id,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        existing.visited_at = now
+    else:
+        session.add(ViewVisitORM(view_id=view_id, user_id=user_id, visited_at=now))
+    await session.flush()
+
+
+async def list_recent_views(
+    session: AsyncSession, user_id: Optional[str], *, limit: int = 5,
+) -> List[RecentViewEntry]:
+    """This user's most recently visited views, newest first.
+
+    Joined against the LIVE view rows, so names/scope are never a stale snapshot
+    and a deleted view drops out on its own (no more clicking a recent entry into
+    a 404).
+    """
+    if not user_id or user_id == "anonymous":
+        return []
+    rows = (await session.execute(
+        select(ViewORM, ViewVisitORM.visited_at)
+        .join(ViewVisitORM, ViewVisitORM.view_id == ViewORM.id)
+        .where(
+            ViewVisitORM.user_id == user_id,
+            ViewORM.deleted_at.is_(None),
+        )
+        .order_by(ViewVisitORM.visited_at.desc())
+        .limit(limit)
+    )).all()
+
+    out: List[RecentViewEntry] = []
+    for view_row, visited_at in rows:
+        enriched = await _to_enriched_response(session, view_row, user_id)
+        try:
+            cfg = json.loads(view_row.config or "{}")
+        except (TypeError, ValueError):
+            cfg = {}
+        out.append(RecentViewEntry(
+            viewId=enriched.id,
+            viewName=enriched.name,
+            viewType=enriched.view_type,
+            icon=cfg.get("icon"),
+            workspaceId=enriched.workspace_id,
+            workspaceName=enriched.workspace_name,
+            dataSourceId=enriched.data_source_id,
+            dataSourceName=enriched.data_source_name,
+            visitedAt=visited_at,
+        ))
+    return out
 
 
 def _view_order_by(sort: Optional[str]):
