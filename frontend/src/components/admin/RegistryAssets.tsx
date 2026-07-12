@@ -6,23 +6,32 @@
  *  Right: scrollable asset list with search, filters, bulk actions,
  *         lazy stats, blast-radius unregister, and inline route step
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
     AlertTriangle, Zap, X, Check, ChevronDown, ChevronLeft, ChevronRight,
-    Plus, WifiOff, ArrowUpDown,
+    Plus, WifiOff, ArrowUpDown, ArrowUpRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     providerService,
     friendlyError,
+    isWarmingError,
     type ProviderResponse,
     type ProviderImpactResponse,
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
+import {
+    useProviders,
+    useProviderAssets,
+    useProviderCatalog,
+    useAllProviderCounts,
+    PROVIDER_ASSETS_QUERY_KEY,
+    PROVIDER_CATALOG_QUERY_KEY,
+} from '@/hooks/useProviderAssets'
 import { workspaceService } from '@/services/workspaceService'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
@@ -33,9 +42,10 @@ import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
 import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
-import type { Envelope, AssetListPayload, AssetStatsPayload } from '@/types/insights'
+import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
+import { DataSourceProfileDrawer } from '@/components/insights/DataSourceProfileDrawer'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
 
@@ -126,17 +136,20 @@ const TYPE_COLOURS = [
 
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
-    providerId, assetName, isRegistered, isSelected,
-    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge
+    providerId, assetName, isRegistered, isSelected, catalogId,
+    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge, onOpenProfile
 }: {
     providerId: string
     assetName: string
     isRegistered: boolean
     isSelected: boolean
+    /** Present once the asset is registered — enables the insights link. */
+    catalogId?: string
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
     onPurge?: (name: string, opts?: { skipReaggregate?: boolean }) => void
+    onOpenProfile: (catalogId: string) => void
     boundWorkspaceName?: string
 }) {
     const [expanded, setExpanded] = useState(false)
@@ -338,6 +351,16 @@ function AssetRow({
                                 <RefreshCw className="w-3 h-3" />
                             )}
                         </button>
+                        {catalogId && (
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onOpenProfile(catalogId) }}
+                                title="Open data source profile"
+                                aria-label={`Open profile for ${assetName}`}
+                                className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                            >
+                                <ArrowUpRight className="w-3.5 h-3.5" />
+                            </button>
+                        )}
                     </div>
 
                     <div className="flex items-center gap-3">
@@ -711,18 +734,29 @@ export function RegistryAssets() {
     const initialProvider = searchParams.get('provider')
     const { showToast, showLoading, hideLoading } = useToast()
 
-    // Providers
-    const [providers, setProviders] = useState<ProviderResponse[]>([])
-    const [providersLoading, setProvidersLoading] = useState(true)
+    // Providers (React Query — shared cache with the counts fan-out below).
+    const { data: providers = [], isLoading: providersLoading } = useProviders()
     const [selectedProviderId, setSelectedProviderId] = useState<string | null>(initialProvider)
 
-    // Per-provider asset state
-    const [assets, setAssets] = useState<string[]>([])
-    const [assetsEnvelope, setAssetsEnvelope] = useState<Envelope<AssetListPayload> | null>(null)
-    const [existingCatalogs, setExistingCatalogs] = useState<CatalogItemResponse[]>([])
+    // Per-provider asset + catalog state, sourced from React Query so the
+    // list is eager, self-updating (invalidate after refresh; poll while a
+    // cold cache is still computing), and globally consistent. `selected`
+    // stays local and starts EMPTY — nothing is pre-selected (was: every
+    // unregistered asset auto-checked, forcing a Clear on every visit).
+    const assetsQuery = useProviderAssets(selectedProviderId)
+    const catalogQuery = useProviderCatalog(selectedProviderId)
+    const assetsEnvelope = assetsQuery.data ?? null
+    const assets = assetsEnvelope?.data?.assets ?? []
+    // Stable ref so the callbacks that depend on it (re-aggregate, purge,
+    // unregister) aren't rebuilt every render.
+    const existingCatalogs = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data])
+    const assetsLoading = assetsQuery.isLoading
+    // Only treat as a hard error when we have nothing to show — a failed
+    // background refetch keeps the last good list visible.
+    const assetsError = (!assetsQuery.data && assetsQuery.error)
+        ? (assetsQuery.error.message || 'Failed to load assets.')
+        : ''
     const [selected, setSelected] = useState<Set<string>>(new Set())
-    const [assetsLoading, setAssetsLoading] = useState(false)
-    const [assetsError, setAssetsError] = useState('')
 
     // Filters
     const [searchQuery, setSearchQuery] = useState('')
@@ -733,7 +767,7 @@ export function RegistryAssets() {
     // per-row stats fetches are needed to order the whole list.
     const [sortBy, setSortBy] = useState<'name' | 'size' | 'refreshed'>('name')
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
-    const [pageSize, setPageSize] = useState<10 | 25 | 50>(25)
+    const [pageSize, setPageSize] = useState<10 | 25 | 50>(10)
     const [page, setPage] = useState(0)
     // Sort menu (house dropdown pattern — click-outside to dismiss,
     // same as RefreshControl's overflow menu in this toolbar).
@@ -766,78 +800,31 @@ export function RegistryAssets() {
         initialValue: AggregationOverridesValue
     } | null>(null)
 
-    // Provider asset count cache (assetId → count)
-    const [providerAssetCounts, setProviderAssetCounts] = useState<Record<string, { total: number; registered: number }>>({})
+    // Eager, global per-provider counts for the sidebar badges + Catalog
+    // Summary. Fans out list + catalog queries for EVERY provider (sharing
+    // the single-provider query keys, so no double fetch) — so counts are
+    // accurate on first paint instead of filling in only as you click each
+    // provider.
+    const providerCounts = useAllProviderCounts(providers)
 
     // QueryClient at the parent level so the panel's Refresh button can
     // invalidate every per-row asset-stats query for the active provider.
     const queryClient = useQueryClient()
 
-    // Load all providers
-    const loadProviders = useCallback(async () => {
-        setProvidersLoading(true)
-        try {
-            const list = await providerService.list()
-            setProviders(list)
-            if (!selectedProviderId && list.length > 0) {
-                setSelectedProviderId(list[0].id)
-            }
-        } catch { /* swallow */ } finally {
-            setProvidersLoading(false)
-        }
-    }, [selectedProviderId])
-
-    useEffect(() => { loadProviders() }, [])
-
-    // Load assets when provider changes
+    // Auto-select the first provider once the list loads (unless the URL
+    // already named one).
     useEffect(() => {
-        if (!selectedProviderId) return
-        let mounted = true
-        // Abort the previous provider's in-flight list fetch on switch —
-        // without this, rapidly flicking through providers piles up
-        // superseded requests that all run to completion server-side.
-        const abort = new AbortController()
-        setAssetsLoading(true)
-        setAssetsError('')
+        if (!selectedProviderId && providers.length > 0) {
+            setSelectedProviderId(providers[0].id)
+        }
+    }, [providers, selectedProviderId])
+
+    // Reset the search box, filter, and selection when switching providers
+    // (the asset list itself is fetched by useProviderAssets above).
+    useEffect(() => {
         setSearchQuery('')
         setStatusFilter('all')
-
-        Promise.all([
-            providerService.listAssets(selectedProviderId, abort.signal),
-            catalogService.list(selectedProviderId),
-        ]).then(([res, existing]) => {
-            if (!mounted) return
-            // res is an Envelope<{ assets: string[] }>. On a cold cache
-            // (`computing` / `unavailable`) `data` is null; render an empty
-            // list and let the user retry — the worker will populate the
-            // cache shortly. The "Refresh" button reissues the call.
-            // We also retain the envelope so the panel can surface
-            // ``meta.last_error`` / ``meta.provider_health`` when the
-            // background discovery couldn't reach the provider (e.g.
-            // wrong host / port), instead of showing a silent empty list.
-            setAssetsEnvelope(res)
-            const assetList = res.data?.assets ?? []
-            setAssets(assetList)
-            setExistingCatalogs(existing)
-            const existingSet = new Set(existing.map((c: any) => c.sourceIdentifier).filter(Boolean))
-            setSelected(new Set(assetList.filter((a: string) => !existingSet.has(a))))
-
-            // Cache counts for sidebar — count by matching physical assets, not raw catalog length
-            setProviderAssetCounts(prev => ({
-                ...prev,
-                [selectedProviderId]: {
-                    total: assetList.length,
-                    registered: assetList.filter((a: string) => existingSet.has(a)).length,
-                }
-            }))
-        }).catch(err => {
-            if (mounted && err?.name !== 'AbortError') {
-                setAssetsError(err.message || 'Failed to load assets.')
-            }
-        }).finally(() => {
-            if (mounted) setAssetsLoading(false)
-        })
-        return () => { mounted = false; abort.abort() }
+        setSelected(new Set())
     }, [selectedProviderId])
 
     // Select provider + update URL
@@ -867,19 +854,15 @@ export function RegistryAssets() {
         setShowOnboarding(true)
     }
 
-    // Called by wizard on successful completion — refresh state
-    const handleOnboardingComplete = async () => {
+    // Called by wizard on successful completion — invalidate the caches so
+    // registration state, sidebar counts, and Catalog Summary recompute.
+    const handleOnboardingComplete = () => {
         setShowOnboarding(false)
         setSelected(new Set())
         if (selectedProviderId) {
-            const existing = await catalogService.list(selectedProviderId)
-            setExistingCatalogs(existing)
-            setProviderAssetCounts(prev => ({
-                ...prev,
-                [selectedProviderId]: { total: assets.length, registered: assets.filter(a => existing.some((c: any) => c.sourceIdentifier === a)).length }
-            }))
+            queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, selectedProviderId] })
+            queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, selectedProviderId] })
         }
-        loadProviders()
     }
 
     // Initiate unregister
@@ -902,12 +885,8 @@ export function RegistryAssets() {
         setUnregisterLoading(true)
         try {
             await catalogService.delete(unregisterTarget.id, true)
-            const existing = await catalogService.list(selectedProviderId)
-            setExistingCatalogs(existing)
-            setProviderAssetCounts(prev => ({
-                ...prev,
-                [selectedProviderId]: { total: assets.length, registered: assets.filter(a => existing.some((c: any) => c.sourceIdentifier === a)).length }
-            }))
+            queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, selectedProviderId] })
+            queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, selectedProviderId] })
             setUnregisterTarget(null)
             setUnregisterImpact(null)
         } catch { /* swallow */ } finally {
@@ -1114,34 +1093,37 @@ export function RegistryAssets() {
     }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
 
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
+    // A provider that's still loading its dataset is reachable, not broken —
+    // show a calm amber "warming up" affordance instead of a red "unreachable"
+    // alarm (fixes stale/inaccurate error messaging).
+    const providerWarming = isWarmingError(assetsEnvelope?.meta.last_error)
 
-    // Refresh the asset list + the assets on the CURRENT PAGE. Used by
-    // the panel-level RefreshControl. Deliberately NOT refresh-
-    // everything: a provider with 200 cached assets used to grind for
-    // minutes through the worker on every click; individual rows keep
-    // their own ⟳ button. The list stays rendered throughout, and the
-    // promise resolves only when every queued asset's job has finished
-    // (its envelope stops reporting ``refreshing``) — RefreshControl
-    // awaits this, so the button spins until the new figures are live.
+    // Refresh EVERY cached asset for the selected provider (all N sources,
+    // not just the visible page). Passing no asset_names tells the backend
+    // to fan out across every cached asset (capped at 200, deduped) plus the
+    // list sentinel. To keep feedback snappy and light, the button only
+    // *waits* on the VISIBLE page's rows to go live; the rest refresh in the
+    // background and update their figures as they're scrolled to (each row's
+    // own stats query polls while its ``meta.refreshing`` is set).
     const handleRefreshSelectedProvider = useCallback(async () => {
         if (!selectedProviderId) return
-        const targets = pagedAssets
+        const providerId = selectedProviderId
         try {
-            const result = await providerService.refreshAllAssets(
-                selectedProviderId, targets,
-            )
-            const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
-            const scopeHint = sortedAssets.length > targets.length
-                ? ` (this page — ${targets.length} of ${sortedAssets.length})`
-                : ''
+            const result = await providerService.refreshAllAssets(providerId)
+            const n = result.jobs_queued
             showToast(
                 'success',
-                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint}.`,
+                `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
             )
         } catch (err: any) {
+            // err.message is already run through friendlyError at the
+            // service boundary, so this reads as human copy (e.g. "The
+            // database is busy right now…") rather than raw JSON.
             showToast(
                 'warning',
-                `Refresh enqueue failed: ${err?.message ?? 'unknown'}. Re-listing assets anyway.`,
+                err?.message
+                    ? `${err.message} Showing the latest available data.`
+                    : "Couldn't queue a refresh right now — showing the latest available data.",
             )
         }
         // Invalidate every per-row asset-stats query under this
@@ -1153,15 +1135,13 @@ export function RegistryAssets() {
                 && q.queryKey[1] === selectedProviderId,
         })
 
-        // Wait for the queued jobs to actually finish: poll each
-        // target's stats endpoint until ``refreshing`` clears (the
+        // Wait only for the VISIBLE page's jobs to finish (bounded, light):
+        // poll each visible row's stats until ``refreshing`` clears (the
         // worker releases the claim on success AND failure, so this
-        // terminates promptly either way; 90s safety cap). fetchQuery
-        // writes into the same query keys the rows render from, so the
-        // figures update in place as each job lands.
-        const providerId = selectedProviderId
+        // terminates promptly; 90s safety cap). fetchQuery writes into the
+        // same query keys the rows render from, so figures update in place.
         const deadline = Date.now() + 90_000
-        const pending = new Set(targets)
+        const pending = new Set(pagedAssets)
         while (pending.size > 0 && Date.now() < deadline) {
             await new Promise(r => setTimeout(r, 2500))
             const checks = await Promise.allSettled(
@@ -1182,18 +1162,13 @@ export function RegistryAssets() {
         }
 
         // Final re-list so the bulk summaries (sort keys, counts,
-        // updatedAt) reflect the completed jobs. No spinner — the
-        // current list stays useful throughout.
-        try {
-            const [res, existing] = await Promise.all([
-                providerService.listAssets(selectedProviderId),
-                catalogService.list(selectedProviderId),
-            ])
-            setAssetsEnvelope(res)
-            setAssets(res.data?.assets ?? [])
-            setExistingCatalogs(existing)
-        } catch { /* keep current list on re-list failure */ }
-    }, [selectedProviderId, pagedAssets, sortedAssets.length, queryClient, showToast])
+        // updatedAt) and the sidebar/Catalog totals reflect the completed
+        // jobs — and so any brand-new graph appears without a page reload.
+        // Invalidation re-fetches in place; the current list stays useful
+        // throughout (React Query keeps prior data during the refetch).
+        queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
+        queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, providerId] })
+    }, [selectedProviderId, pagedAssets, queryClient, showToast])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (
@@ -1225,7 +1200,7 @@ export function RegistryAssets() {
                         <ProviderRailItem
                             key={p.id}
                             provider={p}
-                            counts={providerAssetCounts[p.id]}
+                            counts={providerCounts.byProvider[p.id]}
                             isActive={selectedProviderId === p.id}
                             onSelect={() => handleSelectProvider(p.id)}
                         />
@@ -1243,14 +1218,18 @@ export function RegistryAssets() {
                             </div>
                             <div className="flex items-center justify-between text-xs">
                                 <span className="text-ink-muted">Total Assets</span>
-                                <span className="font-bold text-ink">
-                                    {Object.values(providerAssetCounts).reduce((a, c) => a + c.total, 0)}
+                                <span className="font-bold text-ink tabular-nums">
+                                    {providerCounts.loading
+                                        ? <Loader2 className="w-3 h-3 animate-spin inline" />
+                                        : providerCounts.totals.total}
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-xs">
                                 <span className="text-ink-muted">Registered</span>
-                                <span className="font-bold text-emerald-500">
-                                    {Object.values(providerAssetCounts).reduce((a, c) => a + c.registered, 0)}
+                                <span className="font-bold text-emerald-500 tabular-nums">
+                                    {providerCounts.loading
+                                        ? <Loader2 className="w-3 h-3 animate-spin inline" />
+                                        : providerCounts.totals.registered}
                                 </span>
                             </div>
                         </div>
@@ -1419,28 +1398,42 @@ export function RegistryAssets() {
                             asset list and couldn't distinguish "provider
                             unreachable" from "provider has no graphs". */}
                         {assetsEnvelope?.meta.last_error && (
-                            <div className="shrink-0 mb-3 p-3 rounded-xl border border-red-500/20 bg-red-500/5 flex items-start gap-3 animate-in slide-in-from-top-1 fade-in duration-200">
-                                <WifiOff className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-semibold text-red-600 dark:text-red-400">
-                                        Provider unreachable
-                                    </p>
-                                    <p className="text-xs text-red-500/90 dark:text-red-400/90 mt-0.5 break-words">
-                                        {friendlyError(assetsEnvelope.meta.last_error)}
-                                        {selectedProvider?.host && (
-                                            <span className="ml-1 font-mono text-red-500/70 dark:text-red-400/70">
-                                                (tried {selectedProvider.host}{selectedProvider.port ? `:${selectedProvider.port}` : ''})
-                                            </span>
-                                        )}
-                                    </p>
+                            providerWarming ? (
+                                <div className="shrink-0 mb-3 p-3 rounded-xl border border-amber-500/20 bg-amber-500/5 flex items-start gap-3 animate-in slide-in-from-top-1 fade-in duration-200">
+                                    <Loader2 className="w-4 h-4 text-amber-500 mt-0.5 shrink-0 animate-spin" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                                            Provider warming up
+                                        </p>
+                                        <p className="text-xs text-amber-600/90 dark:text-amber-400/90 mt-0.5 break-words">
+                                            {friendlyError(assetsEnvelope.meta.last_error)} This resolves on its own — data will appear shortly.
+                                        </p>
+                                    </div>
                                 </div>
-                                <Link
-                                    to={`/ingestion?tab=connections&edit=${selectedProviderId}`}
-                                    className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors"
-                                >
-                                    Edit connection
-                                </Link>
-                            </div>
+                            ) : (
+                                <div className="shrink-0 mb-3 p-3 rounded-xl border border-red-500/20 bg-red-500/5 flex items-start gap-3 animate-in slide-in-from-top-1 fade-in duration-200">
+                                    <WifiOff className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-semibold text-red-600 dark:text-red-400">
+                                            Provider unreachable
+                                        </p>
+                                        <p className="text-xs text-red-500/90 dark:text-red-400/90 mt-0.5 break-words">
+                                            {friendlyError(assetsEnvelope.meta.last_error)}
+                                            {selectedProvider?.host && (
+                                                <span className="ml-1 font-mono text-red-500/70 dark:text-red-400/70">
+                                                    (tried {selectedProvider.host}{selectedProvider.port ? `:${selectedProvider.port}` : ''})
+                                                </span>
+                                            )}
+                                        </p>
+                                    </div>
+                                    <Link
+                                        to={`/ingestion?tab=connections&edit=${selectedProviderId}`}
+                                        className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors"
+                                    >
+                                        Edit connection
+                                    </Link>
+                                </div>
+                            )
                         )}
 
                         {/* Asset list */}
@@ -1460,13 +1453,28 @@ export function RegistryAssets() {
                                     feature="view data assets for this provider"
                                 />
                             ) : filteredAssets.length === 0 ? (
-                                <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
-                                    <Filter className="w-10 h-10 opacity-20" />
-                                    <p className="text-sm font-semibold">No assets match your filters</p>
-                                    <button onClick={() => { setSearchQuery(''); setStatusFilter('all') }} className="text-xs text-indigo-500 hover:underline">
-                                        Clear filters
-                                    </button>
-                                </div>
+                                assets.length === 0 && assetsEnvelope?.meta.status === 'computing' ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-ink-muted py-16 gap-4">
+                                        <Loader2 className="w-8 h-8 animate-spin" />
+                                        <div className="text-center">
+                                            <p className="font-semibold text-sm">Discovering data sources…</p>
+                                            <p className="text-xs opacity-70 mt-1">This updates automatically — no need to reload.</p>
+                                        </div>
+                                    </div>
+                                ) : assets.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
+                                        <Database className="w-10 h-10 opacity-20" />
+                                        <p className="text-sm font-semibold">No data sources found on this provider yet</p>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
+                                        <Filter className="w-10 h-10 opacity-20" />
+                                        <p className="text-sm font-semibold">No assets match your filters</p>
+                                        <button onClick={() => { setSearchQuery(''); setStatusFilter('all') }} className="text-xs text-indigo-500 hover:underline">
+                                            Clear filters
+                                        </button>
+                                    </div>
+                                )
                             ) : (
                                 pagedAssets.map(assetName => (
                                     <AssetRow
@@ -1479,10 +1487,12 @@ export function RegistryAssets() {
                                         assetName={assetName}
                                         isRegistered={registeredSourceIds.has(assetName)}
                                         isSelected={selected.has(assetName)}
+                                        catalogId={existingCatalogs.find(c => c.sourceIdentifier === assetName)?.id}
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
                                         onReaggregate={handleReaggregate}
                                         onPurge={handlePurge}
+                                        onOpenProfile={(id) => setSearchParams({ tab: 'assets', provider: selectedProviderId ?? '', profile: id })}
                                     />
                                 ))
                             )}
@@ -1598,6 +1608,12 @@ export function RegistryAssets() {
                     timeoutMinutes: 120,
                 }}
                 onConfirmRetrigger={handleConfirmReaggregate}
+            />
+
+            <DataSourceProfileDrawer
+                catalogId={searchParams.get('profile')}
+                isOpen={!!searchParams.get('profile')}
+                onClose={() => { const p = new URLSearchParams(searchParams); p.delete('profile'); setSearchParams(p) }}
             />
         </div>
     )

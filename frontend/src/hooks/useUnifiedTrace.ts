@@ -20,6 +20,7 @@ import type {
     TraceV2Result, TraceV2Request,
 } from '@/providers/GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
+import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
 
 // ============================================
@@ -469,13 +470,17 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         // (the user sees only the level-0 skeleton with no way to drill).
         const callPerEdge = async (): Promise<TraceV2Result | null> => {
             if (typeof provider.expandAggregated !== 'function') return null
-            const settled = await Promise.allSettled(uncached.map(p => provider.expandAggregated!({
+            // Bounded fan-out (6, matching the browser's HTTP/1.1 per-origin
+            // cap): the previous unbounded Promise.allSettled fired one
+            // /trace/expand per pair with NO cap — the exact storm the
+            // batch endpoint exists to prevent, re-created on its fallback.
+            const settled = await mapWithConcurrency(uncached, 6, p => provider.expandAggregated!({
                 sourceUrn: p.sourceUrn,
                 targetUrn: p.targetUrn,
                 nextLevel: p.nextLevel,
                 lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
                 includeContainmentEdges: config.includeContainmentEdges,
-            })))
+            }))
             const ok = settled
                 .filter((s): s is PromiseFulfilledResult<TraceV2Result> => s.status === 'fulfilled')
                 .map(s => s.value)

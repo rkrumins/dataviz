@@ -1,4 +1,4 @@
-import { Database, Star, GitBranch, ChevronRight } from 'lucide-react'
+import { Database, Star, GitBranch, ChevronRight, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
@@ -22,24 +22,6 @@ interface DataSourceGridCardProps {
     isSelected: boolean
     onSelect: () => void
     onSetPrimary?: () => void
-}
-
-function AggregationStatusBadge({ status }: { status: string }) {
-    const configs: Record<string, { label: string; dot: string; text: string }> = {
-        ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
-        running: { label: 'Running', dot: 'bg-indigo-400 animate-pulse', text: 'text-indigo-600 dark:text-indigo-400' },
-        pending: { label: 'Pending', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600 dark:text-amber-400' },
-        failed: { label: 'Failed', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400' },
-        skipped: { label: 'Skipped', dot: 'bg-gray-400', text: 'text-ink-muted' },
-        none: { label: 'Not Started', dot: 'bg-gray-400', text: 'text-ink-muted' },
-    }
-    const cfg = configs[status] || configs.none
-    return (
-        <span className={cn('flex items-center gap-1.5 text-[11px] font-medium', cfg.text)}>
-            <span className={cn('w-2 h-2 rounded-full', cfg.dot)} />
-            {cfg.label}
-        </span>
-    )
 }
 
 export function DataSourceGridCard({
@@ -132,9 +114,13 @@ export function DataSourceGridCard({
                     </div>
                 </div>
 
-                {/* Status + Ontology */}
+                {/* Status + Ontology — operational status (not the opt-in
+                    aggregation state, which is a per-source detail). */}
                 <div className="flex items-center justify-between mb-3">
-                    <AggregationStatusBadge status={ds.aggregationStatus} />
+                    <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold', ds.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted')}>
+                        <span className={cn('w-2 h-2 rounded-full', ds.isActive ? 'bg-emerald-400' : 'bg-gray-400')} />
+                        {ds.isActive ? 'Active' : 'Inactive'}
+                    </span>
                     {ontologyName && (
                         <span className="flex items-center gap-1 text-[11px] text-ink-muted">
                             <GitBranch className="w-3 h-3" />
@@ -150,12 +136,16 @@ export function DataSourceGridCard({
 
                 {/* Stats */}
                 <div className="grid grid-cols-3 gap-2 mb-3">
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">
-                        <div className="text-sm font-bold text-ink">{stats ? compactNum(stats.nodeCount) : '\u2014'}</div>
+                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
+                        <div className="text-sm font-bold text-ink">
+                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.nodeCount) : '\u2014'}
+                        </div>
                         <div className="text-[9px] text-ink-muted uppercase tracking-wider">Nodes</div>
                     </div>
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">
-                        <div className="text-sm font-bold text-ink">{stats ? compactNum(stats.edgeCount) : '\u2014'}</div>
+                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
+                        <div className="text-sm font-bold text-ink">
+                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.edgeCount) : '\u2014'}
+                        </div>
                         <div className="text-[9px] text-ink-muted uppercase tracking-wider">Edges</div>
                     </div>
                     <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">

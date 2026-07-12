@@ -87,6 +87,17 @@ async def _invalidate_ontology_caches(
         .where(AggregationJobORM.ontology_fingerprint.isnot(None))
         .values(ontology_fingerprint=None)
     )
+    # Also invalidate the process-wide resolved-ontology cache for every
+    # data source that resolves through this ontology — read paths on all
+    # pods re-resolve on their next request instead of serving the old
+    # containment/lineage/alias config for up to the TTL backstop.
+    try:
+        from backend.app.services.resolved_ontology_cache import bump_for_ontology
+        await bump_for_ontology(session, ontology_id)
+    except Exception as exc:  # never block the mutation on cache plumbing
+        import logging
+        logging.getLogger(__name__).warning(
+            "resolved-ontology generation bump failed for %s: %s", ontology_id, exc)
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:

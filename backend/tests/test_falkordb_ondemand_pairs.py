@@ -40,12 +40,17 @@ class _Result:
 
 _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
 _RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
-_Q1_RE = re.compile(r"MATCH \(x\)-\[r\]->\(t\) WHERE x\.urn IN \$xs")
-_Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y\) WHERE y\.urn IN \$ys")
-_RAW_RE = re.compile(r"MATCH \(s\)-\[r\]->\(t\) WHERE s\.urn IN \$sourceUrns")
+_Q1_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:[\w|]+\]->\(t\) WHERE x\.urn IN \$xs")
+_Q2_RE = re.compile(r"MATCH \(s\)-\[r:[\w|]+\]->\(y(?::\w+)?\) WHERE y\.urn IN \$ys")
+_RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.urn IN \$sourceUrns")
+
+
+def _pattern_types(cypher):
+    m = re.search(r"\[r:([\w|]+)\]", cypher)
+    return set(m.group(1).split("|")) if m else set()
 _CHAIN_RE = re.compile(r"MATCH \(child(?::(\w+))?\) WHERE child\.urn IN \$urns")
-_AGG_FANOUT_RE = re.compile(r"MATCH \(x\)-\[r:AGGREGATED\]->\(t2\)")
-_AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y\)")
+_AGG_FANOUT_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:AGGREGATED\]->\(t2\)")
+_AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y(?::\w+)?\)")
 
 
 class _FakeGraph:
@@ -61,10 +66,12 @@ class _FakeGraph:
         self.children = {}     # parent_urn -> set(child_urn)
         self.lineage = []      # (edge_id, src_urn, tgt_urn, type)
         self.agg = []          # (src, tgt, weight, types, sd, td) canonical cells
-        # (regime, stampVersion) — None simulates a pre-_AggMeta graph
-        # (readers fall back to the legacy marker/probe, stamp_version 1,
-        # which keeps depth-keyed mixed derivation OFF).
-        self.meta = None
+        # (regime, stampVersion). Defaults to a healthy stamped boundary
+        # graph; set to None to simulate a pre-_AggMeta graph (readers
+        # resolve regime "unknown" — NO probe on the read path — and
+        # serve the exact raw mirror + stale).
+        self.meta = ("boundary", 2)
+        self.chain_cache_down = False  # True → every chain read misses
 
     def add_node(self, urn, label):
         self.labels[urn] = label
@@ -110,7 +117,7 @@ class _FakeGraph:
 
     legacy_rows = False  # True simulates NULL-aggKey / NULL-stamp rows
 
-    async def proj_ro_query(self, cypher, params=None, timeout=None):
+    async def proj_ro_query(self, cypher, params=None, timeout=None, **kw):
         """Projection-graph reads: _AggMeta, regime probe, depth-stamped
         :AGGREGATED anchors."""
         params = params or {}
@@ -137,8 +144,25 @@ class _FakeGraph:
             ])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
-    async def ro_query(self, cypher, params=None, timeout=None):
+    async def ro_query(self, cypher, params=None, timeout=None, **kw):
         params = params or {}
+        # NO-WALK GUARD: the aggregated read path must never issue a
+        # variable-length containment walk. The only legitimate var-length
+        # caller through this fake is the ancestor-chain COMPUTATION
+        # (hydration/write path), which anchors per label via _CHAIN_RE.
+        if ("*0.." in cypher or "*1.." in cypher) and not _CHAIN_RE.search(cypher):
+            raise AssertionError(
+                f"containment walk issued on the read path: {cypher}"
+            )
+        if "count(ch)" in cypher and "OPTIONAL MATCH" in cypher:
+            # Leafness probe: urn → child count. Single hop, no depth —
+            # depth now comes from the stamped incident cells. (Checked
+            # BEFORE the classify regex, whose label-anchored prefix the
+            # probe shares.)
+            return _Result([
+                [u, len(self.children.get(u, ()))]
+                for u in params["urns"] if u in self.labels
+            ])
         m = _CLASSIFY_RE.search(cypher)
         if m:
             # Per-label urn classification — still used by the hooks'
@@ -167,24 +191,18 @@ class _FakeGraph:
                     cur = parent.get(cur)
                 rows.append([u, chain])
             return _Result(rows)
-        if "count(ch) AS kids" in cypher:
-            # Containment profile: urn → (child count, depth).
-            return _Result([
-                [u, len(self.children.get(u, ())), self.depth(u)]
-                for u in params["urns"] if u in self.labels
-            ])
         if _RESOLVE_UP_RE.search(cypher):
-            # strict upward resolution: c.urn IN $cs, a.urn IN $as_, a above c
-            return _Result([
-                [c, a] for c in params["cs"] for a in params["as_"]
-                if a != c and c in self._descendants_or_self(a)
-            ])
+            raise AssertionError(
+                "strict upward-resolution Cypher issued — the read path "
+                "must resolve ancestors via the Redis chain cache"
+            )
         if _RAW_RE.search(cypher):
-            # Exact-endpoint raw synthesis (cube regime / no containment).
+            # Exact-endpoint raw mirror (cube/unknown regime, no containment).
+            lt = params.get("ltypes") or _pattern_types(cypher)
             cells = {}
             tgts = params.get("targetUrns")
             for eid, s, t, et in self.lineage:
-                if s not in params["sourceUrns"] or et not in params["ltypes"]:
+                if s not in params["sourceUrns"] or et not in lt:
                     continue
                 if s == t or (tgts is not None and t not in tgts):
                     continue
@@ -193,26 +211,16 @@ class _FakeGraph:
                 if et not in types:
                     types.append(et)
             return _Result([[s, t, len(e), ty] for (s, t), (e, ty) in cells.items()])
-        if _Q1_RE.search(cypher) and "MATCH (y)-[:" in cypher:
-            # Leaf sources: raw fan-out, target resolved upward to any $ys.
+        if _Q1_RE.search(cypher):
+            # Leaf sources: EXACT typed raw fan-out (far endpoints are
+            # resolved upward in Python via the chain cache, not here).
+            lt = _pattern_types(cypher)
             cells = {}
             for x in params["xs"]:
                 for eid, s, t, et in self.lineage:
-                    if s != x or et not in params["lt"]:
+                    if s != x or et not in lt:
                         continue
-                    for y in params["ys"]:
-                        if x != y and t in self._descendants_or_self(y):
-                            eids, types = cells.setdefault((x, y), (set(), []))
-                            eids.add(eid)
-                            if et not in types:
-                                types.append(et)
-            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
-        if _Q1_RE.search(cypher) and "t.urn <> x.urn" in cypher:
-            # Source-only mode: exact raw fan-out of the requested leaves.
-            cells = {}
-            for x in params["xs"]:
-                for eid, s, t, et in self.lineage:
-                    if s != x or et not in params["lt"] or t == x:
+                    if "t.urn <> x.urn" in cypher and t == x:
                         continue
                     eids, types = cells.setdefault((x, t), (set(), []))
                     eids.add(eid)
@@ -220,19 +228,18 @@ class _FakeGraph:
                         types.append(et)
             return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
         if _Q2_RE.search(cypher):
-            # Leaf targets: raw fan-in, source resolved upward to any $xs.
+            # Leaf targets: EXACT typed raw fan-in.
+            lt = _pattern_types(cypher)
             cells = {}
             for y in params["ys"]:
                 for eid, s, t, et in self.lineage:
-                    if t != y or et not in params["lt"]:
+                    if t != y or et not in lt:
                         continue
-                    for x in params["xs"]:
-                        if x != y and s in self._descendants_or_self(x):
-                            eids, types = cells.setdefault((x, y), (set(), []))
-                            eids.add(eid)
-                            if et not in types:
-                                types.append(et)
-            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
+                    eids, types = cells.setdefault((y, s), (set(), []))
+                    eids.add(eid)
+                    if et not in types:
+                        types.append(et)
+            return _Result([[y, s, len(e), ty] for (y, s), (e, ty) in cells.items()])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
@@ -242,6 +249,48 @@ def _make_provider(fake, levels):
     p._redis = None
     p._ro_query = fake.ro_query
     p._proj_ro_query = fake.proj_ro_query
+
+    async def _cached_label(urn):
+        return fake.labels.get(urn)
+
+    async def _buckets(urns):
+        by = {}
+        for u in dict.fromkeys(u for u in urns if u):
+            by.setdefault(fake.labels.get(u) or "", []).append(u)
+        return sorted(by.items())
+
+    async def _ancestors_read_through(urns):
+        # Read-THROUGH ancestor resolution, exactly as the reader now calls
+        # it: a cache hit is free, a miss COMPUTES (and caches) the chain —
+        # it never returns a miss, so chain_cache_down (a cold cache) does
+        # NOT suppress resolution. urn → [parent, …, root].
+        parent = {}
+        for par, kids in fake.children.items():
+            for k in kids:
+                parent[k] = par
+        out = {}
+        for u in dict.fromkeys(u for u in urns if u):
+            chain, cur = [], parent.get(u)
+            while cur is not None:
+                chain.append(cur)
+                cur = parent.get(cur)
+            out[u] = chain
+        return out
+
+    async def _stamp_depths(urns):
+        want = set(urns)
+        out = {}
+        for s_, t_, w, ty, sd, td in fake.agg:
+            if s_ in want and sd is not None:
+                out[s_] = max(out.get(s_, -1), int(sd))
+            if t_ in want and td is not None:
+                out[t_] = max(out.get(t_, -1), int(td))
+        return out
+
+    p._get_cached_label = _cached_label
+    p._label_buckets = _buckets
+    p._compute_and_store_ancestors_bulk = _ancestors_read_through
+    p._frontier_depths_from_stamps = _stamp_depths
     return p
 
 
@@ -270,7 +319,7 @@ def test_leaf_source_resolves_ancestor_eight_levels_up():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a7", "urn:b0", 2, ["FLOWS"]]]
@@ -281,7 +330,7 @@ def test_leaf_source_resolves_every_requested_ancestor_level():
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
     targets = [f"urn:b{i}" for i in range(8)]
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], targets, ["CONTAINS"], ["FLOWS"],
     ))
     assert {(r[0], r[1], r[2]) for r in rows} == {
@@ -294,7 +343,7 @@ def test_nonleaf_source_to_leaf_target_uses_reverse_walk():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b7"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a0", "urn:b7", 2, ["FLOWS"]]]
@@ -304,7 +353,7 @@ def test_source_only_mode_returns_exact_raw_targets():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], None, ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
@@ -317,7 +366,7 @@ def test_same_level_pairs_are_not_produced_on_demand():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -332,7 +381,7 @@ def test_mixed_level_pair_derived_from_materialized_diagonal():
     fake.aggregated("urn:a1", "urn:b1", 2)   # materialized table→table
     fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -346,7 +395,7 @@ def test_mixed_level_pair_reverse_direction():
     fake.aggregated("urn:a1", "urn:b1", 2)
     fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -361,7 +410,7 @@ def test_mixed_level_pair_deep_hierarchy():
     fake.aggregated("urn:a6", "urn:b6", 2)
     fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a6"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -384,7 +433,7 @@ def test_label_spellings_are_irrelevant_to_classification():
     fake.flow(1, "urn:a2", "urn:b2")
     fake.flow(2, "urn:a2", "urn:b2")
     p = _make_provider(fake, levels)
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
@@ -398,7 +447,7 @@ def test_no_level_map_still_serves_structural_synthesis():
     fake = _FakeGraph()
     _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels={})
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
@@ -416,7 +465,7 @@ def test_no_containment_types_falls_back_to_raw_synthesis():
         return sentinel
 
     p._synthesize_raw_lineage_pairs = fake_raw
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b2"], [], ["FLOWS"],
     ))
     assert rows == sentinel
@@ -433,10 +482,10 @@ def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
     _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         return _Result([])   # no fine AGGREGATED cells materialized
 
-    async def ro_query(cypher, params=None, timeout=None):
+    async def ro_query(cypher, params=None, timeout=None, **kw):
         # the raw-edge branch of _edges_between_sets_once
         assert "type(r) IN $ltypes" in cypher
         rows = [
@@ -500,7 +549,7 @@ def test_progressive_topdown_drilldown_journey():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -604,7 +653,7 @@ def test_write_path_hook_emits_only_canonical_pairs():
 
         return closure(source_urn), closure(target_urn), False, False
 
-    async def proj_query(cypher, params=None, timeout=None):
+    async def proj_query(cypher, params=None, timeout=None, **kw):
         merged.extend(params["batch"])
 
     import time as _time
@@ -653,7 +702,7 @@ def test_full_cross_product_matrix_six_levels():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -699,7 +748,7 @@ def test_mixed_level_weight_sums_stored_and_derived_portions():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 ["urn:a1", "urn:b1", 5, ["FLOWS"]],
@@ -737,15 +786,18 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         assert "AGGREGATED" in cypher or "_AggMeta" in cypher
         if params and "sourceUrns" in params:
             # The main materialized read: the diagonal cell plus a stale
             # pre-boundary fine cell that must win over the
-            # freshly-synthesized duplicate.
+            # freshly-synthesized duplicate. Filtered by the label-bucket
+            # batch actually requested — the read runs once per bucket.
             return _Result([
-                ["urn:a1", "urn:b1", 5, ["FLOWS"]],
-                ["urn:a2", "urn:b2", 9, ["FLOWS"]],
+                row for row in (
+                    ["urn:a1", "urn:b1", 5, ["FLOWS"]],
+                    ["urn:a2", "urn:b2", 9, ["FLOWS"]],
+                ) if row[0] in params["sourceUrns"]
             ])
         return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
 
@@ -789,20 +841,20 @@ def test_unmapped_label_endpoints_still_visible():
     p = _make_provider(fake, levels)
 
     # unmapped → unmapped: the exact raw edge.
-    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, _, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:m1"], ["urn:m2"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:m1", "urn:m2", 1, ["FLOWS"]]]
 
     # unmapped → mapped container: raw fan-out rolled up to the domain
     # (edges m1→m2 under b1⊂b0 and m1→b2 under b0 both resolve to b0).
-    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, _, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:m1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:m1", "urn:b0", 2, ["FLOWS"]]]
 
     # mapped container → unmapped: exact raw fan-in resolved upward.
-    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, _, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:m2"], ["CONTAINS"], ["FLOWS"],
     ))
     assert {(r[0], r[1], r[2]) for r in rows} == {("urn:a1", "urn:m2", 2)}
@@ -817,13 +869,14 @@ def test_full_cube_regime_skips_mixed_derivation():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)    # diagonal
     fake.aggregated("urn:a1", "urn:b0", 2)    # full-cube mixed cell
-    fake.legacy_rows = True                   # probe sees NULL-aggKey rows
+    fake.meta = None                          # pre-_AggMeta graph
+    fake.legacy_rows = True                   # (probe is write-path-only now)
     p = _make_provider(fake, levels)
 
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -855,6 +908,7 @@ def test_fine_regime_marker_skips_mixed_derivation():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     fake.aggregated("urn:a1", "urn:b0", 2)    # fine-mode mixed cell
+    fake.meta = None                          # regime comes from the marker
     p = _make_provider(fake, levels)
 
     class _MarkerRedis:
@@ -863,7 +917,7 @@ def test_fine_regime_marker_skips_mixed_derivation():
 
     p._redis = _MarkerRedis()
 
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert mixed == []
@@ -887,7 +941,7 @@ def test_graph_meta_beats_legacy_marker_and_probe():
 
     p._redis = _StaleMarkerRedis()
 
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert mixed == []
@@ -918,14 +972,14 @@ def test_self_nesting_mixed_depth_derivation():
     p = _make_provider(fake, {"Roots": 0, "Node": 1})
 
     # Canvas state: side A expanded to its mid container, side B collapsed.
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:m_a"], ["urn:r_b"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
     assert mixed == [["urn:m_a", "urn:r_b", 2, ["FLOWS"]]]
 
     # And the leaf itself against the collapsed far root (Q1).
-    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:l_a"], ["urn:r_b"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:l_a", "urn:r_b", 2, ["FLOWS"]]]
@@ -942,10 +996,10 @@ def test_failed_subquery_marks_result_truncated():
     async def noop_connect():
         return None
 
-    async def failing_ro_query(cypher, params=None, timeout=None):
+    async def failing_ro_query(cypher, params=None, timeout=None, **kw):
         raise TimeoutError("classification timed out")
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([])
         return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
@@ -961,3 +1015,119 @@ def test_failed_subquery_marks_result_truncated():
         lineage_edges=["FLOWS"],
     ))
     assert result.truncated is True
+
+
+def test_unknown_regime_serves_raw_mirror_with_stale_and_no_probe():
+    """Pre-_AggMeta graph with no Redis marker: the reader must NOT probe
+    the cell set (the old LIMIT-1 conformance scan cost 2.0s over 1M cells
+    on the read path, every 5 minutes) — it resolves regime 'unknown',
+    serves the exact raw mirror, and reports stale/unmaterialized so the
+    self-heal trigger fires."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=3)
+    fake.meta = None
+    p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
+
+    async def proj_guard(cypher, params=None, timeout=None, **kw):
+        assert "r.aggKey IS NULL" not in cypher, (
+            "conformance probe issued on the read path"
+        )
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._proj_ro_query = proj_guard
+    rows, mixed, degraded, reason = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a2"], ["urn:b2"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]  # exact mirror
+    assert mixed == []
+    assert reason == "unmaterialized"
+
+
+def test_boundary_stamp1_reports_legacy_cells():
+    """Level-stamped cells without depth stamps (pre-redesign runs):
+    depth-keyed derivation is impossible — raw mirror + stale so the
+    widened trigger re-materializes."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=3)
+    fake.set_meta("boundary", 1)
+    p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
+    rows, mixed, degraded, reason = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a2"], ["urn:b2"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
+    assert mixed == []
+    assert reason == "legacy_cells"
+
+
+def test_cold_chain_cache_resolves_rolled_up_pair_via_read_through():
+    """Read-THROUGH ancestor resolution (trigger-model redesign): a cold
+    ancestor-chain cache no longer DROPS the rolled-up pair. The chain is
+    computed on miss — bounded to the far endpoints, cached — so a2→b0
+    resolves alongside the exact a2→b2, and the result is NOT flagged
+    chain_cache_miss. This is what decouples read-cache warming from
+    materialization and stops the browse-driven re-trigger loop.
+
+    (Still no live containment WALK on the read path: the bound is the
+    visible far set, not the graph — that guarantee is unchanged.)"""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.chain_cache_down = True  # cold cache — read-through computes anyway
+    p = _make_provider(fake, levels)
+    rows, mixed, degraded, reason = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a2"], ["urn:b0", "urn:b2"], ["CONTAINS"], ["FLOWS"],
+    ))
+    # Exact pair (a2→b2) AND rolled-up (a2→b0) both resolve; nothing dropped.
+    assert {(r[0], r[1], r[2]) for r in rows} == {
+        ("urn:a2", "urn:b2", 2), ("urn:a2", "urn:b0", 2),
+    }
+    assert reason is None
+
+
+def test_entry_result_carries_freshness_fields():
+    """get_aggregated_edges_between surfaces stale/staleReason/
+    stampVersion/regime so the engine trigger and the canvas can act."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=3)
+    fake.meta = None
+    p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            return _Result([])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a2"], ["urn:b2"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=["FLOWS"],
+    ))
+    assert result.stale is True
+    assert result.stale_reason == "unmaterialized"
+    assert result.regime == "unknown"
+    assert result.stamp_version == 1
+    # Healthy graphs are NOT stale.
+    fake2 = _FakeGraph()
+    _seed_deep_chains(fake2, depth=3)
+    p2 = _make_provider(fake2, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
+    p2._ensure_connected = noop_connect
+
+    async def proj2(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            return _Result([])
+        return await fake2.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p2._proj_ro_query = proj2
+    result2 = _run(p2.get_aggregated_edges_between(
+        ["urn:a2"], ["urn:b2"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=["FLOWS"],
+    ))
+    assert result2.stale is False
+    assert result2.regime == "boundary" and result2.stamp_version == 2

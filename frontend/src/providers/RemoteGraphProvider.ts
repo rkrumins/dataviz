@@ -1,5 +1,5 @@
 import { unwrapEnvelope } from '@/services/cacheEnvelope'
-import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
+import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useProviderHealthStore } from '@/store/providerHealth'
@@ -94,7 +94,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly dataSourceId?: string
     private readonly branchId?: string
     private readonly connectionId?: string
-    private readonly circuitBreaker: CircuitBreaker
+
+    /** (workspace, data source, branch) identity — client caches keyed by
+     *  URN fold this in so the same URN across two graphs can't collide. */
+    get scopeKey(): string {
+        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}`
+    }
 
     /** In-flight request deduplication: identical concurrent requests share one Promise */
     private _inflight = new Map<string, Promise<unknown>>()
@@ -109,7 +114,6 @@ export class RemoteGraphProvider implements GraphDataProvider {
         this.dataSourceId = options?.dataSourceId
         this.branchId = options?.branchId
         this.connectionId = options?.connectionId
-        this.circuitBreaker = getCircuitBreaker(this.workspaceId, this.dataSourceId)
     }
 
     /**
@@ -210,8 +214,13 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string, timeoutMs?: number): Promise<T> {
-        // Circuit breaker: fail fast if provider is known-dead
-        if (!this.circuitBreaker.canRequest()) {
+        // Per-endpoint-class circuit breaker: a trace 504 opens only the
+        // 'trace' breaker, never the browse (children/aggregated/canvas)
+        // ones — the fix for "one dead endpoint blocked ALL graph reads".
+        const circuitBreaker = getCircuitBreaker(
+            this.workspaceId, this.dataSourceId, classifyEndpoint(url),
+        )
+        if (!circuitBreaker.canRequest()) {
             this._inflight.delete(cacheKey)
             throw new Error('Provider unavailable (circuit open)')
         }
@@ -240,7 +249,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
                     const retryAfter = response.headers.get('Retry-After')
                     const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined
-                    this.circuitBreaker.recordFailure(
+                    circuitBreaker.recordFailure(
                         retryAfterMs && !isNaN(retryAfterMs) ? retryAfterMs : undefined,
                     )
                 }
@@ -284,11 +293,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
             }
 
-            this.circuitBreaker.recordSuccess()
+            circuitBreaker.recordSuccess()
             return data
         } catch (err) {
             if (err instanceof TypeError) {
-                this.circuitBreaker.recordFailure()
+                circuitBreaker.recordFailure()
                 if (err.message.includes('timed out')) {
                     throw new Error(`Request timed out: ${method} ${url}`)
                 }

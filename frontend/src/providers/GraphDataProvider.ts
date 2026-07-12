@@ -605,6 +605,14 @@ export interface GraphDataProvider {
     /** Provider name for debugging */
     readonly name: string
 
+    /**
+     * Stable identity of the (workspace, data source, branch) this provider
+     * reads. Client-side caches keyed by URN MUST fold this in, or the same
+     * URN across two graphs/data sources collides. Optional so non-scoped
+     * providers can omit it (callers default to '').
+     */
+    readonly scopeKey?: string
+
     // ==========================================
     // Node Operations
     // ==========================================
@@ -1122,4 +1130,12 @@ export interface LayerAssignmentRequest {
     assignments?: Record<string, EntityAssignmentConfig>;
     /** The active view's scope ('all' | 'curated'). */
     entityScope?: 'all' | 'curated';
+    /**
+     * URNs of the entities currently loaded in the view. The compute is
+     * scoped to and reads exactly this set — the canvas is lazy-loaded, so
+     * assignment covers the rendered view (top-level nodes + expanded
+     * children), never the whole graph. Omit to fall back to the placed
+     * entities (``assignments`` keys). See assignment_engine.py.
+     */
+    urns?: string[];
 }

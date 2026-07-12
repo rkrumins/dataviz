@@ -50,10 +50,46 @@ class AssignmentEngine:
         )
 
         # ── Fetch graph data via the scoped engine ────────────────────────
-        all_nodes = await engine.get_nodes_query(NodeQuery())
-        all_edges = await engine.get_edges(EdgeQuery())
+        # Layer assignment must cover EXACTLY the entities the caller renders
+        # — never the whole graph. The scope is:
+        #   * request.urns  — the canvas's loaded set (ancestors included), OR
+        #   * the entities being explicitly placed (request.assignments keys)
+        #     when a legacy caller sends no urns.
+        # Each scope is read COMPLETELY — ``limit = len(scope)`` for nodes so
+        # no rendered entity is ever clipped. A truncating full-graph scan
+        # (the previous ``MATCH (n) LIMIT 50001``) was WRONG twice over: it
+        # was ~8s on a 7.7M graph AND, past 50k, it silently assigned layers
+        # over an arbitrary subset and dropped every entity beyond the cap —
+        # exactly the "LIMIT loses data" failure. A whole-graph assignment is
+        # never wanted (the canvas shows a bounded view). Child counts are
+        # irrelevant to assignment; skipping them avoids a per-node subquery.
+        scope_urns: List[str] = []
+        if request.urns:
+            scope_urns = list(dict.fromkeys(request.urns))
+        elif request.assignments:
+            scope_urns = list(dict.fromkeys(request.assignments.keys()))
 
-        logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
+        if scope_urns:
+            all_nodes = await engine.get_nodes_query(NodeQuery(
+                urns=scope_urns, limit=len(scope_urns), include_child_count=False))
+            # Edges are read AMONG the scope only. The scope is a rendered
+            # view (bounded), so intra-view edges cannot realistically exceed
+            # this valve; it is sized well above any real canvas and honestly
+            # flags if it ever clips — it never silently drops a needed edge
+            # for a normal view.
+            edge_cap = max(len(scope_urns) * 8, 10_000)
+            all_edges = await engine.get_edges(EdgeQuery(
+                source_urns=scope_urns, target_urns=scope_urns, limit=edge_cap))
+            truncated = len(all_edges) >= edge_cap
+        else:
+            # No scope and nothing being placed — nothing view-specific to
+            # assign. Return empty rather than scan the whole graph (which
+            # would be slow AND, when capped, lossy).
+            all_nodes, all_edges, truncated = [], [], False
+
+        logging.info(
+            "Computing assignments for %d nodes and %d edges (scope=%d urns, truncated=%s)",
+            len(all_nodes), len(all_edges), len(scope_urns), truncated)
 
         # 2. Build Indices
         rule_index = self._build_rule_index(request.layers, request.assignments)
@@ -94,7 +130,8 @@ class AssignmentEngine:
             stats=LayerAssignmentStats(
                 totalNodes=len(all_nodes),
                 assignedNodes=len(assignments),
-                computeTimeMs=compute_time_ms
+                computeTimeMs=compute_time_ms,
+                truncated=truncated,
             )
         )
 

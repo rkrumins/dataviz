@@ -647,3 +647,34 @@ async def test_purge_lkg_swallows_redis_errors() -> None:
     redis.scan = AsyncMock(side_effect=RedisError("down"))
     cache = GraphCache(redis)
     assert await cache.purge_lkg(CacheScope("ws1", "ds1"), ENDPOINT_AGGREGATED) == 0
+
+
+# ── WS7: TTL posture + new endpoint coverage ─────────────────────────
+
+def test_ws7_ttl_defaults_are_long_and_gen_bump_safe():
+    """The long TTLs (5-15 min) are safe because gen-bump invalidates on
+    write; assert the defaults landed so a regression to 30/60s is caught."""
+    from backend.app.services import graph_cache as gc
+    assert gc._resolve_ttl(None, gc.ENDPOINT_CHILDREN) == 900
+    assert gc._resolve_ttl(None, gc.ENDPOINT_AGGREGATED) == 900
+    assert gc._resolve_ttl(None, gc.ENDPOINT_TOP_LEVEL) == 600
+    assert gc._resolve_ttl(None, gc.ENDPOINT_TRACE) == 300
+    assert gc._resolve_ttl(None, gc.ENDPOINT_LAYER_ASSIGNMENT) == 900
+    # New hydration + canvas endpoints are cache-covered.
+    assert gc._resolve_ttl(None, gc.ENDPOINT_EDGES_BETWEEN) == 900
+    assert gc._resolve_ttl(None, gc.ENDPOINT_NODES_QUERY) == 900
+    assert gc._resolve_ttl(None, gc.ENDPOINT_CANVAS_BOOTSTRAP) == 300
+    assert gc._resolve_ttl(None, gc.ENDPOINT_CANVAS_EXPAND) == 300
+
+
+def test_ws7_new_endpoints_registered_enabled():
+    from backend.app.services import graph_cache as gc
+    for ep in (gc.ENDPOINT_EDGES_BETWEEN, gc.ENDPOINT_NODES_QUERY,
+               gc.ENDPOINT_CANVAS_BOOTSTRAP, gc.ENDPOINT_CANVAS_EXPAND):
+        assert ep in gc._ENABLED_ENDPOINTS
+        assert gc._ENABLED_ENDPOINTS[ep] is True
+
+
+def test_ws7_explicit_ttl_still_wins():
+    from backend.app.services import graph_cache as gc
+    assert gc._resolve_ttl(42, gc.ENDPOINT_EDGES_BETWEEN) == 42

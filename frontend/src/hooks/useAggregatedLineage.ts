@@ -184,10 +184,13 @@ const AGGREGATED_FETCH_CONCURRENCY = (() => {
 // Cache key helper. The FNV-1a hash itself lives in hooks/lib/lineageCache
 // so useLineageStubs and any future lineage hook share the same compact-key
 // implementation. The shape of the key is per-hook (this one is per-pair).
-function getCacheKey(sourceUrns: string[], targetUrns: string[] | undefined, granularity: string): string {
+function getCacheKey(scope: string, sourceUrns: string[], targetUrns: string[] | undefined, granularity: string): string {
     const srcHash = fnv1a64([...sourceUrns].sort().join(''))
     const tgtHash = targetUrns ? fnv1a64([...targetUrns].sort().join('')) : '0'
-    return `${granularity}:${srcHash}:${tgtHash}`
+    // ``scope`` = provider (workspace, data source, branch) identity. Without
+    // it the module-global cache serves one graph's aggregated edges for an
+    // identical URN set in ANOTHER graph — the same URN can exist in both.
+    return `${scope}:${granularity}:${srcHash}:${tgtHash}`
 }
 
 // ============================================
@@ -222,8 +225,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const fetchAggregated = useCallback(async (sourceUrns: string[], targetUrns?: string[]) => {
         if (!provider || sourceUrns.length === 0) return
 
-        // Check cache first
-        const cacheKey = getCacheKey(sourceUrns, targetUrns, granularity)
+        // Check cache first (scoped by provider identity — the same URN set
+        // in a different data source must not collide in the module cache).
+        const cacheKey = getCacheKey(provider.scopeKey ?? '', sourceUrns, targetUrns, granularity)
         const cached = aggregatedEdgeCache.get(cacheKey)
 
         if (cached && (Date.now() - cached.timestamp) < cacheTtl) {

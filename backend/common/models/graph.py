@@ -141,8 +141,11 @@ class TraceRequest(BaseModel):
     """
     urn: str
     direction: str = "both"  # upstream | downstream | both
-    upstream_depth: int = Field(99, alias="upstreamDepth", ge=0)
-    downstream_depth: int = Field(99, alias="downstreamDepth", ge=0)
+    # Default 25 (was 99): the BFS runs one query-wave per hop per
+    # direction, and no real lineage question needs 99 hops — the FE
+    # already sends 25. le=100 caps adversarial/legacy callers.
+    upstream_depth: int = Field(25, alias="upstreamDepth", ge=0, le=100)
+    downstream_depth: int = Field(25, alias="downstreamDepth", ge=0, le=100)
     # 0      = top-level Domain skeleton (DEFAULT — skeleton-first)
     # int    = literal level
     # str    = entity-type-id ("dataset"); resolved to that type's level
@@ -557,6 +560,17 @@ class AggregatedEdgeResult(BaseModel):
     truncated: bool = False
     last_materialized_at: Optional[str] = Field(default=None, alias="lastMaterializedAt")
     materialization_triggered: bool = Field(default=False, alias="materializationTriggered")
+    # Honest freshness signals (additive — old clients ignore them).
+    # stale=True means the answer is served from whatever cells exist but
+    # is known incomplete for this graph state; staleReason says why:
+    # "unmaterialized" (no _AggMeta / never aggregated),
+    # "legacy_cells" (cells predate depth stamps — mixed/leaf derivation off),
+    # "chain_cache_miss" (leaf/mixed resolution dropped pairs pending cache),
+    # "degraded" (an on-demand sub-query failed).
+    stale: bool = False
+    stale_reason: Optional[str] = Field(default=None, alias="staleReason")
+    stamp_version: Optional[int] = Field(default=None, alias="stampVersion")
+    regime: Optional[str] = None
 
     class Config:
         populate_by_name = True

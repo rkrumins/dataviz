@@ -157,6 +157,17 @@ class AggregationService:
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
 
+        # An EXPLICIT (non-auto) trigger clears the terminal-failure
+        # backoff key: the user is deliberately retrying (typically after
+        # raising the budget in the tuning dialog), so the read path's
+        # self-heal suppression must not outlive their intent.
+        if trigger_source != "auto":
+            try:
+                from backend.app.services.aggregation.redis_client import get_redis
+                await get_redis().delete(f"materialize:terminal:{ds_id}")
+            except Exception as exc:
+                logger.debug("terminal-backoff clear failed for %s: %s", ds_id, exc)
+
         # ── Phase 2.2 — idempotency early-return (read-only fast path) ──
         # Two POSTs sharing a key for the same data source within 60 min
         # collapse to the original job (200 with the existing job ID).

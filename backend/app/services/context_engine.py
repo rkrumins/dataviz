@@ -16,7 +16,11 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
-from ..config.resilience import FALKORDB_AGGREGATED_READ_TIMEOUT_SECS, TRACE_TIMEOUT_SECS
+from ..config.resilience import (
+    FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
+    TRACE_ENGINE_HEADROOM_SECS,
+    TRACE_TIMEOUT_SECS,
+)
 from backend.common.adapters import ProviderUnavailable
 
 if TYPE_CHECKING:
@@ -289,11 +293,66 @@ class ContextEngine:
         """Clear cached ontology so the next call re-fetches from source."""
         self._resolved_ontology_cache = None
         self._resolved_ontology_cache_ts = 0.0
+        from . import resolved_ontology_cache as ont_cache
+        ont_cache.drop_local(self._workspace_id, getattr(self, "_data_source_id", None))
 
     async def get_resolved_ontology(self):
         """Public access to the resolved ontology (containment + root types) for
         callers outside the engine (top-level cache serve/compute paths)."""
         return await self._resolve_ontology()
+
+    def _inject_resolved(self, resolved) -> None:
+        """Push a resolved ontology's config into the provider (in-memory
+        setters only — no I/O). Shared by the full resolution path and the
+        process-cache hit path so BOTH honour the eager-configuration
+        contract: endpoints that call ``engine.provider.*`` directly must
+        find the provider configured before its first query."""
+        has_real_ontology = bool(
+            resolved.resolution_sources
+            and any(s in ("assigned", "system_default")
+                    for s in resolved.resolution_sources.values())
+        )
+        if hasattr(self.provider, 'set_containment_edge_types'):
+            self.provider.set_containment_edge_types(
+                resolved.containment_edge_types,
+                from_ontology=has_real_ontology,
+            )
+        if hasattr(self.provider, 'set_ontology_rules'):
+            # Rich commit-boundary rules for the versioned write-through —
+            # only when an EXPLICITLY ASSIGNED ontology contributed (the
+            # system-default/introspection layers must not gate legacy data).
+            from backend.app.ontology.rules import resolved_ontology_to_rules
+            has_assigned = any(
+                s == "assigned"
+                for s in (resolved.resolution_sources or {}).values())
+            self.provider.set_ontology_rules(
+                resolved_ontology_to_rules(resolved) if has_assigned else None)
+        if hasattr(self.provider, 'set_resolved_edge_metadata'):
+            self.provider.set_resolved_edge_metadata(
+                resolved.edge_type_metadata,
+                resolved.lineage_edge_types,
+            )
+        if hasattr(self.provider, 'set_entity_type_levels'):
+            # Build entity-type → hierarchy.level mapping. Single
+            # source of truth shared with the backfill script via
+            # ``derive_level_map``: declared ``hierarchy.level``
+            # takes precedence, with ``can_contain`` /
+            # ``can_be_contained_by`` as fallback. Runtime and
+            # backfill must agree on this map or the digest stamps
+            # will look stale to each other.
+            from .ontology_levels import derive_level_map
+            levels = derive_level_map(resolved)
+            self.provider.set_entity_type_levels(levels)
+
+    def _inject_alignment(self, alignment) -> None:
+        """Inject the per-source vocabulary alias maps ("always reset"
+        contract — an empty map is meaningful)."""
+        if hasattr(self.provider, "set_source_type_aliases"):
+            if alignment is not None:
+                self.provider.set_source_type_aliases(
+                    alignment.rel_alias_map(), alignment.entity_alias_map())
+            else:
+                self.provider.set_source_type_aliases({}, {})
 
     async def _resolve_ontology(self):
         """
@@ -302,6 +361,16 @@ class ContextEngine:
 
         Guarded by an async lock to prevent concurrent resolution when
         multiple requests arrive before the cache is populated.
+
+        Two cache layers:
+        * L0 — this engine instance (engines are per-request; covers repeat
+          calls within one request).
+        * L1 — the process-wide ``resolved_ontology_cache`` keyed
+          (workspace, data source), generation-invalidated via Redis with a
+          300s TTL backstop. A hit re-injects provider config (cheap,
+          in-memory) and SKIPS introspection queries, the Postgres resolve,
+          the ensure_indices DDL storm, and the alignment persistence write
+          — the per-request fixed tax that dominated read latency.
         """
         now = time.monotonic()
         if (
@@ -318,6 +387,24 @@ class ContextEngine:
                 and (now - self._resolved_ontology_cache_ts) < self._ONTOLOGY_CACHE_TTL
             ):
                 return self._resolved_ontology_cache
+
+            gen_before: Optional[int] = None
+            if self._ontology_service and self._workspace_id:
+                from . import resolved_ontology_cache as ont_cache
+                shared = await ont_cache.lookup(self._workspace_id, self._data_source_id)
+                if shared is not None:
+                    resolved, alignment = shared
+                    self._inject_resolved(resolved)
+                    self._source_alignment = alignment
+                    self._inject_alignment(alignment)
+                    self._resolved_ontology_cache = resolved
+                    self._resolved_ontology_cache_ts = time.monotonic()
+                    return resolved
+                # Remember the generation the full resolve runs under so a
+                # concurrent bump leaves the stored entry stale (next lookup
+                # re-resolves) instead of serving across an invalidation.
+                gen_before = await ont_cache.current_generation(
+                    self._workspace_id, self._data_source_id)
 
             # Provider introspection — graceful degradation if provider is unreachable.
             # Outer timeout caps the aggregate introspection call (which may issue
@@ -356,46 +443,13 @@ class ContextEngine:
                         introspected_entity_ids=introspected_entity_ids,
                         introspected_rel_ids=introspected_rel_ids,
                     )
-                    # Push resolved containment types to the provider so subsequent
+                    # Push resolved config to the provider so subsequent
                     # queries (childCount, hierarchy) use the correct edge set.
                     # Always push — even an empty list is meaningful (= no containment).
-                    has_real_ontology = bool(
-                        resolved.resolution_sources
-                        and any(s in ("assigned", "system_default")
-                                for s in resolved.resolution_sources.values())
-                    )
-                    if hasattr(self.provider, 'set_containment_edge_types'):
-                        self.provider.set_containment_edge_types(
-                            resolved.containment_edge_types,
-                            from_ontology=has_real_ontology,
-                        )
-                    if hasattr(self.provider, 'set_ontology_rules'):
-                        # Rich commit-boundary rules for the versioned write-through —
-                        # only when an EXPLICITLY ASSIGNED ontology contributed (the
-                        # system-default/introspection layers must not gate legacy data).
-                        from backend.app.ontology.rules import resolved_ontology_to_rules
-                        has_assigned = any(
-                            s == "assigned"
-                            for s in (resolved.resolution_sources or {}).values())
-                        self.provider.set_ontology_rules(
-                            resolved_ontology_to_rules(resolved) if has_assigned else None)
-                    if hasattr(self.provider, 'set_resolved_edge_metadata'):
-                        self.provider.set_resolved_edge_metadata(
-                            resolved.edge_type_metadata,
-                            resolved.lineage_edge_types,
-                        )
-                    if hasattr(self.provider, 'set_entity_type_levels'):
-                        # Build entity-type → hierarchy.level mapping. Single
-                        # source of truth shared with the backfill script via
-                        # ``derive_level_map``: declared ``hierarchy.level``
-                        # takes precedence, with ``can_contain`` /
-                        # ``can_be_contained_by`` as fallback. Runtime and
-                        # backfill must agree on this map or the digest stamps
-                        # will look stale to each other.
-                        from .ontology_levels import derive_level_map
-                        levels = derive_level_map(resolved)
-                        self.provider.set_entity_type_levels(levels)
+                    self._inject_resolved(resolved)
                     # Ensure indices exist for all ontology-defined entity types.
+                    # Runs only on this full-resolution path (once per
+                    # generation per pod) — a shared-cache hit skips the DDL.
                     if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
                         try:
                             await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
@@ -410,6 +464,11 @@ class ContextEngine:
                             resolved, introspected_entity_ids, introspected_rel_ids)
                     except Exception as exc:
                         logger.warning("source vocabulary alignment failed (non-fatal): %s", exc)
+                    if gen_before is not None:
+                        from . import resolved_ontology_cache as ont_cache
+                        ont_cache.store(
+                            self._workspace_id, self._data_source_id, gen_before,
+                            resolved, getattr(self, "_source_alignment", None))
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -594,6 +653,17 @@ class ContextEngine:
         root_types: List[str] = []
         if resolved and getattr(resolved, "root_entity_types", None):
             root_types = list(resolved.root_entity_types)
+
+        # Default the entity-type filter to the ontology's full vocabulary so
+        # the provider always takes the label-union page/count form (per-label
+        # index scans) instead of the unlabeled MATCH (n) full scan. This also
+        # keeps internal underscore-labelled nodes (_AggMeta, _Projection) out
+        # of the top-level list. Callers passing an explicit filter, and
+        # graphs with no resolved vocabulary (pre-ontology), are unchanged.
+        if entity_types is None and resolved is not None:
+            defined = list(getattr(resolved, "entity_type_definitions", {}) or {})
+            if defined:
+                entity_types = defined
 
         # query_timeout / known_total_count are newer keyword-only params some
         # providers (DraftOverlayProvider, VersionedBranchProvider) don't yet
@@ -1382,7 +1452,12 @@ class ContextEngine:
     # tunes both backend layers and stays in sync with the frontend.
     import os as _os
     TRACE_MAX_NODES: int = int(_os.getenv("TRACE_MAX_NODES", "2000"))
-    TRACE_TIMEOUT_MS: int = int(TRACE_TIMEOUT_SECS * 1000)
+    # Engine budget sits BELOW the HTTP middleware tier by the headroom,
+    # so the engine's truncated-200 (timeout/max_nodes/ancestors_failed)
+    # always beats the middleware 504.
+    TRACE_TIMEOUT_MS: int = int(
+        max(5.0, TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS) * 1000
+    )
     del _os
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
@@ -1695,149 +1770,20 @@ class ContextEngine:
             timeout=FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
         )
 
-        if (
-            len(result.aggregated_edges) == 0
-            and result.last_materialized_at is None
-            and hasattr(self.provider, "materialize_aggregated_edges_batch")
-        ):
-            triggered = await self._trigger_materialize_in_background(
-                containment_types=list(containment_types),
-                lineage_types=list(lineage_types),
-            )
-            if triggered:
-                result.materialization_triggered = True
-
+        # Reads NEVER trigger materialization. Aggregation is event-driven
+        # — projection on merge/publish/import (projection_target._hook) and
+        # post-purge (worker) — plus manual (control plane) and a scheduled
+        # drift sweep. A browse must not enqueue a multi-minute worker job:
+        # the removed read-path "auto" trigger fired on transient read-cache
+        # conditions (chain_cache_miss) and, because nothing on the browse
+        # path warmed that cache, looped "verified · no changes" every
+        # damping window on perfectly healthy graphs. Freshness is still
+        # reported honestly on the result (stale / stale_reason /
+        # stamp_version / regime) so the UI can surface a "re-aggregate"
+        # affordance; the one-time migration heals the legacy
+        # stampVersion<2 backlog. See readpath-perf plan, trigger-model
+        # decision (2026-07-12).
         return result
-
-    async def _trigger_materialize_in_background(
-        self,
-        *,
-        containment_types: List[str],
-        lineage_types: List[str],
-    ) -> bool:
-        """Request a re-materialization as a REAL aggregation job, deduped
-        via Redis SET-NX. Returns True when a job was created (or one is
-        already in flight), False when nothing could be scheduled.
-
-        The read path never writes. The previous implementation ran
-        ``materialize_aggregated_edges_batch`` inline in this process —
-        a shadow run invisible to the jobs UI that held the cross-pod
-        graph write lease, parking every user-triggered worker job on an
-        anonymous "lease held" error. Routing through the aggregation
-        service gives the run a job row (UI-visible, cancellable),
-        worker-fleet placement, watchdog, tuning, and admission — the
-        same lifecycle as any other job.
-        """
-        ds_id = self._data_source_id
-        if not ds_id:
-            return False
-        redis = getattr(self.provider, "_redis", None)
-        dedupe_key = f"materialize:in-flight:{ds_id}"
-        if redis is not None:
-            try:
-                # 15-minute damping: without it, a graph whose
-                # materialization fails terminally (budget exceeded,
-                # ontology misclassification) never stamps
-                # last_materialized_at, so every empty read re-triggers a
-                # full EXTRACT+COMPUTE that fails again — an unbounded,
-                # browsing-driven job-churn loop.
-                claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=900))
-                if not claimed:
-                    return True
-            except Exception as e:
-                logger.warning(
-                    "Materialize dedupe-claim failed (%s) — skipping "
-                    "read-path backfill rather than risking a trigger "
-                    "storm without damping.", e,
-                )
-                return False
-
-        async def _shorten_damping() -> None:
-            # The TRIGGER itself failed — no job exists, so the full
-            # 15-minute damping window would black out backfill over a
-            # possibly transient error (control plane restarting, DB
-            # blip). Shrink the claim to a short cool-down; the damping
-            # window at full length is only for jobs that actually ran.
-            if redis is None:
-                return
-            try:
-                await redis.expire(dedupe_key, 60)
-            except Exception:
-                pass
-
-        from backend.app.services.aggregation.service import get_active_service
-        from backend.app.services.aggregation.schemas import (
-            AggregationTriggerRequest,
-        )
-        projection_mode = getattr(self.provider, "_projection_mode", None) or "in_source"
-        request = AggregationTriggerRequest(projectionMode=projection_mode, batchSize=1000)
-
-        svc = get_active_service()
-        if svc is not None:
-            try:
-                async with svc._session_factory() as session:
-                    job = await svc.trigger(ds_id, request, "auto", session)
-                logger.info(
-                    "Read-path backfill: triggered aggregation job %s for %s",
-                    getattr(job, "id", "?"), ds_id,
-                )
-                return True
-            except Exception as e:
-                # ConflictError = a job is already active — mission
-                # accomplished. Anything else (unresolved ontology, DS
-                # missing) is logged, never raised into the read path.
-                logger.info(
-                    "Read-path backfill trigger for %s not scheduled: %s",
-                    ds_id, e,
-                )
-                if type(e).__name__ == "ConflictError":
-                    return True
-                await _shorten_damping()
-                return False
-
-        # Proxy deployment: this process has no aggregation service —
-        # POST to the control plane's trigger endpoint instead.
-        import os as _os
-        if _os.getenv("AGGREGATION_PROXY_ENABLED", "false").lower() == "true":
-            import httpx
-            base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
-            try:
-                async with httpx.AsyncClient(
-                    base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
-                ) as client:
-                    resp = await client.post(
-                        f"/aggregation/data-sources/{ds_id}/jobs",
-                        params={"triggerSource": "auto"},
-                        json=request.model_dump(by_alias=True, exclude_none=True),
-                    )
-                if resp.status_code in (200, 202):
-                    logger.info(
-                        "Read-path backfill: triggered aggregation job via "
-                        "control plane for %s", ds_id,
-                    )
-                    return True
-                if resp.status_code == 409:
-                    return True  # a job is already active
-                logger.info(
-                    "Read-path backfill trigger for %s rejected by control "
-                    "plane (%s): %s", ds_id, resp.status_code, resp.text[:300],
-                )
-                await _shorten_damping()
-                return False
-            except Exception as e:
-                logger.warning(
-                    "Read-path backfill trigger for %s failed to reach the "
-                    "control plane: %s", ds_id, e,
-                )
-                await _shorten_damping()
-                return False
-
-        logger.info(
-            "Read-path backfill for %s skipped: no aggregation service in "
-            "this process and proxy mode is disabled.", ds_id,
-        )
-        await _shorten_damping()
-        return False
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """

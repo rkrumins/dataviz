@@ -52,6 +52,13 @@ AGGREGATED_SOURCE_URN_BATCH_SIZE: int = int(os.getenv("AGGREGATED_SOURCE_URN_BAT
 # Generous default because batch MERGE operations in the aggregation
 # worker can legitimately take 10-15s on large graphs.
 FALKORDB_WRITE_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_WRITE_TIMEOUT", "15"))
+# Slow-query log threshold (milliseconds). Any Cypher whose DB execution
+# OR semaphore-queue wait exceeds this is logged at WARNING with
+# graph/op/query_ms/queue_ms/rows and the first 80 chars of the query.
+# Queue time is reported separately because it is the saturation signal
+# (queries waiting on the per-provider semaphore / FalkorDB threads),
+# while query time attributes cost to the query shape itself.
+FALKORDB_SLOW_QUERY_MS: int = int(os.getenv("FALKORDB_SLOW_QUERY_MS", "500"))
 # Startup-time operations: seed check, index creation.
 # Short because these run during _ensure_connected() on the critical path.
 FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
@@ -100,6 +107,11 @@ NEO4J_REDIS_OP_TIMEOUT_SECS: float = float(os.getenv("NEO4J_REDIS_OP_TIMEOUT", "
 # more headroom. Was previously read directly as TRACE_TIMEOUT_MS in
 # context_engine.py — moved here for central visibility.
 TRACE_TIMEOUT_SECS: float = float(os.getenv("TRACE_TIMEOUT_SECS", "60"))
+# Headroom the trace ENGINE leaves under the HTTP middleware tier: the
+# engine budget is TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS
+# (floor 5s). With engine == middleware the truncated-200 raced the 504
+# and usually lost — the whole point of graceful truncation defeated.
+TRACE_ENGINE_HEADROOM_SECS: float = float(os.getenv("TRACE_ENGINE_HEADROOM_SECS", "10"))
 
 # ── Ontology introspection ──────────────────────────────────────────
 # Outer timeout for the aggregate get_ontology_metadata() call (which

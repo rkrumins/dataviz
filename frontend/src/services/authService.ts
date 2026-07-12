@@ -103,7 +103,7 @@ export interface PermissionClaims {
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: boolean }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         credentials: 'include',
@@ -150,8 +150,10 @@ export const authService = {
      * the permission slice that drives ``<RequirePermission>`` and the
      * ``can()`` helpers.
      */
-    myPermissions(): Promise<PermissionClaims> {
-        return request<PermissionClaims>(`${ME_API}/permissions`)
+    myPermissions(opts?: { skipAuthRefresh?: boolean }): Promise<PermissionClaims> {
+        // skipAuthRefresh is passed by the post-refresh re-hydrate so this
+        // call can't recurse back into the silent-refresh loop.
+        return request<PermissionClaims>(`${ME_API}/permissions`, opts)
     },
 
     /** Revoke the refresh-token family and clear cookies. Idempotent. */

@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 # across the two modules.
 ENDPOINT_CHILDREN = "children-with-edges"
 ENDPOINT_AGGREGATED = "aggregated"
+ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
+ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,11 @@ def _load_config(prefix: str, default_rate: float, default_burst: int) -> Bucket
 _CONFIGS: dict[str, BucketConfig] = {
     ENDPOINT_CHILDREN: _load_config("CHILDREN", 30.0, 60),
     ENDPOINT_AGGREGATED: _load_config("AGGREGATED", 5.0, 10),
+    # The batched canvas endpoints replace the per-purpose storm, so a
+    # gesture is now ~1 request; generous buckets that still cap a runaway
+    # client. Covered here so enabling FAIR_SHARE_ENABLED protects them too.
+    ENDPOINT_CANVAS_BOOTSTRAP: _load_config("CANVAS_BOOTSTRAP", 10.0, 20),
+    ENDPOINT_CANVAS_EXPAND: _load_config("CANVAS_EXPAND", 20.0, 40),
 }
 
 

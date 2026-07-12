@@ -97,6 +97,7 @@ def _provider(levels, redis, calls):
     p._agg_meta_cached = (AggRunMeta("boundary", 2, None, None), _time.monotonic())
     p._redis = redis
     p._urn_label_key = lambda: "labels"
+    p._agg_members_prefix = lambda: "g:agg_members"
     p._proj_query = proj_query
     return p
 

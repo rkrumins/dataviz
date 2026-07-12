@@ -95,6 +95,7 @@ import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
@@ -381,6 +382,13 @@ export function ContextViewCanvas({
     if (idsToRemove.length > 0) removeStoreEdges(idsToRemove)
     trace.resetAddedEdgeIds()
     setExpandedNodes(new Set())
+    // Clear breakers on exit-trace so a trace 504 that opened the 'trace'
+    // breaker can't linger and block a re-trace. Browse breakers are now
+    // isolated per endpoint class, so this is belt-and-suspenders; it also
+    // resets any half-open flap. (Scope-less: the per-scope vars are
+    // declared later in render order — a deliberate rare user action can
+    // safely reset all scopes' breakers, which re-open on the next failure.)
+    resetAllCircuitBreakers()
     return true
   }, [trace, removeStoreEdges])
 
@@ -788,9 +796,17 @@ export function ContextViewCanvas({
     // buildAssignmentRequest fills the backend EntityAssignmentConfig fields.
     const view = useSchemaStore.getState().getActiveView()
     const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    // Scope the assignment compute to the loaded view (top-level nodes now,
+    // plus whatever the user has lazily expanded). The backend reads exactly
+    // this set — never the whole graph — so million-node graphs stay fast and
+    // no rendered entity is dropped by a truncating cap.
+    const loadedUrns = nodes
+      .map(n => (n.data?.urn as string) || n.id)
+      .filter(Boolean)
     computeAssignments(provider, {
       assignments: norm.assignments,
       entityScope: deriveEntityScope(view?.content, norm),
+      entityIds: loadedUrns,
     })
   }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
 

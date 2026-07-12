@@ -9,7 +9,7 @@ import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
-    CircleDot, ArrowRightLeft, Layers, BarChart3, AlertTriangle, Loader2,
+    BarChart3, AlertTriangle, Loader2,
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -17,12 +17,15 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
+import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -42,9 +45,16 @@ interface DataSourceDetailPanelProps {
     ontologyName?: string
     ontologyId?: string
     views: View[]
-    onEdit: () => void
+    /** Live aggregation readiness — drives the header pill so it agrees with
+     *  the Overview's Aggregation card (the persisted ds.aggregationStatus can
+     *  lag behind the live state). */
+    readiness?: DataSourceReadinessResponse
+    /** Ontologies selectable in the inline edit panel. */
+    ontologies: OntologyDefinitionResponse[]
+    /** Persist an inline metadata edit (label + ontology). Replaces the old
+     *  separate Edit-Data-Source modal. */
+    onSaveEdit: (label: string, ontologyId: string | undefined) => Promise<void> | void
     onDelete?: () => void
-    onExplore: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
@@ -64,41 +74,9 @@ interface DataSourceDetailPanelProps {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
-    return String(n)
-}
-
-const AGG_STATUS_META: Record<string, { label: string; dot: string; text: string }> = {
-    ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
-    running: { label: 'Running', dot: 'bg-indigo-400 animate-pulse', text: 'text-indigo-600 dark:text-indigo-400' },
-    pending: { label: 'Pending', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600 dark:text-amber-400' },
-    failed: { label: 'Failed', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400' },
-    skipped: { label: 'Skipped', dot: 'bg-gray-400', text: 'text-ink-muted' },
-    none: { label: 'Not Started', dot: 'bg-gray-400', text: 'text-ink-muted' },
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────
-
-function MiniKpi({ icon: Icon, value, label, color }: {
-    icon: React.ComponentType<{ className?: string }>
-    value: string | number
-    label: string
-    color: string
-}) {
-    return (
-        <div className="flex-1 p-3 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
-            <div className="flex items-center gap-2 mb-1">
-                <Icon className={cn("w-3.5 h-3.5", color)} />
-                <span className="text-lg font-bold text-ink">{value}</span>
-            </div>
-            <span className="text-[10px] text-ink-muted uppercase tracking-wide">{label}</span>
-        </div>
-    )
-}
 
 function TabBtn({ active, icon: Icon, label, count, onClick }: {
     active: boolean
@@ -131,24 +109,6 @@ function TabBtn({ active, icon: Icon, label, count, onClick }: {
     )
 }
 
-function DetailRow({ icon: Icon, label, children }: {
-    icon: React.ComponentType<{ className?: string }>
-    label: string
-    children: React.ReactNode
-}) {
-    return (
-        <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center shrink-0 mt-0.5">
-                <Icon className="h-3.5 w-3.5 text-ink-muted" />
-            </div>
-            <div className="min-w-0 flex-1">
-                <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-0.5">{label}</span>
-                <div className="text-sm font-medium text-ink">{children}</div>
-            </div>
-        </div>
-    )
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // DataSourceDetailPanel (Drawer)
 // ─────────────────────────────────────────────────────────────────────
@@ -157,14 +117,14 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
-    stats,
     providerInfo,
     ontologyName,
     ontologyId,
     views,
-    onEdit,
+    readiness,
+    ontologies,
+    onSaveEdit,
     onDelete,
-    onExplore,
     onReaggregate,
     onPurge,
     onSaveAggregationConfig,
@@ -173,6 +133,27 @@ export function DataSourceDetailPanel({
     const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
+    // Inline edit (label + ontology) — replaces the old modal-over-drawer.
+    const [editing, setEditing] = useState(false)
+    const [editLabel, setEditLabel] = useState('')
+    const [editOntologyId, setEditOntologyId] = useState('')
+    const [savingEdit, setSavingEdit] = useState(false)
+    const startEditing = () => {
+        setEditLabel(ds?.label || '')
+        setEditOntologyId(ds?.ontologyId || '')
+        setEditing(true)
+    }
+    const saveEdit = async () => {
+        setSavingEdit(true)
+        try {
+            await onSaveEdit(editLabel.trim(), editOntologyId || undefined)
+            setEditing(false)
+        } finally {
+            setSavingEdit(false)
+        }
+    }
+    // Leaving edit mode when the drawer closes/opens on a different source.
+    useEffect(() => { setEditing(false) }, [ds?.id])
     // Aggregation mutations (config save / re-trigger / purge) require
     // workspace:datasource:manage. system:admin is implied through
     // has_permission's shortcut chain.
@@ -229,7 +210,9 @@ export function DataSourceDetailPanel({
         setPendingDedicatedName(originalDedicatedName)
     }
 
-    const aggMeta = AGG_STATUS_META[ds?.aggregationStatus || 'none'] || AGG_STATUS_META.none
+    // Last-aggregated timestamp prefers the live readiness over the persisted
+    // ds field so the header meta agrees with the Overview's Aggregation card.
+    const liveLastAggregatedAt = readiness?.lastAggregatedAt ?? ds?.lastAggregatedAt
 
     const content = (
         <>
@@ -243,7 +226,7 @@ export function DataSourceDetailPanel({
                     <motion.aside
                         key="data-source-detail-drawer"
                         className={cn(
-                            'fixed right-0 top-0 h-full w-[480px] max-w-[92vw] z-[61]',
+                            'fixed right-0 top-0 h-full w-full max-w-2xl z-[61]',
                             'bg-canvas border-l border-glass-border',
                             'flex flex-col shadow-lg',
                         )}
@@ -289,14 +272,13 @@ export function DataSourceDetailPanel({
 
                             {/* Status + meta badges */}
                             <div className="flex flex-wrap items-center gap-2 mb-4">
-                                <span className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border", aggMeta.text,
-                                    ds.aggregationStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/20' :
-                                    ds.aggregationStatus === 'failed' ? 'bg-red-500/10 border-red-500/20' :
-                                    ds.aggregationStatus === 'running' || ds.aggregationStatus === 'pending' ? 'bg-amber-500/10 border-amber-500/20' :
-                                    'bg-black/5 dark:bg-white/5 border-glass-border'
+                                <span className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border",
+                                    ds.isActive
+                                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                        : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border'
                                 )}>
-                                    <span className={cn("w-2 h-2 rounded-full", aggMeta.dot)} />
-                                    {aggMeta.label}
+                                    <span className={cn("w-2 h-2 rounded-full", ds.isActive ? 'bg-emerald-500' : 'bg-gray-400')} />
+                                    {ds.isActive ? 'Active' : 'Inactive'}
                                 </span>
                                 {ontologyName && (
                                     <Link
@@ -306,9 +288,9 @@ export function DataSourceDetailPanel({
                                         <GitBranch className="w-3 h-3" /> {ontologyName}
                                     </Link>
                                 )}
-                                {ds.lastAggregatedAt && (
+                                {liveLastAggregatedAt && (
                                     <span className="flex items-center gap-1 text-[10px] text-ink-muted">
-                                        <Clock className="w-3 h-3" /> Aggregated {new Date(ds.lastAggregatedAt).toLocaleDateString()}
+                                        <Clock className="w-3 h-3" /> Aggregated {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
                             </div>
@@ -329,7 +311,7 @@ export function DataSourceDetailPanel({
                                 </Link>
                                 <DataSourceActions
                                     wsId={wsId}
-                                    onEdit={onEdit}
+                                    onEdit={startEditing}
                                     onDelete={onDelete}
                                 />
                                 {/* DataSourceActions handles permission gating per
@@ -340,80 +322,65 @@ export function DataSourceDetailPanel({
 
                         {/* Per-source vocabulary-alignment drift (Task E) — own component,
                             no overlap with the header chips. */}
-                        <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />
+                        {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
+                        {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
-                            <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Insights" onClick={() => setActiveTab('insights')} />
+                            <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                         </div>
+                        )}
 
-                        {/* ── Tab Content (scrollable) ───────────────────── */}
+                        {/* ── Content (scrollable): inline edit OR the active tab ── */}
                         <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-5">
+                            {editing ? (
+                            <div className="max-w-lg mx-auto space-y-5 animate-in fade-in duration-200">
+                                <div>
+                                    <h3 className="text-base font-bold text-ink">Edit data source</h3>
+                                    <p className="text-xs text-ink-muted mt-0.5">Update how this source appears and which semantic layer classifies it.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-ink mb-1.5">Display name</label>
+                                    <input value={editLabel} onChange={e => setEditLabel(e.target.value)} placeholder={ds.label || 'e.g. Production Graph'}
+                                        className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
+                                    <p className="text-xs text-ink-muted mt-1.5">A friendly label shown across the workspace. The underlying source id doesn't change.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-ink mb-1.5">Semantic layer (ontology)</label>
+                                    <select value={editOntologyId} onChange={e => setEditOntologyId(e.target.value)}
+                                        className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
+                                        <option value="">None — use system defaults</option>
+                                        {ontologies.map(o => <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>)}
+                                    </select>
+                                    <p className="text-xs text-ink-muted mt-1.5">Assigns the ontology that resolves this source's entity and relationship types.</p>
+                                </div>
+                                <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border px-4 py-3">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Source</p>
+                                    <p className="text-xs font-mono text-ink-secondary mt-1 break-all">{ds.catalogItemId}</p>
+                                </div>
+                                <div className="flex items-center justify-end gap-2 pt-1">
+                                    <button onClick={() => setEditing(false)} disabled={savingEdit} className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50">Cancel</button>
+                                    <button onClick={saveEdit} disabled={savingEdit} className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-bold shadow-md shadow-indigo-500/20 transition-colors disabled:opacity-60">
+                                        {savingEdit ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save changes
+                                    </button>
+                                </div>
+                            </div>
+                            ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (
-                                <div className="space-y-5">
-                                    {stats ? (
-                                        <>
-                                            <div className="flex gap-3">
-                                                <MiniKpi icon={CircleDot} value={compactNum(stats.nodeCount)} label="Nodes" color="text-indigo-500" />
-                                                <MiniKpi icon={ArrowRightLeft} value={compactNum(stats.edgeCount)} label="Edges" color="text-violet-500" />
-                                                <MiniKpi icon={Layers} value={stats.entityTypes.length} label="Entity Types" color="text-emerald-500" />
-                                            </div>
-
-                                            {/* Key details */}
-                                            <div className="space-y-3">
-                                                <DetailRow icon={Database} label="Catalog Item">
-                                                    <span className="font-mono text-xs">{ds.catalogItemId}</span>
-                                                </DetailRow>
-                                                {ontologyName && (
-                                                    <DetailRow icon={GitBranch} label="Ontology">
-                                                        <Link to={ontologyId ? `/schema/${ontologyId}` : '/schema'} className="text-indigo-500 hover:underline">
-                                                            {ontologyName}
-                                                        </Link>
-                                                    </DetailRow>
-                                                )}
-                                                <DetailRow icon={Clock} label="Updated">
-                                                    {new Date(ds.updatedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                                                </DetailRow>
-                                            </div>
-
-                                            {stats.entityTypes.length > 0 && (
-                                                <div>
-                                                    <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider mb-2">Entity Type Breakdown</h6>
-                                                    <div className="flex flex-wrap gap-1.5">
-                                                        {stats.entityTypes.sort().map(type => (
-                                                            <span key={type} className="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-black/5 dark:bg-white/5 text-ink-secondary border border-glass-border hover:bg-indigo-500/5 hover:border-indigo-500/20 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-default">
-                                                                {type}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {(stats.nodeCount > 0 || stats.edgeCount > 0) && (
-                                                <div>
-                                                    <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider mb-2">Node / Edge Ratio</h6>
-                                                    <div className="flex h-2 rounded-full overflow-hidden bg-black/5 dark:bg-white/5">
-                                                        <div className="bg-gradient-to-r from-indigo-500 to-indigo-400 rounded-l-full" style={{ width: `${Math.round(stats.nodeCount / (stats.nodeCount + stats.edgeCount) * 100)}%` }} />
-                                                        <div className="bg-gradient-to-r from-violet-500 to-violet-400 rounded-r-full" style={{ width: `${Math.round(stats.edgeCount / (stats.nodeCount + stats.edgeCount) * 100)}%` }} />
-                                                    </div>
-                                                    <div className="flex justify-between mt-1 text-[10px] text-ink-muted">
-                                                        <span>Nodes: {Math.round(stats.nodeCount / (stats.nodeCount + stats.edgeCount) * 100)}%</span>
-                                                        <span>Edges: {Math.round(stats.edgeCount / (stats.nodeCount + stats.edgeCount) * 100)}%</span>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </>
-                                    ) : (
-                                        <div className="py-6 text-center text-xs text-ink-muted">
-                                            <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                                            No statistics available for this data source
-                                        </div>
-                                    )}
-                                </div>
+                                ds.catalogItemId ? (
+                                    <DataSourceProfile
+                                        catalogId={ds.catalogItemId}
+                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName } satisfies DataSourceProfileContext}
+                                        embedded
+                                        onNavigate={onClose}
+                                    />
+                                ) : (
+                                    <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
+                                )
                             )}
 
                             {/* ─── Aggregation Tab ──────────────────────── */}
@@ -620,19 +587,23 @@ export function DataSourceDetailPanel({
                             {activeTab === 'versioning' && (
                                 <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
                             )}
+                            </>)}
                         </div>
 
-                        {/* ── Footer actions ─────────────────────────────── */}
-                        <div className="px-6 py-4 border-t border-glass-border/50 shrink-0 space-y-2">
-                            <button onClick={() => { onExplore(); onClose() }}
+                        {/* ── Footer action ──────────────────────────────── */}
+                        <div className="px-6 py-4 border-t border-glass-border/50 shrink-0">
+                            {/* Views are the payoff of a data source; the header
+                                already has Schema Editor + Explorer, so the primary
+                                footer CTA points at the views that consume it. */}
+                            <Link to={`/workspaces/${wsId}/views`} onClick={onClose}
                                 className={cn(
                                     'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
                                     'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
                                     'shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5',
                                     'transition-[transform,box-shadow] duration-200',
                                 )}>
-                                <ExternalLink className="w-4 h-4" /> Open in Schema Editor
-                            </button>
+                                <Eye className="w-4 h-4" /> See all views
+                            </Link>
                         </div>
                     </motion.aside>
                 )}

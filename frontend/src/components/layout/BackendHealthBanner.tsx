@@ -13,14 +13,33 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { WifiOff, AlertTriangle, CheckCircle, RefreshCw, X } from 'lucide-react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { WifiOff, AlertTriangle, CheckCircle, RefreshCw, X, BellOff, ChevronDown } from 'lucide-react'
 import { useHealthStore, type HealthStatus, type HealthReason } from '@/store/health'
-import { useAllProviderStatuses } from '@/store/providerStatus'
+import { useAllProviderStatuses, useProviderSnooze } from '@/store/providerStatus'
 
-const POLL_HEALTHY_MS = 30_000
-const POLL_UNHEALTHY_BASE_MS = 5_000
-const POLL_UNHEALTHY_CAP_MS = 30_000
+// Steady-state health polling settles at ~once/minute (was 30s healthy /
+// 5s unhealthy floor) to cut request volume. Immediate detection still
+// comes from request failures + browser online/offline events, not this
+// poll; the unhealthy backoff starts a little faster to catch recovery,
+// then caps at 60s.
+const POLL_HEALTHY_MS = 60_000
+const POLL_UNHEALTHY_BASE_MS = 15_000
+const POLL_UNHEALTHY_CAP_MS = 60_000
 const RECOVERY_DISMISS_MS = 5_000
+
+const SNOOZE_OPTIONS: { label: string; getMs: () => number }[] = [
+  { label: '15 minutes', getMs: () => 15 * 60_000 },
+  { label: '1 hour', getMs: () => 60 * 60_000 },
+  { label: '4 hours', getMs: () => 4 * 60 * 60_000 },
+  { label: 'Until tomorrow', getMs: () => {
+    const now = new Date()
+    const t = new Date(now)
+    t.setDate(now.getDate() + 1)
+    t.setHours(8, 0, 0, 0)
+    return t.getTime() - now.getTime()
+  } },
+]
 
 const BANNER_STYLES = {
   unreachable: {
@@ -83,6 +102,8 @@ export function BackendHealthBanner() {
   const reason = useHealthStore((s) => s.reason)
   const detail = useHealthStore((s) => s.detail)
   const providerStatuses = useAllProviderStatuses()
+  const { snoozeUntil, snooze } = useProviderSnooze()
+  const providerSnoozed = snoozeUntil != null && snoozeUntil > Date.now()
 
   const [tabVisible, setTabVisible] = useState(() => document.visibilityState === 'visible')
   const [providerBannerDismissed, setProviderBannerDismissed] = useState(false)
@@ -178,7 +199,7 @@ export function BackendHealthBanner() {
   const visible = status === 'unreachable' || status === 'recovered'
 
   const content = visible ? getBannerContent(status, reason, detail) : null
-  const providerContent = unavailableProviders.length > 0 && !providerBannerDismissed
+  const providerContent = unavailableProviders.length > 0 && !providerBannerDismissed && !providerSnoozed
     ? {
         Icon: AlertTriangle,
         title: unavailableProviders.length === 1
@@ -264,6 +285,46 @@ export function BackendHealthBanner() {
                       {providerContent.message}
                     </span>
                   </div>
+
+                  {/* modal=false is REQUIRED: selecting a snooze option
+                      sets snoozeUntil, which hides this banner — unmounting
+                      the open menu. A modal Radix menu unmounted mid-close
+                      leaves document.body at `pointer-events: none`,
+                      freezing the whole app. Non-modal avoids the body lock
+                      entirely. */}
+                  <DropdownMenu.Root modal={false}>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className={`inline-flex items-center gap-1 rounded-md border border-white/20 bg-white/10 px-2 py-1 text-xs font-semibold transition hover:bg-white/20 outline-none ${providerContent.style.text}`}
+                        aria-label="Snooze provider alerts"
+                      >
+                        <BellOff className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">Snooze</span>
+                        <ChevronDown className="h-3 w-3" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content
+                        align="end"
+                        sideOffset={6}
+                        className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                      >
+                        <div className="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+                          Pause alerts for
+                        </div>
+                        {SNOOZE_OPTIONS.map((opt) => (
+                          <DropdownMenu.Item
+                            key={opt.label}
+                            onSelect={() => snooze(opt.getMs())}
+                            className="w-full flex items-center px-2.5 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                          >
+                            {opt.label}
+                          </DropdownMenu.Item>
+                        ))}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
 
                   <button
                     type="button"

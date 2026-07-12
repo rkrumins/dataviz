@@ -892,10 +892,24 @@ class AggregationWorker:
                 # outer run() handler, which marks the job 'cancelled' and
                 # emits the terminal event with last_cursor preserved.
                 raise
-            except (MaterializationBudgetExceeded, MaterializationPreconditionFailed):
+            except (MaterializationBudgetExceeded, MaterializationPreconditionFailed) as e:
                 # Both are deterministic — every retry recomputes the same
                 # outcome and burns another full EXTRACT+COMPUTE pass. Fail
-                # terminally with the guidance message intact.
+                # terminally with the guidance message intact, and stamp the
+                # terminal-backoff key so the read path's widened self-heal
+                # trigger doesn't re-enqueue the identical doomed job every
+                # damping window. TTL 6h; a manual trigger clears it (the
+                # user is explicitly asking for a retry, e.g. after raising
+                # the budget in the tuning dialog).
+                try:
+                    redis = getattr(provider, "_redis", None)
+                    if redis is not None and getattr(job, "data_source_id", None):
+                        await redis.set(
+                            f"materialize:terminal:{job.data_source_id}",
+                            str(e)[:500], ex=6 * 3600,
+                        )
+                except Exception as mark_exc:
+                    logger.debug("terminal-backoff stamp failed: %s", mark_exc)
                 raise
             except ProviderBusy as e:
                 # ZOMBIE-LEASE takeover: if the park is a graph-lease

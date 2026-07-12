@@ -10,6 +10,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { announcementService, type AnnouncementResponse } from '@/services/announcementService'
+import { POLLING_INTERVALS } from '@/config/polling'
 
 /** Map of announcement id → timestamp (ms) when snooze expires. */
 type SnoozeMap = Record<string, number>
@@ -52,7 +53,10 @@ export const useAnnouncementStore = create<AnnouncementState>()(
     (set, get) => ({
       announcements: [],
       snoozedUntil: {},
-      pollIntervalSeconds: 15,
+      // 60s fallback (was a hardcoded 15s — the app's highest-frequency
+      // idle poll). Wires the previously-dead POLLING_INTERVALS.announcements
+      // constant; backend /announcements/config still overrides via fetchConfig.
+      pollIntervalSeconds: POLLING_INTERVALS.announcements / 1000,
       defaultSnoozeMinutes: 30,
       isLoading: false,
       error: null,

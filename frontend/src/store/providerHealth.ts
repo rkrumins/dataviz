@@ -108,7 +108,10 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
 
 // ─── Polling ──────────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS = 30_000
+// 60s (was 30s): aligned to the provider-status poll so provider health
+// polling settles at ~once/minute. The advisory signal doesn't need to be
+// tighter — real outages surface through request failures and the banner.
+const POLL_INTERVAL_MS = 60_000
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
 

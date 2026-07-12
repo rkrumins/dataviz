@@ -1,6 +1,6 @@
-import { memo, useState, useRef, useCallback } from 'react'
-import { createPortal } from 'react-dom'
+import { memo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
     ChevronRight, Play, Trash2, Activity, Server, FolderOpen,
     MoreHorizontal, TrendingUp, TrendingDown, Minus,
@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { getProviderLogo } from '../ProviderLogos'
-import { formatDuration, timeAgo, useClickOutside, type DataSourceMeta } from './shared'
+import { formatDuration, timeAgo, type DataSourceMeta } from './shared'
 import { JobRow } from './JobRow'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -161,48 +161,6 @@ function DurationTrend({ trend }: { trend: 'up' | 'down' | 'stable' | null }) {
     return <TrendingDown className="w-3 h-3 text-emerald-400" />
 }
 
-// ── Actions Dropdown (portal) ────────────────────────────────────────
-
-function ActionsDropdown({
-    anchorRef,
-    onTrigger,
-    onPurge,
-}: {
-    anchorRef: React.RefObject<HTMLDivElement | null>
-    onTrigger: () => void
-    onPurge: () => void
-}) {
-    const rect = anchorRef.current?.getBoundingClientRect()
-    if (!rect) return null
-
-    return createPortal(
-        <div
-            className="fixed z-[9999]"
-            style={{ top: rect.bottom + 4, left: rect.right - 192 }}
-        >
-            <div className="w-48 bg-canvas border border-glass-border rounded-xl shadow-xl">
-                <div className="py-1">
-                    <button
-                        onClick={onTrigger}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
-                    >
-                        <Play className="w-3.5 h-3.5 text-emerald-500" />
-                        Trigger Aggregation
-                    </button>
-                    <button
-                        onClick={onPurge}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
-                    >
-                        <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                        Purge Aggregated Edges
-                    </button>
-                </div>
-            </div>
-        </div>,
-        document.body,
-    )
-}
-
 // ── Group Card ───────────────────────────────────────────────────────
 
 const INITIAL_VISIBLE_JOBS = 5
@@ -248,9 +206,6 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
     actionLoading,
 }: DataSourceGroupCardProps) {
     const [showAll, setShowAll] = useState(false)
-    const [showActions, setShowActions] = useState(false)
-    const actionsRef = useRef<HTMLDivElement>(null)
-    useClickOutside(actionsRef, useCallback(() => setShowActions(false), []))
 
     const { meta, dsResponse, jobs, totalRuns, successRate, avgDuration, lastRunAt, isActive, sparklineData, durationTrend } = group
     const edgeCount = dsResponse?.aggregationEdgeCount ?? 0
@@ -398,23 +353,50 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                     </div>
                 </div>
 
-                {/* Actions overflow */}
-                <div
-                    ref={actionsRef}
-                    className="relative flex-shrink-0"
-                    onClick={e => e.stopPropagation()}
-                >
-                    <button
-                        onClick={() => setShowActions(p => !p)}
-                        className="p-1.5 rounded-lg text-ink-muted/40 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
-                    >
-                        <MoreHorizontal className="w-4 h-4" />
-                    </button>
-                    {showActions && <ActionsDropdown
-                        anchorRef={actionsRef}
-                        onTrigger={() => { onTriggerAggregation(group.dataSourceId); setShowActions(false) }}
-                        onPurge={() => { onPurgeDataSource(group.dataSourceId); setShowActions(false) }}
-                    />}
+                {/* Actions overflow — Radix dropdown handles portal,
+                    outside-click, positioning, and keyboard. (Was a
+                    hand-rolled portal closed on `mousedown`, which
+                    unmounted the menu before the item click could land —
+                    making every item unclickable.) */}
+                <div className="relative flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    {/* modal=false is REQUIRED: this card re-renders on the
+                        Job History poll/SSE, and a modal Radix menu that
+                        re-renders/unmounts while open leaves
+                        document.body at `pointer-events: none`, freezing
+                        clicks across the whole app. Non-modal never touches
+                        body pointer-events; outside-click still dismisses. */}
+                    <DropdownMenu.Root modal={false}>
+                        <DropdownMenu.Trigger asChild>
+                            <button
+                                aria-label="Data source actions"
+                                className="p-1.5 rounded-lg text-ink-muted/40 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 data-[state=open]:text-ink-muted data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
+                            >
+                                <MoreHorizontal className="w-4 h-4" />
+                            </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Portal>
+                            <DropdownMenu.Content
+                                align="end"
+                                sideOffset={4}
+                                className="z-[9999] w-48 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                            >
+                                <DropdownMenu.Item
+                                    onSelect={() => onTriggerAggregation(group.dataSourceId)}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                                >
+                                    <Play className="w-3.5 h-3.5 text-emerald-500" />
+                                    Trigger Aggregation
+                                </DropdownMenu.Item>
+                                <DropdownMenu.Item
+                                    onSelect={() => onPurgeDataSource(group.dataSourceId)}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                    Purge Aggregated Edges
+                                </DropdownMenu.Item>
+                            </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
                 </div>
             </div>
 
