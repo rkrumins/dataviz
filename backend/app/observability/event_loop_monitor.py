@@ -31,11 +31,13 @@ the canary itself die silently.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,57 @@ WINDOW_SIZE: int = int(os.getenv("EVENT_LOOP_WINDOW_SIZE", "300"))   # 30s @ 100
 
 # Throttle for log lines — avoid spamming if the loop is sustained-bad.
 LOG_INTERVAL_S: float = float(os.getenv("EVENT_LOOP_LOG_INTERVAL_S", "10.0"))
+
+# ── Wedge watchdog (WS1.4) ────────────────────────────────────────────
+# The async monitor above can only MEASURE lag after the loop releases; it
+# cannot dump the frame that is blocking, because it runs ON that wedged
+# loop. A separate OS thread can: it watches a heartbeat the monitor bumps
+# each tick and, when the loop hasn't ticked for _WEDGE_DUMP_THRESHOLD_S,
+# calls faulthandler.dump_traceback() — which prints EVERY thread's stack
+# (including the blocked loop thread) to stderr. That capture is what took
+# many manual steps to reconstruct for the in-process-projector wedge; now
+# any future wedge self-documents with an exact stack.
+_WEDGE_DUMP_THRESHOLD_S: float = float(os.getenv("EVENT_LOOP_WEDGE_DUMP_S", "10"))
+_WEDGE_CHECK_INTERVAL_S: float = float(os.getenv("EVENT_LOOP_WEDGE_CHECK_S", "2"))
+
+# monotonic() of the monitor's last successful tick. Written by the async
+# monitor (loop thread), read by the watchdog thread. Single float read/write
+# is atomic under the GIL, so no lock is needed. 0.0 = monitor not started.
+_heartbeat: list = [0.0]
+
+
+def start_wedge_watchdog(is_stopped: Callable[[], bool]) -> threading.Thread:
+    """Spawn a DAEMON THREAD that dumps all thread stacks when the event loop
+    stops ticking (i.e. is wedged by synchronous/CPU-bound work). Independent
+    of the loop, so it fires precisely when the in-loop monitor cannot."""
+    def _run() -> None:
+        last_dump = 0.0
+        while not is_stopped():
+            time.sleep(_WEDGE_CHECK_INTERVAL_S)
+            beat = _heartbeat[0]
+            if beat <= 0.0:
+                continue  # monitor hasn't taken its first tick yet
+            stall = time.monotonic() - beat
+            if stall >= _WEDGE_DUMP_THRESHOLD_S:
+                now = time.monotonic()
+                if (now - last_dump) >= _WEDGE_DUMP_THRESHOLD_S:  # throttle
+                    last_dump = now
+                    logger.error(
+                        "event-loop WEDGED ~%.1fs — dumping all thread stacks "
+                        "(the blocking frame is in the loop thread below):",
+                        stall,
+                    )
+                    try:
+                        faulthandler.dump_traceback()
+                    except Exception:                              # never crash the watchdog
+                        pass
+        logger.info("event-loop wedge watchdog stopped")
+
+    t = threading.Thread(
+        target=_run, name="event-loop-wedge-watchdog", daemon=True,
+    )
+    t.start()
+    return t
 
 
 @dataclass
@@ -109,6 +162,7 @@ async def run_event_loop_monitor(
             actual_elapsed = time.monotonic() - t0
             lag = max(0.0, actual_elapsed - SAMPLE_INTERVAL_S)
             stats.add_sample(lag)
+            _heartbeat[0] = time.monotonic()   # liveness beat for the wedge watchdog
 
             now = time.monotonic()
             if lag >= CRITICAL_THRESHOLD_S:
