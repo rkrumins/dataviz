@@ -47,6 +47,15 @@ class FakeGraph:
         self.nodes, self.edges = list(nodes), list(edges)
         self.writes = []
 
+    # The reader (and therefore the copy) only sees urn-bearing entities — a node
+    # without one never renders, searches or traces. The fake honours the same rule.
+    def _visible_nodes(self):
+        return [(lab, pr) for lab, pr in self.nodes if pr.get("urn")]
+
+    def _visible_edges(self):
+        urns = {pr.get("urn") for _, pr in self.nodes if pr.get("urn")}
+        return [e for e in self.edges if e[0] in urns and e[1] in urns]
+
     async def query(self, cypher, params=None, timeout=None):
         p = params or {}
         lo, hi = p.get("lo", 0), p.get("hi", 10**9)
@@ -55,9 +64,13 @@ class FakeGraph:
         if "max(ID(r))" in cypher:
             return _RS([[len(self.edges) - 1 if self.edges else None]])
         if "count(n)" in cypher:
-            return _RS([[len(self.nodes)]])
+            invisible = "n.urn IS NULL" in cypher
+            return _RS([[len(self.nodes) - len(self._visible_nodes()) if invisible
+                         else len(self._visible_nodes())]])
         if "count(r)" in cypher:
-            return _RS([[len(self.edges)]])
+            invisible = "IS NULL" in cypher
+            return _RS([[len(self.edges) - len(self._visible_edges()) if invisible
+                         else len(self._visible_edges())]])
         if cypher.startswith("UNWIND $urns"):
             urns = set(p.get("urns") or [])
             return _RS([[lab, pr] for lab, pr in self.nodes if pr.get("urn") in urns])
@@ -65,10 +78,13 @@ class FakeGraph:
             self.writes.append(cypher.split("SET")[1].strip()[:20])
             return _RS([])
         if cypher.startswith("MATCH (n)"):
-            return _RS([[lab, pr] for i, (lab, pr) in enumerate(self.nodes) if lo <= i < hi])
+            urns = {pr.get("urn") for _, pr in self.nodes if pr.get("urn")}
+            return _RS([[lab, pr] for i, (lab, pr) in enumerate(self.nodes)
+                        if lo <= i < hi and pr.get("urn")])
         if cypher.startswith("MATCH (a)-[r]->(b)"):
+            urns = {pr.get("urn") for _, pr in self.nodes if pr.get("urn")}
             return _RS([[s, t, ty, pr] for i, (s, t, ty, pr) in enumerate(self.edges)
-                        if lo <= i < hi])
+                        if lo <= i < hi and s in urns and t in urns])
         return _RS([])
 
     async def delete(self):                                    # a reseed would call this
@@ -244,19 +260,31 @@ async def _run() -> None:
     n, _ = await _counts(gid, await _commit_id(gid))
     assert n == 7, "restart re-imports the CURRENT source (6 + the late node)"
 
-    # ══ D. untrackable items and dropped connections fail loudly ═════════════
+    # ══ D. items the app can't see are skipped + REPORTED (never silent) ═════
+    # A node with no identifier never renders, searches or traces — it isn't part of
+    # the graph as far as this product is concerned, so copying it is meaningless.
+    # It must still be counted and stated, which is what the old path failed to do.
     d = ds()
-    bad = FakeGraph([_node("urn:a"), (["Table"], {"displayName": "no urn"})], [])
+    invisible = FakeGraph(
+        [_node("urn:a"), _node("urn:b"), (["SentinelMarker"], {"id": "left-over-test-node"})],
+        [_edge("urn:a", "urn:b")],
+    )
     res = await _enable(d)
-    out = await _drive(_runner(bad), res["job_id"])
-    assert out["status"] == "failed" and "no identifier" in out["error"], out
+    out = await _drive(_runner(invisible), res["job_id"])
+    assert out["status"] == "completed", out
+    status = await bootstrap_status(data_source_id=d)
+    assert status["report"]["skippedWithoutIdentifier"] == {"nodes": 1, "edges": 0}
+    n, e = await _counts(res["graph_id"], await _commit_id(res["graph_id"]))
+    assert (n, e) == (2, 1)
 
+    # ...but a connection between two REAL items whose endpoint never arrived is a
+    # genuine inconsistency and must fail.
     d = ds()
-    # An edge whose endpoint isn't in the source at all.
-    dangling = FakeGraph([_node("urn:a")], [_edge("urn:a", "urn:ghost")])
+    dangling = FakeGraph([_node("urn:a"), _node("urn:ghost")], [_edge("urn:a", "urn:ghost")])
+    dangling._visible_nodes = lambda: [dangling.nodes[0]]      # the ghost vanishes mid-copy
     res = await _enable(d)
     out = await _drive(_runner(dangling), res["job_id"])
-    assert out["status"] == "failed" and "don't exist" in out["error"], out
+    assert out["status"] == "failed", out
     # Abandon puts the data source back exactly as it was.
     await abandon_bootstrap(data_source_id=d)
     async with db.graphver_session() as s:

@@ -69,7 +69,6 @@ from .models import (
     _now,
 )
 from .projection import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
-from .reconcile import falkor_counts
 from .service import (
     ConcurrencyError,
     GraphVersioningService,
@@ -92,26 +91,48 @@ _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 
 
 # --------------------------------------------------------------------------- #
-# Source scan (FalkorDB) — ID-range windows, mirroring reconcile.falkor_counts #
-# so validation compares like with like and derived rollups are never imported. #
+# Source scan (FalkorDB)                                                       #
+#                                                                              #
+# WHAT COUNTS AS "THE GRAPH": exactly what the application itself can see.     #
+# The reader (`falkordb_provider._node_from_props` / `_edge_from_row`) drops a #
+# node with no `urn` and any edge whose endpoints have none — such entities do #
+# not render, search, or trace: they are not part of the user's graph. Copying #
+# is scoped the same way, so "we copied everything" means the same thing to the#
+# job as it does to the canvas. They are still COUNTED and surfaced in the      #
+# report (never silently ignored).                                             #
+#                                                                              #
+# Derived/system artifacts are excluded outright: the `:AGGREGATED` rollup      #
+# layer and its bookkeeping markers are the projector's and the aggregation     #
+# worker's own output, not source data — importing them would make the graph    #
+# own its own cache.                                                            #
 # --------------------------------------------------------------------------- #
+_DERIVED_LABELS = ("_GVRollupMeta", "_AggMeta", "_Projection")
+_NOT_DERIVED = " AND ".join(f"NOT '{lab}' IN labels(n)" for lab in _DERIVED_LABELS)
+
 _MAX_NODE_ID = "MATCH (n) RETURN max(ID(n))"
 _MAX_EDGE_ID = "MATCH ()-[r]->() RETURN max(ID(r))"
+_COUNT_NODES = f"MATCH (n) WHERE n.urn IS NOT NULL AND {_NOT_DERIVED} RETURN count(n)"
+_COUNT_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
+                "AND a.urn IS NOT NULL AND b.urn IS NOT NULL RETURN count(r)")
+# Entities the app can't see (no identifier) — reported, never copied, never fatal.
+_COUNT_INVISIBLE_NODES = f"MATCH (n) WHERE n.urn IS NULL AND {_NOT_DERIVED} RETURN count(n)"
+_COUNT_INVISIBLE_EDGES = ("MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
+                          "AND (a.urn IS NULL OR b.urn IS NULL) RETURN count(r)")
+
 _SCAN_NODES = (
-    "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-    "AND NOT '_GVRollupMeta' IN labels(n) "
+    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND n.urn IS NOT NULL AND {_NOT_DERIVED} "
     "RETURN labels(n), properties(n)"
 )
 _SCAN_EDGES = (
     "MATCH (a)-[r]->(b) WHERE ID(r) >= $lo AND ID(r) < $hi "
-    "AND type(r) <> 'AGGREGATED' "
+    "AND type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL AND b.urn IS NOT NULL "
     "RETURN a.urn, b.urn, type(r), properties(r)"
 )
 _SAMPLE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) RETURN labels(n), properties(n)"
-# Backfill: additive, idempotent, and scoped to the same non-derived entities.
+# Backfill: additive, idempotent, and scoped to the same entities we copied.
 _BACKFILL_NODES = (
-    "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-    "AND NOT '_GVRollupMeta' IN labels(n) AND n.entityId IS NULL AND n.urn IS NOT NULL "
+    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_NOT_DERIVED} "
+    "AND n.entityId IS NULL AND n.urn IS NOT NULL "
     "SET n.entityId = n.urn"
 )
 _BACKFILL_EDGES = (
@@ -249,27 +270,41 @@ class BootstrapRunner:
     # ---------------------------------------------------------------- phases --
     async def _phase_counting(self, job_id: str, graph_id: str) -> bool:
         """Read the source's own totals — the denominator every later check compares
-        against (and the progress bar's total)."""
+        against (and the progress bar's total). Counted with the SAME predicates the
+        scan uses, so "scanned == source" is a meaningful statement."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
         client = await self._client(ps)
-        nodes, edges = await falkor_counts(client)
+        nodes = await self._count(client, _COUNT_NODES)
+        edges = await self._count(client, _COUNT_EDGES)
+        inv_nodes = await self._count(client, _COUNT_INVISIBLE_NODES)
+        inv_edges = await self._count(client, _COUNT_INVISIBLE_EDGES)
         async with self._session() as s:
             job = await s.get(JobORM, job_id)
             summary = dict(job.summary or {})
-            summary["source"] = {"nodes": int(nodes), "edges": int(edges)}
+            summary["source"] = {
+                "nodes": nodes, "edges": edges,
+                # Entities with no identifier: invisible to the reader (they never render,
+                # search, or trace), so they are not copied — but the user is TOLD.
+                "invisibleNodes": inv_nodes, "invisibleEdges": inv_edges,
+            }
             summary.setdefault("scanned", {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}})
             summary.setdefault("written", {"nodes": 0, "edges": 0})
-            summary.setdefault("rejected", {"urnlessNodes": 0, "duplicateUrns": 0,
-                                            "danglingEdges": 0, "samples": []})
+            summary.setdefault("rejected", {"duplicateUrns": 0, "danglingEdges": 0, "samples": []})
             summary.setdefault("collapsedParallelEdges", 0)
             summary.setdefault("sample", {"nodes": [], "nodesSeen": 0})
             job.summary = summary
-            job.total = int(nodes) + int(edges)
+            job.total = nodes + edges
             job.processed = 0
             job.updated_at = _now()
-        logger.info("bootstrap %s: source has %d nodes / %d edges", job_id, nodes, edges)
+        logger.info("bootstrap %s: source has %d nodes / %d edges (%d/%d without an identifier)",
+                    job_id, nodes, edges, inv_nodes, inv_edges)
         return True
+
+    async def _count(self, client, cypher: str) -> int:
+        res = await _q(client, cypher, timeout_ms=_WRITE_TIMEOUT_MS)
+        rs = getattr(res, "result_set", None) or []
+        return int(rs[0][0]) if rs and rs[0] and rs[0][0] is not None else 0
 
     async def _phase_nodes(self, job_id: str, graph_id: str) -> bool:
         return await self._scan_phase(job_id, graph_id, kind="nodes")
@@ -378,15 +413,12 @@ class BootstrapRunner:
         check("edges_seen", scanned.get("edges") == src.get("edges"),
               f"scanned {scanned.get('edges'):,} of {src.get('edges'):,} connections")
         # 2. Nothing was silently dropped on the way in.
-        check("no_untrackable_items", int(rejected.get("urnlessNodes", 0)) == 0,
-              f"{rejected.get('urnlessNodes', 0)} item(s) without an identifier")
         check("no_duplicate_items", int(rejected.get("duplicateUrns", 0)) == 0,
               f"{rejected.get('duplicateUrns', 0)} item(s) sharing an identifier")
         check("no_dropped_connections", int(rejected.get("danglingEdges", 0)) == 0,
               f"{rejected.get('danglingEdges', 0)} connection(s) with a missing endpoint")
         # 3. What we wrote reconciles exactly with what we saw.
-        exp_nodes = (scanned.get("nodes", 0) - int(rejected.get("urnlessNodes", 0))
-                     - int(rejected.get("duplicateUrns", 0)))
+        exp_nodes = scanned.get("nodes", 0) - int(rejected.get("duplicateUrns", 0))
         exp_edges = (scanned.get("edges", 0) - int(rejected.get("danglingEdges", 0))
                      - int(summary.get("collapsedParallelEdges", 0)))
         check("nodes_written", written.get("nodes") == exp_nodes,
@@ -422,6 +454,12 @@ class BootstrapRunner:
             "sampleChecked": len(sample_urns),
             "sampleMismatched": mismatched[:10],
             "mergedDuplicateConnections": int(summary.get("collapsedParallelEdges", 0)),
+            # Not copied because the app can't see them either (no identifier) — stated
+            # plainly rather than hidden, so "everything was copied" stays true.
+            "skippedWithoutIdentifier": {
+                "nodes": int(src.get("invisibleNodes", 0)),
+                "edges": int(src.get("invisibleEdges", 0)),
+            },
             "merkle": "pending",
         }
         async with self._session() as s:
@@ -621,15 +659,13 @@ class BootstrapRunner:
                             (summary.get("sample") or {}).get("nodes"),
                             (summary.get("sample") or {}).get("nodesSeen", 0))
         tallies: Dict[str, int] = {}
-        rejects = {"urnlessNodes": 0, "duplicateUrns": 0, "samples": []}
+        rejects = {"duplicateUrns": 0, "samples": []}
         seen: set = set()
         dicts: List[dict] = []
         for labels, props in rows:
             node = _node_from_props(dict(props or {}), _label_of(labels))
             if node is None or not node.urn:
-                rejects["urnlessNodes"] += 1
-                _add_reject_sample(rejects, {"kind": "node", "reason": "no identifier (urn)"})
-                continue
+                continue                                   # filtered by the scan; belt-and-braces
             row = {"kind": "node", **node.model_dump(by_alias=True, exclude_none=True)}
             canonicalize_rows([row], rules)
             if not row.get("entityType"):
@@ -936,9 +972,6 @@ def _explain_failed_checks(failed: List[dict]) -> str:
     makes the re-read sample disagree too) — saying "the graph changed" there would send
     the user chasing the wrong thing."""
     keys = {c["key"] for c in failed}
-    if "no_untrackable_items" in keys:
-        return ("Some items in the source graph have no identifier, so they can't be tracked "
-                "in version history. Give every item a urn and try again.")
     if "no_duplicate_items" in keys:
         return ("Some items in the source graph share an identifier. Version history needs "
                 "unique identifiers — de-duplicate them and try again.")
@@ -978,8 +1011,7 @@ def _merge_scan_summary(summary: dict, kind: str, *, scanned: int, written: int,
                         tallies: dict, rejects: dict, sample, dupes: int) -> dict:
     sc = dict(summary.get("scanned") or {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}})
     wr = dict(summary.get("written") or {"nodes": 0, "edges": 0})
-    rj = dict(summary.get("rejected") or {"urnlessNodes": 0, "duplicateUrns": 0,
-                                          "danglingEdges": 0, "samples": []})
+    rj = dict(summary.get("rejected") or {"duplicateUrns": 0, "danglingEdges": 0, "samples": []})
     sc[kind] = int(sc.get(kind, 0)) + scanned
     wr[kind] = int(wr.get(kind, 0)) + written
     bucket = "byLabel" if kind == "nodes" else "byType"
@@ -987,7 +1019,7 @@ def _merge_scan_summary(summary: dict, kind: str, *, scanned: int, written: int,
     for k, v in (tallies or {}).items():
         agg[k] = agg.get(k, 0) + v
     sc[bucket] = agg
-    for k in ("urnlessNodes", "duplicateUrns", "danglingEdges"):
+    for k in ("duplicateUrns", "danglingEdges"):
         rj[k] = int(rj.get(k, 0)) + int((rejects or {}).get(k, 0))
     for s in (rejects or {}).get("samples") or []:
         _add_reject_sample(rj, s)

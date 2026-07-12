@@ -8,12 +8,14 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
-import { useBootstrapGraph, useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
+import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import type { Branch } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
+import { BootstrapProgress } from './BootstrapProgress'
+import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { kindMeta } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 
@@ -33,15 +35,19 @@ function timeAgo(iso?: string): string {
 }
 
 export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; dataSourceId: string }) {
-  const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
-  const bootstrap = useBootstrapGraph(wsId)
   const branchesQ = useBranches(wsId, graphId)
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
   const mrsQ = useMergeRequests(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
+  const [showEnable, setShowEnable] = useState(false)
+  // Same hook as the canvas strip → the two surfaces can never disagree.
+  const boot = useBootstrapWatch(wsId, dataSourceId, {
+    headSeq: resolve.data?.mainHeadCommitSeq ?? 0,
+    seed: resolve.data?.bootstrap ?? undefined,
+  })
 
   if (resolve.isLoading) {
     return (
@@ -55,37 +61,66 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
   // need the seed step; treating "exists but empty" as not-enabled self-heals a
   // bootstrap that failed partway. Blank models are excluded: genesis-only by design
   // (hand-built, never provider-seeded), so they get the normal versioning view.
+  // The copy just landed — show the integrity report before handing over to the normal
+  // versioning view (see useBootstrapWatch: the receipt belongs to whoever ran it).
+  if (boot.showReport && boot.job) {
+    return (
+      <BootstrapProgress
+        job={boot.job}
+        wsId={wsId}
+        dataSourceId={dataSourceId}
+        variant="card"
+        canManage={canManage}
+        onDismiss={boot.dismissReport}
+      />
+    )
+  }
+
   const needsSeed = !graphId ||
     (resolve.data?.kind !== 'blank' && (resolve.data?.mainHeadCommitSeq ?? 0) <= 1)
   if (needsSeed) {
+    // A copy in flight (or one that stopped) replaces the CTA with live progress.
+    if (boot.showProgress && boot.job) {
+      return (
+        <BootstrapProgress
+          job={boot.job}
+          wsId={wsId}
+          dataSourceId={dataSourceId}
+          variant="card"
+          canManage={canManage}
+        />
+      )
+    }
     return (
-      <div className="rounded-2xl border border-glass-border bg-gradient-to-br from-accent-lineage/[0.06] to-transparent p-6 text-center">
-        <span className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-accent-lineage/10 border border-accent-lineage/20 mb-3">
-          <GitBranch className="w-6 h-6 text-accent-lineage" />
-        </span>
-        <h4 className="text-base font-semibold text-ink">Version control is off</h4>
-        <p className="text-sm text-ink-muted mt-1 max-w-md mx-auto">
-          Enable it to edit this data source safely in drafts, review every change against the published
-          graph, and publish with a full, auditable history.
-        </p>
-        {canManage ? (
-          <button
-            onClick={() =>
-              bootstrap.mutate(dataSourceId, {
-                onSuccess: () => showToast('success', 'Version control enabled.'),
-                onError: (e) => showToast('error', (e as Error).message),
-              })
-            }
-            disabled={bootstrap.isPending}
-            className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60"
-          >
-            {bootstrap.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            {bootstrap.isPending ? 'Setting up…' : 'Enable version control'}
-          </button>
-        ) : (
-          <p className="mt-4 text-xs text-ink-muted/70">Ask a workspace manager to enable it.</p>
-        )}
-      </div>
+      <>
+        <div className="rounded-2xl border border-glass-border bg-gradient-to-br from-accent-lineage/[0.06] to-transparent p-6 text-center">
+          <span className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-accent-lineage/10 border border-accent-lineage/20 mb-3">
+            <GitBranch className="w-6 h-6 text-accent-lineage" />
+          </span>
+          <h4 className="text-base font-semibold text-ink">Version control is off</h4>
+          <p className="text-sm text-ink-muted mt-1 max-w-md mx-auto">
+            Enable it to edit this data source safely in drafts, review every change against the published
+            graph, and publish with a full, auditable history.
+          </p>
+          {canManage ? (
+            <button
+              onClick={() => setShowEnable(true)}
+              className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Sparkles className="w-4 h-4" />
+              Enable version control
+            </button>
+          ) : (
+            <p className="mt-4 text-xs text-ink-muted/70">Ask a workspace manager to enable it.</p>
+          )}
+        </div>
+        <EnableVersioningFlow
+          open={showEnable}
+          onClose={() => setShowEnable(false)}
+          wsId={wsId}
+          dataSourceId={dataSourceId}
+        />
+      </>
     )
   }
 

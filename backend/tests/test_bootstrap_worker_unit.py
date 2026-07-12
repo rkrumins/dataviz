@@ -61,14 +61,14 @@ def test_percent_tracks_the_scan_and_never_exceeds_its_span():
 def test_scan_summary_accumulates_across_windows():
     s = {}
     s = _merge_scan_summary(s, "nodes", scanned=3, written=2, tallies={"Table": 2},
-                            rejects={"urnlessNodes": 1, "samples": [{"kind": "node"}]},
+                            rejects={"duplicateUrns": 1, "samples": [{"kind": "node"}]},
                             sample={"nodes": ["a"], "nodesSeen": 2}, dupes=0)
     s = _merge_scan_summary(s, "nodes", scanned=2, written=2, tallies={"Table": 1, "Column": 1},
                             rejects={}, sample={"nodes": ["a", "b"], "nodesSeen": 4}, dupes=0)
     assert s["scanned"]["nodes"] == 5
     assert s["written"]["nodes"] == 4
     assert s["scanned"]["byLabel"] == {"Table": 3, "Column": 1}
-    assert s["rejected"]["urnlessNodes"] == 1
+    assert s["rejected"]["duplicateUrns"] == 1
     assert s["sample"] == {"nodes": ["a", "b"], "nodesSeen": 4}
 
 
@@ -87,9 +87,9 @@ def test_reject_samples_are_bounded():
     s = {}
     for i in range(50):
         s = _merge_scan_summary(s, "nodes", scanned=1, written=0, tallies={},
-                                rejects={"urnlessNodes": 1, "samples": [{"kind": "node", "i": i}]},
+                                rejects={"duplicateUrns": 1, "samples": [{"kind": "node", "i": i}]},
                                 sample=None, dupes=0)
-    assert s["rejected"]["urnlessNodes"] == 50
+    assert s["rejected"]["duplicateUrns"] == 50
     assert len(s["rejected"]["samples"]) == 10, "samples must not grow with the graph"
 
 
@@ -111,7 +111,6 @@ def test_tally_match_tolerates_merged_duplicate_connections_only_when_allowed():
 
 @pytest.mark.parametrize("key,expected", [
     ("nodes_seen", "changed while we were copying"),
-    ("no_untrackable_items", "no identifier"),
     ("no_duplicate_items", "share an identifier"),
     ("no_dropped_connections", "point at items that don't exist"),
 ])

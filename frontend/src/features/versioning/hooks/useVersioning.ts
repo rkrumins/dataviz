@@ -60,6 +60,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'watermark', ws, gid] as const,
   restorePreview: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'restorePreview', ws, gid, cid] as const,
+  bootstrap: (ws?: string, ds?: string | null) =>
+    [...VERSIONING_KEYS.all, 'bootstrap', ws, ds] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -317,12 +319,59 @@ export function useSquashedCommits(
 // ── Mutations ────────────────────────────────────────────────────────────────
 
 /** Enable version control for a data source (create-or-seed its versioned graph). */
+/** Start the enablement job (202 + jobId). The status poll below takes over from here. */
 export function useBootstrapGraph(wsId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (dataSourceId: string) => api.bootstrapGraph(wsId, dataSourceId),
     onSuccess: (_res, dataSourceId) => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+    },
+  })
+}
+
+/** Live progress of the enablement job. Polls ONLY while a job is actually running —
+ *  a completed/failed/absent job settles to no network at all (the storm-safe pattern
+ *  the projection watermark uses). `seed` renders instantly from /resolve on reload. */
+export function useBootstrapStatus(
+  wsId?: string, dataSourceId?: string | null,
+  opts: { enabled?: boolean; seed?: api.BootstrapJob | null } = {},
+) {
+  const enabled = (opts.enabled ?? true) && !!wsId && !!dataSourceId
+  return useQuery({
+    queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId),
+    queryFn: () => api.getBootstrapStatus(wsId!, dataSourceId!),
+    enabled,
+    initialData: opts.seed ?? undefined,
+    retry: false,                          // 404 = never started; don't hammer
+    refetchInterval: (q) => {
+      const s = (q.state.data as api.BootstrapJob | undefined)?.status
+      return s === 'pending' || s === 'running' ? 2500 : false
+    },
+    refetchIntervalInBackground: false,    // a hidden tab doesn't poll
+  })
+}
+
+/** Resume a failed copy (or start it over) / give up and restore the data source. */
+export function useRetryBootstrap(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (mode: 'resume' | 'restart' = 'resume') =>
+      api.retryBootstrap(wsId, dataSourceId, mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
+    },
+  })
+}
+
+export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.abandonBootstrap(wsId, dataSourceId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
     },
   })
