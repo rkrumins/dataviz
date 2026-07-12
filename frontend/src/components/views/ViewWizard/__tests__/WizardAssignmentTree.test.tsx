@@ -215,7 +215,7 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     expect(onBulkAssign).not.toHaveBeenCalled()
   })
 
-  it('"Select all N children" pages in every remaining child before selecting', async () => {
+  it('"Select its N children only" pages in every remaining child before selecting', async () => {
     // 888 children, only the first page loaded — the exact case that used to
     // mean clicking "Load more" seventeen times.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
@@ -224,40 +224,48 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     renderTree()
 
     fireEvent.click(screen.getByText('Node A'))
-    fireEvent.click(screen.getByRole('button', { name: /Select all 888 children/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Select its 888 children only/i }))
 
     await waitFor(() => expect(fakeBrowser.loadAllChildren).toHaveBeenCalledWith('urn:a'))
   })
 
-  it('selects every loaded child on the FIRST click (no stale-state second click)', async () => {
-    // The regression: loadAllChildren resolves, but React hasn't re-rendered, so
-    // reading state gave the pre-load node and only the parent got selected.
-    // The loader now RETURNS the ids, so one click is enough.
+  it('selects the children — WITHOUT the parent — on the FIRST click', async () => {
+    // Two contracts in one:
+    //  1. The stale-state regression: loadAllChildren resolved but React hadn't
+    //     re-rendered, so the old code read the pre-load node and selected only
+    //     the parent. The loader RETURNS the ids now, so one click is enough.
+    //  2. "Children only" means only the children. Selecting the parent as well
+    //     would just be a slow way of placing the parent (its children inherit),
+    //     and would give no way to place children WITHOUT their parent.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
       ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextCursor: 'c1', loaded: true })],
     ])
     fakeBrowser.loadAllChildren.mockImplementationOnce(async (urn: string) => {
       // Simulate the hook: children land in the map and the ids come back.
-      fakeBrowser.nodes.set('urn:c1', child('urn:c1', 'Child One'))
-      fakeBrowser.nodes.set('urn:c2', child('urn:c2', 'Child Two'))
-      fakeBrowser.nodes.set(urn, nodeA({
-        totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
-        childIds: ['urn:c1', 'urn:c2'],
-      }))
+      // A NEW Map — the tree memoises on map identity, as the real hook does.
+      fakeBrowser.nodes = new Map<string, FakeEntry>([
+        [urn, nodeA({
+          totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+          childIds: ['urn:c1', 'urn:c2'],
+        })],
+        ['urn:c1', child('urn:c1', 'Child One')],
+        ['urn:c2', child('urn:c2', 'Child Two')],
+      ])
       return ['urn:c1', 'urn:c2']
     })
     const onBulkAssign = vi.fn()
     renderTree({ onBulkAssign })
 
-    fireEvent.click(screen.getByText('Node A'))
-    fireEvent.click(screen.getByRole('button', { name: /Select all 2 children/i }))
+    fireEvent.click(screen.getByTitle('Node A'))
+    fireEvent.click(screen.getByRole('button', { name: /Select its 2 children only/i }))
 
-    // Parent + both children are selected after ONE click.
-    await waitFor(() => expect(screen.getByText('3 selected')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument())
+    // And it says so, so nobody places children without their parent by accident.
+    expect(screen.getByText(/itself won’t be placed/)).toBeInTheDocument()
 
-    // And placing that selection sends all three (the Studio collapses them).
+    // Placing sends the two children and NOT the parent.
     fireEvent.keyDown(window, { key: '1' })
-    expect(onBulkAssign).toHaveBeenCalledWith('l1', expect.arrayContaining(['urn:a', 'urn:c1', 'urn:c2']))
+    expect(onBulkAssign).toHaveBeenCalledWith('l1', ['urn:c1', 'urn:c2'])
   })
 
   it('reports a child count the server actually gave (never the paging heuristic)', () => {
@@ -280,7 +288,8 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
   })
 
   it('releasing a parent releases its children too', async () => {
-    // Parent with two loaded children, all selected.
+    // Parent with two loaded children; select the children, then add the parent
+    // so the whole subtree is ticked.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
       ['urn:a', nodeA({ totalChildren: 2, loaded: true, childIds: ['urn:c1', 'urn:c2'] })],
       ['urn:c1', child('urn:c1', 'Child One')],
@@ -290,13 +299,18 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     const onBulkAssign = vi.fn()
     renderTree({ onBulkAssign })
 
-    fireEvent.click(screen.getByText('Node A'))
-    fireEvent.click(screen.getByRole('button', { name: /Select all 2 children/i }))
+    // getByTitle targets the ROW: the parent's name also appears in the toolbar's
+    // "…itself won’t be placed" line once its children are selected.
+    fireEvent.click(screen.getByTitle('Node A'))
+    fireEvent.click(screen.getByRole('button', { name: /Select its 2 children only/i }))
+    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTitle('Node A'), { metaKey: true })   // add the parent
     await waitFor(() => expect(screen.getByText('3 selected')).toBeInTheDocument())
 
-    // Cmd-click the parent to release it — the children must not be left behind
-    // silently selected, or the next placement quietly drags them along.
-    fireEvent.click(screen.getByText('Node A'), { metaKey: true })
+    // Now release the parent — the children must not be left behind silently
+    // selected, or the next placement quietly drags them along.
+    fireEvent.click(screen.getByTitle('Node A'), { metaKey: true })
 
     await waitFor(() => expect(screen.queryByText('3 selected')).not.toBeInTheDocument())
     // Nothing is selected any more, so a quick-assign key must do nothing.

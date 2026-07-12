@@ -822,7 +822,8 @@ export function WizardAssignmentTree({
      * into 201 flat entries that destroy the hierarchy in the Layers panel.
      */
     const selectionPlan = useMemo(() => {
-        if (selectedIds.size === 0) return { placedCount: 0, inheritedCount: 0 }
+        const empty = { placedCount: 0, inheritedCount: 0, excludedParentName: null as string | null }
+        if (selectedIds.size === 0) return empty
 
         const selectedRoots: EntityTreeNode[] = []
         const walk = (nodes: EntityTreeNode[], underSelected: boolean) => {
@@ -838,8 +839,21 @@ export function WizardAssignmentTree({
         // placed root (server counts, not just what's loaded).
         const inheritedCount = selectedRoots.reduce((sum, n) => sum + n.childCount, 0)
 
-        return { placedCount: selectedRoots.length, inheritedCount }
-    }, [entityTree, selectedIds])
+        // "Children without their parent": every selection shares one parent, and
+        // that parent is NOT selected. Worth saying out loud — the parent will not
+        // be in the layer, which is the whole point of the gesture but also the
+        // easiest thing to do by accident.
+        const parentIds = new Set(selectedRoots.map(n => n.parentId ?? '__root'))
+        let excludedParentName: string | null = null
+        if (selectedRoots.length > 0 && parentIds.size === 1) {
+            const parentId = selectedRoots[0].parentId
+            if (parentId && !selectedIds.has(parentId)) {
+                excludedParentName = findTreeNode(parentId)?.name ?? null
+            }
+        }
+
+        return { placedCount: selectedRoots.length, inheritedCount, excludedParentName }
+    }, [entityTree, selectedIds, findTreeNode])
 
     // Deselecting a parent releases its whole subtree — leaving orphaned child
     // selections behind (the old behaviour) meant the next assignment silently
@@ -887,40 +901,39 @@ export function WizardAssignmentTree({
         setSelectedIds(new Set())
     }, [selectedIds, onBulkAssign, onAssignmentChange])
 
-    // TRUE select-all-children: pages in EVERY remaining child of the selected
-    // node BEFORE selecting them — so "select all 200 children" is one click,
-    // not four "Load more"s.
-    //
-    // It uses the ids RETURNED by loadAllChildren rather than re-reading state:
-    // React hasn't re-rendered when the await resolves, which is exactly why
-    // this used to select nothing on the first click and work on the second.
-    //
-    // Deliberately does NOT explode *unexpanded* grandchildren: placement
-    // inherits down containment, so the parent already covers them, and walking
-    // a million-node subtree to tick boxes helps nobody.
+    /**
+     * Select the CHILDREN of the selected node — and not the node itself.
+     *
+     * This is the one gesture that expresses "place the children, but leave the
+     * parent out of this layer". Selecting the parent already means "place the
+     * parent, everything under it follows" (one entry, inherited), so if this
+     * button also selected the parent it would be a slower way of doing exactly
+     * that — which is what it used to be.
+     *
+     * It pages in EVERY remaining child first (one click, not four "Load more"s)
+     * and uses the ids RETURNED by loadAllChildren rather than re-reading state:
+     * React hasn't re-rendered when the await resolves, which is why this used to
+     * select nothing on the first click and work on the second.
+     *
+     * Grandchildren are deliberately left unticked: they inherit from whichever
+     * child ends up placed, and the "included" chip already says so. Walking a
+     * million-node subtree to tick boxes helps nobody.
+     */
     const handleSelectAllChildren = useCallback(async () => {
         if (selectedIds.size !== 1 || selectAllBusy) return
-        const rootId = Array.from(selectedIds)[0]
+        const parentId = Array.from(selectedIds)[0]
 
         setSelectAllBusy(true)
         try {
-            const childIds = await browser.loadAllChildren(rootId)
+            const childIds = await browser.loadAllChildren(parentId)
+            if (childIds.length === 0) return
 
-            const selected = new Set<string>([rootId, ...childIds])
-            // Any descendant the user had already expanded gets completed too,
-            // so what they can see is what they get.
-            for (const childId of childIds) {
-                if (!expandedIds.has(childId)) continue
-                const grandChildren = await browser.loadAllChildren(childId)
-                grandChildren.forEach(id => selected.add(id))
-            }
-
-            setExpandedIds(prev => new Set(prev).add(rootId))
-            setSelectedIds(selected)
+            setExpandedIds(prev => new Set(prev).add(parentId))
+            setSelectedIds(new Set(childIds))
         } finally {
             setSelectAllBusy(false)
         }
-    }, [selectedIds, selectAllBusy, expandedIds, browser])
+    }, [selectedIds, selectAllBusy, browser])
 
     // Drag & Drop
     const handleDragStart = useCallback((e: React.DragEvent, node: EntityTreeNode) => {
@@ -1194,15 +1207,16 @@ export function WizardAssignmentTree({
                                     const total = entry?.totalChildren ?? 0
                                     if (total === 0) return null
                                     const label = entry?.totalIsExact ? total.toLocaleString() : `${total}+`
+                                    const name = findTreeNode(only)?.name ?? 'this entity'
                                     return (
                                         <button
                                             onClick={handleSelectAllChildren}
                                             disabled={selectAllBusy}
-                                            title="Tick every child individually — only needed if you want to place them in DIFFERENT layers"
+                                            title={`Swap the selection to the ${label} children on their own — ${name} itself will NOT be placed. To place ${name} with everything under it, just place ${name}: its children follow.`}
                                             className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-white dark:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors disabled:opacity-60 shrink-0"
                                         >
                                             {selectAllBusy && <Loader2 className="w-3 h-3 animate-spin" />}
-                                            {selectAllBusy ? 'Loading children…' : `Select all ${label} children`}
+                                            {selectAllBusy ? 'Loading children…' : `Select its ${label} children only`}
                                         </button>
                                     )
                                 })()}
@@ -1243,7 +1257,17 @@ export function WizardAssignmentTree({
                             <div className="flex items-start gap-1.5 text-[11px] text-blue-700/80 dark:text-blue-300/80">
                                 <Info className="w-3 h-3 mt-0.5 shrink-0" />
                                 <span>
-                                    {selectionPlan.inheritedCount > 0 ? (
+                                    {selectionPlan.excludedParentName ? (
+                                        <>
+                                            Placing <strong>{selectionPlan.placedCount.toLocaleString()}</strong>{' '}
+                                            {selectionPlan.placedCount === 1 ? 'child' : 'children'} on their own —{' '}
+                                            <strong>{selectionPlan.excludedParentName}</strong> itself won’t be placed
+                                            {selectionPlan.inheritedCount > 0 && (
+                                                <>, and <strong>{selectionPlan.inheritedCount.toLocaleString()}</strong>{' '}
+                                                {selectionPlan.inheritedCount === 1 ? 'grandchild follows' : 'grandchildren follow'} them</>
+                                            )}.
+                                        </>
+                                    ) : selectionPlan.inheritedCount > 0 ? (
                                         <>
                                             Placing <strong>{selectionPlan.placedCount}</strong>{' '}
                                             {selectionPlan.placedCount === 1 ? 'entity' : 'entities'} —{' '}
@@ -1252,7 +1276,7 @@ export function WizardAssignmentTree({
                                             keeping the hierarchy intact.
                                         </>
                                     ) : (
-                                        <>Children always follow their parent’s layer. To split them up, place the children themselves.</>
+                                        <>Children always follow their parent’s layer. To place children on their own, select the children.</>
                                     )}
                                 </span>
                             </div>
