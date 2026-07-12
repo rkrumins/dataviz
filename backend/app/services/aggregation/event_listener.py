@@ -1,99 +1,145 @@
 """
-Aggregation event listener for the viz-service.
+Aggregation state-sync consumer.
 
-Subscribes to Redis Pub/Sub channel ``aggregation.events`` and syncs
-aggregation state changes into ``public.workspace_data_sources``.
+Consumes the Redis Stream ``aggregation.events.stream`` via the
+``viz-state-sync`` consumer group and syncs aggregation state changes
+into ``public.workspace_data_sources``.
 
-This runs as a background asyncio task in the viz-service lifespan.
-When the Control Plane or Workers publish status events (job.completed,
-job.failed, state.updated, etc.), this listener updates the local
-``workspace_data_sources`` table so the viz-service has fresh data
-for its own endpoints (e.g. workspace detail, onboarding wizard).
+Hosted in the Control Plane (NOT the viz-service web tier). The former
+design ran this as a Redis Pub/Sub subscriber inside every web replica,
+so N replicas each received every event and independently re-applied the
+same ``workspace_data_sources`` write, contending on the row. A stream +
+consumer group delivers each event to exactly ONE consumer across the
+fleet; the web tier is now stateless.
 
-Fallback: if the listener was down and missed events, the viz-service
-can poll the Control Plane's readiness endpoint on demand.
+Delivery semantics. ``XREADGROUP`` is at-least-once: a consumer that
+crashes after handling an event but before ``XACK`` will see it
+redelivered (reclaimed from the group's Pending Entry List by
+``XAUTOCLAIM`` on restart). Every handler here is idempotent — a repeated
+``UPDATE ... aggregation_status='ready'`` or cache invalidation is a
+no-op — so redelivery is safe.
+
+Correctness backstop. ``workspace_data_sources.aggregation_status`` is a
+denormalized HINT; the authoritative source is the control-plane readiness
+endpoint (``aggregation_data_source_state`` / ``aggregation_jobs``). If a
+rare cross-consumer reorder leaves a briefly-stale hint, an on-demand
+readiness read reconciles it.
 """
 import asyncio
 import json
 import logging
+import os
+import platform
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class AggregationEventListener:
-    """Subscribes to aggregation events and syncs viz-service state."""
+    """Consumes aggregation status events and syncs the local state row."""
 
     def __init__(self, redis_client: Any, session_factory: Any) -> None:
         self._redis = redis_client
         self._session_factory = session_factory
         self._running = False
-        self._pubsub = None
+        self._consumer_name = f"statesync-{platform.node()}-{os.getpid()}"
 
     async def start(self) -> None:
-        """Subscribe and process events until stopped. Auto-reconnects."""
-        from .redis_client import EVENTS_CHANNEL
+        """Consume status events via the consumer group until stopped."""
+        from .redis_client import (
+            EVENTS_STREAM, STATE_SYNC_GROUP, ensure_state_sync_group,
+        )
 
         self._running = True
-        logger.info("Aggregation event listener starting on channel '%s'", EVENTS_CHANNEL)
+        await ensure_state_sync_group()
+        logger.info(
+            "Aggregation state-sync consumer started "
+            "(stream='%s', group='%s', consumer='%s')",
+            EVENTS_STREAM, STATE_SYNC_GROUP, self._consumer_name,
+        )
 
-        import os
-        _SUBSCRIBE_TIMEOUT = float(os.getenv("EVENT_LISTENER_TIMEOUT", "10"))
+        # Reclaim events delivered to a consumer that crashed before ACK.
+        await self._recover_pending()
 
         while self._running:
             try:
-                self._pubsub = self._redis.pubsub()
-                await asyncio.wait_for(
-                    self._pubsub.subscribe(EVENTS_CHANNEL),
-                    timeout=_SUBSCRIBE_TIMEOUT,
+                entries = await self._redis.xreadgroup(
+                    STATE_SYNC_GROUP,
+                    self._consumer_name,
+                    {EVENTS_STREAM: ">"},
+                    count=64,
+                    block=5000,
                 )
-                logger.info("Subscribed to '%s'", EVENTS_CHANNEL)
-
-                # Poll-based listen with timeout instead of blocking
-                # `async for` iterator. Prevents silent hang if Redis
-                # goes down without raising an exception.
-                while self._running:
-                    message = await asyncio.wait_for(
-                        self._pubsub.get_message(
-                            ignore_subscribe_messages=True, timeout=1.0,
-                        ),
-                        timeout=_SUBSCRIBE_TIMEOUT,
-                    )
-                    if message is None:
-                        continue
-                    if message["type"] != "message":
-                        continue
-
-                    try:
-                        event = json.loads(message["data"])
-                        await self._handle_event(event)
-                    except json.JSONDecodeError:
-                        logger.warning("Invalid JSON in event: %s", message["data"][:200])
-                    except Exception as e:
-                        logger.error("Event handler error: %s", e, exc_info=True)
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("Event listener connection lost: %s (reconnecting in 5s)", e)
-                await asyncio.sleep(5)
-            finally:
-                if self._pubsub:
-                    try:
-                        await self._pubsub.unsubscribe()
-                        await self._pubsub.aclose()
-                    except Exception:
-                        pass
-                    self._pubsub = None
+                logger.warning(
+                    "state-sync XREADGROUP failed: %s (retrying in 2s)", e,
+                )
+                await asyncio.sleep(2)
+                continue
+
+            if not entries:
+                continue
+
+            # entries = [(stream_name, [(msg_id, {field: value}), ...])]
+            for _stream_name, messages in entries:
+                for msg_id, fields in messages:
+                    await self._process(msg_id, fields)
+
+    async def _recover_pending(self) -> None:
+        """Reclaim events idle > 60s in the group's Pending Entry List —
+        delivered to a consumer that died before ``XACK``. Idempotent
+        handlers make reprocessing safe."""
+        from .redis_client import EVENTS_STREAM, STATE_SYNC_GROUP
+
+        try:
+            result = await self._redis.xautoclaim(
+                EVENTS_STREAM, STATE_SYNC_GROUP, self._consumer_name,
+                min_idle_time=60000, start_id="0-0", count=128,
+            )
+        except Exception as e:
+            logger.warning("state-sync PEL recovery failed: %s", e)
+            return
+        if not result or len(result) < 2:
+            return
+        claimed = result[1] or []
+        if claimed:
+            logger.info(
+                "state-sync PEL recovery: reprocessing %d event(s)",
+                len(claimed),
+            )
+        for msg_id, fields in claimed:
+            await self._process(msg_id, fields)
+
+    async def _process(self, msg_id: Any, fields: dict) -> None:
+        """Handle one stream entry, then ACK it. ACK happens even on a
+        handler error: the handlers swallow their own exceptions (the DB /
+        readiness backstop reconciles), so a poison message must never
+        wedge the group by lingering in the PEL forever."""
+        from .redis_client import EVENTS_STREAM, STATE_SYNC_GROUP
+
+        try:
+            raw = (fields or {}).get("data")
+            if raw:
+                await self._handle_event(json.loads(raw))
+        except json.JSONDecodeError:
+            logger.warning(
+                "Invalid JSON in event %s: %s", msg_id, str(fields)[:200],
+            )
+        except Exception as e:
+            logger.error(
+                "Event handler error (%s): %s", msg_id, e, exc_info=True,
+            )
+        finally:
+            try:
+                await self._redis.xack(EVENTS_STREAM, STATE_SYNC_GROUP, msg_id)
+            except Exception as e:
+                logger.warning("state-sync XACK failed for %s: %s", msg_id, e)
 
     async def stop(self) -> None:
-        """Signal the listener to stop."""
+        """Signal the consumer loop to stop after its current iteration."""
         self._running = False
-        if self._pubsub:
-            try:
-                await self._pubsub.unsubscribe()
-            except Exception:
-                pass
 
     async def _handle_event(self, event: dict) -> None:
         """Dispatch event to the appropriate handler."""
