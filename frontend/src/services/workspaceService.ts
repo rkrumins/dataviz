@@ -48,9 +48,15 @@ export interface DataSourceResponse {
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
     dedicatedGraphName?: string | null  // graph name when dedicated
+    /** Provenance: 'managed' = fully managed in-app graph (blank/versioned),
+     *  'federated' = external system of record. Null/absent on legacy rows —
+     *  resolve with {@link resolveSourceMode}. */
+    sourceMode?: 'managed' | 'federated' | null
+    /** Federated only: overlay edits are pushed back to the external system. */
+    writeBackEnabled?: boolean
     createdAt: string
     updatedAt: string
-    
+
     // Aggregation state
     aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
     lastAggregatedAt?: string
@@ -90,6 +96,18 @@ export interface WorkspaceResponse {
 
 export interface WorkspaceDataSourceImpactResponse {
     views: { id: string; name: string; type: string }[]
+}
+
+/**
+ * Resolve a data source's provenance when `sourceMode` is null/absent
+ * (legacy rows). Mirrors the backend ORM comment: a source with no
+ * catalog item is a manual/blank in-app model → managed; anything
+ * onboarded from the catalog is federated by default.
+ */
+export function resolveSourceMode(
+    ds: Pick<DataSourceResponse, 'sourceMode' | 'catalogItemId'>,
+): 'managed' | 'federated' {
+    return ds.sourceMode ?? (ds.catalogItemId ? 'federated' : 'managed')
 }
 
 // ============================================================

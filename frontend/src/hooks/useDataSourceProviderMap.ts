@@ -1,11 +1,11 @@
 /**
  * useDataSourceProviderMap — resolves the Provider behind every data source.
  *
- * A view/data source only carries a `catalogItemId`; the provider it is built
- * from is reached via `DataSource.catalogItemId → CatalogItem.providerId →
- * Provider`. This hook fetches catalog items + providers once, walks every
- * workspace's data sources from the workspaces store, and returns a lookup
- * keyed by data source id.
+ * Catalog-onboarded sources resolve via `DataSource.catalogItemId →
+ * CatalogItem.providerId → Provider`; manual/blank sources (no catalog item)
+ * resolve directly through their own `providerId`. This hook fetches catalog
+ * items + providers once, walks every workspace's data sources from the
+ * workspaces store, and returns a lookup keyed by data source id.
  *
  * The catalog/provider list endpoints are admin-gated (they suppress the 403
  * modal on read), so for non-admin users the fetch fails quietly and the map is
@@ -62,15 +62,19 @@ export function useDataSourceProviderMap() {
     const result: Record<string, DataSourceProviderInfo> = {}
     for (const ws of workspaces) {
       for (const ds of ws.dataSources ?? []) {
-        const cat = catMap[ds.catalogItemId]
-        if (!cat) continue
-        const prov = provMap[cat.providerId]
+        const cat = ds.catalogItemId ? catMap[ds.catalogItemId] : undefined
+        // Manual/blank sources have no catalog item but always carry a
+        // providerId — resolve them directly so fully-managed models get
+        // provider identity too (they'd otherwise be skipped entirely).
+        const providerId = cat?.providerId ?? ds.providerId
+        if (!providerId) continue
+        const prov = provMap[providerId]
         result[ds.id] = {
-          providerId: cat.providerId,
-          providerName: prov?.name || cat.providerId,
+          providerId,
+          providerName: prov?.name || providerId,
           providerType: prov?.providerType || 'unknown',
-          sourceIdentifier: cat.sourceIdentifier,
-          catalogItemName: cat.name,
+          sourceIdentifier: cat?.sourceIdentifier ?? ds.graphName,
+          catalogItemName: cat?.name ?? ds.label,
         }
       }
     }

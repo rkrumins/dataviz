@@ -46,6 +46,8 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         graphName=row.graph_name,
         accessLevel=row.access_level,
         extraConfig=json.loads(row.extra_config) if row.extra_config else None,
+        sourceMode=row.source_mode,
+        writeBackEnabled=bool(row.write_back_enabled),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
