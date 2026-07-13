@@ -2,11 +2,12 @@ import {
   Rocket,
   LayoutGrid,
   Server,
-  AlertTriangle,
   HelpCircle,
   Boxes,
   Cloud,
   GitBranch,
+  Terminal,
+  ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -64,10 +65,13 @@ export interface DocKeyJourney {
 // ── Sections ───────────────────────────────────────────────────────
 
 export const docSections: DocSection[] = [
-  { id: 'getting-started', label: 'Getting Started', icon: Rocket },
+  { id: 'getting-started', label: 'Start Here', icon: Rocket },
   { id: 'architecture', label: 'Architecture', icon: LayoutGrid },
-  { id: 'reference', label: 'Technical Reference', icon: Server },
-  { id: 'operations', label: 'Operations', icon: AlertTriangle },
+  { id: 'dev-workflow', label: 'Setup & Development', icon: Terminal },
+  { id: 'reference', label: 'Backend, API & Frontend', icon: Server },
+  { id: 'versioning', label: 'Versioning', icon: GitBranch },
+  { id: 'security-identity', label: 'Security & Identity', icon: ShieldCheck },
+  { id: 'operations', label: 'Deployment & Operations', icon: Cloud },
   { id: 'faq', label: 'FAQ', icon: HelpCircle },
 ]
 
@@ -81,7 +85,7 @@ export const docPersonas: DocPersona[] = [
     tagline: 'Get {brand} running and make your first change',
     intro:
       'Clone the repo, stand up the local stack, and get enough of the lay of the land to ship a first pull request with confidence.',
-    sectionId: 'getting-started',
+    sectionId: 'dev-workflow',
     startSlug: 'setup',
     accent: {
       gradient: 'from-cyan-500 to-blue-600',
@@ -116,7 +120,7 @@ export const docPersonas: DocPersona[] = [
     intro:
       'Deployment topology, known risks, and the operational posture worth tracking before it becomes an incident.',
     sectionId: 'operations',
-    startSlug: 'technical-debt',
+    startSlug: 'deployment',
     accent: {
       gradient: 'from-amber-500 to-orange-600',
       text: 'text-amber-600 dark:text-amber-400',
@@ -156,26 +160,26 @@ export const docKeyJourneys: DocKeyJourney[] = [
     icon: Server,
     time: '8 min',
   },
+  {
+    title: 'Ship a change safely',
+    outcome: 'Draft branches, review & merge, revert vs. rollback',
+    slug: 'versioning-overview',
+    icon: GitBranch,
+    time: '10 min',
+  },
 ]
 
 // ── Document Entries ───────────────────────────────────────────────
 // Adding a new doc? Add one entry here — that's it.
 
 export const docEntries: DocEntry[] = [
-  // Getting Started
+  // Start Here
   {
     slug: 'overview',
     section: 'getting-started',
     title: 'Project Overview',
     description: 'What {brand} is and how the platform works',
     importFn: () => import('@docs/OVERVIEW.md?raw'),
-  },
-  {
-    slug: 'setup',
-    section: 'getting-started',
-    title: 'Setup Guide',
-    description: 'Docker and local development setup',
-    importFn: () => import('@docs/SETUP.md?raw'),
   },
 
   // Architecture
@@ -187,14 +191,58 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/ARCHITECTURE.md?raw'),
   },
   {
+    slug: 'data-architecture',
+    section: 'architecture',
+    title: 'Data Architecture',
+    description: 'Database schema and entity relationships',
+    importFn: () => import('@docs/DATA_ARCHITECTURE.md?raw'),
+  },
+  {
     slug: 'decisions',
     section: 'architecture',
     title: 'Design Decisions',
     description: 'ADRs and architectural trade-offs',
     importFn: () => import('@docs/DECISIONS.md?raw'),
   },
+  {
+    slug: 'scaling-architecture',
+    section: 'architecture',
+    title: 'Scaling Architecture (Future)',
+    description: 'Deferred horizontal-scale plan — not yet active',
+    importFn: () => import('@docs/architecture-when-scaling.md?raw'),
+  },
+  {
+    slug: 'aggregation-pipeline',
+    section: 'architecture',
+    title: 'Aggregation Pipeline',
+    description: 'How :AGGREGATED edges are materialized and rolled up',
+    importFn: () => import('@docs/AGGREGATION_PIPELINE.md?raw'),
+  },
+  {
+    slug: 'technical-debt',
+    section: 'architecture',
+    title: 'Technical Debt',
+    description: 'Known debt items and remediation plan',
+    importFn: () => import('@docs/TECHNICAL_DEBT.md?raw'),
+  },
 
-  // Technical Reference
+  // Setup & Development
+  {
+    slug: 'setup',
+    section: 'dev-workflow',
+    title: 'Setup Guide',
+    description: 'Docker and local development setup',
+    importFn: () => import('@docs/SETUP.md?raw'),
+  },
+  {
+    slug: 'integration-testing',
+    section: 'dev-workflow',
+    title: 'Local Integration Testing',
+    description: 'Backend-only path to exercise the draft/branch graph journey',
+    importFn: () => import('@docs/local-integration-testing.md?raw'),
+  },
+
+  // Backend, API & Frontend
   {
     slug: 'backend',
     section: 'reference',
@@ -210,13 +258,6 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/FRONTEND.md?raw'),
   },
   {
-    slug: 'data-architecture',
-    section: 'reference',
-    title: 'Data Architecture',
-    description: 'Database schema and entity relationships',
-    importFn: () => import('@docs/DATA_ARCHITECTURE.md?raw'),
-  },
-  {
     slug: 'api-features',
     section: 'reference',
     title: 'Feature Flags API',
@@ -224,20 +265,122 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/API_FEATURES.md?raw'),
   },
 
-  // Operations
+  // Versioning
   {
-    slug: 'technical-debt',
-    section: 'operations',
-    title: 'Technical Debt',
-    description: 'Known debt items and remediation plan',
-    importFn: () => import('@docs/TECHNICAL_DEBT.md?raw'),
+    slug: 'versioning-overview',
+    section: 'versioning',
+    title: 'Versioning: Overview & Architecture',
+    description: 'Git for graphs — draft branches, merge, review & publish, revert/rollback',
+    importFn: () => import('@docs/versioning/01-overview-and-architecture.md?raw'),
+  },
+  {
+    slug: 'versioning-api-reference',
+    section: 'versioning',
+    title: 'Versioning: API Reference',
+    description: 'The REST contract for the versioning and draft-aware graph routers',
+    importFn: () => import('@docs/versioning/06-api-reference.md?raw'),
+  },
+  {
+    slug: 'versioning-e2e',
+    section: 'versioning',
+    title: 'Versioning: End-to-End Walkthrough',
+    description: 'Hands-on test guide for the draft, branch, and merge flow',
+    importFn: () => import('@docs/VERSIONING_E2E.md?raw'),
+  },
+  {
+    slug: 'versioning-drafts-merge',
+    section: 'versioning',
+    title: 'Versioning: Drafts, Lineage & Merge',
+    description: 'Engineering notes on a draft-lineage/merge data-loss bug and its repair',
+    importFn: () => import('@docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md?raw'),
+  },
+  {
+    slug: 'versioning-deep-dives',
+    section: 'versioning',
+    title: 'Versioning: Deep-Dive Index',
+    description: 'Directory into the full versioning reference suite',
+    importFn: () => import('@docs/versioning/README-index.md?raw'),
+  },
+
+  // Security & Identity
+  {
+    slug: 'rbac',
+    section: 'security-identity',
+    title: 'RBAC',
+    description: 'Roles, permissions, and the resolver that enforces them',
+    importFn: () => import('@docs/RBAC.md?raw'),
+  },
+  {
+    slug: 'sso',
+    section: 'security-identity',
+    title: 'SSO (Operator Guide)',
+    description: "What's supported, and how to configure and run it",
+    importFn: () => import('@docs/SSO.md?raw'),
+  },
+  {
+    slug: 'sso-integration',
+    section: 'security-identity',
+    title: 'SSO Integration (Developer Guide)',
+    description: 'Day-1 walkthrough, architecture, sequence diagrams, and cookbooks',
+    importFn: () => import('@docs/SSO_INTEGRATION.md?raw'),
   },
   {
     slug: 'signup-service',
-    section: 'operations',
+    section: 'security-identity',
     title: 'User Service Plan',
     description: 'Signup and user management roadmap',
     importFn: () => import('@docs/SIGNUP_USER_SERVICE_PLAN.md?raw'),
+  },
+  {
+    slug: 'security-audit',
+    section: 'security-identity',
+    title: 'Security Audit: RBAC & SSO',
+    description: 'Findings and remediations from the 2026-06-05 audit',
+    importFn: () => import('@docs/audits/rbac-sso-audit-2026-06-05.md?raw'),
+  },
+
+  // Deployment & Operations
+  {
+    slug: 'deployment',
+    section: 'operations',
+    title: 'Self-Host Deployment',
+    description: 'Deploy on a VM with Docker Compose — backup, restore, hardening',
+    importFn: () => import('@docs/DEPLOYMENT.md?raw'),
+  },
+  {
+    slug: 'falkordb-deployment',
+    section: 'operations',
+    title: 'FalkorDB Deployment',
+    description: 'Enterprise HA cluster topology on GKE',
+    importFn: () => import('@docs/FALKORDB_DEPLOYMENT.md?raw'),
+  },
+  {
+    slug: 'falkordb-dr',
+    section: 'operations',
+    title: 'FalkorDB Disaster Recovery',
+    description: 'Runbook for recovering FalkorDB with PostgreSQL as source of truth',
+    importFn: () => import('@docs/FALKORDB_DR_RUNBOOK.md?raw'),
+  },
+  {
+    slug: 'infra-launch-scale',
+    section: 'operations',
+    title: 'Infrastructure: Launch Scale',
+    description: 'GCP infrastructure spec for ~1,000 users / 300 graphs',
+    importFn: () => import('@docs/INFRASTRUCTURE_LAUNCH_SCALE.md?raw'),
+  },
+  {
+    slug: 'infra-scaling-250m',
+    section: 'operations',
+    title: 'Infrastructure: 250M-Node Scale',
+    description: 'Theoretical-max deployment spec',
+    importFn: () => import('@docs/INFRASTRUCTURE_SCALING_250M.md?raw'),
+  },
+  {
+    slug: 'read-path-performance',
+    section: 'operations',
+    title: 'Read-Path Performance',
+    description: 'The read-path perf redesign — ontology tax removal, label-bucket seeks, and more',
+    importFn: () => import('@docs/read-path-performance/README.md?raw'),
   },
 ]
 
@@ -269,7 +412,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Setup',
     question: 'How do I get started quickly?',
     answer:
-      'Run `docker compose up --build` from the repo root. This starts all 5 services (frontend, viz-service, graph-service, FalkorDB, PostgreSQL). Open http://localhost:3080 and log in with `admin@synodic.local` / `admin123`. See the [Setup Guide](/docs/setup) for details.',
+      'Run `docker compose up --build` from the repo root. This starts the full stack (frontend, viz-service, FalkorDB, PostgreSQL, Redis). Open http://localhost:3080 and log in with `admin@nexuslineage.local` / `admin123`. See the [Setup Guide](/docs/setup) for details.',
   },
   {
     category: 'Setup',
@@ -331,15 +474,15 @@ export const faqEntries: FAQEntry[] = [
   // Architecture
   {
     category: 'Architecture',
-    question: 'Why are there two backend services?',
+    question: 'Was there ever a separate Graph Service?',
     answer:
-      'The **Visualization Service** (port 8000) handles auth, workspace management, ontology, and orchestration. The **Graph Service** (port 8001) handles provider discovery, connectivity testing, and direct graph queries. This separation allows independent scaling and eventual microservice extraction.',
+      'Yes, briefly — a standalone **Graph Service** on port 8001 handled provider discovery and connectivity testing. It was retired ([ADR-018](/docs/decisions)): it was deployed but never actually invoked, since the onboarding flow already calls the Visualization Service\'s own bulkheaded connectivity check. The provider adapters it used (Neo4j, DataHub, Spanner) survive and now run in-process inside the **Visualization Service** (port 8000), which handles everything — auth, workspaces, ontology, and provider connectivity.',
   },
   {
     category: 'Architecture',
     question: 'What is the tech stack?',
     answer:
-      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.12 + FastAPI + SQLAlchemy 2.0 async**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL** (production) / SQLite (dev). State: **Zustand**. Visualization: **React Flow**.',
+      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.13 + FastAPI + SQLAlchemy 2.0 async**, with schema migrations managed by **Alembic**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL** (production) / SQLite (local dev fallback). Cache/session store: a dedicated **Redis**. State: **Zustand**. Visualization: **React Flow**.',
   },
 
   // Troubleshooting
@@ -347,7 +490,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Troubleshooting',
     question: 'The frontend shows a blank page or API errors',
     answer:
-      'Ensure both backend services are running and healthy. In Docker mode, check that `nginx.conf` proxy targets match the service names. In local dev, check that `vite.config.ts` proxy targets point to `localhost:8000` and `localhost:8001`.',
+      'Ensure the viz-service backend is running and healthy. In Docker mode, check that `nginx.conf` proxies to the `viz-service` container. In local dev, check that `vite.config.ts` proxies to `localhost:8000`.',
   },
   {
     category: 'Troubleshooting',
@@ -359,7 +502,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Troubleshooting',
     question: 'Docker Compose fails with port conflicts',
     answer:
-      'Another process is using one of the required ports (6379, 5432, 8000, 8001, 3080). Stop the conflicting process or change the port mapping in `docker-compose.yml`.',
+      'Another process is using one of the required ports (6379, 5432, 8000, 3080). Stop the conflicting process or change the port mapping in `docker-compose.yml`.',
   },
 ]
 

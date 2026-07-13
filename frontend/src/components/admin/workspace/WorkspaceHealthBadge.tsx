@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
  * `empty` and `idle` are now first-class: they are not failures, they are the two
  * most common states of a young workspace, and each has an obvious next action.
  */
-export type WorkspaceHealth = 'healthy' | 'warning' | 'critical' | 'idle' | 'empty' | 'unknown'
+export type WorkspaceHealth = 'healthy' | 'warning' | 'critical' | 'no-data' | 'empty' | 'unknown'
 
 interface WorkspaceHealthBadgeProps {
   status: WorkspaceHealth
@@ -25,12 +25,13 @@ interface WorkspaceHealthBadgeProps {
 export const HEALTH_CONFIG = {
   healthy:  { dot: 'bg-emerald-400', label: 'Ready',           text: 'text-emerald-500' },
   warning:  { dot: 'bg-amber-400 animate-pulse', label: 'Syncing',  text: 'text-amber-500' },
-  critical: { dot: 'bg-red-400',     label: 'Needs Attention', text: 'text-red-500' },
-  // Sources are connected, aggregation just hasn't been run. Nothing is wrong.
-  idle:     { dot: 'bg-slate-400',   label: 'Not aggregated',  text: 'text-ink-muted' },
+  critical: { dot: 'bg-red-400',     label: 'Needs attention', text: 'text-red-500' },
+  // Sources are connected but we can't see any data in them yet.
+  'no-data': { dot: 'bg-slate-400',  label: 'No data yet',     text: 'text-ink-muted' },
   // No data sources at all — the workspace is waiting to be filled.
-  empty:    { dot: 'bg-slate-300 dark:bg-slate-600', label: 'No data',  text: 'text-ink-muted' },
-  unknown:  { dot: 'bg-gray-400',    label: 'Unknown',         text: 'text-ink-muted' },
+  empty:    { dot: 'bg-slate-300 dark:bg-slate-600', label: 'No sources', text: 'text-ink-muted' },
+  // Stats haven't arrived. "We don't know" is not "nothing there".
+  unknown:  { dot: 'bg-gray-400',    label: 'Checking…',       text: 'text-ink-muted' },
 } as const
 
 const config = HEALTH_CONFIG
@@ -58,20 +59,34 @@ export function WorkspaceHealthBadge({
   )
 }
 
+/**
+ * Workspace health = "can I use this?", not "has the rollup run?".
+ *
+ * It used to be derived SOLELY from aggregationStatus, which is an optional
+ * rollup: a workspace holding 2.1M nodes across 8 sources reported "Not
+ * aggregated" in grey simply because some of its sources had never had
+ * :AGGREGATED edges computed. Aggregation is an optimisation, not a
+ * precondition — views read those graphs perfectly well without it. So the
+ * question the dot answers is now whether the workspace has DATA, and
+ * aggregation only contributes the two states that genuinely mean something is
+ * wrong or in flight.
+ *
+ * `nodeCount` undefined means "stats haven't landed yet" and yields `unknown`,
+ * NOT `no-data`. Reporting an unmeasured workspace as empty is a lie that reads
+ * exactly like a real one.
+ */
 export function deriveWorkspaceHealth(
   dataSources: { aggregationStatus: string }[],
+  opts?: { nodeCount?: number },
 ): WorkspaceHealth {
-  // Not a health problem — an empty workspace is one that hasn't been filled yet.
   if (dataSources.length === 0) return 'empty'
 
   const statuses = dataSources.map((ds) => ds.aggregationStatus)
+  // Something broke, or is mid-flight. These DO belong in health.
   if (statuses.some((s) => s === 'failed')) return 'critical'
   if (statuses.some((s) => s === 'pending' || s === 'running')) return 'warning'
-  if (statuses.every((s) => s === 'ready' || s === 'skipped')) return 'healthy'
 
-  // 'none' = aggregation has never run. It was falling through to "unknown", which
-  // is how 44 of 56 sources ended up greyed out as if something were wrong.
-  if (statuses.every((s) => s === 'none' || s === 'ready' || s === 'skipped')) return 'idle'
-
-  return 'unknown'
+  const nodes = opts?.nodeCount
+  if (nodes === undefined) return 'unknown'
+  return nodes > 0 ? 'healthy' : 'no-data'
 }

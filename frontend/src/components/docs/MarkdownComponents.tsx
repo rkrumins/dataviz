@@ -4,7 +4,10 @@ import { Link as RouterLink } from 'react-router-dom'
 import { Hash } from 'lucide-react'
 import { MermaidBlock } from './MermaidBlock'
 
-// Map the actual filenames from docs/ to route slugs
+// Map the actual filenames from docs/ to route slugs. Adding a new doc to
+// docsConfig.ts? Add its filename here too, or its relative .md links from
+// other docs will fall through to the "external link" branch below instead
+// of routing in-SPA.
 const filenameMap: Record<string, string> = {
   'OVERVIEW.md': 'overview',
   'SETUP.md': 'setup',
@@ -16,6 +19,23 @@ const filenameMap: Record<string, string> = {
   'API_FEATURES.md': 'api-features',
   'TECHNICAL_DEBT.md': 'technical-debt',
   'SIGNUP_USER_SERVICE_PLAN.md': 'signup-service',
+  'architecture-when-scaling.md': 'scaling-architecture',
+  'AGGREGATION_PIPELINE.md': 'aggregation-pipeline',
+  'local-integration-testing.md': 'integration-testing',
+  'VERSIONING_E2E.md': 'versioning-e2e',
+  'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-merge',
+  '01-overview-and-architecture.md': 'versioning-overview',
+  '06-api-reference.md': 'versioning-api-reference',
+  'README-index.md': 'versioning-deep-dives',
+  'RBAC.md': 'rbac',
+  'SSO.md': 'sso',
+  'SSO_INTEGRATION.md': 'sso-integration',
+  'rbac-sso-audit-2026-06-05.md': 'security-audit',
+  'DEPLOYMENT.md': 'deployment',
+  'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
+  'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
+  'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
+  'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',
 }
 
 function rewriteDocLink(href: string): string {
