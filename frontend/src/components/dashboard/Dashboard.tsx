@@ -40,15 +40,11 @@ import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
 import { DashboardSkeleton } from './DashboardSkeleton'
 import { DashboardActivityFeed } from './DashboardActivityFeed'
-import { DashboardDrafts } from './DashboardDrafts'
-import { DashboardPinned } from './DashboardPinned'
+import { DashboardWorkHub } from './DashboardWorkHub'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
 import { DashboardOnboarding } from './DashboardOnboarding'
-// "Jump back in" IS the Explorer's recents strip — one component, one shape, one
-// icon/theme resolution. A second implementation is how the two would drift.
-import { ExplorerRecentStrip } from '@/components/explorer/ExplorerRecentStrip'
 import { motion } from 'framer-motion'
 import { LayoutTemplate, BookOpen } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
@@ -236,46 +232,29 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 2. Unfinished work outranks browsing: a draft you left open is
-                       YOUR half-done edit, not just a page you happened to visit.
-                       Renders nothing when you have none. */}
+                {/* 2. Your work — ONE section, not three.
+                       Unfinished drafts, pinned views and recently visited all
+                       answered the same question ("which view do I open?") and
+                       overlapped so heavily that ~8 views were drawn ~15 times down
+                       the page. Merging them is what lets activity sit directly
+                       below the fold instead of three screens down: no cramming
+                       required, just less repetition. */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger, ...MOTION.sectionEntry }}
                 >
-                    <DashboardDrafts />
+                    <DashboardWorkHub />
                 </motion.div>
 
-                {/* 3. Pinned: the only signal the user gives ON PURPOSE. Recents are a
-                       side-effect of browsing; a star is a decision. Renders nothing
-                       when they've pinned nothing. */}
-                <motion.div
-                    initial={{ opacity: 0, y: MOTION.sectionY }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 1.5, ...MOTION.sectionEntry }}
-                >
-                    <DashboardPinned />
-                </motion.div>
-
-                {/* 4. Jump back in — REAL per-user visit history */}
-                <motion.div
-                    initial={{ opacity: 0, y: MOTION.sectionY }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
-                >
-                    <ExplorerRecentStrip
-                        title="Jump back in"
-                        subtitle="Views you visited recently"
-                    />
-                </motion.div>
-
-                {/* 3. What the team has been doing, in the user's workspaces */}
+                {/* 3. Activity — full width, and now the SECOND thing you see.
+                       It gets the room it needs (a readable timeline plus its
+                       summary) rather than being squeezed into a sidebar. */}
                 <motion.div
                     id="dashboard-activity"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
+                    transition={{ delay: MOTION.sectionStagger * 1.5, ...MOTION.sectionEntry }}
                 >
                     <DashboardActivityFeed />
                 </motion.div>

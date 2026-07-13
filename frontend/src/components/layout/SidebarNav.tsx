@@ -9,19 +9,14 @@ import {
   Shield,
   PanelLeftClose,
   PanelLeftOpen,
-  Pin,
-  Clock,
-  ArrowRight,
   BookOpen,
   Sparkles,
 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { tabForPath, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
-import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
-import { DynamicIcon, resolveViewIcon, viewTypeColor } from '@/lib/viewUtils'
 import { useNavPermission } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
 
@@ -88,143 +83,6 @@ function CollapsedTooltip({
       </div>
     </div>,
     document.body,
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Sidebar Quick Access — Pinned + Recent sections
-// ─────────────────────────────────────────────────────────────────────
-
-function SidebarQuickAccess({
-  onOpenView,
-}: {
-  onOpenView: (viewId: string, wsId?: string, dsId?: string) => void
-}) {
-  const navigate = useNavigate()
-  const pinnedViewIds = usePreferencesStore((s) => s.pinnedViewIds)
-  const unpinView = usePreferencesStore((s) => s.unpinView)
-  const { recentViews, allViews, activeViewId } = useWorkspaceContext()
-
-  // Resolve pinned view IDs to view data (filter out deleted views)
-  const pinnedViews = pinnedViewIds
-    .map(id => allViews.find(v => v.id === id))
-    .filter((v): v is NonNullable<typeof v> => v != null)
-
-  // Recent views that aren't already pinned, max 3
-  const pinnedSet = new Set(pinnedViewIds)
-  const recentNonPinned = recentViews
-    .filter(r => !pinnedSet.has(r.viewId))
-    .slice(0, 3)
-
-  const hasContent = pinnedViews.length > 0 || recentNonPinned.length > 0
-
-  if (!hasContent) {
-    return (
-      <div className="px-2.5 mt-4">
-        <p className="text-[11px] text-ink-muted px-2 leading-relaxed">
-          Pin views for quick access. Open any view and click the pin icon, or browse the{' '}
-          <button
-            onClick={() => navigate('/explorer')}
-            className="text-accent-lineage hover:underline"
-          >
-            Explorer
-          </button>.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="px-2.5 mt-4 space-y-3">
-      {/* Pinned section */}
-      {pinnedViews.length > 0 && (
-        <div>
-          <h3 className="px-2 mb-1 text-[10px] font-bold uppercase tracking-wider text-ink-muted flex items-center gap-1.5">
-            <Pin className="w-3 h-3" />
-            Pinned
-          </h3>
-          <div className="space-y-0.5">
-            {pinnedViews.map(view => {
-              const isActive = view.id === activeViewId
-              const iconName = resolveViewIcon({ icon: view.icon, viewType: view.layout?.type ?? 'graph' })
-              const colorClass = viewTypeColor(view.layout?.type ?? 'graph')
-              return (
-                <div key={view.id} className="group flex items-center">
-                  <button
-                    onClick={() => onOpenView(view.id, view.workspaceId, view.dataSourceId ?? undefined)}
-                    className={cn(
-                      "flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left transition-colors text-sm",
-                      isActive
-                        ? "bg-accent-lineage/10 text-accent-lineage"
-                        : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
-                    )}
-                  >
-                    <DynamicIcon
-                      name={iconName}
-                      className={cn("w-3.5 h-3.5 shrink-0", isActive ? "text-accent-lineage" : colorClass)}
-                    />
-                    <span className="truncate">{view.name}</span>
-                  </button>
-                  <button
-                    onClick={() => unpinView(view.id)}
-                    className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-all shrink-0"
-                    title="Unpin"
-                  >
-                    <Pin className="w-3 h-3 text-ink-muted" />
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Recent section */}
-      {recentNonPinned.length > 0 && (
-        <div>
-          <h3 className="px-2 mb-1 text-[10px] font-bold uppercase tracking-wider text-ink-muted flex items-center gap-1.5">
-            <Clock className="w-3 h-3" />
-            Recent
-          </h3>
-          <div className="space-y-0.5">
-            {recentNonPinned.map(entry => {
-              const isActive = entry.viewId === activeViewId
-              const iconName = resolveViewIcon({ icon: entry.icon, viewType: entry.viewType })
-              const colorClass = viewTypeColor(entry.viewType)
-              return (
-                <button
-                  key={entry.viewId}
-                  onClick={() => onOpenView(entry.viewId, entry.workspaceId, entry.dataSourceId)}
-                  className={cn(
-                    "w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left transition-colors text-sm",
-                    isActive
-                      ? "bg-accent-lineage/10 text-accent-lineage"
-                      : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
-                  )}
-                >
-                  <DynamicIcon
-                    name={iconName}
-                    className={cn("w-3.5 h-3.5 shrink-0", isActive ? "text-accent-lineage" : colorClass)}
-                  />
-                  <span className="truncate">{entry.viewName}</span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* See all link */}
-      <div className="px-2">
-        <button
-          onClick={() => navigate('/explorer')}
-          className="text-2xs text-ink-muted hover:text-accent-lineage transition-colors flex items-center gap-1"
-        >
-          Browse all views
-          <ArrowRight className="w-2.5 h-2.5" />
-        </button>
-      </div>
-    </div>
   )
 }
 
@@ -306,9 +164,8 @@ export function SidebarNav() {
   const activeTab = tabForPath(pathname)
   const sidebarCollapsed = usePreferencesStore((s) => s.sidebarCollapsed)
   const toggleSidebar = usePreferencesStore((s) => s.toggleSidebar)
-  const activeLensId = useCanvasStore((s) => s.activeLensId)
 
-  const { viewCount, openView } = useWorkspaceContext()
+  const { viewCount } = useWorkspaceContext()
 
   // ── Resize state ──────────────────────────────────────────────────
   const [width, setWidth] = useState(DEFAULT_WIDTH)
@@ -343,10 +200,6 @@ export function SidebarNav() {
   // ── Collapsed tooltip state ───────────────────────────────────────
   const [hoveredNavId, setHoveredNavId] = useState<string | null>(null)
   const hoveredNavRef = useRef<HTMLButtonElement | null>(null)
-
-  const handleOpenView = (viewId: string, viewWorkspaceId?: string, viewDataSourceId?: string) => {
-    openView(viewId, viewWorkspaceId, viewDataSourceId)
-  }
 
   const handleNavClick = (tabId: NavigationTab) => {
     switch (tabId) {
@@ -431,27 +284,7 @@ export function SidebarNav() {
             />
           ))}
         </div>
-
-        {/* Pinned + Recent quick access (expanded sidebar only) */}
-        {!sidebarCollapsed && (
-          <SidebarQuickAccess
-            onOpenView={handleOpenView}
-          />
-        )}
       </nav>
-
-      {/* Active Lens Indicator */}
-      {activeLensId && !sidebarCollapsed && (
-        <div className="p-3 border-t border-glass-border">
-          <div className="glass-panel-subtle rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-accent-business animate-pulse" />
-              <span className="text-xs font-medium text-ink-secondary">Active Lens</span>
-            </div>
-            <p className="text-sm font-medium mt-1 truncate">{activeLensId}</p>
-          </div>
-        </div>
-      )}
 
       {/* User Guide link */}
       <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 pt-2" : "px-2.5 pt-2")}>
