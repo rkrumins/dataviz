@@ -95,14 +95,26 @@ describe('mergeWorkItems', () => {
         expect(items.map(i => i.viewId)).toEqual(['newer', 'older'])
     })
 
-    it('falls back to a pin\'s workspace name when the draft had none', () => {
+    it('takes the workspace name from a later source when the draft had none', () => {
+        // The drafts endpoint returns a workspace ID but no NAME. Views do not have
+        // unique names — this instance has two "Data Lineage" — so without the
+        // workspace the two cards are indistinguishable. Whichever source knows the
+        // name, the merged item must end up carrying it.
         const items = mergeWorkItems(
-            [draft({ viewId: 'v1', name: undefined })],
+            [draft({ viewId: 'v1' })],
             [pin({ id: 'v1', workspaceName: 'Finance' })],
             [],
         )
-        // The draft seeds subtitle as "Unnamed draft"; it must not be clobbered.
-        expect(items[0].subtitle).toBe('Unnamed draft')
+        expect(items[0].workspaceName).toBe('Finance')
+    })
+
+    it('keeps a NAMED draft\'s name, and leaves it undefined when unnamed', () => {
+        const named = mergeWorkItems([draft({ viewId: 'v1', name: 'Q3 refactor' })], [], [])
+        expect(named[0].draftName).toBe('Q3 refactor')
+
+        const unnamed = mergeWorkItems([draft({ viewId: 'v2', name: undefined })], [], [])
+        // Undefined, not "Unnamed draft" — the card decides how to phrase absence.
+        expect(unnamed[0].draftName).toBeUndefined()
     })
 
     it('handles all three sources being empty', () => {

@@ -22,7 +22,8 @@ import { usePinnedViews } from '@/hooks/usePinnedViews'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
+import { useWorkspacesStore } from '@/store/workspaces'
 import {
     mergeWorkItems, filterWorkItems, countBadge, isStaleDraft,
     type WorkFilter, type WorkItem,
@@ -35,38 +36,56 @@ const FILTERS: { id: WorkFilter; label: string }[] = [
     { id: 'recent', label: 'Recent' },
 ]
 
-function Badges({ item }: { item: WorkItem }) {
+const CHIP = 'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap'
+
+/** Why is this card here? Say it in words. */
+function Reasons({ item }: { item: WorkItem }) {
     return (
-        <span className="flex items-center gap-1 shrink-0">
+        <span className="flex items-center gap-1 min-w-0">
             {item.badges.includes('draft') && (
                 <span
-                    title="You have an unpublished draft on this view"
-                    className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                    className={cn(CHIP, 'bg-amber-500/10 text-amber-600 dark:text-amber-400 min-w-0')}
+                    title={item.draftName
+                        ? `Unpublished draft: "${item.draftName}"`
+                        : 'You have an unpublished draft on this view'}
                 >
-                    <GitBranch className="w-3 h-3" />
+                    <GitBranch className="w-2.5 h-2.5 shrink-0" />
+                    {/* A NAMED draft says its name; an unnamed one just says Draft.
+                        Four cards all reading "Unnamed draft" told the reader nothing. */}
+                    <span className="truncate">{item.draftName ?? 'Draft'}</span>
                 </span>
             )}
             {item.badges.includes('pinned') && (
-                <span title="Pinned" className="inline-flex items-center justify-center w-5 h-5">
-                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                <span className={cn(CHIP, 'bg-black/5 dark:bg-white/10 text-ink-muted')} title="You pinned this view">
+                    <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-400 shrink-0" />
+                    Pinned
                 </span>
             )}
             {item.badges.includes('recent') && !item.badges.includes('draft') && (
-                <span
-                    title="You opened this recently"
-                    className="inline-flex items-center justify-center w-5 h-5 text-ink-muted"
-                >
-                    <Clock className="w-3 h-3" />
+                <span className={cn(CHIP, 'bg-black/5 dark:bg-white/10 text-ink-muted')} title="You opened this recently">
+                    <Clock className="w-2.5 h-2.5 shrink-0" />
+                    Recent
                 </span>
             )}
         </span>
     )
 }
 
-function WorkCard({ item, index }: { item: WorkItem; index: number }) {
+function WorkCard({ item, index, workspaceName }: {
+    item: WorkItem
+    index: number
+    workspaceName?: string
+}) {
     const meta = viewTypeMeta(item.viewType)
     const icon = resolveViewIcon({ icon: item.icon, viewType: item.viewType })
     const stale = isStaleDraft(item)
+
+    // WHICH "Data Lineage" is this? Two views share that name here, and two more
+    // share "Domain Overview". Without the workspace the cards are twins.
+    const where = workspaceName ?? item.workspaceName
+    const subtitle = where
+        ? `${where} · ${viewTypeLabel(item.viewType)}`
+        : viewTypeLabel(item.viewType)
 
     // A draft goes straight back INTO the draft, not to the published view — that
     // is the whole point of surfacing it. useBranchDeepLink applies ?branch= on
@@ -107,17 +126,17 @@ function WorkCard({ item, index }: { item: WorkItem; index: number }) {
                         <span className="block text-[13px] font-bold text-ink truncate group-hover:text-accent-lineage transition-colors">
                             {item.name}
                         </span>
-                        {item.subtitle && (
-                            <span className="block text-[11px] text-ink-muted truncate mt-0.5">
-                                {item.subtitle}
-                            </span>
-                        )}
+                        <span className="block text-[11px] text-ink-muted truncate mt-0.5">
+                            {subtitle}
+                        </span>
                     </span>
-
-                    <Badges item={item} />
                 </div>
 
-                <div className="relative mt-auto flex items-center justify-between gap-2">
+                <div className="relative mb-2.5">
+                    <Reasons item={item} />
+                </div>
+
+                <div className="relative mt-auto flex items-center justify-between gap-2 pt-2 border-t border-glass-border/60">
                     <span className={cn(
                         'inline-flex items-center gap-1 text-[11px] font-medium truncate',
                         stale ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted',
@@ -128,7 +147,12 @@ function WorkCard({ item, index }: { item: WorkItem; index: number }) {
                             : `${item.timeVerb} ${timeAgo(item.timestamp)}`}
                     </span>
 
-                    <ArrowRight className="w-3.5 h-3.5 shrink-0 text-ink-muted opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
+                    {/* Say what the click DOES. A draft resumes an edit; everything
+                        else just opens. */}
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-ink-muted group-hover:text-accent-lineage transition-colors shrink-0">
+                        {item.draftId ? 'Resume' : 'Open'}
+                        <ArrowRight className="w-3 h-3 transition-transform group-hover:translate-x-0.5" />
+                    </span>
                 </div>
             </Link>
         </motion.div>
@@ -139,6 +163,9 @@ export function DashboardWorkHub() {
     const { data: drafts, isLoading: loadingDrafts } = useMyDrafts()
     const { data: pinned, isLoading: loadingPinned } = usePinnedViews()
     const { recent } = useRecentViews()
+    // The drafts endpoint returns a workspace ID, not a name — resolve it here
+    // rather than widening the endpoint for a string the client already holds.
+    const workspaces = useWorkspacesStore(s => s.workspaces)
 
     const [filter, setFilter] = useState<WorkFilter>('all')
 
@@ -213,7 +240,15 @@ export function DashboardWorkHub() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 {visible.map((item, i) => (
-                    <WorkCard key={item.viewId} item={item} index={i} />
+                    <WorkCard
+                        key={item.viewId}
+                        item={item}
+                        index={i}
+                        workspaceName={
+                            item.workspaceName
+                            ?? workspaces.find(w => w.id === item.workspaceId)?.name
+                        }
+                    />
                 ))}
             </div>
         </section>

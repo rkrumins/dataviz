@@ -19,10 +19,18 @@ export interface WorkItem {
     viewType?: string
     /** The user's chosen icon (config.icon), when they set one. */
     icon?: string
-    subtitle?: string
+    /** WHICH view this is. Names are not unique — this dev instance has two views
+     *  called "Data Lineage" and two called "Domain Overview" — so the card must
+     *  carry the workspace, or two cards are indistinguishable. Every source gives
+     *  us the id; the name is resolved against the workspaces store. */
+    workspaceId?: string
+    workspaceName?: string
     badges: WorkBadge[]
     /** Present iff this view has an open draft — the card deep-links into it. */
     draftId?: string
+    /** The draft's own name, when the user gave it one. Most are unnamed, and
+     *  printing "Unnamed draft" on four cards told the reader nothing. */
+    draftName?: string
     /** Sort key: the most recent thing that happened to this item, for the user. */
     timestamp: string
     /** What that timestamp MEANS. A draft's "edited" and a visit's "opened" are
@@ -78,12 +86,13 @@ export function mergeWorkItems(
         const item = touch(d.viewId, {
             name: d.viewName,
             viewType: d.viewType,
-            subtitle: d.name ?? 'Unnamed draft',
+            workspaceId: d.workspaceId,
             timestamp: d.updatedAt,
             timeVerb: 'Edited',
         })
         item.badges.push('draft')
         item.draftId = d.draftId
+        item.draftName = d.name
     }
 
     for (const p of pinned) {
@@ -91,15 +100,18 @@ export function mergeWorkItems(
             name: p.name,
             viewType: p.viewType,
             icon: p.config?.icon ?? undefined,
-            subtitle: p.workspaceName ?? undefined,
+            workspaceId: p.workspaceId,
+            workspaceName: p.workspaceName ?? undefined,
             timestamp: p.dataUpdatedAt ?? p.updatedAt,
             timeVerb: 'Updated',
         })
         item.badges.push('pinned')
         // A pinned view we already know as a draft keeps the draft's timestamp:
-        // the edit is the live fact, the pin is just a preference.
+        // the edit is the live fact, the pin is just a preference. But fill in any
+        // detail the draft source didn't have.
         if (!item.icon) item.icon = p.config?.icon ?? undefined
-        if (!item.subtitle) item.subtitle = p.workspaceName ?? undefined
+        if (!item.workspaceName) item.workspaceName = p.workspaceName ?? undefined
+        if (!item.workspaceId) item.workspaceId = p.workspaceId
     }
 
     for (const r of recents) {
@@ -107,13 +119,15 @@ export function mergeWorkItems(
             name: r.viewName,
             viewType: r.viewType,
             icon: r.icon,
-            subtitle: r.workspaceName ?? undefined,
+            workspaceId: r.workspaceId,
+            workspaceName: r.workspaceName,
             timestamp: r.visitedAt,
             timeVerb: 'Opened',
         })
         item.badges.push('recent')
         if (!item.icon) item.icon = r.icon
-        if (!item.subtitle) item.subtitle = r.workspaceName ?? undefined
+        if (!item.workspaceName) item.workspaceName = r.workspaceName
+        if (!item.workspaceId) item.workspaceId = r.workspaceId
     }
 
     const items = [...byView.values()]
