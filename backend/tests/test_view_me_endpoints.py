@@ -102,3 +102,18 @@ async def test_me_is_not_swallowed_as_a_view_id(test_client: AsyncClient):
     resp = await test_client.get("/api/v1/views/me/activity")
     # Resolves to the {view_id} route with view_id="me" → no such view.
     assert resp.status_code == 404
+
+
+async def test_most_viewed_route_is_not_swallowed_by_view_id(test_client: AsyncClient):
+    """The collision this file exists for.
+
+    ``/views/most-viewed`` is a SINGLE segment, so unlike the /me/* routes it
+    competes directly with ``/views/{view_id}``. Declared below it, FastAPI binds
+    view_id="most-viewed" and the endpoint becomes a silent 404. A 200 here proves
+    it is still declared above.
+    """
+    resp = await test_client.get("/api/v1/views/most-viewed")
+    assert resp.status_code == 200, (
+        "most-viewed is being swallowed by /{view_id} — move it above that route"
+    )
+    assert isinstance(resp.json(), list)

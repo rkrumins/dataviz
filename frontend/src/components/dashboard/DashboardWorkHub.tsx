@@ -16,16 +16,17 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Briefcase, GitBranch, Star, Clock, ArrowRight, AlertTriangle } from 'lucide-react'
+import { Briefcase, GitBranch, Star, Clock, ArrowRight, AlertTriangle, Flame, Users } from 'lucide-react'
 import { useMyDrafts } from '@/hooks/useMyDrafts'
 import { usePinnedViews } from '@/hooks/usePinnedViews'
 import { useRecentViews } from '@/hooks/useRecentViews'
+import { useMostViewed } from '@/hooks/useMostViewed'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import {
-    mergeWorkItems, filterWorkItems, countBadge, isStaleDraft,
+    mergeWorkItems, filterWorkItems, countBadge, isStaleDraft, isPersonal,
     type WorkFilter, type WorkItem,
 } from './workItems'
 
@@ -34,7 +35,26 @@ const FILTERS: { id: WorkFilter; label: string }[] = [
     { id: 'draft', label: 'Unfinished' },
     { id: 'pinned', label: 'Pinned' },
     { id: 'recent', label: 'Recent' },
+    { id: 'popular', label: 'Popular' },
 ]
+
+/** What the Popular tab is showing — it is NOT your work, so it says so. */
+const POPULAR_NOTE = 'What your team opens most, across views you can access.'
+
+/**
+ * Popularity, phrased honestly. Visits are counted per person, so we can say how
+ * many PEOPLE opened a view — a stronger recommendation than raw hits, which one
+ * enthusiastic refresher can dominate. With a single viewer there is no social
+ * signal at all, so we report the opens instead of claiming "1 person".
+ */
+function popularityLabel(item: WorkItem): string | null {
+    const viewers = item.viewers ?? 0
+    const opens = item.opens ?? 0
+    if (viewers > 1) return `${viewers} people opened it`
+    if (opens > 1) return `Opened ${opens} times`
+    if (opens === 1) return 'Opened once'
+    return null
+}
 
 const CHIP = 'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap'
 
@@ -67,14 +87,25 @@ function Reasons({ item }: { item: WorkItem }) {
                     Recent
                 </span>
             )}
+            {item.badges.includes('popular') && (
+                <span
+                    className={cn(CHIP, 'bg-rose-500/10 text-rose-600 dark:text-rose-400')}
+                    title={popularityLabel(item) ?? 'Opened by your team'}
+                >
+                    <Flame className="w-2.5 h-2.5 shrink-0" />
+                    Popular
+                </span>
+            )}
         </span>
     )
 }
 
-function WorkCard({ item, index, workspaceName }: {
+function WorkCard({ item, index, workspaceName, showPopularity }: {
     item: WorkItem
     index: number
     workspaceName?: string
+    /** In the Popular tab the count IS the story; elsewhere the timestamp is. */
+    showPopularity?: boolean
 }) {
     const meta = viewTypeMeta(item.viewType)
     const icon = resolveViewIcon({ icon: item.icon, viewType: item.viewType })
@@ -137,15 +168,22 @@ function WorkCard({ item, index, workspaceName }: {
                 </div>
 
                 <div className="relative mt-auto flex items-center justify-between gap-2 pt-2 border-t border-glass-border/60">
-                    <span className={cn(
-                        'inline-flex items-center gap-1 text-[11px] font-medium truncate',
-                        stale ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted',
-                    )}>
-                        {stale && <AlertTriangle className="w-3 h-3 shrink-0" />}
-                        {stale
-                            ? `Untouched ${timeAgo(item.timestamp)}`
-                            : `${item.timeVerb} ${timeAgo(item.timestamp)}`}
-                    </span>
+                    {showPopularity ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-ink-muted truncate">
+                            <Users className="w-3 h-3 shrink-0" />
+                            {popularityLabel(item)}
+                        </span>
+                    ) : (
+                        <span className={cn(
+                            'inline-flex items-center gap-1 text-[11px] font-medium truncate',
+                            stale ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted',
+                        )}>
+                            {stale && <AlertTriangle className="w-3 h-3 shrink-0" />}
+                            {stale
+                                ? `Untouched ${timeAgo(item.timestamp)}`
+                                : `${item.timeVerb} ${timeAgo(item.timestamp)}`}
+                        </span>
+                    )}
 
                     {/* Say what the click DOES. A draft resumes an edit; everything
                         else just opens. */}
@@ -163,6 +201,7 @@ export function DashboardWorkHub() {
     const { data: drafts, isLoading: loadingDrafts } = useMyDrafts()
     const { data: pinned, isLoading: loadingPinned } = usePinnedViews()
     const { recent } = useRecentViews()
+    const { data: popular } = useMostViewed()
     // The drafts endpoint returns a workspace ID, not a name — resolve it here
     // rather than widening the endpoint for a string the client already holds.
     const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -170,18 +209,20 @@ export function DashboardWorkHub() {
     const [filter, setFilter] = useState<WorkFilter>('all')
 
     const items = useMemo(
-        () => mergeWorkItems(drafts ?? [], pinned ?? [], recent ?? []),
-        [drafts, pinned, recent],
+        () => mergeWorkItems(drafts ?? [], pinned ?? [], recent ?? [], popular ?? []),
+        [drafts, pinned, recent, popular],
     )
 
     const visible = useMemo(() => filterWorkItems(items, filter), [items, filter])
     const staleDrafts = useMemo(() => items.filter(i => isStaleDraft(i)).length, [items])
 
     const counts: Record<WorkFilter, number> = {
-        all: items.length,
+        // "All" counts YOUR work only — the popular-but-untouched views are not in it.
+        all: items.filter(isPersonal).length,
         draft: countBadge(items, 'draft'),
         pinned: countBadge(items, 'pinned'),
         recent: countBadge(items, 'recent'),
+        popular: countBadge(items, 'popular'),
     }
 
     // No layout while loading, nothing when empty — the same contract as every
@@ -198,7 +239,11 @@ export function DashboardWorkHub() {
                 </div>
                 <div className="flex items-baseline gap-2 min-w-0">
                     <h2 className="text-ink text-sm font-bold whitespace-nowrap">Your work</h2>
-                    {staleDrafts > 0 && (
+                    {/* The Popular tab shows what OTHER people open, so the header
+                        stops claiming the list is yours. */}
+                    {filter === 'popular' ? (
+                        <span className="text-[11px] text-ink-muted truncate">{POPULAR_NOTE}</span>
+                    ) : staleDrafts > 0 && (
                         <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 truncate">
                             {staleDrafts} draft{staleDrafts === 1 ? '' : 's'} sitting over a week
                         </span>
@@ -244,6 +289,7 @@ export function DashboardWorkHub() {
                         key={item.viewId}
                         item={item}
                         index={i}
+                        showPopularity={filter === 'popular'}
                         workspaceName={
                             item.workspaceName
                             ?? workspaces.find(w => w.id === item.workspaceId)?.name

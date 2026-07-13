@@ -449,6 +449,42 @@ async def create_view(
     return view
 
 
+@router.get("/most-viewed", response_model=List[view_repo.MostViewedEntry])
+async def list_most_viewed_views(
+    limit: int = Query(12, le=50),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What the team opens most — among views the CALLER can actually read.
+
+    DECLARATION ORDER IS LOAD-BEARING: this is a single-segment path, so it must
+    sit ABOVE ``/{view_id}`` or FastAPI binds it as view_id="most-viewed" and the
+    endpoint silently becomes a 404. (The /me/* routes are two segments and don't
+    collide, which is why they can live further down.) test_view_me_endpoints.py
+    guards this.
+
+    Over-fetch, then apply the same per-view read predicate as every other list
+    (``can_read_view``), then trim — a popularity list must never become a way to
+    discover that a view you cannot open exists.
+    """
+    pairs = await view_repo.list_most_viewed(session, limit=limit * 3)
+    if not pairs:
+        return []
+
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return [entry for entry, _ in pairs][:limit]
+
+    ctx = await _viewer_context(session, user, claims)
+    visible: List[view_repo.MostViewedEntry] = []
+    for entry, view_orm in pairs:
+        if len(visible) >= limit:
+            break
+        if await view_access.can_read_view(session, ctx, view_orm):
+            visible.append(entry)
+    return visible
+
+
 @router.get("/{view_id}", response_model=ViewResponse)
 async def get_view(
     view_id: str = Path(...),
