@@ -22,6 +22,7 @@ import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
+import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { ToastContainer } from '@/components/ui/toast'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
@@ -34,7 +35,6 @@ export function AppLayout() {
   // Selector subscriptions (not whole-store) so this always-mounted shell
   // only re-renders when these specific fields change, not on every
   // unrelated preference write (sidebar collapse, pinned views, …).
-  const theme = usePreferencesStore((s) => s.theme)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
   // View editor state
@@ -77,31 +77,11 @@ export function AppLayout() {
     loadViews()
   }, [isAuthenticated])
 
-  // Apply theme. Each class flip is wrapped in `.theme-transitioning` so the
-  // global `* { transition: color… }` rule (globals.css) does NOT cascade-
-  // animate every element in the DOM on a light/dark switch — that mass
-  // transition is a visible jank spike. Double-rAF: a single rAF fires before
-  // the browser flushes the new styles, so the guard would stick; waiting two
-  // frames guarantees the new colours have painted before transitions resume.
-  useEffect(() => {
-    const root = document.documentElement
-    const applyDark = (isDark: boolean) => {
-      root.classList.add('theme-transitioning')
-      root.classList.toggle('dark', isDark)
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => root.classList.remove('theme-transitioning'))
-      )
-    }
-    if (theme === 'system') {
-      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-      applyDark(mediaQuery.matches)
-      const handler = (e: MediaQueryListEvent) => applyDark(e.matches)
-      mediaQuery.addEventListener('change', handler)
-      return () => mediaQuery.removeEventListener('change', handler)
-    } else {
-      applyDark(theme === 'dark')
-    }
-  }, [theme])
+  // Applies the theme preference to <html class="dark">. See
+  // useAppliedTheme for the anti-jank details — routes outside this layout
+  // (e.g. /docs, /guide) call the same hook directly since this effect only
+  // runs where AppLayout is mounted.
+  useAppliedTheme()
 
   // Mirror the reduced-motion preference onto <html> so the CSS calm-mode
   // block (globals.css) can quiet always-on keyframes. Framer animations are

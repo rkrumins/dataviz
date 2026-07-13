@@ -34,6 +34,24 @@
       })()
     </script>
 
+    <!-- Pre-hydration theme paint: apply the persisted theme class to <html>
+         synchronously, before React boots, so a cold load of a route outside
+         AppLayout (e.g. /docs, /guide — reached via full page navigation,
+         not SPA routing) doesn't flash light mode. Key/shape must stay in
+         sync with the 'nexus-preferences' zustand persist store. -->
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem('nexus-preferences')
+          if (!raw) return
+          var theme = (JSON.parse(raw).state || {}).theme
+          var isDark = theme === 'dark' ||
+            (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (isDark) document.documentElement.classList.add('dark')
+        } catch (e) { /* no-op: first visit or storage unavailable */ }
+      })()
+    </script>
+
     <!-- Preload fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

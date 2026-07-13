@@ -4,6 +4,9 @@ import {
   Server,
   AlertTriangle,
   HelpCircle,
+  Boxes,
+  Cloud,
+  GitBranch,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -29,6 +32,35 @@ export interface FAQEntry {
   answer: string
 }
 
+/** An audience-oriented grouping surfaced on the docs hub. */
+export interface DocPersona {
+  id: string
+  label: string
+  icon: LucideIcon
+  tagline: string
+  intro: string
+  /** Section previewed on this persona's card. */
+  sectionId: string
+  /** Slug the persona's card links to. */
+  startSlug: string
+  accent: {
+    gradient: string
+    text: string
+    soft: string
+    border: string
+    glow: string
+  }
+}
+
+/** A curated "key journey" card shown on the docs hub. */
+export interface DocKeyJourney {
+  title: string
+  outcome: string
+  slug: string
+  icon: LucideIcon
+  time: string
+}
+
 // ── Sections ───────────────────────────────────────────────────────
 
 export const docSections: DocSection[] = [
@@ -37,6 +69,93 @@ export const docSections: DocSection[] = [
   { id: 'reference', label: 'Technical Reference', icon: Server },
   { id: 'operations', label: 'Operations', icon: AlertTriangle },
   { id: 'faq', label: 'FAQ', icon: HelpCircle },
+]
+
+// ── Personas (docs hub) ────────────────────────────────────────────
+
+export const docPersonas: DocPersona[] = [
+  {
+    id: 'new-engineer',
+    label: 'New Engineers',
+    icon: Rocket,
+    tagline: 'Get {brand} running and make your first change',
+    intro:
+      'Clone the repo, stand up the local stack, and get enough of the lay of the land to ship a first pull request with confidence.',
+    sectionId: 'getting-started',
+    startSlug: 'setup',
+    accent: {
+      gradient: 'from-cyan-500 to-blue-600',
+      text: 'text-cyan-600 dark:text-cyan-400',
+      soft: 'bg-cyan-500/10',
+      border: 'border-cyan-500/20',
+      glow: 'shadow-cyan-500/20',
+    },
+  },
+  {
+    id: 'architect',
+    label: 'Architects & Tech Leads',
+    icon: Boxes,
+    tagline: 'Understand the system and why it\'s built this way',
+    intro:
+      'System design, service boundaries, the data model, and the trade-offs behind them — including the decisions that didn\'t make the cut.',
+    sectionId: 'architecture',
+    startSlug: 'architecture',
+    accent: {
+      gradient: 'from-slate-500 to-slate-700',
+      text: 'text-slate-600 dark:text-slate-300',
+      soft: 'bg-slate-500/10',
+      border: 'border-slate-500/20',
+      glow: 'shadow-slate-500/20',
+    },
+  },
+  {
+    id: 'operator',
+    label: 'Platform Operators',
+    icon: Cloud,
+    tagline: 'Deploy, secure, and keep it running',
+    intro:
+      'Deployment topology, known risks, and the operational posture worth tracking before it becomes an incident.',
+    sectionId: 'operations',
+    startSlug: 'technical-debt',
+    accent: {
+      gradient: 'from-amber-500 to-orange-600',
+      text: 'text-amber-600 dark:text-amber-400',
+      soft: 'bg-amber-500/10',
+      border: 'border-amber-500/20',
+      glow: 'shadow-amber-500/20',
+    },
+  },
+]
+
+export const docKeyJourneys: DocKeyJourney[] = [
+  {
+    title: 'Run it locally',
+    outcome: 'Docker or hot-reload dev setup, from clone to logged in',
+    slug: 'setup',
+    icon: Rocket,
+    time: '10 min',
+  },
+  {
+    title: 'Understand the system',
+    outcome: 'Services, data flow, and how the pieces fit together',
+    slug: 'architecture',
+    icon: LayoutGrid,
+    time: '12 min',
+  },
+  {
+    title: 'See why we built it this way',
+    outcome: 'Architecture decision records and the trade-offs behind them',
+    slug: 'decisions',
+    icon: GitBranch,
+    time: '15 min',
+  },
+  {
+    title: 'Look up an API',
+    outcome: 'Backend routes, services, and repositories',
+    slug: 'backend',
+    icon: Server,
+    time: '8 min',
+  },
 ]
 
 // ── Document Entries ───────────────────────────────────────────────
