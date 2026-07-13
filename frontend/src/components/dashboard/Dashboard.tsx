@@ -40,6 +40,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
 import { DashboardSkeleton } from './DashboardSkeleton'
 import { DashboardActivityFeed } from './DashboardActivityFeed'
+import { DashboardDrafts } from './DashboardDrafts'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
@@ -234,11 +235,22 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 2. Jump back in — REAL per-user visit history */}
+                {/* 2. Unfinished work outranks browsing: a draft you left open is
+                       YOUR half-done edit, not just a page you happened to visit.
+                       Renders nothing when you have none. */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger, ...MOTION.sectionEntry }}
+                >
+                    <DashboardDrafts />
+                </motion.div>
+
+                {/* 3. Jump back in — REAL per-user visit history */}
+                <motion.div
+                    initial={{ opacity: 0, y: MOTION.sectionY }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: MOTION.sectionStagger * 1.5, ...MOTION.sectionEntry }}
                 >
                     <ExplorerRecentStrip
                         title="Jump back in"
