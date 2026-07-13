@@ -34,6 +34,7 @@
  * rows the write path produced.
  */
 import { Link } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import {
     Plus, Pencil, Eye, Share2, UserMinus, Heart, HeartOff, Trash2, RotateCcw,
     Database, History, ChevronRight,
@@ -173,7 +174,7 @@ export function groupActivity(entries: ViewActivityEntry[]): DayGroup[] {
 
 // ── Rendering ──────────────────────────────────────────────────────────────
 
-function ActivityRow({ row }: { row: Row }) {
+function ActivityRow({ row, index }: { row: Row; index: number }) {
     const { entry, count } = row
     const meta = META[entry.action] ?? FALLBACK
     const Icon = meta.icon
@@ -181,7 +182,14 @@ function ActivityRow({ row }: { row: Row }) {
     const detail = detailFor(entry, meta)
 
     return (
-        <li className="relative">
+        <motion.li
+            className="relative"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            // Cap the stagger: with 24 rows an uncapped delay makes the last
+            // row land nearly a second late, which reads as jank, not polish.
+            transition={{ duration: 0.18, delay: Math.min(index, 8) * 0.025 }}
+        >
             <Link
                 to={`/views/${entry.viewId}`}
                 className="group flex items-start gap-3 rounded-xl px-2.5 py-2.5 -mx-2.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
@@ -237,7 +245,7 @@ function ActivityRow({ row }: { row: Row }) {
                     <ChevronRight className="w-3.5 h-3.5 text-ink-muted opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
                 </span>
             </Link>
-        </li>
+        </motion.li>
     )
 }
 
@@ -285,8 +293,8 @@ export function ActivityFeedList({ entries, isLoading, emptyText, skeletonRows =
                             aria-hidden
                             className="absolute left-[18px] top-2 bottom-4 w-px bg-glass-border"
                         />
-                        {group.rows.map(row => (
-                            <ActivityRow key={row.entry.id} row={row} />
+                        {group.rows.map((row, i) => (
+                            <ActivityRow key={row.entry.id} row={row} index={i} />
                         ))}
                     </ul>
                 </section>

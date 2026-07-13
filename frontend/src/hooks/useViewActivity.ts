@@ -31,8 +31,16 @@ export const MY_ACTIVITY_FEED_QUERY_KEY = 'my-activity-feed' as const
 
 /** The dashboard's "What changed" feed — activity across everything the user
  *  can see. Access-scoped server-side. */
+/**
+ * How many events the "activity in your workspaces" feed loads. Shared by the
+ * feed and the hero's "what's new" line so they hit the SAME query key — two
+ * different limits would mean two cache entries and two requests for the same
+ * data. It is also the window the digest and the "24+" cap describe.
+ */
+export const MY_FEED_LIMIT = 24
+
 export function useMyActivityFeed(
-    limit = 12,
+    limit: number = MY_FEED_LIMIT,
     enabled = true,
 ): UseQueryResult<ViewActivityEntry[], Error> {
     return useQuery<ViewActivityEntry[], Error>({

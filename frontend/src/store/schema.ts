@@ -319,15 +319,28 @@ export const useSchemaStore = create<SchemaState>()(
             const prevSchema = state.schema
             const nextContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
             const nextLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
+            // Null (not undefined) when the backend couldn't digest the ontology —
+            // the drift check reads null as "skip", and `undefined` would be an
+            // absent field rather than a stated one.
+            const nextDigest = backendSchema.ontologyDigest ?? null
 
             // Strategic no-op: skip the write only when (a) the payload is
             // byte-identical AND (b) we're still inside the same scope key.
             // Dropping the scope check would let a cross-workspace switch
             // with a matching digest accidentally serve stale state.
+            //
+            // The digest belongs in this comparison, not just in the result: it
+            // hashes the WHOLE ontology projection, so it can move while the
+            // converted entity/relationship types stay byte-identical (and
+            // `version` is hardcoded "1.0.0" backend-side, so it never
+            // discriminates anything). Leave it out and a digest-only refresh is
+            // swallowed, the store keeps serving the old hash, and the drift
+            // check silently compares against a stale value.
             if (
               prevSchema &&
               state.lastLoadedScopeKey === incomingScopeKey &&
               prevSchema.version === backendSchema.version &&
+              (prevSchema.ontologyDigest ?? null) === nextDigest &&
               jsonEquals(prevSchema.entityTypes, entityTypes) &&
               jsonEquals(prevSchema.relationshipTypes, relationshipTypes) &&
               jsonEquals(prevSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES, nextContainment) &&
@@ -377,6 +390,7 @@ export const useSchemaStore = create<SchemaState>()(
               containmentEdgeTypes: nextContainment,
               lineageEdgeTypes: nextLineage,
               rootEntityTypes: backendSchema.rootEntityTypes ?? [],
+              ontologyDigest: nextDigest,
             }
 
             return {

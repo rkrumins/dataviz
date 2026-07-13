@@ -30,12 +30,17 @@ import { useViewStats } from '@/hooks/useViewStats'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
-import { useAuthStore, SYSTEM_ROLE_LABELS, type SystemRole } from '@/store/auth'
+import { useAuthStore } from '@/store/auth'
+import { useMyActivityFeed, MY_FEED_LIMIT } from '@/hooks/useViewActivity'
+import { useRecentViews } from '@/hooks/useRecentViews'
+import { useViewEditorModal } from '@/components/layout/AppLayout'
+import { salutationFor, initialsOf, whatsNewLine, HeroActions } from './dashboardWelcome'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
 import { DashboardSkeleton } from './DashboardSkeleton'
 import { DashboardActivityFeed } from './DashboardActivityFeed'
+import { DashboardDrafts } from './DashboardDrafts'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
@@ -50,35 +55,6 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 const EMPTY_STATS_PARAMS = {}
-
-/**
- * The hero badge said "Data Intelligence Platform" — marketing copy that told the
- * user nothing. It now carries who they are in BUSINESS terms, from data we
- * already hold: their name, their role, their department (an IdP-mapped attribute,
- * present only for SSO users) and how many business areas they work across.
- * Every part is omitted when we don't actually know it — no invented context.
- */
-function useBusinessContextLabel(workspaceCount: number): string | undefined {
-    const user = useAuthStore(s => s.user)
-    if (!user) return undefined
-
-    const department = typeof user.attributes?.department === 'string'
-        ? user.attributes.department
-        : undefined
-
-    // SYSTEM_ROLE_LABELS is keyed by the role SLUG ('org_admin' → 'Org Admin') —
-    // the same map the TopBar badge uses, so the two can't drift apart.
-    const parts = [
-        user.firstName || undefined,
-        SYSTEM_ROLE_LABELS[user.role as SystemRole] ?? undefined,
-        department,
-        workspaceCount > 0
-            ? `${workspaceCount} business area${workspaceCount === 1 ? '' : 's'}`
-            : undefined,
-    ].filter(Boolean)
-
-    return parts.length > 0 ? parts.join(' · ') : undefined
-}
 
 export function Dashboard() {
     useDocumentTitle('Dashboard')
@@ -104,7 +80,23 @@ export function Dashboard() {
     const onboardingDismissedAt = usePreferencesStore(s => s.onboardingDismissedAt)
     const dismissOnboarding = usePreferencesStore(s => s.dismissOnboarding)
 
-    const contextLabel = useBusinessContextLabel(workspaces?.length ?? 0)
+    // Greeting + "what's new" + the CTA row. useMyActivityFeed shares its query
+    // key with DashboardActivityFeed, so this reuses that cache rather than
+    // firing a second request.
+    const user = useAuthStore(s => s.user)
+    const { data: feed } = useMyActivityFeed(MY_FEED_LIMIT)
+    const { recent } = useRecentViews()
+    const { openViewEditor } = useViewEditorModal()
+
+    const greeting = user
+        ? {
+            salutation: salutationFor(new Date().getHours()),
+            name: user.firstName || undefined,
+            initials: initialsOf(user.firstName, user.lastName),
+        }
+        : undefined
+    const statusLine = whatsNewLine(feed ?? [], MY_FEED_LIMIT)
+    const resumeTarget = recent?.[0]
 
     const [searchQuery, setSearchQuery] = useState('')
     const searchResult = useGlobalSearch(searchQuery)
@@ -226,15 +218,39 @@ export function Dashboard() {
                         recentSearches={recentSearches}
                         onRemoveRecentSearch={removeRecentSearch}
                         onClearRecentSearches={clearRecentSearches}
-                        contextLabel={contextLabel}
+                        greeting={greeting}
+                        statusLine={statusLine}
+                        onStatusClick={() => {
+                            document.getElementById('dashboard-activity')
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                        }}
+                        actions={
+                            <HeroActions
+                                onCreateView={() => openViewEditor()}
+                                onResume={resumeTarget ? () => navigate(`/views/${resumeTarget.viewId}`) : undefined}
+                                resumeLabel={resumeTarget?.viewName}
+                                onBrowse={() => navigate('/explorer')}
+                            />
+                        }
                     />
                 </motion.div>
 
-                {/* 2. Jump back in — REAL per-user visit history */}
+                {/* 2. Unfinished work outranks browsing: a draft you left open is
+                       YOUR half-done edit, not just a page you happened to visit.
+                       Renders nothing when you have none. */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger, ...MOTION.sectionEntry }}
+                >
+                    <DashboardDrafts />
+                </motion.div>
+
+                {/* 3. Jump back in — REAL per-user visit history */}
+                <motion.div
+                    initial={{ opacity: 0, y: MOTION.sectionY }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: MOTION.sectionStagger * 1.5, ...MOTION.sectionEntry }}
                 >
                     <ExplorerRecentStrip
                         title="Jump back in"
@@ -244,6 +260,7 @@ export function Dashboard() {
 
                 {/* 3. What the team has been doing, in the user's workspaces */}
                 <motion.div
+                    id="dashboard-activity"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}

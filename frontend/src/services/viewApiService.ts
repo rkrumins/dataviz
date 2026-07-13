@@ -485,6 +485,36 @@ interface RecentViewApi extends Omit<RecentViewEntry, 'icon' | 'workspaceId' | '
 
 /** The signed-in user's recently visited views — follows them across devices,
  *  and is joined against the live views (never a stale name / deleted entry). */
+/** One piece of the caller's unfinished work — an open, unpublished draft. */
+export interface MyDraftEntry {
+    draftId: string
+    graphId: string
+    viewId: string
+    viewName: string
+    viewType?: string
+    workspaceId?: string
+    /** Drafts are usually unnamed; the view is the label that matters. */
+    name?: string
+    createdAt: string
+    updatedAt: string
+}
+
+interface MyDraftApi extends Omit<MyDraftEntry, 'viewType' | 'workspaceId' | 'name'> {
+    viewType?: string | null
+    workspaceId?: string | null
+    name?: string | null
+}
+
+export async function getMyDrafts(limit = 6): Promise<MyDraftEntry[]> {
+    const raw = await apiFetch<MyDraftApi[]>(`/api/v1/views/me/drafts?limit=${limit}`)
+    return (raw ?? []).map(d => ({
+        ...d,
+        viewType: d.viewType ?? undefined,
+        workspaceId: d.workspaceId ?? undefined,
+        name: d.name ?? undefined,
+    }))
+}
+
 export async function getRecentViews(limit = 5): Promise<RecentViewEntry[]> {
     const raw = await apiFetch<RecentViewApi[]>(`/api/v1/views/me/recent?limit=${limit}`)
     // Normalise null → undefined at the boundary so consumers (sidebar, command

@@ -21,6 +21,8 @@ import logging
 import os
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import (
@@ -38,6 +40,8 @@ from backend.app.providers.manager import provider_manager as provider_registry 
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services import view_access
+from backend.app.services.versioning.db import graphver_session
+from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewCreateRequest,
@@ -792,6 +796,115 @@ async def list_my_activity_feed(
         if await view_access.can_read_view(session, ctx, view_orm):
             visible.append(entry)
     return visible
+
+
+class MyDraftEntry(BaseModel):
+    """One piece of the caller's unfinished work."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    draft_id: str = Field(alias="draftId")
+    graph_id: str = Field(alias="graphId")
+    view_id: str = Field(alias="viewId")
+    view_name: str = Field(alias="viewName")
+    view_type: Optional[str] = Field(default=None, alias="viewType")
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    name: Optional[str] = None
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+async def _open_drafts_for(owner: str, limit: int) -> List[BranchORM]:
+    """The caller's OPEN drafts, newest-touched first.
+
+    Seam on purpose: ``graphver`` is a separate schema (and, in some
+    deployments, a separate database) with **no cross-schema FKs to public** —
+    ``originating_view_id`` is a logical reference, not a join key. So the branch
+    read happens here, against the graphver session, and the endpoint stitches
+    the view titles from the app DB. Tests stub this one function, because the
+    SQLite test harness never creates the graphver tables.
+    """
+    async with graphver_session() as s:
+        rows = (
+            await s.execute(
+                select(BranchORM)
+                .where(
+                    BranchORM.owner == owner,
+                    BranchORM.status == "open",
+                    BranchORM.kind.in_(("draft", "fork_draft")),
+                    BranchORM.originating_view_id.is_not(None),
+                )
+                .order_by(BranchORM.updated_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    return list(rows)
+
+
+@router.get("/me/drafts", response_model=List[MyDraftEntry])
+async def list_my_drafts(
+    limit: int = Query(6, le=25),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The caller's unpublished drafts — "pick up where you left off".
+
+    Until now this work was invisible the moment you navigated away from the view
+    you were editing: every branch endpoint is scoped to a single graph, so
+    nothing could answer "what have I left unfinished?". Drafts then rot quietly
+    and resurface as somebody else's merge conflict.
+
+    Only drafts the caller OWNS, and only those still readable: a draft whose view
+    was deleted, or which the caller can no longer read, drops out rather than
+    rendering a dead link.
+    """
+    owner = _user_id(user)
+    if not owner or owner == "anonymous":
+        return []
+
+    # Over-fetch: some drafts will be dropped by the deleted/RBAC filters below.
+    drafts = await _open_drafts_for(owner, limit * 3)
+    if not drafts:
+        return []
+
+    view_ids = [d.originating_view_id for d in drafts if d.originating_view_id]
+    rows = (
+        await session.execute(
+            select(ViewORM).where(
+                ViewORM.id.in_(view_ids),
+                ViewORM.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    by_id = {v.id: v for v in rows}
+
+    ctx = await _viewer_context(session, user, claims)
+    enforce = rbac_flag("RBAC_ENFORCE_VIEWS")
+
+    out: List[MyDraftEntry] = []
+    for d in drafts:
+        if len(out) >= limit:
+            break
+        view = by_id.get(d.originating_view_id)
+        if view is None:
+            continue  # view deleted since the draft was opened
+        if enforce and not await view_access.can_read_view(session, ctx, view):
+            continue
+        out.append(
+            MyDraftEntry(
+                draftId=d.id,
+                graphId=d.graph_id,
+                viewId=view.id,
+                viewName=view.name,
+                viewType=view.view_type,
+                workspaceId=view.workspace_id,
+                name=d.name,
+                createdAt=d.created_at,
+                updatedAt=d.updated_at,
+            )
+        )
+    return out
 
 
 @router.get("/me/recent", response_model=List[view_repo.RecentViewEntry])
