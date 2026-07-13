@@ -61,6 +61,13 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // The @docs alias (below) resolves to ../docs, outside this project's
+    // root — without explicitly allowing it, Vite serves those files via a
+    // static passthrough that skips plugin transforms (breaking `?raw`
+    // imports) instead of the full dev-server pipeline.
+    fs: {
+      allow: [path.resolve(__dirname, '..')],
+    },
     proxy: {
       '/api': {
         target:

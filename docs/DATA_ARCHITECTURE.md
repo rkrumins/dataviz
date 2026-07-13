@@ -625,7 +625,7 @@ own CPU / memory / eviction / failover domain.
 
 ## 6. Stats Polling Service
 
-The Stats Polling Service (`backend/stats_service/main.py`) is a standalone async process that periodically refreshes materialized statistics for each active data source.
+The Stats Polling Service (`backend/insights_service/`, superseding the retired `backend/stats_service/` per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) is a standalone async process that periodically refreshes materialized statistics for each active data source.
 
 ```mermaid
 graph TB
@@ -692,40 +692,55 @@ The `outbox_events` table implements a transactional outbox for domain events, e
 
 ## 8. Schema Migration Strategy
 
-### Current Approach: Inline Migrations
+### Current Approach: Alembic Migrations
 
-The project uses **inline ALTER TABLE statements** in `init_db()` rather than Alembic:
+The project uses **versioned Alembic migrations** as the source of schema truth,
+alongside the SQLAlchemy ORM models. Migrations live in
+`backend/alembic/versions/` (a linear/merge-able revision chain from
+`0001_baseline` forward), and are the authoritative record of every schema
+change.
+
+**Applying migrations** is owned by a dedicated `synodic-upgrade` service
+(`backend/scripts/upgrade.py`) — a Helm pre-install/pre-upgrade hook Job in
+Kubernetes, or a one-shot `upgrade` service (`depends_on`) in docker-compose.
+Developers running `uvicorn` directly apply them first with:
+
+```bash
+python -m backend.scripts.upgrade upgrade   # alembic upgrade head, under pg_advisory_lock
+python -m backend.scripts.upgrade check     # exits 0 iff the DB matches every head
+```
+
+**The API process never mutates the schema.** `init_db()`
+(`backend/app/db/engine.py`) only *verifies*, read-only, that
+`alembic_version` matches the expected head(s):
 
 ```python
 # backend/app/db/engine.py: init_db()
-migrations = [
-    "ALTER TABLE workspace_data_sources ADD COLUMN projection_mode TEXT",
-    "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
-    "ALTER TABLE ontologies ADD COLUMN entity_type_definitions TEXT DEFAULT '{}'",
-    "ALTER TABLE ontologies ADD COLUMN evolution_policy TEXT DEFAULT 'reject'",
-    # ... 15+ more
-]
-for stmt in migrations:
-    try:
-        await conn.execute(sqlalchemy.text(stmt))
-    except Exception:
-        pass  # Column already exists, safe to ignore
+expected_heads = sorted(ScriptDirectory.from_config(cfg).get_heads())
+applied = sorted({r[0] for r in await conn.execute(
+    sa_text("SELECT version_num FROM alembic_version")).fetchall()})
+
+at_head = applied == expected_heads
+# missing alembic_version  → BootstrapError("schema_not_initialised") (degraded mode)
+# revision mismatch        → loud error, keep serving; /health/ready surfaces it
 ```
 
 **Characteristics:**
-- All migrations are idempotent (safe to re-run)
-- No version tracking or ordering
-- No rollback capability
-- Tables created via `Base.metadata.create_all()` on startup
+- Full version tracking and ordering via the Alembic revision graph
+- Rollback capability (`downgrade`) where migrations define it
+- Migrations run exactly once, under a `pg_advisory_lock`, by the upgrade service
+- In Kubernetes a `wait-for-schema` initContainer gates every backend Pod on
+  the migration having already completed
 
-### Phased Migration History
+### Migration History
 
-| Phase | Changes |
-|-------|---------|
-| **0a** | Rename `ontology_blueprints` to `ontologies`, `blueprint_id` to `ontology_id` |
-| **1** | Add `entity_type_definitions`, `relationship_type_definitions` columns |
-| **2** | Add `description`, `evolution_policy` columns |
-| **3+** | Multi-source support, schema drift detection, polling config |
+The earliest schema evolution — renaming `ontology_blueprints` → `ontologies`
+(and `blueprint_id` → `ontology_id`), the first
+`entity_type_definitions`/`relationship_type_definitions` and
+`evolution_policy` columns, and the multi-source / schema-drift / polling-config
+work — predates Alembic and is consolidated into the `0001_baseline` revision.
+Everything since is an individual dated revision in
+`backend/alembic/versions/`.
 
 ---
 

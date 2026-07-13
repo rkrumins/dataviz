@@ -1,8 +1,8 @@
 # Self-Host Deployment Guide
 
-Deploy Synodic on a VM or bare-metal server using Docker Compose. Everything runs in containers — no local Python/Node needed.
+Deploy {brand} on a VM or bare-metal server using Docker Compose. Everything runs in containers — no local Python/Node needed.
 
-For local development (editing source code), see [DEVELOPMENT.md](DEVELOPMENT.md).
+For local development (editing source code), see [SETUP.md](SETUP.md).
 
 ## Prerequisites
 
@@ -131,7 +131,7 @@ Then `./deploy.sh up` rebuilds from an empty state.
 
 Beyond the defaults, for a production deployment:
 
-1. **TLS termination** — put Caddy/Nginx/Traefik in front. Synodic binds to 0.0.0.0 — close it off via a firewall except for the reverse proxy.
+1. **TLS termination** — put Caddy/Nginx/Traefik in front. {brand} binds to 0.0.0.0 — close it off via a firewall except for the reverse proxy.
 2. **Firewall** — only expose the frontend port (3080) externally; keep Postgres (5432), FalkorDB (6379), Redis (6380) bound to localhost or the Docker network only. Edit `docker-compose.yml` to change `"5432:5432"` → `"127.0.0.1:5432:5432"` etc.
 3. **Strong secrets** — `JWT_SECRET_KEY` should be at least 256 bits. `openssl rand -hex 48` is good.
 4. **CREDENTIAL_ENCRYPTION_KEY** — don't skip in production. Provider credentials are stored in the management DB and protected by this Fernet key.

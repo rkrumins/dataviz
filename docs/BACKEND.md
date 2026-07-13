@@ -2,12 +2,15 @@
 
 ## Overview
 
-The Synodic backend consists of two independent FastAPI services:
+The Synodic backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
 
 | Service | Port | Entry Point | Responsibility |
 |---------|------|-------------|----------------|
-| **Visualization Service** | 8000 | `backend/app/main.py` | Stateful: auth, workspaces, graph queries, ontology |
-| **Graph Service** | 8001 | `backend/graph/main.py` | Stateless: provider discovery, connectivity testing |
+| **Visualization Service** | 8000 | `backend/app/main.py` | Auth, workspaces, graph queries, ontology, provider connectivity/discovery/testing |
+| **Aggregation Control Plane** | 8091 | `backend/app/services/aggregation/controlplane.py` | Orchestrates the rollup/materialization pipeline (schedules + dispatches to worker(s)) |
+| **Insights Service** | -- | `backend/insights_service/__main__.py` | Background collection of schema/stats and cache warming |
+
+> A standalone `graph-service` (`:8001`, `backend/graph/main.py`) once handled provider connectivity testing. It was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) -- it was built and deployed but never invoked. Its Neo4j/DataHub/Spanner adapters survive in `backend/graph/adapters/` and are now imported **in-process** by the Visualization Service.
 
 ---
 
@@ -408,44 +411,34 @@ classDiagram
 
 ### Provider Location Note
 
-Providers live in **two different services**:
+All providers run **in-process** in the Visualization Service, split across two packages:
 
-| Provider | Location | Service |
-|----------|----------|---------|
-| FalkorDBProvider | `backend/app/providers/falkordb_provider.py` | Visualization Service (8000) |
-| MockGraphProvider | `backend/app/providers/mock_provider.py` | Visualization Service (8000) |
-| Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` | Graph Service (8001) |
-| DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` | Graph Service (8001) |
+| Provider | Location |
+|----------|----------|
+| FalkorDBProvider | `backend/app/providers/falkordb_provider.py` |
+| MockGraphProvider | `backend/app/providers/mock_provider.py` |
+| Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` |
+| DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` |
 
-Neo4j and DataHub adapters live in the Graph Service because they are used for **pre-registration connectivity testing** (stateless). The Visualization Service uses the `GraphDataProvider` interface but currently only instantiates FalkorDB and Mock providers for workspace-scoped queries.
+The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB and Mock providers.
 
 ---
 
-## 4. Graph Service (Port 8001)
+## 4. Provider Connectivity Adapters (In-Process)
 
-The Graph Service is a **stateless companion** for provider discovery and connectivity testing. It accepts connection parameters in the request body and requires no management database.
+Pre-registration provider discovery and connectivity testing runs **in-process** in the Visualization Service. A standalone `graph-service` (`:8001`, `backend/graph/main.py`) previously exposed this over HTTP, but it was built and deployed yet **never invoked**, and was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service). The onboarding wizard calls the Visualization Service's own `POST /admin/providers/test-connection` (and the per-provider `POST /admin/providers/{id}/test`) instead.
 
-**File:** `backend/graph/main.py`
+The provider adapters that service depended on **survive** and are imported directly by the Visualization Service (`backend/app/providers/manager.py`, `backend/app/registry/provider_registry.py`).
 
-### Graph Service Endpoints
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/graph/v1/providers` | GET | List supported provider types and capabilities |
-| `/graph/v1/providers/falkordb/ping` | POST | Test FalkorDB connectivity |
-| `/graph/v1/providers/falkordb/graphs` | POST | List available graphs on FalkorDB instance |
-| `/graph/v1/providers/neo4j/ping` | POST | Test Neo4j connectivity |
-| `/graph/v1/providers/neo4j/databases` | POST | List available Neo4j databases |
-| `/graph/v1/providers/datahub/ping` | POST | Test DataHub GraphQL connectivity |
-
-### Graph Service Adapters
+### Provider Adapters
 
 Located in `backend/graph/adapters/`:
 
 | Adapter | File | Purpose |
 |---------|------|---------|
-| `neo4j_provider.py` | Neo4j adapter | Bolt protocol connectivity testing |
-| `datahub_provider.py` | DataHub adapter | GraphQL endpoint testing |
+| `neo4j_provider.py` | Neo4j adapter | Bolt protocol connectivity + queries |
+| `datahub_provider.py` | DataHub adapter | GraphQL endpoint connectivity + queries |
+| `spanner_provider.py` | Spanner adapter | Cloud Spanner connectivity + queries |
 | `schema_mapping.py` | Schema mapper | Provider-specific label/property mapping |
 
 ---
@@ -476,11 +469,11 @@ Detects schema changes between the introspected graph schema and the defined ont
 
 Validates node/edge creation requests against the resolved ontology. Ensures entity types and relationship types conform to ontology rules before writes are committed.
 
-### Stats Polling Service
+### Insights Service
 
-**File:** `backend/stats_service/main.py`
+**File:** `backend/insights_service/__main__.py`
 
-Asynchronous sidecar service that polls data sources for schema and statistics. Runs concurrently (`asyncio.gather`) to fetch stats, schema, ontology metadata, and graph schema. Writes results to `data_source_stats` and `data_source_polling_configs` tables.
+Out-of-process service that collects schema and statistics for data sources and warms provider caches. Writes results to the `data_source_stats` and `data_source_polling_configs` tables. Supersedes the former `backend/stats_service/` skeleton, which was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service).
 
 ---
 

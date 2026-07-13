@@ -25,12 +25,9 @@ quadrantChart
     Dual code paths: [0.55, 0.6]
     Missing edges on load: [0.15, 0.35]
     Singleton cache scaling: [0.6, 0.4]
-    No Alembic migrations: [0.7, 0.35]
     Sparse test coverage: [0.5, 0.7]
-    CORS wildcard: [0.45, 0.5]
     Ontology cache TTL: [0.4, 0.3]
     Outbox consumer missing: [0.65, 0.55]
-    Inline migration growth: [0.6, 0.45]
     Per-worker cache isolation: [0.55, 0.35]
 ```
 
@@ -93,20 +90,9 @@ A log message ("change password after first login!") is the only control.
 - Print to stdout only (not logged)
 - Force password change on first login (`must_change_password` flag)
 
-### 1.4 CORS Wildcard on Graph Service (MEDIUM)
+### 1.4 CORS Wildcard on Graph Service — RESOLVED
 
-**Files:** `backend/graph/main.py`
-
-```python
-allow_origins=["http://localhost:3000", "http://localhost:5173", "*"]
-```
-
-The `"*"` allows any origin to call the Graph Service. Combined with `allow_credentials=True`, this enables cross-origin attacks.
-
-**Recommendation:**
-- Remove `"*"` from CORS origins
-- Add rate limiting to Graph Service endpoints
-- Log failed connection tests (scanning detection)
+The standalone `graph-service` (`backend/graph/main.py`) this item was about no longer exists — it was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service). Provider connectivity testing now runs in-process inside the Visualization Service, under its own CORS configuration (`CORS_ALLOWED_ORIGINS`, no wildcard default — see [SETUP.md](SETUP.md)).
 
 ---
 
@@ -128,29 +114,9 @@ SQLite is the default if `MANAGEMENT_DB_URL` is not set. SQLite cannot handle:
 - Fail loudly if SQLite detected outside dev/test
 - Document "SQLite is dev-only" prominently
 
-### 2.2 No Schema Versioning (Alembic) (HIGH)
+### 2.2 No Schema Versioning (Alembic) — RESOLVED
 
-**Files:** `backend/app/db/engine.py` (inline ALTER TABLE migrations)
-
-15+ migrations run as raw SQL in `init_db()` with exceptions silently caught:
-```python
-for stmt in migrations:
-    try:
-        await conn.execute(sqlalchemy.text(stmt))
-    except Exception:
-        pass  # Column already exists
-```
-
-**Risks:**
-- No ordering, dependency management, or version tracking
-- Silent failures if migration partially applies
-- No rollback capability
-- Race conditions in multi-worker deployments
-
-**Recommendation:**
-- Implement Alembic for schema versioning
-- Separate table creation from migration
-- Add migration lock for concurrent deployments
+Schema versioning now runs through **Alembic** (`backend/alembic/versions/`) as the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head at startup; it never mutates the schema itself. See [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) for the full migration strategy.
 
 ### 2.3 Versioning merge field-loss + draft read model (MOSTLY RESOLVED)
 
@@ -335,7 +301,7 @@ Trace operations wait for backend response before updating UI. Perceived latency
 | **Outbox consumer missing** | Medium | `outbox_events` table accepts writes (e.g., `user.created`) but no consumer process exists. Events accumulate with `processed = false` forever. |
 | **Provider location split** | Low | FalkorDB and Mock providers live in `backend/app/providers/`, while Neo4j and DataHub live in `backend/graph/adapters/`. This split is functional but undocumented and may confuse contributors. |
 | **Feature flag hot-reload** | Low | Feature flags are fetched from DB per request. No caching or change-notification mechanism -- acceptable at current scale but will need attention with increased traffic. |
-| **Growing inline migrations** | Medium | 15+ `ALTER TABLE` statements in `init_db()` with exceptions silently caught. No ordering, no version tracking, no rollback. Each new schema change adds another raw SQL statement. Risk of partial application and silent failures increases linearly. |
+| ~~Growing inline migrations~~ | ~~Medium~~ | **Resolved** — see §2.2. Schema changes now go through versioned Alembic migrations, not raw SQL in `init_db()`. |
 | **Per-worker ProviderRegistry cache isolation** | Medium | Each Uvicorn worker has its own `ProviderRegistry` singleton. With N workers = N separate connection pools. Config changes (eviction, provider updates) in one worker are invisible to others. Silent coherence issue at scale; fine for single-worker dev. Future: Redis-backed shared cache. |
 
 ### 6.2 Pre-Production Readiness Review (2026-07)
@@ -355,7 +321,7 @@ manifests.
 | **SSRF via provider connection-testing** | **HIGH** | The onboarding wizard tests arbitrary `host:port` from inside the cluster (a tenant could probe internal services / the GCP metadata endpoint). **Add an egress allowlist / metadata-endpoint block** on the connection tester. |
 | Control-plane scheduler not single-flight under HA | Low | Control plane is now 2 replicas (SPOF removed). The scheduler is detect-and-log (idempotent), so 2 replicas is safe, but it does 2× drift-check reads against FalkorDB every 60s. If that read load matters, gate `_tick` behind a Postgres advisory lock like the reconciler. |
 | `stats` is not a real `SynodicRole` | Low | The insights/stats service sets `SYNODIC_ROLE=stats`, which falls back to `dev`, so the WS2.1 dedicated-cache guard is skipped for it (the structural `build_cache_client` fix still prevents FalkorDB co-location). Add a `STATS` role or use `worker`. |
-| `DATA_ARCHITECTURE.md` §6 stale reference | Low | Still names the deleted `backend/stats_service/main.py`; the live service is `backend/insights_service`. |
+| ~~`DATA_ARCHITECTURE.md` §6 stale reference~~ | ~~Low~~ | **Resolved** — §6 now correctly names `backend/insights_service/`. |
 
 ---
 
@@ -440,12 +406,12 @@ gantt
 
 | Category | Critical | High | Medium | Low |
 |----------|----------|------|--------|-----|
-| **Security** | 2 (JWT, SQLite) | 2 (encryption, admin pwd) | 2 (CORS, CSP) | - |
-| **Architecture** | - | 2 (dual paths, no migrations) | 4 (singleton cache, ontology TTL, provider split, inline migration growth) | - |
+| **Security** | 2 (JWT, SQLite) | 2 (encryption, admin pwd) | 1 (CSP) | - |
+| **Architecture** | - | 1 (dual paths) | 3 (singleton cache, ontology TTL, provider split) | - |
 | **Testing** | - | 2 (sparse coverage, no CI) | 1 (no integration tests) | - |
 | **Frontend** | - | ~~1 (missing edges)~~ resolved | 1 (no error boundaries) | 1 (no optimistic updates) |
 | **Infrastructure** | - | 1 (outbox consumer) | 3 (no monitoring, no rate limits, per-worker cache isolation) | 3 (no API docs, no pagination cap, poller shutdown) |
-| **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~ |
+| **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~, ~~CORS wildcard~~, ~~no Alembic~~, ~~inline migration growth~~ |
 
 **Highest priority blockers for production deployment:**
 1. Force credential encryption (prevent plaintext leaks)
