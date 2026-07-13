@@ -267,6 +267,21 @@ INGEST_HEARTBEAT_SECS: int = int(os.getenv(
 # job that is 80% done — the worker waits them out. Each window gets its own budget of
 # retrying (a successful window resets it), so this is "how long an outage may last",
 # not "how long the job may take". Beyond it the job fails honestly and stays resumable.
+# The largest graph a RE-SYNC is allowed to attempt, in entities (nodes + edges).
+#
+# This is a guard rail over a real limitation, not a policy: `sync_ingest` rebuilds the whole
+# graph several times over to do its 3-way merge, and measured cost is ~4.5 KiB of RSS per
+# entity — 2.03 GB to compute 808 changes on a 478k graph, in one HTTP request on the web tier.
+# Linearly, the 7.7M model asks for ~30 GB and takes the API process down with it. Above the
+# limit the operation does not work, so refusing with an honest number is strictly better than
+# an OOM — an OOM kills every other request in flight as well, and explains nothing.
+#
+# 250k ≈ a 1.1 GB peak: survivable on a web process, and comfortably above every real graph
+# we have seen (the largest non-synthetic one is ~200k). Raise it only if you know the memory
+# is there. It exists to be DELETED: see docs/versioning/11-resync-at-any-scale.md, which
+# makes re-sync bounded and moves it onto the worker, after which no limit is needed.
+RESYNC_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_RESYNC_MAX_ENTITIES", "250000"))
+
 BOOTSTRAP_RETRY_BUDGET_SECS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS", "600"))
 BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(
     os.getenv("GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS", "30"))

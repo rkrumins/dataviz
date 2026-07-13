@@ -74,6 +74,7 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 | 08 | [Import / Export](08-import-export.md) | Bulk CRUD as "manual flow at scale": drafts, resolve/reconcile, tabular columns, formats, view-scope | build bulk data flows |
 | 09 | [Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) | Measured wins, O(graph) hotspots, dormant machinery, honest gaps, roadmap | assess production-readiness |
 | 10 | [Authoritative Sources — DataHub / OpenMetadata](10-authoritative-sources-datahub-openmetadata.md) | Managed vs federated, the existing seam, sync-as-commit, curation-as-overlay | plan external-catalog integration |
+| 11 | [Re-sync at Any Scale](11-resync-at-any-scale.md) | Why re-sync costs 2 GB to compute 808 changes, the measured numbers, and the design that removes the size guard | fix `sync_ingest`'s O(graph) memory |
 
 **Suggested paths.** *Architect / evaluator:* 01 → 03 → 09 → 10. *Backend engineer:* 02 → 03 → 04
 → 05. *Frontend engineer:* 01 → 07 → 06. *Operator / SRE:* 04 → 09.

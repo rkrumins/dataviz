@@ -126,6 +126,46 @@ class ApprovalRequired(RuntimeError):
         self.pending = list(pending)
 
 
+# Peak bytes of RSS `sync_ingest` costs per entity, MEASURED — not guessed. A 478,430-entity
+# resync peaked at 2,095 MiB over a 65 MiB baseline: 2,030 MiB / 478,430 = 4.45 KiB/entity,
+# rounded up. It is the price of holding ~6 whole-graph structures at once (the snapshot, base,
+# ours, theirs, merged, plus the urn/edge match indexes). Used only to tell the operator the
+# truth in the refusal message, and to size the default limit.
+_SYNC_BYTES_PER_ENTITY = 4_600
+
+
+class GraphTooLargeToSync(RuntimeError):
+    """A re-sync of this graph would not fit in memory, so we refuse it instead of dying.
+
+    ``sync_ingest`` reconstructs the ENTIRE graph several times over to do its 3-way merge —
+    the external snapshot, the state at the last sync, the state at head, the merged result,
+    and the indexes used to match them. Measured on a 478,430-entity graph: **2.03 GB of RAM
+    to compute 808 changes**, in one HTTP request, on the web tier. That is ~4.5 KiB per
+    entity, and it scales linearly: the 7.7M-entity model would ask for roughly 30 GB and
+    take the API process down with it.
+
+    This is a real limitation, not a policy: above the threshold the operation does not work.
+    Refusing with an honest number is strictly better than an OOM, because an OOM kills every
+    other request in flight too, and tells nobody why.
+
+    The fix is designed (stream the snapshot, discard by content hash, merge only the touched
+    set, run it on the worker rather than the web tier) — see
+    ``docs/versioning/11-resync-at-any-scale.md``. When it lands, this guard goes.
+    """
+
+    def __init__(self, entities: int, limit: int):
+        gb = entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824
+        super().__init__(
+            f"this data source has {entities:,} items, and re-syncing currently loads the "
+            f"whole graph into memory — about {gb:.1f} GB for this one, which would take the "
+            f"service down. Re-sync is limited to {limit:,} items until the streaming "
+            f"re-sync ships."
+        )
+        self.entities = entities
+        self.limit = limit
+        self.estimated_bytes = int(entities * _SYNC_BYTES_PER_ENTITY)
+
+
 class NotUpToDate(RuntimeError):
     """A draft is behind ``main`` and must pull the latest changes (rebase) before it can be
     merged — the 'require up to date before merging' gate. ``.behind_by`` is how many commits it
@@ -4085,12 +4125,41 @@ class GraphVersioningService:
         ``strategy='external_wins'``). The projector then refreshes FalkorDB. The
         ``collect_provider_rows`` output shape (kind/urn/entityType for nodes;
         edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes."""
+        # Refuse BEFORE paging the provider. `collect_provider_rows` is the first of the six
+        # whole-graph allocations, and by the time it has finished the process may already be
+        # dead — so the check that saves us has to come before it, not inside sync_ingest's
+        # transaction. (sync_ingest checks too: it is O(graph) for its OWN callers regardless
+        # of how many rows they hand it.)
+        await self._assert_syncable(graph_id)
         from backend.app.providers.versioned_bootstrap import collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
             containment_edge_types=containment_edge_types, message="resync from provider")
+
+    async def _assert_syncable(self, graph_id: str) -> None:
+        """Refuse a sync the machine cannot survive, with the number that proves it.
+
+        See :class:`GraphTooLargeToSync`. The count is the only cheap thing in this operation:
+        one indexed count against `entity_heads`, versus the several gigabytes the merge would
+        otherwise ask for. Fail fast, fail honestly, change nothing."""
+        limit = config.RESYNC_MAX_ENTITIES
+        if limit <= 0:
+            return                                      # explicitly disabled by an operator
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            entities = await s.scalar(
+                select(func.count()).select_from(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id,
+                    EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.is_tombstone.is_(False),
+                )) or 0
+        if entities > limit:
+            logger.warning(
+                "refusing sync for graph %s: %d entities exceeds the %d limit (~%.1f GB)",
+                graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
+            raise GraphTooLargeToSync(entities, limit)
 
     async def sync_ingest(
         self, *, graph_id: str, rows, actor: str, source: str = "external",
@@ -4104,7 +4173,14 @@ class GraphVersioningService:
         theirs = the external snapshot. A field both sides changed conflicts under
         ``strategy='merge'`` (resubmit with ``resolutions``) or takes the external value
         under ``strategy='external_wins'``. The snapshot is authoritative: an entity it
-        drops is deleted if the user hadn't touched it. Idempotent on ``idempotency_key``."""
+        drops is deleted if the user hadn't touched it. Idempotent on ``idempotency_key``.
+
+        MEMORY: this reconstructs the whole graph several times over (base, ours, theirs,
+        merged, plus the urn/edge match indexes), so it is O(graph) for EVERY caller — no
+        matter how few rows they pass. Pushing a SINGLE row into a 7.7M-entity graph asks for
+        ~30 GB just as surely as a full re-sync does. That is why the guard lives here and not
+        only on the resync path. See :class:`GraphTooLargeToSync`."""
+        await self._assert_syncable(graph_id)
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:

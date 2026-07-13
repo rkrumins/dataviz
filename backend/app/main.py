@@ -1276,6 +1276,35 @@ async def _feature_disabled_handler(request, exc: _FeatureDisabledError):
     )
 
 
+from backend.app.services.versioning.service import GraphTooLargeToSync as _GraphTooLargeToSync  # noqa: E402
+
+
+@app.exception_handler(_GraphTooLargeToSync)
+async def _graph_too_large_to_sync_handler(request, exc: _GraphTooLargeToSync):
+    """Refused, not crashed.
+
+    A re-sync of a graph this size would allocate several gigabytes in this very process (see
+    GraphTooLargeToSync) and take every other in-flight request down with it. Answering with a
+    number the caller can act on is the only honest outcome available until the streaming
+    re-sync lands — an OOM would tell them nothing and cost everyone else their request.
+    """
+    logger.warning("Refusing sync on %s: %d entities (limit %d, ~%.1f GB)",
+                   request.url.path, exc.entities, exc.limit,
+                   exc.estimated_bytes / 1_073_741_824)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "type": "graph_too_large_to_sync",
+                "entities": exc.entities,
+                "limit": exc.limit,
+                "estimatedBytes": exc.estimated_bytes,
+                "message": str(exc),
+            }
+        },
+    )
+
+
 # A canvas write reached a data source that isn't versioned yet. Enablement copies the
 # whole source graph, so it is an explicit guided job — never an implicit side-effect of
 # a write (which used to make the web tier's memory O(graph)).
