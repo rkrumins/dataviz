@@ -12,6 +12,7 @@ import { Loader2, AlertTriangle } from 'lucide-react'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
 import { UnsavedWorkGuard } from '@/components/canvas/UnsavedWorkGuard'
 import { useViewNavigation } from '@/hooks/useViewNavigation'
+import { ViewPageHeader } from '@/components/views/ViewPageHeader'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -71,7 +72,14 @@ export function ViewPage() {
 
   // ─── Ready state — render canvas in a view-scoped execution context ──
   return (
-    <div className="absolute inset-0">
+    <div className="absolute inset-0 flex flex-col">
+      {/* The view had no identity on screen — its name lived only in the tab
+          title — and neither Details nor Activity was reachable from the canvas,
+          which is where people actually work. */}
+      {status === 'ready' && view?.id && (
+        <ViewPageHeader viewId={view.id} workspaceName={wsName} />
+      )}
+
       {/* Health warning overlay for broken views */}
       {status === 'ready' && healthWarning && (
         <div className="absolute inset-0 flex items-center justify-center bg-canvas/80 backdrop-blur-sm z-30">
@@ -101,14 +109,16 @@ export function ViewPage() {
           useGraphHydration, useViewEntityTypes, etc.) receive view-scoped data.
           No global workspace mutation occurs. */}
       {status === 'ready' && viewWorkspaceId && (
-        <ViewExecutionProvider
-          workspaceId={viewWorkspaceId}
-          dataSourceId={viewDataSourceId}
-          viewId={view?.id ?? null}
-        >
-          <CanvasRouter layoutType={layoutType} />
-          <UnsavedWorkGuard />
-        </ViewExecutionProvider>
+        <div className="relative flex-1 min-h-0">
+          <ViewExecutionProvider
+            workspaceId={viewWorkspaceId}
+            dataSourceId={viewDataSourceId}
+            viewId={view?.id ?? null}
+          >
+            <CanvasRouter layoutType={layoutType} />
+            <UnsavedWorkGuard />
+          </ViewExecutionProvider>
+        </div>
       )}
 
       {/* Loading overlay */}

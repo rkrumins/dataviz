@@ -175,9 +175,11 @@ export function DashboardHero({
 
                 <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-4 leading-[1.1]">
                     What would you like<br className="hidden md:block" /> to{' '}
-                    {/* accent-explore was never defined in the Tailwind config, so this
-                        gradient had ONE stop and faded the word to transparent. */}
-                    <span className="inline-block pr-1 bg-gradient-to-r from-accent-lineage to-accent-business bg-clip-text text-transparent">
+                    {/* inline-block + a hair of padding: bg-clip-text crops the final
+                        glyph without it. (accent-explore now EXISTS — it was referenced
+                        here and in 5 other components while defined nowhere, so this
+                        gradient had one stop and faded the word to transparent.) */}
+                    <span className="inline-block pr-1 bg-gradient-to-r from-accent-business via-accent-explore to-accent-lineage bg-clip-text text-transparent">
                         explore?
                     </span>
                 </h1>
