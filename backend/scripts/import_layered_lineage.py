@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Import a Solidatus JSON export into FalkorDB.
+Import a layered-lineage JSON export into FalkorDB.
 
-Solidatus models use a Layer → Object → Attribute/Group hierarchy with
+These JSON models use a Layer → Object → Attribute/Group hierarchy with
 transitions (lineage) between attributes. This script converts that
 structure into Synodic graph nodes and edges.
 
@@ -24,13 +24,10 @@ These are custom types — the ontology resolver will pick them up via
 introspection and generate default visuals automatically.
 
 Usage:
-  python backend/scripts/import_solidatus.py --file model.json --graph solidatus_demo
-  python backend/scripts/import_solidatus.py --file model.json --graph solidatus_demo --source-system solidatus
-  python backend/scripts/import_solidatus.py --file model.json --dry-run
-  cat model.json | python backend/scripts/import_solidatus.py --graph solidatus_demo
-
-Solidatus JSON format reference:
-  https://docs.solidatus.com/api-documentation/api-actions/solidatus-json-format
+  python backend/scripts/import_layered_lineage.py --file model.json --graph layered_lineage_demo
+  python backend/scripts/import_layered_lineage.py --file model.json --graph layered_lineage_demo --source-system layered-lineage
+  python backend/scripts/import_layered_lineage.py --file model.json --dry-run
+  cat model.json | python backend/scripts/import_layered_lineage.py --graph layered_lineage_demo
 """
 
 
@@ -48,14 +45,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from backend.common.models.graph import GraphNode, GraphEdge
 
-logger = logging.getLogger("import_solidatus")
+logger = logging.getLogger("import_layered_lineage")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(name)s  %(message)s")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ENTITY TYPE DETECTION
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Solidatus IDs *may* encode the entity type in a prefix (LYR-, OBJ-, ATR-, GRP-).
+# Entity IDs *may* encode the entity type in a prefix (LYR-, OBJ-, ATR-, GRP-).
 # When IDs are plain UUIDs, we fall back to hierarchy-based inference.
 PREFIX_TO_TYPE = {
     "LYR": "layer",
@@ -65,10 +62,10 @@ PREFIX_TO_TYPE = {
 }
 
 
-def detect_entity_type_from_prefix(solidatus_id: str) -> Optional[str]:
-    """Try to derive entity type from a known Solidatus ID prefix.
+def detect_entity_type_from_prefix(entity_id: str) -> Optional[str]:
+    """Try to derive entity type from a known entity ID prefix.
     Returns None if the prefix is not recognized (e.g. plain UUID)."""
-    prefix = solidatus_id.split("-", 1)[0].upper()
+    prefix = entity_id.split("-", 1)[0].upper()
     return PREFIX_TO_TYPE.get(prefix)
 
 
@@ -124,29 +121,29 @@ def infer_entity_types(
 # GRAPH BUILDER
 # ═══════════════════════════════════════════════════════════════════════════
 
-class SolidatusGraphBuilder:
-    """Converts a Solidatus JSON export into Synodic GraphNode/GraphEdge lists."""
+class LayeredLineageGraphBuilder:
+    """Converts a layered-lineage JSON export into Synodic GraphNode/GraphEdge lists."""
 
-    def __init__(self, source_system: str = "solidatus"):
+    def __init__(self, source_system: str = "layered-lineage"):
         self.source_system = source_system
         self.nodes: List[GraphNode] = []
         self.edges: List[GraphEdge] = []
-        self._urn_map: Dict[str, str] = {}  # solidatus_id → synodic URN
+        self._urn_map: Dict[str, str] = {}  # entity_id → synodic URN
 
-    def _make_urn(self, entity_type: str, solidatus_id: str) -> str:
-        """Generate a deterministic Synodic URN from the Solidatus entity ID."""
-        return f"urn:synodic:{self.source_system}:{entity_type}:{solidatus_id}"
+    def _make_urn(self, entity_type: str, entity_id: str) -> str:
+        """Generate a deterministic Synodic URN from the source entity ID."""
+        return f"urn:synodic:{self.source_system}:{entity_type}:{entity_id}"
 
-    def _get_or_create_urn(self, solidatus_id: str, entity_type: str = "object") -> str:
-        """Lazily resolve a Solidatus ID to a Synodic URN."""
-        if solidatus_id not in self._urn_map:
-            self._urn_map[solidatus_id] = self._make_urn(entity_type, solidatus_id)
-        return self._urn_map[solidatus_id]
+    def _get_or_create_urn(self, entity_id: str, entity_type: str = "object") -> str:
+        """Lazily resolve a source entity ID to a Synodic URN."""
+        if entity_id not in self._urn_map:
+            self._urn_map[entity_id] = self._make_urn(entity_type, entity_id)
+        return self._urn_map[entity_id]
 
     def build(self, data: Dict[str, Any]) -> None:
-        """Parse a Solidatus JSON export and populate nodes + edges."""
+        """Parse a layered-lineage JSON export and populate nodes + edges."""
         entities = data.get("entities", {})
-        # Solidatus uses "layers" or "roots" depending on export version
+        # The export uses "layers" or "roots" depending on export version
         root_ids: List[str] = data.get("layers", []) or data.get("roots", [])
         transitions = data.get("transitions", {})
 
@@ -154,35 +151,35 @@ class SolidatusGraphBuilder:
         type_map = infer_entity_types(entities, root_ids)
 
         # ── Pass 1: Create nodes for every entity ────────────────────
-        for solidatus_id, entity_def in entities.items():
-            entity_type = type_map.get(solidatus_id, "object")
-            urn = self._get_or_create_urn(solidatus_id, entity_type)
+        for entity_id, entity_def in entities.items():
+            entity_type = type_map.get(entity_id, "object")
+            urn = self._get_or_create_urn(entity_id, entity_type)
 
             # Separate well-known fields from arbitrary properties
             props = dict(entity_def.get("properties", {}))
-            props["solidatusId"] = solidatus_id
+            props["sourceId"] = entity_id
 
             # Mark layers
-            if solidatus_id in root_ids:
+            if entity_id in root_ids:
                 props["isLayer"] = True
 
             self.nodes.append(GraphNode(
                 urn=urn,
                 entityType=entity_type,
-                displayName=entity_def.get("name", solidatus_id),
-                qualifiedName=entity_def.get("name", solidatus_id),
+                displayName=entity_def.get("name", entity_id),
+                qualifiedName=entity_def.get("name", entity_id),
                 properties=props,
                 tags=[],
             ))
 
         # ── Pass 2: Create containment edges (parent → child) ───────
-        for solidatus_id, entity_def in entities.items():
+        for entity_id, entity_def in entities.items():
             children = entity_def.get("children", [])
-            parent_urn = self._get_or_create_urn(solidatus_id)
+            parent_urn = self._get_or_create_urn(entity_id)
 
             for child_id in children:
                 if child_id not in entities:
-                    logger.warning(f"Child {child_id} referenced by {solidatus_id} not found in entities — skipping")
+                    logger.warning(f"Child {child_id} referenced by {entity_id} not found in entities — skipping")
                     continue
 
                 child_urn = self._get_or_create_urn(child_id)
@@ -204,7 +201,7 @@ class SolidatusGraphBuilder:
                 continue
 
             # Create placeholder nodes for references not in entities
-            # (some Solidatus exports reference external entities)
+            # (some exports reference external entities)
             for ref_id in (source_id, target_id):
                 if ref_id not in entities and ref_id not in self._urn_map:
                     ref_type = detect_entity_type_from_prefix(ref_id) or "attribute"
@@ -215,7 +212,7 @@ class SolidatusGraphBuilder:
                         entityType=ref_type,
                         displayName=ref_id,
                         qualifiedName=ref_id,
-                        properties={"solidatusId": ref_id, "placeholder": True},
+                        properties={"sourceId": ref_id, "placeholder": True},
                         tags=[],
                     ))
 
@@ -223,7 +220,7 @@ class SolidatusGraphBuilder:
             target_urn = self._get_or_create_urn(target_id)
 
             props = dict(transition_def.get("properties", {}))
-            props["solidatusTransitionId"] = transition_id
+            props["sourceTransitionId"] = transition_id
 
             self.edges.append(GraphEdge(
                 id=f"flows-{source_urn}-{target_urn}",
@@ -332,7 +329,7 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
 
         # Batch size is tunable — smaller batches bound per-query memory/time (fewer rows in
         # flight) at the cost of more round-trips.
-        CHUNK = int(os.getenv("SOLIDATUS_IMPORT_CHUNK", "10000"))
+        CHUNK = int(os.getenv("LINEAGE_IMPORT_CHUNK", "10000"))
         logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}' (chunk={CHUNK})...")
         for i in range(0, len(builder.nodes), CHUNK):
             await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
@@ -380,25 +377,25 @@ if __name__ == "__main__":
     # a single shard (partial wipe, partial import). Fail fast.
     from backend.app.providers.falkordb_connection import assert_standalone_env
 
-    assert_standalone_env("import_solidatus.py")
+    assert_standalone_env("import_layered_lineage.py")
 
     parser = argparse.ArgumentParser(
-        description="Import a Solidatus JSON export into FalkorDB",
+        description="Import a layered-lineage JSON export into FalkorDB",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python backend/scripts/import_solidatus.py --file model.json --graph solidatus_demo
-  python backend/scripts/import_solidatus.py --file model.json --graph solidatus_demo --source-system solidatus
-  python backend/scripts/import_solidatus.py --file model.json --dry-run
-  cat model.json | python backend/scripts/import_solidatus.py --graph solidatus_demo
+  python backend/scripts/import_layered_lineage.py --file model.json --graph layered_lineage_demo
+  python backend/scripts/import_layered_lineage.py --file model.json --graph layered_lineage_demo --source-system layered-lineage
+  python backend/scripts/import_layered_lineage.py --file model.json --dry-run
+  cat model.json | python backend/scripts/import_layered_lineage.py --graph layered_lineage_demo
         """,
     )
     parser.add_argument("--file", type=str, default=None,
-                        help="Path to Solidatus JSON file (reads from stdin if omitted)")
+                        help="Path to a layered-lineage JSON file (reads from stdin if omitted)")
     parser.add_argument("--graph", type=str, default=None,
                         help="FalkorDB graph name (required unless --dry-run)")
-    parser.add_argument("--source-system", type=str, default="solidatus",
-                        help="Source system identifier for URN generation (default: solidatus)")
+    parser.add_argument("--source-system", type=str, default="layered-lineage",
+                        help="Source system identifier for URN generation (default: layered-lineage)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and print stats without pushing to FalkorDB")
     parser.add_argument("--keep-persistence", action="store_true",
@@ -411,7 +408,7 @@ Examples:
                              "REPLACE (delete-before-load) so re-running doesn't merge into a stale "
                              "copy and accumulate.")
     parser.add_argument("--schema", type=str, default=None,
-                        help="Conversion schema (preset name or JSON path) mapping the Solidatus "
+                        help="Conversion schema (preset name or JSON path) mapping the generator's "
                              "roles onto a custom ontology, e.g. 'roots_node'. Omit for the "
                              "legacy layer/object/group/attribute + HAS/FLOWS_TO output.")
     parser.add_argument("--emit-ontology", type=str, default=None,
@@ -458,7 +455,7 @@ Examples:
 
     # ── Legacy path (no --schema): unchanged behavior ────────────────────────
     if not args.schema:
-        builder = SolidatusGraphBuilder(source_system=args.source_system)
+        builder = LayeredLineageGraphBuilder(source_system=args.source_system)
         builder.build(data)
         builder.print_stats()
         if args.dry_run:
@@ -473,21 +470,21 @@ Examples:
         sys.exit(0)
 
     # ── Schema path: convert into the custom ontology ────────────────────────
-    from backend.scripts.solidatus_schema import convert_model, derive_ontology_request, load_schema
+    from backend.scripts.layered_lineage_schema import convert_model, derive_ontology_request, load_schema
 
     schema = load_schema(args.schema)
     cg = convert_model(data, schema, source_system=args.source_system)
     _log_converted_stats(cg, schema)
 
     if args.emit_ontology:
-        req = derive_ontology_request(schema, cg, name=f"Solidatus {schema.name}")
+        req = derive_ontology_request(schema, cg, name=f"Layered Lineage {schema.name}")
         with open(args.emit_ontology, "w") as f:
             json.dump(req.model_dump(by_alias=True), f, indent=2)
             f.write("\n")
         logger.info(f"Wrote derived ontology to {args.emit_ontology}")
 
     if args.versioned:
-        from backend.scripts.solidatus_schema import ingest_versioned
+        from backend.scripts.layered_lineage_schema import ingest_versioned
         result = asyncio.run(ingest_versioned(
             schema=schema, cg=cg, workspace_id=args.workspace_id, provider_id=args.provider_id,
             graph_name=args.graph, ontology_id=args.ontology_id, project=not args.no_project))

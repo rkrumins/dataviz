@@ -3916,9 +3916,9 @@ class FalkorDBProvider(GraphDataProvider):
     # UNWIND batch size for bulk-CREATE. FalkorDB's documented best
     # practice is 10k–50k rows per UNWIND: large batches amortize the
     # parser/planner overhead, and CREATE is O(1) per row so larger
-    # batches don't widen the per-row variance. solidatus-generator
-    # uses 2000 because its writes are MERGE-on-node (which is more
-    # variance-prone); our path is CREATE-on-relationship, which
+    # batches don't widen the per-row variance. The layered-lineage
+    # importer uses 2000 because its writes are MERGE-on-node (which is
+    # more variance-prone); our path is CREATE-on-relationship, which
     # tolerates and benefits from the higher number.
     _BULK_CREATE_BATCH_SIZE = 10000
     _BULK_WIPE_BATCH_SIZE = 50000    # cursored DELETE chunk for AGGREGATED wipe
@@ -4164,8 +4164,7 @@ class FalkorDBProvider(GraphDataProvider):
         """Create per-label URN indexes for every label that will be
         matched during bulk-CREATE. Idempotent — best-effort on failure.
 
-        Mirrors the pattern in
-        solidatus-generator/app/falkordb_client.py:67-85 — indexes go in
+        Mirrors the pattern in the layered-lineage importer — indexes go in
         BEFORE any writes so every MATCH/CREATE row is an index seek.
         """
         if not labels:
@@ -4235,7 +4234,7 @@ class FalkorDBProvider(GraphDataProvider):
         total_cached = 0
 
         # Per-label hard cap to bound memory + cache size on huge labels.
-        # ``solidatus_perf_xlarge`` style graphs sit well below this, and
+        # ``layered_lineage_perf_xlarge`` style graphs sit well below this, and
         # any label with >200k nodes likely doesn't benefit from a full
         # cache pre-warm anyway (the per-label index seek at lookup time
         # is already fast).
@@ -6072,7 +6071,8 @@ class FalkorDBProvider(GraphDataProvider):
         #          (orphan), anchor there and report fallbackLevel. If
         #          resolution fails, fall through to legacy resolver.
         #      (b) focus_level unknown (ontology doesn't declare a level
-        #          for the focus's entity type, e.g. Solidatus "layer") →
+        #          for the focus's entity type, e.g. a generator-declared
+        #          "layer") →
         #          skip root-anchor entirely. Anchor at the focus itself
         #          and signal effective_level=-1 so _expand_aggregated_set
         #          uses the peer-label fallback (same-label neighbours
@@ -6855,7 +6855,7 @@ class FalkorDBProvider(GraphDataProvider):
         used as the neighbour filter when no level-set and no per-bucket
         label can constrain the expansion. Without this, the query would
         walk to ANY neighbour and a Layer-focused trace would over-fetch
-        into Attribute children (the original Solidatus bug). Pass the
+        into Attribute children (the original layered-lineage bug). Pass the
         focus's entity_type so peer-rollup always has a fallback.
 
         Sub-queries per label bucket per direction:

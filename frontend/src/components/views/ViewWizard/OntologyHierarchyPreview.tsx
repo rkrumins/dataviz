@@ -11,7 +11,7 @@
  * Deliberately not a mini graph canvas: it's the containment spine, the edge
  * that walks it, and how many instances live at each level.
  *
- * Self-containment is real (a Node nests inside a Node in the Solidatus
+ * Self-containment is real (a Node nests inside a Node in the Roots/Node
  * ontology), so the walk is depth-guarded and a self-nesting type is marked
  * rather than expanded forever.
  */

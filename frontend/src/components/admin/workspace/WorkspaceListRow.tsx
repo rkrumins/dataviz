@@ -53,14 +53,19 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
                     type="button"
                     onClick={e => { e.stopPropagation(); onToggleSelect() }}
                     aria-label={isSelected ? 'Deselect workspace' : 'Select workspace'}
-                    className={cn(
-                        'w-4 h-4 rounded border flex items-center justify-center transition-all',
-                        isSelected
-                            ? 'bg-indigo-500 border-indigo-500 opacity-100'
-                            : 'border-glass-border bg-canvas opacity-0 group-hover:opacity-100 hover:border-indigo-500',
-                    )}
+                    aria-pressed={isSelected}
+                    title={isSelected ? 'Deselect' : 'Select for bulk actions'}
+                    className="group/check"
                 >
-                    {isSelected && <Check className="w-3 h-3 text-white" />}
+                    {/* Always drawn — it used to be invisible until hover. */}
+                    <span className={cn(
+                        'block w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-all',
+                        isSelected
+                            ? 'bg-indigo-500 border-indigo-500'
+                            : 'border-ink-muted/35 bg-canvas/60 group-hover/check:!border-indigo-500 group-hover/check:bg-indigo-500/10',
+                    )}>
+                        {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                    </span>
                 </button>
             ) : <span />}
 

@@ -36,6 +36,8 @@ vi.mock('@/services/authService', () => ({
 }))
 
 const setPermissionsMock = vi.fn()
+/** What the store currently holds. Mutated per-test to exercise the downgrade guard. */
+let currentClaims: PermissionClaims = { sid: '', global: [], ws: {} }
 vi.mock('@/store/auth', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/store/auth')>()
     return {
@@ -44,7 +46,13 @@ vi.mock('@/store/auth', async (importOriginal) => {
         // export so the permuted-keys test exercises the actual shared
         // canonicalizer the poller uses in production.
         useAuthStore: {
-            getState: () => ({ setPermissions: setPermissionsMock }),
+            // ``permissions`` matters now: the poller refuses to overwrite a REAL
+            // claim set with an empty one, so the guard needs to see what the store
+            // currently holds. Tests that want the downgrade path set this.
+            getState: () => ({
+                setPermissions: setPermissionsMock,
+                permissions: currentClaims,
+            }),
         },
     }
 })
@@ -63,6 +71,7 @@ vi.mock('./permissionChangeBus', () => ({
 beforeEach(async () => {
     myPermissionsMock.mockReset()
     setPermissionsMock.mockReset()
+    currentClaims = { sid: '', global: [], ws: {} }
     invalidateQueriesMock.mockReset()
     notifyPermissionsChangedMock.mockReset()
     // Reset module state between tests so ``lastSnapshot`` doesn't
@@ -161,6 +170,45 @@ describe('permissionPoller.pollOnce', () => {
         // The next tick succeeds — confirms a transient error
         // doesn't poison the snapshot or break the loop.
         await mod.__pollOnce__()
+        expect(setPermissionsMock).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe('pollOnce — never blanks a user who has permissions', () => {
+    it('REFUSES to overwrite a real claim set with an empty one', async () => {
+        // The disappearing-Create-Workspace-button bug. /me/permissions answers 200
+        // with empty claims for any token that carries none (get_permission_claims
+        // returns empty rather than raising). The poller wrote that straight into the
+        // store, and every permission-gated control vanished — the button, the
+        // provider/ontology summaries, the schema chips — with a full page reload as
+        // the only cure. hydratePermissions already refused to do this; the poller
+        // bypassed that guard by calling setPermissions directly.
+        currentClaims = { sid: 's1', global: ['system:admin'], ws: { ws_1: ['workspace:admin'] } }
+        myPermissionsMock.mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
+
+        const mod = await loadPoller()
+        await mod.__pollOnce__()
+
+        expect(setPermissionsMock).not.toHaveBeenCalled()
+    })
+
+    it('still accepts a REDUCED claim set — that is a real demotion, not a blanking', async () => {
+        currentClaims = { sid: 's1', global: ['system:admin'], ws: { ws_1: ['workspace:admin'] } }
+        myPermissionsMock.mockResolvedValueOnce({ sid: 's1', global: [], ws: { ws_1: ['workspace:view:read'] } })
+
+        const mod = await loadPoller()
+        await mod.__pollOnce__()
+
+        expect(setPermissionsMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('accepts empty claims for a user who genuinely has none', async () => {
+        currentClaims = { sid: '', global: [], ws: {} }
+        myPermissionsMock.mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
+
+        const mod = await loadPoller()
+        await mod.__pollOnce__()
+
         expect(setPermissionsMock).toHaveBeenCalledTimes(1)
     })
 })

@@ -123,10 +123,10 @@ describe('predicateDsl — descendantOf (Root in view)', () => {
     it('stringifies a single-URN descendantOf via IN form', () => {
         const p: Predicate = {
             kind: 'descendantOf',
-            urns: ['urn:synodic:solidatus:layer:LYR-tlB9DRNg'],
+            urns: ['urn:synodic:layered-lineage:layer:LYR-tlB9DRNg'],
         }
         expect(stringifyPredicate(p)).toBe(
-            'descendantOf IN ("urn:synodic:solidatus:layer:LYR-tlB9DRNg")',
+            'descendantOf IN ("urn:synodic:layered-lineage:layer:LYR-tlB9DRNg")',
         )
     })
 
@@ -142,11 +142,11 @@ describe('predicateDsl — descendantOf (Root in view)', () => {
 
     it('parses descendantOf IN (...) to a DescendantOfPredicate', () => {
         const r = parsePredicate(
-            'descendantOf IN ("urn:synodic:solidatus:layer:LYR-tlB9DRNg")',
+            'descendantOf IN ("urn:synodic:layered-lineage:layer:LYR-tlB9DRNg")',
         )
         expect(r.predicate?.kind).toBe('descendantOf')
         expect((r.predicate as { urns: string[] }).urns).toEqual([
-            'urn:synodic:solidatus:layer:LYR-tlB9DRNg',
+            'urn:synodic:layered-lineage:layer:LYR-tlB9DRNg',
         ])
     })
 
@@ -165,7 +165,7 @@ describe('predicateDsl — descendantOf (Root in view)', () => {
                 { kind: 'text', value: 'payment', target: 'name',
                   match: 'substring', caseSensitive: false, boost: 1.0 },
                 { kind: 'descendantOf',
-                  urns: ['urn:synodic:solidatus:layer:LYR-tlB9DRNg'] },
+                  urns: ['urn:synodic:layered-lineage:layer:LYR-tlB9DRNg'] },
             ],
         }
         const code = stringifyPredicate(original)

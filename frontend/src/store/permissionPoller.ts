@@ -34,6 +34,7 @@
  *     while they were away).
  */
 import { useAuthStore, claimsSnapshot } from './auth'
+import type { PermissionClaims } from '@/services/authService'
 import { authService } from '@/services/authService'
 import { getQueryClient } from '@/main'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
@@ -72,9 +73,43 @@ function invalidateAllQueries(): void {
     void qc.invalidateQueries()
 }
 
+/** No global perms AND no workspace scopes — i.e. "you can do nothing at all".
+ *  A missing claims object counts as empty: "we don't know" is not "you have some". */
+function isEmptyClaims(claims: PermissionClaims | undefined | null): boolean {
+    if (!claims) return true
+    return (claims.global?.length ?? 0) === 0
+        && Object.keys(claims.ws ?? {}).length === 0
+}
+
 async function pollOnce(): Promise<void> {
     try {
         const claims = await authService.myPermissions()
+
+        // NEVER downgrade a real claim set to nothing on the strength of a 200.
+        //
+        // `hydratePermissions` in store/auth.ts already refuses to do this — the
+        // comment there says zeroing claims "blank[ed] the UI" and amplified a
+        // request storm. This poller called `setPermissions` DIRECTLY and so
+        // bypassed that guard entirely: one odd 200 and every permission-gated
+        // control silently vanishes (the Create Workspace button, the provider and
+        // ontology summaries, the schema chips on each card), with a full page
+        // reload as the only cure.
+        //
+        // An empty payload is never a legitimate REVOCATION signal here: the
+        // endpoint runs `get_current_user`, which checks the revocation set and
+        // answers 401 — that path is handled elsewhere. And `get_permission_claims`
+        // returns EMPTY claims (200, not 401) for any token without embedded
+        // claims. So empty-after-non-empty means "we don't know", not "you have
+        // nothing" — and the two must not be rendered the same way.
+        const current = useAuthStore.getState().permissions
+        if (isEmptyClaims(claims) && !isEmptyClaims(current)) {
+            console.warn(
+                '[permissions] /me/permissions returned an empty claim set for a user '
+                + 'who has permissions. Keeping the known-good claims; not blanking the UI.',
+            )
+            return
+        }
+
         const next = claimsSnapshot(claims)
         if (next === lastSnapshot) return
         lastSnapshot = next

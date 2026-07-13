@@ -30,6 +30,8 @@ import { TIMEOUTS } from '@/config/timeouts'
 import { useQueryClient } from '@tanstack/react-query'
 import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { cn } from '@/lib/utils'
+import { Check } from 'lucide-react'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -105,6 +107,8 @@ export function WorkspacesPage() {
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [isLoading, setIsLoading] = useState(true)
+    /** A provider/catalog/ontology probe failed — the extras on screen may be stale. */
+    const [probeFailed, setProbeFailed] = useState(false)
 
     /* ── Create-workspace wizard ── */
     const [showWizard, setShowWizard] = useState(false)
@@ -262,13 +266,29 @@ export function WorkspacesPage() {
                 ...adminProbes,
             ])
             const wsList = settled[0].status === 'fulfilled' ? settled[0].value as WorkspaceResponse[] : ([] as WorkspaceResponse[])
-            const catList = settled[1].status === 'fulfilled' ? settled[1].value as CatalogItemResponse[] : ([] as CatalogItemResponse[])
-            const provList = settled[2].status === 'fulfilled' ? settled[2].value as ProviderResponse[] : ([] as ProviderResponse[])
-            const ontoList = settled[3].status === 'fulfilled' ? settled[3].value as OntologyDefinitionResponse[] : ([] as OntologyDefinitionResponse[])
             setWorkspaces(wsList)
-            setCatalogItems(catList)
-            setProviders(provList)
-            setOntologies(ontoList)
+
+            // Keep what we already had when a probe FAILS.
+            //
+            // These three used to fall back to [] on any rejection — including a
+            // timeout, which withTimeout produces routinely on a slow provider. The
+            // page then re-rendered as if the estate had no providers, no catalog and
+            // no ontologies: the summary silently dropped "Governed by N ontologies"
+            // and "Connected via", and every card lost its provider logo and schema
+            // chips. Nothing said anything had failed — the UI just quietly asserted
+            // a smaller, false world, and only a page reload brought it back.
+            //
+            // Stale-but-true beats blank-and-false. A failed refresh means "we don't
+            // know right now", not "there are none".
+            if (settled[1].status === 'fulfilled') setCatalogItems(settled[1].value as CatalogItemResponse[])
+            if (settled[2].status === 'fulfilled') setProviders(settled[2].value as ProviderResponse[])
+            if (settled[3].status === 'fulfilled') setOntologies(settled[3].value as OntologyDefinitionResponse[])
+
+            const degraded = settled.slice(1).some(r => r.status === 'rejected')
+            setProbeFailed(degraded)
+            if (degraded) {
+                console.warn('[workspaces] provider/catalog/ontology refresh failed; keeping the last known values')
+            }
 
             listViews({ limit: 200 }).then(({ items, total }) => {
                 setTotalViews(total)
@@ -437,6 +457,23 @@ export function WorkspacesPage() {
                 )}
             </div>
 
+            {/* A failed refresh used to erase the provider/ontology detail silently.
+                Now it keeps it and admits it might be stale. */}
+            {probeFailed && !isLoading && (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5 flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                    <p className="text-xs text-ink-muted flex-1">
+                        Couldn't refresh provider and semantic-layer details — showing the last known values.
+                    </p>
+                    <button
+                        onClick={() => loadData()}
+                        className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+                    >
+                        Retry
+                    </button>
+                </div>
+            )}
+
             {/* Pipeline nudge when no providers exist */}
             {showPipelineNudge && (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-4 flex items-start gap-3">
@@ -572,6 +609,50 @@ export function WorkspacesPage() {
                 </div>
             )}
 
+            {/* Select-all lived only in the list header, so in grid view bulk
+                selection had no entry point at all. */}
+            {!isLoading && filtered.length > 0 && (
+                <div className="flex items-center justify-between gap-3 -mb-2">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const allSelected = filtered.every(w => selectedIds.has(w.id))
+                            setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
+                        }}
+                        className="inline-flex items-center gap-2 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+                    >
+                        <span className={cn(
+                            'w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-colors',
+                            filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                ? 'bg-indigo-500 border-indigo-500'
+                                : selectedIds.size > 0
+                                    ? 'border-indigo-400/70'
+                                    : 'border-ink-muted/35 hover:border-indigo-500',
+                        )}>
+                            {filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                ? <Check className="w-3 h-3 text-white" strokeWidth={3} />
+                                // Partial selection reads as a dash, not a tick.
+                                : selectedIds.size > 0
+                                    ? <span className="w-2 h-0.5 rounded-full bg-indigo-400" />
+                                    : null}
+                        </span>
+                        {selectedIds.size > 0
+                            ? `${selectedIds.size} selected`
+                            : `Select all ${filtered.length}`}
+                    </button>
+
+                    {selectedIds.size > 0 && (
+                        <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                        >
+                            Clear
+                        </button>
+                    )}
+                </div>
+            )}
+
             {/* ── Filter toolbar ── */}
             <WorkspaceFilterToolbar
                 search={searchInput}
@@ -612,6 +693,7 @@ export function WorkspacesPage() {
                                 ws={ws}
                                 isSelected={selectedIds.has(ws.id)}
                                 onToggleSelect={() => toggleSelect(ws.id)}
+                                selectionActive={selectedIds.size > 0}
                                 stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
                                 healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}

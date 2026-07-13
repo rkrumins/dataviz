@@ -50,7 +50,7 @@ function makeWs(id: string, name: string, dataSources: DataSourceResponse[]): Wo
 
 // "Home" is where you are; the thing you want lives in "Elsewhere".
 const HOME = makeWs('ws1', 'Home', [makeDs('ds1', 'Billing Pipeline', 'ws1')])
-const ELSEWHERE = makeWs('ws2', 'Elsewhere', [makeDs('ds2', 'Solidatus Lineage', 'ws2')])
+const ELSEWHERE = makeWs('ws2', 'Elsewhere', [makeDs('ds2', 'Layered Lineage', 'ws2')])
 const EMPTY = makeWs('ws3', 'Empty Space', [])
 
 function renderScope(over: {
@@ -85,7 +85,7 @@ const search = () => screen.getByPlaceholderText(/Search data sources/i)
 describe('ScopeStep — searching beyond the current workspace', () => {
   it('offers a way out when the match is in another workspace', () => {
     renderScope()
-    fireEvent.change(search(), { target: { value: 'solidatus' } })
+    fireEvent.change(search(), { target: { value: 'layered' } })
 
     // Nothing here — but we know exactly where it is, so say so instead of
     // showing a bare "no results" and letting them hunt the rail. (The count sits
@@ -94,10 +94,10 @@ describe('ScopeStep — searching beyond the current workspace', () => {
       screen.getByText((_c, el) =>
         el?.tagName === 'SPAN' && /1 match in other workspaces/i.test(el.textContent ?? '')),
     ).toBeInTheDocument()
-    expect(screen.queryByText('Solidatus Lineage')).not.toBeInTheDocument()
+    expect(screen.queryByText('Layered Lineage')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Search all/i }))
-    expect(screen.getByText('Solidatus Lineage')).toBeInTheDocument()
+    expect(screen.getByText('Layered Lineage')).toBeInTheDocument()
   })
 
   it('says which workspace a foreign source lives in', () => {
@@ -105,7 +105,7 @@ describe('ScopeStep — searching beyond the current workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: /All workspaces/i }))
 
     // Picking it moves the whole view to that workspace, so it can't be silent.
-    const card = screen.getByText('Solidatus Lineage').closest('button')
+    const card = screen.getByText('Layered Lineage').closest('button')
     expect(card?.textContent).toContain('Elsewhere')
     // A source in the workspace you're already browsing needs no such chip.
     expect(screen.getByText('Billing Pipeline').closest('button')?.textContent)
@@ -118,7 +118,7 @@ describe('ScopeStep — searching beyond the current workspace', () => {
     renderScope({ onSelectWorkspace, onSelectDataSource })
 
     fireEvent.click(screen.getByRole('button', { name: /All workspaces/i }))
-    fireEvent.click(screen.getByText('Solidatus Lineage'))
+    fireEvent.click(screen.getByText('Layered Lineage'))
 
     // Both, or the wizard would build the view in the wrong place.
     expect(onSelectWorkspace).toHaveBeenCalledWith('ws2')
@@ -133,7 +133,7 @@ describe('ScopeStep — searching beyond the current workspace', () => {
     expect(screen.getByText(/has no data sources/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Browse all 2 sources/i }))
 
-    expect(screen.getByText('Solidatus Lineage')).toBeInTheDocument()
+    expect(screen.getByText('Layered Lineage')).toBeInTheDocument()
     expect(screen.getByText('Billing Pipeline')).toBeInTheDocument()
   })
 

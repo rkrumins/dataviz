@@ -265,6 +265,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     login: async (email, password) => {
         set({ error: null, isLoading: true })
+        resetClaimRecovery()
         try {
             const { user } = await authService.login({ email, password })
             set({ ..._authenticated(user), error: null, isLoading: false })
@@ -304,11 +305,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // ignore
         }
         clearUserCache()
+        resetClaimRecovery()
         set({ ..._unauthenticated, error: null, isLoading: false })
     },
 
     handleSessionLost: () => {
         clearUserCache()
+        resetClaimRecovery()
         set({ ..._unauthenticated, error: null })
     },
 
@@ -351,12 +354,63 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
  * temporary outage of the permissions endpoint shouldn't log the user
  * out, just hide everything until they reload.
  */
+/** No global perms AND no workspace scopes: "you can do nothing at all". */
+function claimsAreEmpty(claims: PermissionClaims | null | undefined): boolean {
+    if (!claims) return true
+    return (claims.global?.length ?? 0) === 0
+        && Object.keys(claims.ws ?? {}).length === 0
+}
+
+/**
+ * One-shot per page load. A claimless token is a property of the SESSION, not of
+ * the request, so retrying on every hydrate would be a rotation storm.
+ */
+let claimRecoveryAttempted = false
+
+/** Called on login/logout: a new session deserves a fresh attempt. */
+export function resetClaimRecovery(): void {
+    claimRecoveryAttempted = false
+}
+
 async function hydratePermissions(
     set: (partial: Partial<AuthState>) => void,
     opts?: { skipAuthRefresh?: boolean },
 ): Promise<void> {
     try {
-        const claims = await authService.myPermissions(opts)
+        let claims = await authService.myPermissions(opts)
+
+        // SELF-HEAL A CLAIMLESS TOKEN.
+        //
+        // `/me/permissions` DECODES THE ACCESS JWT — it does not consult the
+        // database. So a token that carries no permission claims produces an empty
+        // set with a 200, not a 401: the backend's own note says such tokens "still
+        // authenticate (via the legacy role claim) and the user simply has no
+        // permissions until their next login."
+        //
+        // "Until their next login" is the bug. The user is left with every
+        // permission-gated control silently missing — the Create Workspace button,
+        // the provider and ontology summaries, the schema chips — and no reload can
+        // fix it, because a reload reuses the same cookie. Logging out and back in
+        // was the only cure, and that is exactly what a user reported.
+        //
+        // Rotating the token is the same cure without the ceremony: /auth/refresh
+        // re-resolves claims from the DB and mints a new access token, so one
+        // rotation restores the session in place.
+        //
+        // Guarded on `skipAuthRefresh` because that flag marks the call that ALREADY
+        // came from a refresh — rotating again there would loop.
+        if (claimsAreEmpty(claims) && !claimRecoveryAttempted && !opts?.skipAuthRefresh) {
+            claimRecoveryAttempted = true
+            try {
+                await authService.refresh()
+                claims = await authService.myPermissions({ skipAuthRefresh: true })
+            } catch {
+                // Rotation failed (or the session really is gone). Fall through with
+                // what we have: a user who genuinely holds no permissions is a real,
+                // legitimate state, and must not be mistaken for a broken one.
+            }
+        }
+
         set({ permissions: claims })
     } catch {
         // Keep the previous claims on a transient failure. Zeroing them

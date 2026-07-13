@@ -8,7 +8,7 @@
  * root entity types into the list. Those are identifiers, not prose, and the
  * results were embarrassing in real estates:
  *
- *     "Overlay WS Overview"  ·  "Solidatus multi-containment Model"
+ *     "Overlay WS Overview"  ·  "Layered Lineage multi-containment Model"
  *     "Zones Landscape"      ·  "Zone to Asset Flow"
  *
  * So the curated list is the backbone, and exactly ONE contextual suggestion is
@@ -101,7 +101,7 @@ export function buildNameSuggestions(
 
     // Blank models are excluded on purpose: their "data source label" IS the
     // ontology's name (see buildBlankScopeContext), which reads like a schema,
-    // not like a view — that's where "Solidatus multi-containment Model" came from.
+    // not like a view — that's where "Layered Lineage multi-containment Model" came from.
     const dsLabel = scope?.dataSourceLabel
     if (!scope?.isBlank && isHumanLabel(dsLabel)) {
         push(`${dsLabel.trim()} Lineage`)
