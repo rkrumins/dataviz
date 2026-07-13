@@ -64,11 +64,18 @@ export interface OntologyMatchState {
     analyze: () => void
 }
 
-export function useOntologyMatches({ providerId, assetName, enabled }: {
+export function useOntologyMatches({ providerId, assetName, enabled, minScore = 0 }: {
     providerId?: string
     /** The graph name as the provider knows it (sourceIdentifier), not the label. */
     assetName?: string
     enabled: boolean
+    /**
+     * Score threshold. The server defaults to 0.1, which is right for a
+     * SUGGESTION list. This wizard asks for 0: the user can expand the full list,
+     * and a layer down there must carry the same coverage numbers and warnings as
+     * the top three — "no score" and "scores badly" are different claims.
+     */
+    minScore?: number
 }): OntologyMatchState {
     const [phase, setPhase] = useState<OntologyMatchState['phase']>('idle')
     const [matches, setMatches] = useState<OntologyMatchResult[]>([])
@@ -98,7 +105,7 @@ export function useOntologyMatches({ providerId, assetName, enabled }: {
             }
 
             const stats = transformStatsForSuggest(envelope.data)
-            const suggested = await ontologyDefinitionService.suggest(stats)
+            const suggested = await ontologyDefinitionService.suggest(stats, undefined, minScore)
 
             // Rank by overlap. Ties keep the server's order, which is stable.
             const ranked = [...suggested.matchingOntologies]
@@ -115,7 +122,7 @@ export function useOntologyMatches({ providerId, assetName, enabled }: {
             setError(err instanceof Error ? err.message : 'Could not analyse the graph.')
             setPhase('error')
         }
-    }, [providerId, assetName])
+    }, [providerId, assetName, minScore])
 
     // Analyse once the step is reachable and we know which graph to look at.
     useEffect(() => {

@@ -18,6 +18,7 @@ import { useState, useMemo, useCallback, useEffect, startTransition } from 'reac
 import { motion } from 'framer-motion'
 import {
     Database, BookOpen, ClipboardCheck, Check, Loader2, AlertTriangle, Sparkles, MoveRight,
+    ChevronDown, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
@@ -117,7 +118,31 @@ export function AddDataSourceWizard({
         })
     }, [ontologies, scoreOf])
 
-    const bestId = matching.best?.ontologyId ?? null
+    // Three is the answer, not a list. Dumping thirteen layers — ten of which don't
+    // fit — makes the user do the ranking we just did for them. The rest stay one
+    // click away, paginated, and carry the SAME numbers and warnings: a layer is
+    // only fairly rejected if you can see why.
+    const TOP_N = 3
+    const PAGE_SIZE = 4
+    const [showAll, setShowAll] = useState(false)
+    const [page, setPage] = useState(0)
+
+    const topMatches = rankedOntologies.slice(0, TOP_N)
+    const restMatches = rankedOntologies.slice(TOP_N)
+    const pageCount = Math.max(1, Math.ceil(restMatches.length / PAGE_SIZE))
+    const pagedRest = restMatches.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
+
+    // A layer chosen from deep in the list must stay visible when the list collapses.
+    const selectedIsHidden = Boolean(
+        ontologyId && !showAll && restMatches.some(o => o.id === ontologyId),
+    )
+
+    // Asking for every layer (min_score=0) means "best" exists even when NOTHING
+    // fits. A 0% layer must never wear a BEST FIT badge or get auto-selected — that
+    // would be a worse lie than the flat list this replaced.
+    const bestId = (matching.best?.jaccardScore ?? 0) > 0
+        ? matching.best?.ontologyId ?? null
+        : null
 
     // Pre-select the best fit once, and only if the user hasn't chosen — a
     // recommendation, not a hijack.
@@ -366,27 +391,84 @@ export function AddDataSourceWizard({
                             meta="Use this if nothing fits"
                             dashed
                         />
-                        {rankedOntologies.map(o => {
-                            const match = scoreOf.get(o.id)
+
+                        {topMatches.map(o => (
+                            <OntologyCardFor
+                                key={o.id}
+                                ontology={o}
+                                match={scoreOf.get(o.id)}
+                                selected={ontologyId === o.id}
+                                isBest={bestId === o.id && matching.phase === 'ready'}
+                                analysed={matching.phase === 'ready'}
+                                onPick={() => { setPickedOntology(true); setOntologyId(o.id) }}
+                            />
+                        ))}
+
+                        {/* Chosen from the long list, then collapsed — keep it on screen
+                            rather than making the selection vanish. */}
+                        {selectedIsHidden && (() => {
+                            const o = restMatches.find(x => x.id === ontologyId)!
                             return (
-                                <OntologyCard
-                                    key={o.id}
-                                    selected={ontologyId === o.id}
-                                    onClick={() => { setPickedOntology(true); setOntologyId(o.id) }}
-                                    title={o.name}
-                                    subtitle={o.description || `Version ${o.version}`}
-                                    meta={`${Object.keys(o.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(o.relationshipTypeDefinitions ?? {}).length} relationships`}
-                                    published={o.isPublished}
-                                    match={match}
-                                    isBest={bestId === o.id && matching.phase === 'ready'}
-                                    // The server drops anything under 10% overlap, so
-                                    // "analysed, but absent" means "doesn't fit" — not
-                                    // "not analysed". Different claims; say which.
-                                    noOverlap={matching.phase === 'ready' && !match}
+                                <OntologyCardFor
+                                    ontology={o}
+                                    match={scoreOf.get(o.id)}
+                                    selected
+                                    analysed={matching.phase === 'ready'}
+                                    onPick={() => { setPickedOntology(true); setOntologyId(o.id) }}
                                 />
                             )
-                        })}
+                        })()}
+
+                        {showAll && pagedRest.map(o => (
+                            <OntologyCardFor
+                                key={o.id}
+                                ontology={o}
+                                match={scoreOf.get(o.id)}
+                                selected={ontologyId === o.id}
+                                analysed={matching.phase === 'ready'}
+                                onPick={() => { setPickedOntology(true); setOntologyId(o.id) }}
+                            />
+                        ))}
                     </div>
+
+                    {restMatches.length > 0 && (
+                        <div className="flex items-center justify-between gap-3">
+                            <button
+                                type="button"
+                                onClick={() => { setShowAll(v => !v); setPage(0) }}
+                                className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                            >
+                                <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', showAll && 'rotate-180')} />
+                                {showAll
+                                    ? 'Show only the top matches'
+                                    : `Show all ${rankedOntologies.length} semantic layers`}
+                            </button>
+
+                            {showAll && pageCount > 1 && (
+                                <div className="flex items-center gap-1">
+                                    <button
+                                        type="button"
+                                        disabled={page === 0}
+                                        onClick={() => setPage(p => Math.max(0, p - 1))}
+                                        className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        <ChevronLeft className="w-4 h-4" />
+                                    </button>
+                                    <span className="text-xs text-slate-500 tabular-nums px-1">
+                                        {page + 1} / {pageCount}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        disabled={page >= pageCount - 1}
+                                        onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                                        className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        <ChevronRight className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -487,6 +569,40 @@ function ReviewRow({ label, value, hint }: { label: string; value: string; hint?
                 {hint && <span className="block text-xs text-slate-400 truncate">{hint}</span>}
             </span>
         </div>
+    )
+}
+
+/**
+ * One place that turns an ontology + its match into a card.
+ *
+ * The top three and the expanded list render through this, so a layer cannot show
+ * a coverage ring in one place and a bare name in the other. That equivalence is
+ * the point: a layer is only fairly rejected if you can see the same numbers and
+ * warnings that got the winners to the top.
+ */
+function OntologyCardFor({ ontology, match, selected, isBest, analysed, onPick }: {
+    ontology: OntologyDefinitionResponse
+    match?: OntologyMatchResult
+    selected: boolean
+    isBest?: boolean
+    analysed: boolean
+    onPick: () => void
+}) {
+    return (
+        <OntologyCard
+            selected={selected}
+            onClick={onPick}
+            title={ontology.name}
+            subtitle={ontology.description || `Version ${ontology.version}`}
+            meta={`${Object.keys(ontology.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(ontology.relationshipTypeDefinitions ?? {}).length} relationships`}
+            published={ontology.isPublished}
+            // A zero-overlap layer scores 0 and covers nothing: showing it an empty
+            // ring and a "doesn't cover: <everything>" list is noise. It reads as
+            // what it is.
+            match={match && match.jaccardScore > 0 ? match : undefined}
+            isBest={isBest}
+            noOverlap={analysed && (!match || match.jaccardScore === 0)}
+        />
     )
 }
 

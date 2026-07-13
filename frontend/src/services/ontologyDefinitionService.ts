@@ -237,14 +237,28 @@ export const ontologyDefinitionService = {
         )
     },
 
-    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologySuggestResponse> {
-        const url = baseOntologyId
-            ? `${ADMIN_API}/suggest?base_ontology_id=${encodeURIComponent(baseOntologyId)}`
-            : `${ADMIN_API}/suggest`
-        return request<OntologySuggestResponse>(url, {
-            method: 'POST',
-            body: JSON.stringify(stats),
-        })
+    /**
+     * Score the graph's schema against every ontology.
+     *
+     * `minScore` drops layers below that Jaccard overlap. The default (0.1, set
+     * server-side) keeps the onboarding wizard's suggestion list to plausible
+     * candidates. Pass 0 to score EVERY layer — the Add/Move Data Source wizard
+     * does that, so a layer the user expands to see carries the same numbers and
+     * warnings as the top matches instead of appearing with no score at all.
+     */
+    suggest(
+        stats: Record<string, unknown>,
+        baseOntologyId?: string,
+        minScore?: number,
+    ): Promise<OntologySuggestResponse> {
+        const params = new URLSearchParams()
+        if (baseOntologyId) params.set('base_ontology_id', baseOntologyId)
+        if (minScore !== undefined) params.set('min_score', String(minScore))
+        const qs = params.toString()
+        return request<OntologySuggestResponse>(
+            qs ? `${ADMIN_API}/suggest?${qs}` : `${ADMIN_API}/suggest`,
+            { method: 'POST', body: JSON.stringify(stats) },
+        )
     },
 
     /**
