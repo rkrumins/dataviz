@@ -592,13 +592,36 @@ async def build_graph_client(
     if cfg.mode == "cluster":
         host, port = await resolve_cluster_node_for_key(cfg, graph_name, socket_timeout)
         node_kwargs = {**pool_kwargs, **_tls_pool}
+        # The falkordb client's cluster adapter (falkordb.asyncio.cluster.
+        # Cluster_Conn) rebuilds a RedisCluster from the pool we hand it and does
+        #     username = connection_kwargs.pop("username")
+        #     password = connection_kwargs.pop("password")
+        # with NO default — so both keys MUST exist on the pool's
+        # connection_kwargs or FalkorDB(connection_pool=...) raises
+        # ``KeyError: 'username'`` and cluster mode cannot connect at all
+        # (including against an UNAUTHENTICATED cluster, where they'd otherwise
+        # be absent). Always set them, defaulting to None. The sentinel branch
+        # above injects auth for the same reason; cluster was missing it.
+        node_kwargs.setdefault("username", cfg.username)
+        node_kwargs.setdefault("password", cfg.password)
         pool = ConnectionPool(host=host, port=port, **node_kwargs)
+        # ``Cluster_Conn`` DESTRUCTIVELY pops host/port/username/password (and
+        # retry/retry_on_error) off ``pool.connection_kwargs`` to rebuild its own
+        # RedisCluster. That mutates the very pool we hand back to the caller —
+        # which the provider reuses for its verification ``Redis(connection_pool=
+        # pool).ping()`` and for teardown. Stripped of host/port, redis-py then
+        # silently falls back to **localhost:6379** and the connect fails with a
+        # bogus "connection refused to localhost" (observed against a live
+        # cluster). Snapshot and restore so the returned pool stays usable.
+        _kwargs_before = dict(pool.connection_kwargs)
+        db = FalkorDB(connection_pool=pool)
+        pool.connection_kwargs.update(_kwargs_before)
         logger.info(
             "falkordb_connection: cluster graph %r routed to owning node %s:%d%s",
             graph_name, host, port,
             " (TLS)" if _tls_pool else "",
         )
-        return FalkorDB(connection_pool=pool), pool
+        return db, pool
 
     raise ProviderConfigurationError(f"Unsupported FalkorDB mode: {cfg.mode!r}")
 
@@ -696,10 +719,17 @@ def build_graph_pool_kwargs(
         ),
         **resilient_pool_kwargs(socket_timeout=socket_timeout),
     }
-    if cfg.username:
-        kw["username"] = cfg.username
-    if cfg.password:
-        kw["password"] = cfg.password
+    # ``username``/``password`` must ALWAYS be present, even as None. The
+    # falkordb client wraps any pool whose server is cluster-enabled in
+    # ``falkordb.asyncio.cluster.Cluster_Conn``, which rebuilds a RedisCluster
+    # via ``connection_kwargs.pop("username")`` / ``pop("password")`` with NO
+    # default. Setting them only when truthy (the old behaviour) meant that
+    # against an UNAUTHENTICATED cluster the keys were absent and every
+    # ``FalkorDB(connection_pool=...)`` raised ``KeyError: 'username'`` — i.e.
+    # Redis Cluster mode could not connect at all. None is equivalent to
+    # omitting them for redis-py (no AUTH is sent).
+    kw["username"] = cfg.username or None
+    kw["password"] = cfg.password or None
     return kw
 
 
@@ -1132,13 +1162,27 @@ async def list_graph_keys_for_config(
     pool_kwargs = build_graph_pool_kwargs(cfg, socket_timeout=st, max_connections=2)
 
     if cfg.mode == "cluster":
+        # Per-primary GRAPH.LIST, unioned.
+        #
+        # Deliberately a PLAIN redis client, never ``FalkorDB(connection_pool=)``:
+        # the falkordb client wraps any pool whose server is cluster-enabled in
+        # ``Cluster_Conn`` → a RedisCluster, which routes the *keyless*
+        # GRAPH.LIST to ONE arbitrary node. Iterating the primaries with such a
+        # client therefore re-asks an arbitrary node each time and SILENTLY
+        # under-reports the union (verified against a live 3-shard cluster: it
+        # returned 3 of 6 graphs, missing an entire shard's worth). GRAPH.LIST
+        # is keyless, so a plain client pinned to a node is never redirected and
+        # reports exactly that node's graphs.
+        from redis.asyncio import Redis as _NodeRedis
+
         keys: set = set()
         tls = tls_pool_kwargs(cfg.tls_settings())
         for host, port in await cluster_primary_nodes(cfg, st):
             pool = ConnectionPool(host=host, port=port, **pool_kwargs, **tls)
             try:
-                db = FalkorDB(connection_pool=pool)
-                keys |= {_decode_key(k) for k in await db.list_graphs()}
+                node = _NodeRedis(connection_pool=pool)
+                res = await node.execute_command("GRAPH.LIST")
+                keys |= {_decode_key(k) for k in (res or [])}
             finally:
                 try:
                     await pool.aclose()
