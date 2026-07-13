@@ -5,7 +5,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
-import { WorkspaceHealthBadge } from './workspace/WorkspaceHealthBadge'
+import { WorkspaceHealthBadge, type WorkspaceHealth } from './workspace/WorkspaceHealthBadge'
 import { getProviderLogo } from './ProviderLogos'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ interface WorkspaceCardProps {
     isSelected?: boolean
     onToggleSelect?: () => void
     stats: { nodes: number; edges: number; types: number }
-    healthStatus?: 'healthy' | 'warning' | 'critical' | 'unknown'
+    healthStatus?: WorkspaceHealth
     dsProviders: WsDataSourceProviderInfo[]
     schemaSummary: WorkspaceSchemaSummary
     onOpen: () => void
@@ -189,6 +189,11 @@ export function WorkspaceCard({
                                 <span className="shrink-0 px-1.5 py-0.5 text-[9px] font-bold rounded bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">DEFAULT</span>
                             )}
                         </div>
+                        {/* The status was a 2px dot with no label, grey on nearly every
+                            card. Say what it means. */}
+                        <span className="inline-flex items-center gap-1.5 mb-1">
+                            <WorkspaceHealthBadge status={healthStatus || 'unknown'} showLabel />
+                        </span>
                         {ws.description ? (
                             <p className="text-xs text-ink-muted line-clamp-2">{ws.description}</p>
                         ) : (

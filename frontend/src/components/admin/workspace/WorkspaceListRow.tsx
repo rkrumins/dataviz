@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { Database, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers, Users, Check } from 'lucide-react'
 import { type WorkspaceResponse } from '@/services/workspaceService'
-import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
+import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
 import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { cn } from '@/lib/utils'
@@ -21,7 +21,7 @@ interface WorkspaceListRowProps {
     isSelected?: boolean
     onToggleSelect?: () => void
     stats: { nodes: number; edges: number; types: number }
-    healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
+    healthStatus: WorkspaceHealth
     dsProviders: WsDataSourceProviderInfo[]
     onOpen: () => void
     onDelete: () => void

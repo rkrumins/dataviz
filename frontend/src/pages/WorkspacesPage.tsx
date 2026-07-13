@@ -457,6 +457,18 @@ export function WorkspacesPage() {
     // would mislead them into clicking a CTA they can't use.
     const showPipelineNudge = !isLoading && isPlatformAdmin && providers.length === 0
 
+    // Live counts per health state. Without these the Health menu offered filters
+    // that matched nothing (every workspace was "unknown"), so choosing one just
+    // blanked the page.
+    const healthCounts = useMemo(() => {
+        const counts: Record<string, number> = { all: workspaces.length }
+        for (const ws of workspaces) {
+            const h = deriveWorkspaceHealth(ws.dataSources || [])
+            counts[h] = (counts[h] ?? 0) + 1
+        }
+        return counts
+    }, [workspaces])
+
     const selectedWorkspaces = useMemo(
         () => workspaces.filter(w => selectedIds.has(w.id)),
         [workspaces, selectedIds],
@@ -643,6 +655,7 @@ export function WorkspacesPage() {
                 onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
                 healthFilter={healthFilter}
                 onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
+                healthCounts={healthCounts}
                 totalCount={workspaces.length}
                 filteredCount={filtered.length}
             />
