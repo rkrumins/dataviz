@@ -9,6 +9,7 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -53,6 +54,8 @@ from backend.common.models.management import (
     DataSourceMoveRequest,
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -501,7 +504,19 @@ async def remove_data_source(
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a data source. Rejects if it's the last one in the workspace."""
+    """Remove a data source, and reclaim the versioned graph it owns.
+
+    Deleting the row alone is what orphaned 2,296 of this database's 2,321 versioned graphs: the
+    data source vanished and its commits, drafts and version rows stayed behind forever, reachable
+    by nothing. So the delete now also SOFT-DELETES the graph — which hides it from every read
+    immediately — and enqueues a windowed purge to reclaim the rows on the versioning worker.
+    Millions of rows are not something an HTTP request should try to delete inline.
+
+    The purge is enqueued FIRST, and deliberately so. If the data-source delete then fails, we are
+    left with a queued purge for a soft-deleted graph, which is recoverable and visible. The other
+    order risks the inverse — the data source gone and nothing queued — which is exactly the
+    silent leak we are fixing.
+    """
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
@@ -509,6 +524,19 @@ async def remove_data_source(
     count = await data_source_repo.count_data_sources(session, workspace_id)
     if count <= 1:
         raise HTTPException(status_code=409, detail="Cannot delete the last data source in a workspace")
+
+    try:
+        from backend.app.services.versioning.purge_worker import purge_graph_for_data_source
+        jobs = await purge_graph_for_data_source(
+            data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
+        if jobs:
+            logger.info("data source %s deleted by %s; purge queued: %s", ds_id, _user.id, jobs)
+    except Exception:
+        # Graphver being unreachable must not strand the user with an undeletable data source.
+        # The graph stays queryable-but-orphaned, which is the status quo we are improving on —
+        # not a regression — and the loud log is what gets it swept up later.
+        logger.exception("could not queue purge for data source %s — graph rows will be orphaned",
+                         ds_id)
 
     await provider_registry.evict_workspace(workspace_id, session)
     await data_source_repo.delete_data_source(session, ds_id)

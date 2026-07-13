@@ -286,6 +286,14 @@ BOOTSTRAP_RETRY_BUDGET_SECS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_RETRY_BUDGE
 BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(
     os.getenv("GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS", "30"))
 
+# Rows deleted per transaction when purging a deleted graph. One graph here is ~2.9M rows and a
+# real one is 7.7M+, so this is the knob that keeps a purge from becoming one enormous
+# transaction holding locks and generating WAL for the entire graph. 25k keeps each window well
+# under a second on the live table while making the whole purge ~120 transactions per million
+# rows. It does NOT need to be large: the windows are Index Scans (see purge_worker), so there is
+# no per-window rescan cost to amortise away.
+PURGE_WINDOW: int = int(os.getenv("GRAPHVER_PURGE_WINDOW", "25000"))
+
 
 def _selftest() -> None:
     assert PARTITIONS >= 1 and MERKLE_DEPTH >= 1

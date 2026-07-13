@@ -31,6 +31,7 @@ from .projection import FalkorProjector
 
 if TYPE_CHECKING:
     from .bootstrap_worker import BootstrapRunner
+    from .purge_worker import PurgeRunner
     from .service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class ProjectionWorker:
         evict_budget: Optional[Callable[[str], Union[int, Awaitable[int]]]] = None,
         evict_secs: Optional[int] = None,
         bootstrap: Optional["BootstrapRunner"] = None,
+        purge: Optional["PurgeRunner"] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -61,6 +63,7 @@ class ProjectionWorker:
         self._evict_secs = evict_secs or config.EVICT_SECS
         self._cache = CacheManager(projector) if evict_budget is not None else None
         self._bootstrap = bootstrap              # enables the "enable version control" ingest loop
+        self._purge = purge                      # enables reclaiming deleted graphs
 
     def stop(self) -> None:
         self._stop.set()
@@ -122,6 +125,8 @@ class ProjectionWorker:
             loops.append(self._evict_loop())
         if self._bootstrap is not None:
             loops.append(self._ingest_loop())
+        if self._purge is not None:
+            loops.append(self._purge_loop())
         await asyncio.gather(*loops)
 
     async def _ingest_loop(self) -> None:
@@ -137,6 +142,23 @@ class ProjectionWorker:
                     continue                      # drain the queue before sleeping
             except Exception:
                 logger.exception("bootstrap ingest loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.INGEST_POLL_SECS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _purge_loop(self) -> None:
+        """Reclaim graphs whose data source was deleted. Same durable-queue contract as the
+        ingest loop: claimed with FOR UPDATE SKIP LOCKED, taken over on a stale heartbeat, and —
+        because DELETE is idempotent — resumable with no cursor to get wrong."""
+        while not self._stop.is_set():
+            try:
+                job_id = await self._purge.claim_one()
+                if job_id:
+                    await self._purge.run_job(job_id)
+                    continue                      # drain the queue before sleeping
+            except Exception:
+                logger.exception("purge loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.INGEST_POLL_SECS)
             except asyncio.TimeoutError:

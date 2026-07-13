@@ -873,6 +873,7 @@ async def lifespan(_app: FastAPI):
         from .services.versioning import config as _vcfg
         if _vcfg.PROJECTION_INPROCESS:
             from .services.versioning.bootstrap_worker import BootstrapRunner
+            from .services.versioning.purge_worker import PurgeRunner
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
             from .services.versioning.worker import ProjectionWorker
@@ -910,6 +911,7 @@ async def lifespan(_app: FastAPI):
                 # "Enable version control" jobs (dev / single-node: the standalone
                 # versioning-worker hosts them when INPROCESS=0).
                 bootstrap=BootstrapRunner(make_registry_graph_factory()),
+                purge=PurgeRunner(make_registry_graph_factory()),
             )
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(

@@ -3,11 +3,15 @@
 Three columns and one widened CHECK, and every one of them exists to stop us destroying
 something we do not own.
 
-1. ``graphs.deleted_at`` / ``deleted_by`` — SOFT DELETE. A versioned graph holds human-authored
-   history: commits, drafts, curation, decisions. Destroying it is irreversible, and reclaiming
-   7.7M version rows is a long background job. Soft-delete lets the graph vanish from every read
-   the instant the user asks, while the rows survive a grace period during which one click brings
-   it all back. The difference between a mistake and a disaster is an undo window.
+1. ``graphs.deleted_at`` / ``deleted_by`` — SOFT DELETE, as a PURGE TOMBSTONE. Reclaiming 2.9M
+   rows (a real graph here) takes ~35s on the versioning worker, and 7.7M takes minutes; that is
+   not something an HTTP request does inline. The tombstone lets the graph vanish from every read
+   the instant the user asks, while the purge grinds through the rows behind it — so nothing ever
+   resolves a graph that is half deleted.
+
+   It is NOT an undo window, and the UI does not offer one. A real undo would need the DATA SOURCE
+   row soft-deleted too, and it is hard-deleted; promising a restore we cannot perform would be
+   worse than promising nothing. The dialog says "this cannot be undone", and means it.
 
 2. ``projection_state.owns_falkor_graph`` — THE GUARDRAIL. A bootstrapped graph is PINNED to the
    customer's REAL FalkorDB graph (`nexus_lineage`, `perf-load-test-solidatus`) — that pinning is

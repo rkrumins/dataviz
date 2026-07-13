@@ -3373,10 +3373,14 @@ class GraphVersioningService:
 
     async def get_graph_by_data_source(self, data_source_id: str) -> Optional[Dict[str, object]]:
         """Reverse lookup: the versioned graph backing a data source (1:1 via the
-        ``uq_graphs_data_source`` unique constraint), or ``None``."""
+        ``uq_graphs_data_source`` unique constraint), or ``None``.
+
+        Soft-deleted graphs are invisible here. A graph awaiting purge is being dismantled row by
+        row; anything that resolved it would be reading a graph that is half gone."""
         async with self._session() as s:
             g = (await s.execute(
-                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id,
+                                       GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
 
@@ -3397,7 +3401,8 @@ class GraphVersioningService:
         workspace for tenant isolation)."""
         async with self._session() as s:
             g = (await s.execute(
-                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id,
+                                       GraphORM.deleted_at.is_(None))   # purge in flight => gone
             )).scalar_one_or_none()
             if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
                 return None
