@@ -4,6 +4,7 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { RequireNav } from '@/components/auth/RequireNav'
+import { RequireFeature } from '@/components/RequireFeature'
 
 // The standalone workspace-views page was retired; view management now lives
 // in the workspace-detail "Views" tab. Redirect any old link there.
@@ -124,7 +125,9 @@ export const router = createBrowserRouter([
       // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
-      { path: 'workspaces/:wsId/reviews', element: <Lazy><WorkspaceReviewsPage /></Lazy> },
+      // Reviews are a versioning surface — the whole route disappears (redirects
+      // to the workspace) when the admin turns version control off.
+      { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" redirectTo="/workspaces/:wsId"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },

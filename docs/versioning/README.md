@@ -74,6 +74,7 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 | 08 | [Import / Export](08-import-export.md) | Bulk CRUD as "manual flow at scale": drafts, resolve/reconcile, tabular columns, formats, view-scope | build bulk data flows |
 | 09 | [Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) | Measured wins, O(graph) hotspots, dormant machinery, honest gaps, roadmap | assess production-readiness |
 | 10 | [Authoritative Sources — DataHub / OpenMetadata](10-authoritative-sources-datahub-openmetadata.md) | Managed vs federated, the existing seam, sync-as-commit, curation-as-overlay | plan external-catalog integration |
+| 11 | [Re-sync at Any Scale](11-resync-at-any-scale.md) | Why re-sync costs 2 GB to compute 808 changes, the measured numbers, and the design that removes the size guard | fix `sync_ingest`'s O(graph) memory |
 
 **Suggested paths.** *Architect / evaluator:* 01 → 03 → 09 → 10. *Backend engineer:* 02 → 03 → 04
 → 05. *Frontend engineer:* 01 → 07 → 06. *Operator / SRE:* 04 → 09.
@@ -146,6 +147,39 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 > single-node case, with several deliberately deferred scale items (checkpoint Merkle CoW,
 > keyset-streaming full seed, a real async import dispatcher, GC/retention) and a handful of known
 > gaps. Chapter 09 is the consolidated, candid list — read it before making production commitments.
+
+---
+
+## Since this suite was written (2026-07-13)
+
+Four capabilities landed that the chapters below predate. Until they are folded in, the
+canonical reference for each is **[`../VERSIONING_E2E.md`](../VERSIONING_E2E.md)** (endpoint
+tables + semantics) and the code:
+
+1. **Rollback is a product feature, not just a service method.** `revert_commit` (undo one
+   commit, conflict-guarded) is joined by **`restore_to_commit`** — reset `main` to its state at
+   any commit as ONE new `restore` commit. A restore overrides everything after its target, so
+   it *cannot* conflict: it is the escape hatch when a revert is blocked. Both write new commits
+   (history is never rewritten) and both are reachable from the UI — the history timeline's
+   per-revision menu, and "Revert this merge" on a merged PR.
+   → `service.py::restore_to_commit` / `restore_preview`, migration `20260713_1200_restore_kind`.
+2. **"Enable version control" is an async, resumable, integrity-validated job**, not an inline
+   request. ID-range windows + per-window transactions (memory is O(window), not O(graph)),
+   deterministic version ids so a replayed window is a no-op, and the import stays **invisible
+   until validated** (head parked at genesis). Finalize **fast-forwards** the projection rather
+   than reseeding the graph it just copied. → `services/versioning/bootstrap_worker.py`.
+3. **A `versioningEnabled` admin flag** gates every mutating versioning route (403
+   `feature_disabled`) and hides the whole UI surface; reads and workers keep running, and
+   nothing is deleted. → `api/v1/versioning_gate.py`, `frontend/src/store/features.ts`.
+4. **What "the graph" means is now explicit.** The copy contains exactly what the application
+   can see: the reader ignores nodes without a `urn` and edges whose endpoints have none, so
+   those are counted and disclosed in the integrity report rather than silently dropped (the
+   old bootstrap's behaviour). Derived artifacts (`:AGGREGATED`, `_GVRollupMeta`, `_AggMeta`,
+   `_Projection`) are never imported.
+
+Chapter 09's "keyset-streaming full seed" item is now **half-done**: the *bootstrap* streams;
+the *projector's* full reseed (`_compute_changes` at `from_seq<=0`) still materializes state in
+memory — bootstrap simply never triggers it.
 
 ---
 

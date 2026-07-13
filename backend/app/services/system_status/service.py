@@ -90,12 +90,13 @@ async def _assemble(app_state) -> dict:
         probes.probe_outbox(app_state),
         probes.probe_overview(app_state),
         probes.probe_graph_providers(app_state),
+        probes.probe_bootstrap_jobs(),
         return_exceptions=True,
     )
     (viz, mgmt_db, gv_db, bus_redis, cache_redis, falkordb,
      controlplane, worker, stats_svc, graph_svc,
      streams, projection, agg_jobs, stats_polling, outbox, overview,
-     graph_providers) = results
+     graph_providers, bootstrap_jobs) = results
 
     services = [
         _coerce_service(viz, "vizService", "Viz Service"),
@@ -142,6 +143,8 @@ async def _assemble(app_state) -> dict:
     if (insights_dlq.get("len") or 0) > 0:
         _degrade(stats_tile, f"DLQ {insights_dlq['len']}")
 
+    bootstrap_jobs = _coerce_data(bootstrap_jobs)
+
     # ── Rollup ──
     if by_key["managementDb"]["status"] == "down":
         overall = "down"
@@ -149,6 +152,20 @@ async def _assemble(app_state) -> dict:
         overall = "degraded"
     else:
         overall = "healthy"
+
+    # A STALLED copy means no worker claimed a job whose heartbeat aged out — the versioning
+    # worker tier is gone, not one job being slow (the worker heartbeats on a timer, not on
+    # progress). That is systemic, so it degrades the deployment.
+    #
+    # A FAILED copy deliberately does NOT. It blocks writes to ONE data source until someone
+    # resumes or abandons it — real, and an admin must action it — but scoping a whole
+    # deployment to "degraded" for one stuck data source is how a dashboard becomes wallpaper.
+    # The gap this closed was that a failed copy was INVISIBLE, not that it was un-alarmed:
+    # `bootstrapJobs` now carries it and the infrastructure panel shows it in red, with the
+    # reason and the fact that writes are blocked. (Aggregation draws the same line — its
+    # stuck jobs degrade the worker tile, not the rollup.)
+    if bootstrap_jobs and overall == "healthy" and bootstrap_jobs.get("stalled"):
+        overall = "degraded"
 
     return {
         "status": overall,
@@ -159,6 +176,7 @@ async def _assemble(app_state) -> dict:
         "streams": streams,
         "projection": projection,
         "aggregationJobs": agg_jobs,
+        "bootstrapJobs": bootstrap_jobs,
         "statsPolling": stats_polling,
         "outbox": outbox,
     }

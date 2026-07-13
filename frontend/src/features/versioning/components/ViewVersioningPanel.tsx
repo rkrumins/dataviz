@@ -167,7 +167,7 @@ export function ViewVersioningPanel({
             ))}
 
           {tab === 'history' && (
-            <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} />
+            <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} canManage={canManage} />
           )}
 
           {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} />}

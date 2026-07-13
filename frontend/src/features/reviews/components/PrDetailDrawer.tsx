@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
+  Undo2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -25,8 +26,10 @@ import {
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { CommitRow } from '../../versioning/components/CommitRow'
+import { RevertDialog } from '../../versioning/components/RollbackDialogs'
 import { ownerName } from '../../versioning/model/branchVocab'
 import { usePermission, useAuthStore } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { useBranchStore } from '@/store/branchStore'
 import { useToast } from '@/components/ui/toast'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
@@ -107,6 +110,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [needsPull, setNeedsPull] = useState(false)
   const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
   const [dismissing, setDismissing] = useState(false)
+  // "Revert this merge" (merged PRs): the merge's squash commit is revertable
+  // like any other main revision — the dialog owns the confirm + conflict UX.
+  const versioningEnabled = useFeature('versioningEnabled')
+  const [reverting, setReverting] = useState(false)
 
   const terminal = pr?.status === 'merged' || pr?.status === 'closed'
   const isAuthor = !!user && pr?.actor === user.id
@@ -469,6 +476,38 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               </button>
             </div>
           </div>
+        )}
+
+        {/* Merged terminal state — the one action left is undoing the merge. */}
+        {pr && pr.status === 'merged' && canManage && versioningEnabled && pr.resultingCommitId && (
+          <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center justify-between gap-3">
+            <p className="text-[12px] text-ink-muted leading-snug">
+              Merged the wrong thing? Undo it as a new revision — history is kept.
+            </p>
+            <button
+              onClick={() => setReverting(true)}
+              className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-medium text-rose-500 border border-rose-500/30 bg-rose-500/[0.06] hover:bg-rose-500/10 transition-colors"
+            >
+              <Undo2 className="w-4 h-4" /> Revert this merge
+            </button>
+          </div>
+        )}
+        {pr && pr.resultingCommitId && (
+          <RevertDialog
+            open={reverting}
+            commit={{
+              commit_id: pr.resultingCommitId,
+              message: `Merge: ${derivePrTitle(pr)}`,
+              kind: 'squash_publish',
+              actor: pr.mergedBy ?? pr.actor,
+              created_at: pr.mergedAt ?? pr.updatedAt,
+              stats: {},
+            }}
+            wsId={wsId}
+            graphId={pr.graphId}
+            userNames={pr.userNames}
+            onClose={() => setReverting(false)}
+          />
         )}
 
         {conflicts && (

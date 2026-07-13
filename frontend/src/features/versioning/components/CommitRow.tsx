@@ -10,7 +10,8 @@
  * remains fully auditable on demand). Nested rows are themselves diffable.
  */
 import { useCallback, useState } from 'react'
-import { ChevronRight, User, Loader2, Layers } from 'lucide-react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { ChevronRight, User, Loader2, Layers, MoreHorizontal, History, Undo2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
@@ -92,6 +93,8 @@ export function CommitRow({
   userNames,
   expanded,
   onToggle,
+  onRevert,
+  onRestore,
 }: {
   commit: Record<string, unknown>
   wsId: string
@@ -103,10 +106,16 @@ export function CommitRow({
   userNames?: Record<string, string>
   expanded: boolean
   onToggle: (commitId: string) => void
+  /** When provided (main timeline, manager, flag on): "Undo just this change". Hidden on genesis. */
+  onRevert?: (commit: Record<string, unknown>) => void
+  /** When provided: "Restore graph to here" (valid on every revision incl. genesis = empty). */
+  onRestore?: (commit: Record<string, unknown>) => void
 }) {
   const commitId = commit.commit_id as string
   const stats = (commit.stats ?? {}) as Record<string, unknown>
   const kind = kindMeta(commit.kind)
+  const isGenesis = commit.kind === 'genesis'
+  const showRollbackMenu = Boolean(onRestore || (onRevert && !isGenesis))
   // On a squash (publish/merge) actor is the publisher; contributors are everyone who actually edited.
   const contributors = Array.isArray(commit.contributors) ? (commit.contributors as string[]) : []
   const others = contributors.filter((c) => c && c !== commit.actor)
@@ -135,7 +144,59 @@ export function CommitRow({
               {kind.label}
             </span>
           </p>
-          <StatChips stats={stats} />
+          <span className="flex items-center gap-1 shrink-0">
+            <StatChips stats={stats} />
+            {showRollbackMenu && (
+              /* modal={false}: this list lives in polling/self-refreshing panels — the
+                 documented guard against the Radix body pointer-events freeze. */
+              <DropdownMenu.Root modal={false}>
+                <DropdownMenu.Trigger asChild>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Revision actions"
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    className="p-1 rounded-md text-ink-muted/40 hover:text-ink-muted hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50 data-[state=open]:text-ink-muted data-[state=open]:bg-black/[0.05] dark:data-[state=open]:bg-white/[0.06] cursor-pointer"
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                  </span>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="end"
+                    sideOffset={4}
+                    className="z-[9999] w-60 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                  >
+                    {onRevert && !isGenesis && (
+                      <DropdownMenu.Item
+                        onSelect={() => onRevert(commit)}
+                        className="flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-[13px] text-ink cursor-pointer outline-none data-[highlighted]:bg-rose-500/[0.08]"
+                      >
+                        <Undo2 className="w-4 h-4 mt-0.5 shrink-0 text-rose-500" />
+                        <span className="min-w-0">
+                          <span className="block font-medium">Undo just this change</span>
+                          <span className="block text-[11px] text-ink-muted leading-snug">Later changes are kept.</span>
+                        </span>
+                      </DropdownMenu.Item>
+                    )}
+                    {onRestore && (
+                      <DropdownMenu.Item
+                        onSelect={() => onRestore(commit)}
+                        className="flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-[13px] text-ink cursor-pointer outline-none data-[highlighted]:bg-amber-500/[0.08]"
+                      >
+                        <History className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                        <span className="min-w-0">
+                          <span className="block font-medium">Restore graph to here</span>
+                          <span className="block text-[11px] text-ink-muted leading-snug">Rolls back everything after this revision.</span>
+                        </span>
+                      </DropdownMenu.Item>
+                    )}
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            )}
+          </span>
         </div>
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
           <User className="w-3 h-3" /> {actorLabel(commit.actor, userNames)}

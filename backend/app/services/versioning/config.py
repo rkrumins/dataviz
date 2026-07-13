@@ -225,6 +225,68 @@ IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
 
 
+# --------------------------------------------------------------------------- #
+# "Enable version control" bootstrap job (async, resumable, integrity-checked)  #
+# --------------------------------------------------------------------------- #
+# The source graph is scanned in ID-RANGE windows (never OFFSET: deep offsets are
+# O(n²) at 10M) and written in per-window transactions, so peak memory is O(window)
+# regardless of graph size. The cursor (next `lo`) is checkpointed on the job row,
+# making a crashed job resumable mid-phase.
+BOOTSTRAP_SCAN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_WIDTH", "100000"))
+BOOTSTRAP_SCAN_MIN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH", "10000"))
+# Edges per window. A node-id window is a terrible predictor of how many EDGES it holds:
+# ids cluster by entity type, so on a real 5M-edge model one 10k-node window held 15k edges
+# and the next held 185k — enough to blow the server's per-query budget even at the minimum
+# node width. Counting a window's edges first is cheap (~0.1s); returning them is not. So the
+# edge phase sizes its window by this target and halves the node span until it fits.
+BOOTSTRAP_EDGE_TARGET: int = int(os.getenv("GRAPHVER_BOOTSTRAP_EDGE_TARGET", "50000"))
+# Rows accumulated before a window is committed to Postgres.
+BOOTSTRAP_WINDOW: int = int(os.getenv("GRAPHVER_BOOTSTRAP_WINDOW", "50000"))
+# Entities re-read from the SOURCE and content-hash-compared during validation.
+BOOTSTRAP_SAMPLE_K: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SAMPLE_K", "64"))
+# The import commit's Merkle tree is built inline up to this many entities; above it
+# the root is left NULL (the column is expressly "async-filled for bulk") and the
+# report says so, rather than OOM-ing on a 10M-entity in-memory tree.
+BOOTSTRAP_MERKLE_INLINE_MAX: int = int(os.getenv("GRAPHVER_BOOTSTRAP_MERKLE_MAX", "1000000"))
+# Worker pickup cadence + the heartbeat age after which a `running` job is presumed
+# dead and taken over by another worker (JobORM is the durable queue; no stream).
+INGEST_POLL_SECS: int = int(os.getenv("GRAPHVER_INGEST_POLL_SECS", "5"))
+INGEST_STALE_SECS: int = int(os.getenv("GRAPHVER_INGEST_STALE_SECS", "120"))
+# How often a running worker says "still alive". This must be comfortably shorter than
+# INGEST_STALE_SECS, and it must be a TIMER rather than a per-window commit: a scan halving
+# its way down the ladder, or a validate anti-joining a 10M-row commit, can work for minutes
+# without committing anything. Heartbeating only on commit would let a second worker declare
+# a healthy worker dead and steal its job — and the two would then trade it back and forth
+# indefinitely. Default = a quarter of the stale window, i.e. three missed beats before a
+# worker is presumed dead.
+INGEST_HEARTBEAT_SECS: int = int(os.getenv(
+    "GRAPHVER_INGEST_HEARTBEAT_SECS", str(max(5, INGEST_STALE_SECS // 4))))
+# A copy of a 10M-entity graph runs for tens of minutes, which is long enough to SPAN
+# ordinary infrastructure events: a FalkorDB restart or RDB reload, a Postgres failover,
+# a Kubernetes node rotation, a transient network partition. Those must not destroy a
+# job that is 80% done — the worker waits them out. Each window gets its own budget of
+# retrying (a successful window resets it), so this is "how long an outage may last",
+# not "how long the job may take". Beyond it the job fails honestly and stays resumable.
+# The largest graph a RE-SYNC is allowed to attempt, in entities (nodes + edges).
+#
+# This is a guard rail over a real limitation, not a policy: `sync_ingest` rebuilds the whole
+# graph several times over to do its 3-way merge, and measured cost is ~4.5 KiB of RSS per
+# entity — 2.03 GB to compute 808 changes on a 478k graph, in one HTTP request on the web tier.
+# Linearly, the 7.7M model asks for ~30 GB and takes the API process down with it. Above the
+# limit the operation does not work, so refusing with an honest number is strictly better than
+# an OOM — an OOM kills every other request in flight as well, and explains nothing.
+#
+# 250k ≈ a 1.1 GB peak: survivable on a web process, and comfortably above every real graph
+# we have seen (the largest non-synthetic one is ~200k). Raise it only if you know the memory
+# is there. It exists to be DELETED: see docs/versioning/11-resync-at-any-scale.md, which
+# makes re-sync bounded and moves it onto the worker, after which no limit is needed.
+RESYNC_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_RESYNC_MAX_ENTITIES", "250000"))
+
+BOOTSTRAP_RETRY_BUDGET_SECS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS", "600"))
+BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(
+    os.getenv("GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS", "30"))
+
+
 def _selftest() -> None:
     assert PARTITIONS >= 1 and MERKLE_DEPTH >= 1
     h1 = hash_parts(b"ab", b"c")

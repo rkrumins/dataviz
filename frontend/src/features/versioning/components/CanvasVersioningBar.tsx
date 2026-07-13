@@ -16,10 +16,13 @@ import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBootstrapGraph, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useAbandonDraft, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
+import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { AggregationSyncChip } from './AggregationSyncChip'
+import { BootstrapProgress } from './BootstrapProgress'
+import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { RefreshingBadge } from './RefreshingBadge'
@@ -38,7 +41,13 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const resolve = useResolveGraph(workspaceId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
-  const bootstrap = useBootstrapGraph(workspaceId)
+  const [showEnable, setShowEnable] = useState(false)
+  // The enablement job: live progress while it runs (seeded from /resolve, so a reload
+  // lands straight back on it), then the integrity report until it's dismissed.
+  const boot = useBootstrapWatch(workspaceId, dataSourceId, {
+    headSeq: resolve.data?.mainHeadCommitSeq ?? 0,
+    seed: resolve.data?.bootstrap ?? undefined,
+  })
 
   const activeView = useActiveView()
   const viewId = activeView?.id ?? null
@@ -86,16 +95,24 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const activeBranch = (branchesQ.data ?? []).find((b) => b.branchId === branchId)
   const behindMain = isDraft && !!activeBranch && (activeBranch.baseCommitSeq ?? 0) < mainHead
 
-  const handleEnable = () => {
-    if (!dataSourceId) return
-    bootstrap.mutate(dataSourceId, {
-      onSuccess: () => showToast('success', 'Version control enabled — you can now create drafts and review changes.'),
-      onError: (e) => showToast('error', (e as Error).message),
-    })
-  }
-
   // No data source, or still resolving → render nothing (avoid flicker).
   if (!dataSourceId || (resolve.isLoading && !graphId)) return null
+
+  // The copy just landed: hold the strip on the INTEGRITY REPORT until the user is done
+  // with it. Without this the graph turns versioned in the same frame and the receipt —
+  // the whole reason enabling is no longer an act of faith — would flash past unread.
+  if (boot.showReport && boot.job) {
+    return (
+      <BootstrapProgress
+        job={boot.job}
+        wsId={workspaceId}
+        dataSourceId={dataSourceId}
+        variant="bar"
+        canManage={canManage}
+        onDismiss={boot.dismissReport}
+      />
+    )
+  }
 
   // No versioned graph yet — or one that exists but was never seeded (genesis only,
   // mainHeadCommitSeq <= 1; e.g. a bootstrap that failed partway). Offer to enable/seed
@@ -107,27 +124,47 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const needsSeed = !graphId || (!isBlankModel && (resolve.data?.mainHeadCommitSeq ?? 0) <= 1)
   if (needsSeed) {
     if (!canManage) return null
+    // A copy in flight (or one that stopped) OWNS this strip: the user watches it, and
+    // a reload comes straight back to it (the job is seeded from /resolve).
+    if (boot.showProgress && boot.job) {
+      return (
+        <BootstrapProgress
+          job={boot.job}
+          wsId={workspaceId}
+          dataSourceId={dataSourceId}
+          variant="bar"
+          canManage={canManage}
+        />
+      )
+    }
     return (
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] via-canvas-elevated/40 to-transparent shrink-0">
-        <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 shrink-0">
-          <GitBranch className="w-4 h-4 text-accent-lineage" />
-        </span>
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-ink leading-tight">Version control is off for this data source</p>
-          <p className="text-[11px] text-ink-muted leading-tight">
-            Turn it on to edit safely in drafts, review changes, and publish with full history.
-          </p>
+      <>
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] via-canvas-elevated/40 to-transparent shrink-0">
+          <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 shrink-0">
+            <GitBranch className="w-4 h-4 text-accent-lineage" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-ink leading-tight">Version control is off for this data source</p>
+            <p className="text-[11px] text-ink-muted leading-tight">
+              Turn it on to edit safely in drafts, review changes, and publish with full history.
+            </p>
+          </div>
+          <div className="flex-1" />
+          <button
+            onClick={() => setShowEnable(true)}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Enable version control
+          </button>
         </div>
-        <div className="flex-1" />
-        <button
-          onClick={handleEnable}
-          disabled={bootstrap.isPending}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 disabled:hover:scale-100"
-        >
-          {bootstrap.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-          {bootstrap.isPending ? 'Setting up…' : 'Enable version control'}
-        </button>
-      </div>
+        <EnableVersioningFlow
+          open={showEnable}
+          onClose={() => setShowEnable(false)}
+          wsId={workspaceId}
+          dataSourceId={dataSourceId}
+        />
+      </>
     )
   }
 

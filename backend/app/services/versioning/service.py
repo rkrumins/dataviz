@@ -50,6 +50,7 @@ from .models import (
     EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
+    JobORM,
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
@@ -123,6 +124,46 @@ class ApprovalRequired(RuntimeError):
         super().__init__(f"pr {pr_id} needs approval from {pending}")
         self.pr_id = pr_id
         self.pending = list(pending)
+
+
+# Peak bytes of RSS `sync_ingest` costs per entity, MEASURED — not guessed. A 478,430-entity
+# resync peaked at 2,095 MiB over a 65 MiB baseline: 2,030 MiB / 478,430 = 4.45 KiB/entity,
+# rounded up. It is the price of holding ~6 whole-graph structures at once (the snapshot, base,
+# ours, theirs, merged, plus the urn/edge match indexes). Used only to tell the operator the
+# truth in the refusal message, and to size the default limit.
+_SYNC_BYTES_PER_ENTITY = 4_600
+
+
+class GraphTooLargeToSync(RuntimeError):
+    """A re-sync of this graph would not fit in memory, so we refuse it instead of dying.
+
+    ``sync_ingest`` reconstructs the ENTIRE graph several times over to do its 3-way merge —
+    the external snapshot, the state at the last sync, the state at head, the merged result,
+    and the indexes used to match them. Measured on a 478,430-entity graph: **2.03 GB of RAM
+    to compute 808 changes**, in one HTTP request, on the web tier. That is ~4.5 KiB per
+    entity, and it scales linearly: the 7.7M-entity model would ask for roughly 30 GB and
+    take the API process down with it.
+
+    This is a real limitation, not a policy: above the threshold the operation does not work.
+    Refusing with an honest number is strictly better than an OOM, because an OOM kills every
+    other request in flight too, and tells nobody why.
+
+    The fix is designed (stream the snapshot, discard by content hash, merge only the touched
+    set, run it on the worker rather than the web tier) — see
+    ``docs/versioning/11-resync-at-any-scale.md``. When it lands, this guard goes.
+    """
+
+    def __init__(self, entities: int, limit: int):
+        gb = entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824
+        super().__init__(
+            f"this data source has {entities:,} items, and re-syncing currently loads the "
+            f"whole graph into memory — about {gb:.1f} GB for this one, which would take the "
+            f"service down. Re-sync is limited to {limit:,} items until the streaming "
+            f"re-sync ships."
+        )
+        self.entities = entities
+        self.limit = limit
+        self.estimated_bytes = int(entities * _SYNC_BYTES_PER_ENTITY)
 
 
 class NotUpToDate(RuntimeError):
@@ -300,6 +341,34 @@ class GraphVersioningService:
             return {"graph_id": again["graph_id"], "already_enabled": True,
                     "imported": 0, "rows": 0}
 
+    async def _assert_not_bootstrapping(self, s, graph_id: str) -> None:
+        """A graph whose "enable version control" job hasn't COMPLETED is not a graph yet:
+        its head is parked at genesis, its seq-2 ``import`` commit is half-written, and its
+        projection watermark is parked so nothing reseeds the source.
+
+        Writing to it in that state is not merely racy — it is destructive. A commit would
+        advance ``main_head_commit_seq`` PAST the partial import commit, un-parking the
+        watermark; the projector would then see work to do, and (the graph being pinned to
+        the data source's real FalkorDB graph) DROP that graph and reseed it from a main
+        that holds a fraction of the entities. One stray canvas edit would destroy the
+        user's source data.
+
+        So the gate covers **failed** jobs too, not just in-flight ones: a failed enablement
+        must be resumed or abandoned, never edited around. One indexed lookup
+        (``ix_jobs_graph_status``)."""
+        unfinished = await s.scalar(select(JobORM.status).where(
+            JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
+            JobORM.status.in_(("pending", "running", "failed")),
+        ).limit(1))
+        if unfinished == "failed":
+            raise ConcurrencyError(
+                "enabling version control for this data source didn't finish — resume it "
+                "or cancel it before making changes")
+        if unfinished:
+            raise ConcurrencyError(
+                "version control is still being enabled for this data source — "
+                "try again once it finishes")
+
     async def open_draft(
         self,
         *,
@@ -318,6 +387,7 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
+            await self._assert_not_bootstrapping(s, graph_id)
             draft = BranchORM(
                 graph_id=graph_id,
                 kind="draft",
@@ -1084,6 +1154,156 @@ class GraphVersioningService:
             if ps is not None:
                 ps.target_commit_seq = new_seq
             return revert.id
+
+    async def _restore_delta(self, s, graph, main_id, target):
+        """Shared compute for restore-to-commit (write) and its preview (read):
+        the net delta that returns main to its state at ``target``.
+
+        ``touched`` = entities changed in ``(k, head]`` — everything after the
+        target commit. Each returns to its value AT ``k`` (absent at k ⇒ None ⇒
+        tombstone, so entities created later are deleted and entities deleted
+        later are resurrected). Bounded O(touched) via ``_values_at`` for a
+        non-fork main; forks use the CoW-aware ``_state_as_of`` replay (their
+        base inherits from the parent graph). The same hydrate → cascade →
+        integrity guards as publish/revert run so the delta (and therefore the
+        preview counts) is exactly what a restore will write."""
+        graph_id = graph.id
+        k, head_seq = target.commit_seq, graph.main_head_commit_seq
+        touched = await self._changed_in_window(s, graph_id, main_id, k, head_seq)
+        if graph.fork_parent_graph_id:
+            before = await self._state_as_of(s, graph_id, main_id, k)
+            cur = await self._state_as_of(s, graph_id, main_id, head_seq)
+            merged = dict(cur)
+            for eid in touched:
+                merged[eid] = before.get(eid)          # restore (None ⇒ tombstone)
+            theirs = cur
+        else:
+            before = await self._values_at(s, graph_id, main_id, touched, k)
+            cur = await self._values_at(s, graph_id, main_id, touched, head_seq)
+            merged = {eid: before.get(eid) for eid in touched}   # restore (None ⇒ tombstone)
+            theirs = {eid: cur.get(eid) for eid in touched}
+
+        # Hydrate the live neighborhood for the in-dict cascade/integrity guards (sparse-safe).
+        await self._hydrate_merge_neighborhood(s, graph_id, main_id, merged, theirs)
+        self._cascade_incident_edges(merged)
+        self._assert_referential_integrity(merged)
+        return net_delta(theirs, merged)
+
+    async def restore_to_commit(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str] = None,
+    ) -> str:
+        """Reset main to its state at ``commit_id`` as ONE new ``restore``
+        commit — the point-in-time rollback counterpart of :meth:`revert_commit`
+        (which inverts a single commit and conflicts when later commits touched
+        the same entities). A restore overrides everything after the target by
+        definition, so there is NO conflict path; history is never rewritten and
+        the restore itself is revertable. Restoring to the genesis commit is the
+        well-defined "empty the graph". Ontology rules are deliberately not
+        applied (administrative path, same as revert — must be able to restore
+        pre-ontology states)."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            target = await s.get(CommitORM, (graph_id, commit_id))
+            if target is None or target.branch_id != main_id:
+                raise ValueError("commit is not on this graph's main")
+
+            deltas = await self._restore_delta(s, graph, main_id, target)
+            if not deltas:
+                return ""                              # already at (or equal to) the target
+
+            head_seq = graph.main_head_commit_seq
+            new_seq = head_seq + 1
+            main = await s.get(BranchORM, main_id)
+            restore = CommitORM(
+                graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="restore",
+                message=message or f"restore to {commit_id}", actor=actor,
+                source_commit_ids=[commit_id],         # provenance: the restore target
+            )
+            s.add(restore)
+            await s.flush()
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
+            await self._write_deltas(s, graph_id, main_id, restore, deltas, kind_by_entity, actor)
+            main.head_commit_id = restore.id
+            graph.main_head_commit_seq = new_seq
+            restore.merkle_root = await self._commit_merkle(s, graph_id, main_id, restore, deltas)
+            graph.updated_at = _now()
+            restore.stats = _delta_stats(deltas)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return restore.id
+
+    # A preview is a synchronous web request, so it must not be allowed to materialize an
+    # arbitrarily large delta: restoring a freshly-enabled 7M-entity graph back to genesis
+    # touches every entity in it. Past this many touched entities we answer with the shape
+    # of the change (how many revisions roll back) and say the item counts are approximate,
+    # rather than dragging millions of payloads through the web tier to render a dialog.
+    _RESTORE_PREVIEW_MAX_TOUCHED = 200_000
+
+    async def restore_preview(
+        self, *, graph_id: str, commit_id: str,
+    ) -> Dict[str, object]:
+        """What :meth:`restore_to_commit` would do — exact per-kind create/update/
+        delete counts (same compute, same cascade guards, nothing written) plus
+        how many later commits the restore rolls back. Bounded O(touched), and
+        short-circuits to approximate counts above ``_RESTORE_PREVIEW_MAX_TOUCHED``."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            target = await s.get(CommitORM, (graph_id, commit_id))
+            if target is None or target.branch_id != main_id:
+                raise ValueError("commit is not on this graph's main")
+
+            commits_undone = await s.scalar(
+                select(func.count()).select_from(CommitORM).where(
+                    CommitORM.graph_id == graph_id,
+                    CommitORM.branch_id == main_id,
+                    CommitORM.commit_seq > target.commit_seq,
+                    CommitORM.commit_seq <= graph.main_head_commit_seq,
+                )
+            )
+            touched_n = await self._count_changed_in_window(
+                s, graph_id, main_id, target.commit_seq, graph.main_head_commit_seq)
+            if touched_n > self._RESTORE_PREVIEW_MAX_TOUCHED:
+                # Too big to price exactly without hurting the request. Be honest about it.
+                return {"commitsUndone": int(commits_undone or 0),
+                        "approximate": True, "touchedEstimate": int(touched_n),
+                        "nodes": {"create": 0, "update": 0, "delete": 0},
+                        "edges": {"create": 0, "update": 0, "delete": 0}}
+
+            deltas = await self._restore_delta(s, graph, main_id, target)
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)
+            counts = {"nodes": {"create": 0, "update": 0, "delete": 0},
+                      "edges": {"create": 0, "update": 0, "delete": 0}}
+            for d in deltas:
+                bucket = "edges" if kind_by_entity.get(d.entity_id) == "edge" else "nodes"
+                counts[bucket][d.op] = counts[bucket].get(d.op, 0) + 1
+            return {"commitsUndone": int(commits_undone or 0), "approximate": False,
+                    "nodes": counts["nodes"], "edges": counts["edges"]}
+
+    async def _count_changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> int:
+        """How many entities commits in ``(from_seq, to_seq]`` touched — the size of the
+        restore, WITHOUT materializing the id set (which for a restore-to-genesis on a
+        freshly-enabled graph is every entity in it)."""
+        total = 0
+        for model in (NodeVersionORM, EdgeVersionORM):
+            total += int(await s.scalar(
+                select(func.count(func.distinct(model.entity_id))).where(
+                    model.graph_id == graph_id, model.branch_id == branch_id,
+                    model.commit_seq > from_seq, model.commit_seq <= to_seq,
+                )
+            ) or 0)
+        return total
 
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
@@ -3905,12 +4125,41 @@ class GraphVersioningService:
         ``strategy='external_wins'``). The projector then refreshes FalkorDB. The
         ``collect_provider_rows`` output shape (kind/urn/entityType for nodes;
         edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes."""
+        # Refuse BEFORE paging the provider. `collect_provider_rows` is the first of the six
+        # whole-graph allocations, and by the time it has finished the process may already be
+        # dead — so the check that saves us has to come before it, not inside sync_ingest's
+        # transaction. (sync_ingest checks too: it is O(graph) for its OWN callers regardless
+        # of how many rows they hand it.)
+        await self._assert_syncable(graph_id)
         from backend.app.providers.versioned_bootstrap import collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
             containment_edge_types=containment_edge_types, message="resync from provider")
+
+    async def _assert_syncable(self, graph_id: str) -> None:
+        """Refuse a sync the machine cannot survive, with the number that proves it.
+
+        See :class:`GraphTooLargeToSync`. The count is the only cheap thing in this operation:
+        one indexed count against `entity_heads`, versus the several gigabytes the merge would
+        otherwise ask for. Fail fast, fail honestly, change nothing."""
+        limit = config.RESYNC_MAX_ENTITIES
+        if limit <= 0:
+            return                                      # explicitly disabled by an operator
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            entities = await s.scalar(
+                select(func.count()).select_from(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id,
+                    EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.is_tombstone.is_(False),
+                )) or 0
+        if entities > limit:
+            logger.warning(
+                "refusing sync for graph %s: %d entities exceeds the %d limit (~%.1f GB)",
+                graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
+            raise GraphTooLargeToSync(entities, limit)
 
     async def sync_ingest(
         self, *, graph_id: str, rows, actor: str, source: str = "external",
@@ -3924,7 +4173,14 @@ class GraphVersioningService:
         theirs = the external snapshot. A field both sides changed conflicts under
         ``strategy='merge'`` (resubmit with ``resolutions``) or takes the external value
         under ``strategy='external_wins'``. The snapshot is authoritative: an entity it
-        drops is deleted if the user hadn't touched it. Idempotent on ``idempotency_key``."""
+        drops is deleted if the user hadn't touched it. Idempotent on ``idempotency_key``.
+
+        MEMORY: this reconstructs the whole graph several times over (base, ours, theirs,
+        merged, plus the urn/edge match indexes), so it is O(graph) for EVERY caller — no
+        matter how few rows they pass. Pushing a SINGLE row into a 7.7M-entity graph asks for
+        ~30 GB just as surely as a full re-sync does. That is why the guard lives here and not
+        only on the resync path. See :class:`GraphTooLargeToSync`."""
+        await self._assert_syncable(graph_id)
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
@@ -4127,6 +4383,7 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         async with self._session() as s:
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")

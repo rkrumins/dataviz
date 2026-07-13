@@ -48,6 +48,7 @@ import { useReparentNode } from '@/components/canvas/context-view/useReparentNod
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useFeature } from '@/store/features'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
@@ -138,8 +139,15 @@ export function EntityDrawer({
 
   // Real "last updated" timestamp — the most recent COMMIT that touched this entity (source of
   // truth), not the stale `lastSyncedAt` (which is set at sync/creation and doesn't move on edits).
-  // Shared query with the History section (no extra fetch).
-  const entityHistory = useEntityHistory(historyWsId, historyGraphId, selectedNode?.id ?? undefined)
+  // Shared query with the History section (no extra fetch). Both are versioning
+  // surfaces: when the admin turns version control off, the queries stop and the
+  // History section disappears (undefined ids disable the hooks).
+  const versioningEnabled = useFeature('versioningEnabled')
+  const entityHistory = useEntityHistory(
+    versioningEnabled ? historyWsId : undefined,
+    versioningEnabled ? historyGraphId : undefined,
+    selectedNode?.id ?? undefined,
+  )
   const lastUpdatedAt = useMemo(() => {
     const versions = (entityHistory.data?.versions ?? []) as Array<{ created_at?: string; commit_seq?: number }>
     if (!versions.length) return undefined
@@ -1205,6 +1213,7 @@ function ViewModeContent({
   branchId,
 }: ViewModeContentProps) {
   const hasAdditional = Object.keys(propertiesBag).length > 0
+  const versioningEnabledForHistory = useFeature('versioningEnabled')
   return (
     <div className="divide-y divide-glass-border/30">
       {/* Identifier */}
@@ -1277,7 +1286,7 @@ function ViewModeContent({
       />
 
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
-      {wsId && graphId && (
+      {versioningEnabledForHistory && wsId && graphId && (
         <Section title="History" icon={LucideIcons.History}>
           <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} branchId={branchId} />
         </Section>

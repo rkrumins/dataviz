@@ -27,6 +27,25 @@ from backend.app.services.feature_flags import feature_flags as _flag_service
 
 router = APIRouter()
 
+# Unauthenticated read-only values (mounted at /api/v1/features — no /admin prefix).
+# Flags are UI behaviour toggles, never secrets: this router exposes ONLY the merged
+# value map (no schema, categories, or admin hints), mirroring branding.public_router.
+public_router = APIRouter()
+
+
+@public_router.get("/values")
+async def get_feature_values(
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Read-only flag values for app bootstrap (no auth, no schema/categories overhead)."""
+    values = await _flag_service.get_all(session)
+    return {
+        "values": values,
+        "version": _flag_service.cached_version,
+        "updatedAt": _flag_service.cached_updated_at,
+    }
+
+
 # PATCH rate limit: 30 requests per 60 seconds per IP
 _RATE_LIMIT_WINDOW = 60.0
 _RATE_LIMIT_MAX = 30

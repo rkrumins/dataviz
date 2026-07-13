@@ -58,6 +58,10 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'squashed', ws, gid, cid] as const,
   projectionWatermark: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'watermark', ws, gid] as const,
+  restorePreview: (ws?: string, gid?: string | null, cid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'restorePreview', ws, gid, cid] as const,
+  bootstrap: (ws?: string, ds?: string | null) =>
+    [...VERSIONING_KEYS.all, 'bootstrap', ws, ds] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -315,12 +319,59 @@ export function useSquashedCommits(
 // ── Mutations ────────────────────────────────────────────────────────────────
 
 /** Enable version control for a data source (create-or-seed its versioned graph). */
+/** Start the enablement job (202 + jobId). The status poll below takes over from here. */
 export function useBootstrapGraph(wsId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (dataSourceId: string) => api.bootstrapGraph(wsId, dataSourceId),
     onSuccess: (_res, dataSourceId) => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+    },
+  })
+}
+
+/** Live progress of the enablement job. Polls ONLY while a job is actually running —
+ *  a completed/failed/absent job settles to no network at all (the storm-safe pattern
+ *  the projection watermark uses). `seed` renders instantly from /resolve on reload. */
+export function useBootstrapStatus(
+  wsId?: string, dataSourceId?: string | null,
+  opts: { enabled?: boolean; seed?: api.BootstrapJob | null } = {},
+) {
+  const enabled = (opts.enabled ?? true) && !!wsId && !!dataSourceId
+  return useQuery({
+    queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId),
+    queryFn: () => api.getBootstrapStatus(wsId!, dataSourceId!),
+    enabled,
+    initialData: opts.seed ?? undefined,
+    retry: false,                          // 404 = never started; don't hammer
+    refetchInterval: (q) => {
+      const s = (q.state.data as api.BootstrapJob | undefined)?.status
+      return s === 'pending' || s === 'running' ? 2500 : false
+    },
+    refetchIntervalInBackground: false,    // a hidden tab doesn't poll
+  })
+}
+
+/** Resume a failed copy (or start it over) / give up and restore the data source. */
+export function useRetryBootstrap(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (mode: 'resume' | 'restart' = 'resume') =>
+      api.retryBootstrap(wsId, dataSourceId, mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
+    },
+  })
+}
+
+export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.abandonBootstrap(wsId, dataSourceId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
     },
   })
@@ -422,6 +473,59 @@ export function usePublishBranch(wsId: string, graphId: string) {
       invalidateAggregatedEdges()
       setTimeout(invalidateAggregatedEdges, 4000)
     },
+  })
+}
+
+/** Main advanced by a rollback commit — the same cache fan-out as a publish. */
+function invalidateAfterMainAdvance(
+  qc: ReturnType<typeof useQueryClient>,
+  wsId: string,
+  graphId: string,
+  bumpMainEpoch: () => void,
+) {
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
+  bumpMainEpoch()
+  invalidateAggregatedEdges()
+  setTimeout(invalidateAggregatedEdges, 4000)
+}
+
+/** Undo ONE published commit (new `revert` revision; keeps later work).
+ *  Surfaces `MergeConflictError` when later commits touched the same entities. */
+export function useRevertCommit(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { commitId: string; message?: string }) =>
+      api.revertCommit(wsId, graphId, v.commitId, v.message),
+    onSuccess: () => invalidateAfterMainAdvance(qc, wsId, graphId, bumpMainEpoch),
+  })
+}
+
+/** Reset main to its state at a commit (new `restore` revision; rolls back everything after). */
+export function useRestoreCommit(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { commitId: string; message?: string }) =>
+      api.restoreCommit(wsId, graphId, v.commitId, v.message),
+    onSuccess: () => invalidateAfterMainAdvance(qc, wsId, graphId, bumpMainEpoch),
+  })
+}
+
+/** Exact impact of restoring to a commit — fetched while the confirm dialog is open. */
+export function useRestorePreview(
+  wsId?: string, graphId?: string | null, commitId?: string | null, enabled = true,
+) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.restorePreview(wsId, graphId, commitId),
+    queryFn: () => api.getRestorePreview(wsId!, graphId!, commitId!),
+    enabled: enabled && !!wsId && !!graphId && !!commitId,
+    staleTime: 15_000,
   })
 }
 

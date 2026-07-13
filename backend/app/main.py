@@ -872,6 +872,7 @@ async def lifespan(_app: FastAPI):
     try:
         from .services.versioning import config as _vcfg
         if _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.bootstrap_worker import BootstrapRunner
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
             from .services.versioning.worker import ProjectionWorker
@@ -906,6 +907,9 @@ async def lifespan(_app: FastAPI):
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
                 # provider's falkorMaxResident is set.
                 evict_budget=make_registry_budget_resolver(),
+                # "Enable version control" jobs (dev / single-node: the standalone
+                # versioning-worker hosts them when INPROCESS=0).
+                bootstrap=BootstrapRunner(make_registry_graph_factory()),
             )
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
@@ -1248,6 +1252,72 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
+    )
+
+
+# A write reached a feature an admin turned off (e.g. the versioned write-through
+# path when ``versioningEnabled`` is disabled) — same typed 403 shape as the
+# API-layer gate in ``versioning_gate.py`` so the frontend handles one contract.
+from backend.app.services.feature_flags import FeatureDisabledError as _FeatureDisabledError  # noqa: E402
+
+
+@app.exception_handler(_FeatureDisabledError)
+async def _feature_disabled_handler(request, exc: _FeatureDisabledError):
+    logger.info("Feature-disabled write blocked on %s: %s", request.url.path, exc.feature)
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": {
+                "type": "feature_disabled",
+                "feature": exc.feature,
+                "message": exc.message,
+            }
+        },
+    )
+
+
+from backend.app.services.versioning.service import GraphTooLargeToSync as _GraphTooLargeToSync  # noqa: E402
+
+
+@app.exception_handler(_GraphTooLargeToSync)
+async def _graph_too_large_to_sync_handler(request, exc: _GraphTooLargeToSync):
+    """Refused, not crashed.
+
+    A re-sync of a graph this size would allocate several gigabytes in this very process (see
+    GraphTooLargeToSync) and take every other in-flight request down with it. Answering with a
+    number the caller can act on is the only honest outcome available until the streaming
+    re-sync lands — an OOM would tell them nothing and cost everyone else their request.
+    """
+    logger.warning("Refusing sync on %s: %d entities (limit %d, ~%.1f GB)",
+                   request.url.path, exc.entities, exc.limit,
+                   exc.estimated_bytes / 1_073_741_824)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "type": "graph_too_large_to_sync",
+                "entities": exc.entities,
+                "limit": exc.limit,
+                "estimatedBytes": exc.estimated_bytes,
+                "message": str(exc),
+            }
+        },
+    )
+
+
+# A canvas write reached a data source that isn't versioned yet. Enablement copies the
+# whole source graph, so it is an explicit guided job — never an implicit side-effect of
+# a write (which used to make the web tier's memory O(graph)).
+from backend.app.providers.versioned_write_provider import (  # noqa: E402
+    VersioningNotEnabled as _VersioningNotEnabled,
+)
+
+
+@app.exception_handler(_VersioningNotEnabled)
+async def _versioning_not_enabled_handler(request, exc: _VersioningNotEnabled):
+    return JSONResponse(
+        status_code=409,
+        content={"detail": {"type": "versioning_not_enabled", "message": str(exc)}},
     )
 
 
