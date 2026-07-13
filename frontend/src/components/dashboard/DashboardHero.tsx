@@ -13,7 +13,7 @@ import {
     Clock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { QUICK_SUGGESTIONS, CATEGORY_COLORS, type SearchResultCategory } from './dashboard-constants'
+import { CATEGORY_COLORS, type SearchResultCategory } from './dashboard-constants'
 import { CATEGORY_ORDER, type GlobalSearchResult, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { HighlightedText } from '@/components/ui/HighlightedText'
 
@@ -129,7 +129,7 @@ export function DashboardHero({
     }
 
     return (
-        <section className="relative w-full flex flex-col items-center justify-center pt-14 pb-10 text-center overflow-visible">
+        <section className="relative w-full flex flex-col items-center justify-center pt-10 pb-8 text-center overflow-visible">
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="w-[900px] h-[400px] bg-accent-business/8 blur-[140px] rounded-[100%]" />
             </div>
@@ -149,7 +149,7 @@ export function DashboardHero({
                         initial={{ opacity: 0, y: -6 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ delay: 0.05, duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-                        className="inline-flex items-center gap-3 mb-5"
+                        className="inline-flex items-center gap-3 mb-3"
                     >
                         <span className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0
                                          bg-gradient-to-br from-accent-lineage to-accent-business
@@ -173,11 +173,13 @@ export function DashboardHero({
                     </motion.div>
                 )}
 
-                <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-4 leading-[1.1]">
-                    What would you like<br className="hidden md:block" /> to{' '}
-                    {/* accent-explore was never defined in the Tailwind config, so this
-                        gradient had ONE stop and faded the word to transparent. */}
-                    <span className="inline-block pr-1 bg-gradient-to-r from-accent-lineage to-accent-business bg-clip-text text-transparent">
+                <h1 className="text-3xl md:text-4xl font-extrabold text-ink tracking-tight mb-4 leading-[1.15]">
+                    What would you like to{' '}
+                    {/* inline-block + a hair of padding: bg-clip-text crops the final
+                        glyph without it. (accent-explore now EXISTS — it was referenced
+                        here and in 5 other components while defined nowhere, so this
+                        gradient had one stop and faded the word to transparent.) */}
+                    <span className="inline-block pr-1 bg-gradient-to-r from-accent-business via-accent-explore to-accent-lineage bg-clip-text text-transparent">
                         explore?
                     </span>
                 </h1>
@@ -310,30 +312,9 @@ export function DashboardHero({
                     </motion.div>
                 )}
 
-                {/* Quick suggestions — hide while the dropdown is open so it can't sit on top of recents/results. */}
-                {!value && !showDropdown && (
-                    <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-                        <span className="text-[11px] font-bold text-ink-muted uppercase tracking-widest mr-1">Jump to:</span>
-                        {QUICK_SUGGESTIONS.map((s, i) => (
-                            <motion.button
-                                key={s.label}
-                                onClick={(e) => {
-                                    e.preventDefault()
-                                    onChange(s.label)
-                                    setFocused(true)
-                                    setTimeout(() => inputRef.current?.focus(), 50)
-                                }}
-                                initial={{ opacity: 0, y: 8 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: 0.15 + i * 0.03 }}
-                                className="group flex items-center gap-1.5 px-3.5 py-1.5 rounded-full glass-panel border border-glass-border text-sm font-medium text-ink-muted hover:text-accent-business hover:border-accent-business/40 hover:bg-accent-business/5 transition-all"
-                            >
-                                <s.icon className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
-                                {s.label}
-                            </motion.button>
-                        ))}
-                    </div>
-                )}
+                {/* The "Jump to:" chip row lived here. It duplicated the search box
+                    directly above it — every chip just typed its own label into that
+                    input — and cost a whole row of the fold. Removed. */}
             </motion.div>
         </section>
     )

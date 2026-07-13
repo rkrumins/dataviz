@@ -19,10 +19,10 @@ async def _workspace(session: AsyncSession) -> WorkspaceORM:
     return ws
 
 
-async def _view(session: AsyncSession, ws_id: str):
+async def _view(session: AsyncSession, ws_id: str, name: str = "V"):
     return await view_repo.create_view(
         session,
-        ViewCreateRequest(name="V", workspace_id=ws_id, view_type="graph", visibility="private"),
+        ViewCreateRequest(name=name, workspace_id=ws_id, view_type="graph", visibility="private"),
         user_id="u1",
     )
 
@@ -100,3 +100,36 @@ async def test_unknown_action_is_noop(db_session: AsyncSession):
         select(ViewActivityLogORM).where(ViewActivityLogORM.view_id == view.id)
     )).scalars().all()
     assert rows == []
+
+
+async def test_recent_activity_feed_pairs_entries_with_views(db_session: AsyncSession):
+    """The dashboard feed returns each entry with its ViewORM so the endpoint can
+    apply the same read check the views list uses (no cross-workspace leak)."""
+    ws = await _workspace(db_session)
+    a = await _view(db_session, ws.id, "A")
+    b = await _view(db_session, ws.id, "B")
+
+    await view_activity_repo.record_view_activity(
+        db_session, view_id=a.id, workspace_id=ws.id, action="updated", actor="u1",
+    )
+    await view_activity_repo.record_view_activity(
+        db_session, view_id=b.id, workspace_id=ws.id, action="data_changed", actor="u2",
+    )
+
+    pairs = await view_activity_repo.get_recent_activity(db_session, limit=10)
+    assert len(pairs) == 2
+    # Newest first, view name resolved, ViewORM paired for the access check.
+    entry, view_orm = pairs[0]
+    assert entry.action == "data_changed"
+    assert entry.viewName == view_orm.name
+    assert view_orm.id == entry.viewId
+
+
+async def test_recent_activity_excludes_deleted_views(db_session: AsyncSession):
+    ws = await _workspace(db_session)
+    a = await _view(db_session, ws.id, "A")
+    await view_activity_repo.record_view_activity(
+        db_session, view_id=a.id, workspace_id=ws.id, action="updated", actor="u1",
+    )
+    await view_repo.delete_view(db_session, a.id)
+    assert await view_activity_repo.get_recent_activity(db_session, limit=10) == []

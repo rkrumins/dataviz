@@ -104,11 +104,6 @@ interface PreferencesState {
   lineageBundleFanIn: number
   setLineageBundleFanIn: (n: number) => void
 
-  // Pinned views (sidebar quick access)
-  pinnedViewIds: string[]
-  pinView: (viewId: string) => void
-  unpinView: (viewId: string) => void
-  reorderPins: (viewIds: string[]) => void
 
   // User avatar
   avatarId: string | null
@@ -212,18 +207,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       // User avatar
       avatarId: null,
       setAvatarId: (avatarId) => set({ avatarId }),
-
-      // Pinned views
-      pinnedViewIds: [],
-      pinView: (viewId) => set((state) => {
-        if (state.pinnedViewIds.includes(viewId)) return state
-        if (state.pinnedViewIds.length >= 10) return state
-        return { pinnedViewIds: [...state.pinnedViewIds, viewId] }
-      }),
-      unpinView: (viewId) => set((state) => ({
-        pinnedViewIds: state.pinnedViewIds.filter(id => id !== viewId),
-      })),
-      reorderPins: (viewIds) => set({ pinnedViewIds: viewIds }),
 
       // Onboarding
       onboardingCompletedSteps: [],
