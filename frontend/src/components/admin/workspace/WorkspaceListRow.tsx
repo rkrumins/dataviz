@@ -5,6 +5,24 @@ import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBad
 import { getProviderLogo } from '../ProviderLogos'
 import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
+
+/**
+ * The list grid — ONE definition, used by the header in WorkspacesPage and by every
+ * row here. They were two separate literals, and when a Created column was added to
+ * one and not the other the row silently wrapped its last cell onto an implicit
+ * second line: every value sat under the wrong heading, and each row grew a band of
+ * dead space. A shared constant makes that impossible.
+ */
+export const WORKSPACE_LIST_GRID =
+    'grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_92px_92px_72px]'
+
+/** "13 Jun 2026" — unambiguous, and short enough for a column. */
+function shortDate(iso: string): string {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return '—'
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
 
@@ -42,7 +60,8 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
             {...prefetchHandlers}
             onClick={onOpen}
             className={cn(
-                "group grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border cursor-pointer transition-colors",
+                'group grid gap-3 items-center px-4 py-3 border-b border-glass-border cursor-pointer transition-colors',
+                WORKSPACE_LIST_GRID,
                 isSelected
                     ? "bg-indigo-500/[0.06] hover:bg-indigo-500/[0.09]"
                     : "hover:bg-black/[0.02] dark:hover:bg-white/[0.02]",
@@ -127,18 +146,20 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
                 <span className="font-semibold">{stats.types > 0 ? stats.types : '\u2014'}</span>
             </div>
 
-            {/* Created, then Updated. The list only ever showed the latter. */}
+            {/* Created, then Updated. The list only ever showed the latter, and both
+                were near-invisible grey. Created is an exact date (you look it up);
+                Updated is relative (you scan it). */}
             <span
-                className="text-[11px] text-ink-muted/70"
-                title={new Date(ws.createdAt).toLocaleString()}
+                className="text-[11px] text-ink-secondary tabular-nums truncate"
+                title={`Created ${new Date(ws.createdAt).toLocaleString()}`}
             >
-                {new Date(ws.createdAt).toLocaleDateString()}
+                {shortDate(ws.createdAt)}
             </span>
             <span
-                className="text-[11px] text-ink-muted"
-                title={new Date(ws.updatedAt).toLocaleString()}
+                className="text-[11px] font-medium text-ink-secondary truncate"
+                title={`Updated ${new Date(ws.updatedAt).toLocaleString()}`}
             >
-                {new Date(ws.updatedAt).toLocaleDateString()}
+                {timeAgo(ws.updatedAt)}
             </span>
 
             <WorkspaceRowActions

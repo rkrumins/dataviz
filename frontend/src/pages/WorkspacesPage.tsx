@@ -16,7 +16,7 @@ import { Link } from 'react-router-dom'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from '@/components/admin/WorkspaceCard'
 import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
-import { WorkspaceListRow } from '@/components/admin/workspace/WorkspaceListRow'
+import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
 import { CreateWorkspaceWizard } from '@/components/admin/CreateWorkspaceWizard'
@@ -143,7 +143,11 @@ export function WorkspacesPage() {
         for (const ws of workspaces) {
             const infos: WsDataSourceProviderInfo[] = []
             for (const ds of ws.dataSources || []) {
-                const cat = catMap[ds.catalogItemId]
+                // catalogItemId is optional (a source can be bound to a provider
+                // directly), so this was indexing with `undefined`. It happened to
+                // behave — the lookup just missed — but it has been the file's only
+                // type error for as long as it's been here.
+                const cat = ds.catalogItemId ? catMap[ds.catalogItemId] : undefined
                 const prov = cat ? provMap[cat.providerId] : undefined
                 const onto = ds.ontologyId ? ontoMap[ds.ontologyId] : undefined
                 infos.push({
@@ -715,7 +719,11 @@ export function WorkspacesPage() {
                 </div>
             ) : (
                 <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                    <div className="grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                    <div className={cn(
+                        'grid gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold',
+                        // The SAME template the rows use — see WORKSPACE_LIST_GRID.
+                        WORKSPACE_LIST_GRID,
+                    )}>
                         {/* Select-all: the fastest way to bulk-act, and it selects only
                             what's currently FILTERED — not the whole catalogue. */}
                         <button
