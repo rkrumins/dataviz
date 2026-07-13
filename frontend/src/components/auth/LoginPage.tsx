@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useFeature } from '@/store/features'
 
 
 // SSO is initiated by a top-level GET so the IdP redirect flow works
@@ -128,6 +129,7 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
 }
 
 export function LoginPage() {
+    const signupEnabled = useFeature('signupEnabled')
     const brand = useBrand()
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
@@ -329,12 +331,17 @@ export function LoginPage() {
                                 Forgot your password?
                             </Link>
                         </p>
-                        <p className="text-xs text-ink-muted">
-                            Don't have an account?{' '}
-                            <Link to="/signup" className="text-accent-lineage font-semibold hover:underline">
-                                Sign up
-                            </Link>
-                        </p>
+                        {/* The server now REFUSES this signup (auth.py), so offering it would
+                            hand someone a form that cannot submit. When self-registration is
+                            off, an invite link is the only way in — and that still works. */}
+                        {signupEnabled && (
+                            <p className="text-xs text-ink-muted">
+                                Don't have an account?{' '}
+                                <Link to="/signup" className="text-accent-lineage font-semibold hover:underline">
+                                    Sign up
+                                </Link>
+                            </p>
+                        )}
                         <p className="text-xs text-ink-muted">
                             <a href="/docs" target="_blank" rel="noopener noreferrer" className="text-accent-lineage/70 hover:text-accent-lineage hover:underline transition-colors">
                                 Documentation

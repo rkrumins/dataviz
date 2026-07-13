@@ -74,7 +74,10 @@ function Lazy({ children }: { children: React.ReactNode }) {
 export const router = createBrowserRouter([
   // Unauthenticated routes
   { path: '/login', element: <Lazy><LoginPage /></Lazy> },
-  { path: '/signup', element: <Lazy><SignUpPage /></Lazy> },
+  // Self-registration is an admin switch AND a security control. The server refuses the
+  // signup POST when it is off (auth.py); this stops us handing someone a form that
+  // cannot submit. RequireFeature sends them to the login page instead.
+  { path: '/signup', element: <RequireFeature feature="signupEnabled" redirectTo="/login"><Lazy><SignUpPage /></Lazy></RequireFeature> },
   // Public docs
   {
     path: '/docs',

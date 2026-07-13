@@ -106,6 +106,12 @@ export function ComprehensionTools({
 }: ComprehensionToolsProps) {
   const { showToast } = useToast()
 
+  // The server now REFUSES POST /graph/trace* when this is off (feature_gate.py), so leaving
+  // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
+  // control invites a click and explains nothing, and an admin who switched the feature off
+  // wants it gone, not merely inert.
+  const traceEnabled = useFeature('traceEnabled')
+
   // Warn the user when they try to trace before the lineage data has
   // finished hydrating. Keyed so rapid repeat clicks coalesce instead of
   // stacking dozens of identical toasts.
@@ -170,8 +176,10 @@ export function ComprehensionTools({
              Stays clickable to fire a warning toast, so the affordance
              reads as "not yet" rather than "broken".
           3. ready → Trace Lineage (existing indigo gradient). Hard-
-             disabled when no entity selected. */}
-      {traceActive ? (
+             disabled when no entity selected.
+          …and a fourth: the feature is switched off, in which case there is no state to show —
+          the button is gone, because the server will refuse the request anyway. */}
+      {!traceEnabled ? null : traceActive ? (
         <button
           onClick={onExitTrace}
           title="Exit trace mode"
@@ -221,7 +229,7 @@ export function ComprehensionTools({
           next to the Trace toggle so the active scope (↑N upstream,
           ↓N downstream) is one glance away. Blue / green colors
           mirror EntityDrawer's Root Cause / Impact treatment. */}
-      {traceActive && (
+      {traceEnabled && traceActive && (
         <TraceDepthControl
           upstreamDepth={traceUpstreamDepth}
           downstreamDepth={traceDownstreamDepth}
