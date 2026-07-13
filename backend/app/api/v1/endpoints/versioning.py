@@ -1316,7 +1316,10 @@ async def create_blank_graph(
         created = await svc.create_graph(
             data_source_id=ds.id, workspace_id=ws_id, kind="blank", actor=user.id,
             base_ontology_id=body.ontology_id, falkor_graph_name=graph_name,
-            falkor_provider=body.provider_id, ontology_enforcement="strict")
+            falkor_provider=body.provider_id, ontology_enforcement="strict",
+            # A blank model HAS no source — WE mint its FalkorDB graph (`blank_<ds>`), so it is
+            # ours to reclaim. This is the only user-facing case where a purge may drop the key.
+            owns_falkor_graph=True)
     except Exception:
         logger.exception("blank-graph creation failed for ds=%s; compensating", ds.id)
         try:                                             # compensate: remove the orphan ds
