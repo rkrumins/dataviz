@@ -86,3 +86,44 @@ export function useFeature(key: string): boolean {
 export function featureEnabled(key: string): boolean {
     return coerce(useFeaturesStore.getState().values, key)
 }
+
+/** How often a VISIBLE tab re-checks the served flags. The server caches these for 30s, and the
+ *  payload is a few hundred bytes with no auth, so this is cheap. Background tabs never poll. */
+const REFRESH_MS = 60_000
+
+/**
+ * Keep flags current WITHOUT a page reload.
+ *
+ * The values are, and always were, backend/DB-owned — a `feature_flags` row in Postgres, served
+ * by `GET /api/v1/features/values`. What was missing was any way for a change to REACH a running
+ * client: `loadFeatures()` ran once at boot and nothing ever asked again. So an admin could turn
+ * version control off, the database and the API would agree it was off, the server would refuse
+ * every versioning write — and every open tab, including the admin's own, would go on showing
+ * the buttons until someone happened to hard-refresh. A flag that lies is worse than no flag.
+ *
+ * Two cheap signals close it, no websocket required:
+ *   * the tab becoming visible again — which is what a human actually does after changing a
+ *     setting in another tab, and costs one request at the moment they look;
+ *   * a slow poll while visible, so a tab left open on a dashboard still converges.
+ *
+ * A hidden tab polls nothing: it will refresh the instant it is looked at, which is the only
+ * moment its correctness matters.
+ *
+ * Returns a teardown for tests. Enforcement remains SERVER-side (the 403 write gate); this only
+ * decides what the UI offers, so a missed refresh is a cosmetic lag, never a security hole.
+ */
+export function startFeaturesSync(): () => void {
+    const refresh = () => {
+        if (document.visibilityState !== 'visible') return
+        void useFeaturesStore.getState().loadFeatures()
+    }
+    const onVisibility = () => refresh()
+    document.addEventListener('visibilitychange', onVisibility)   // fires on document, not window
+    window.addEventListener('focus', refresh)
+    const timer = window.setInterval(refresh, REFRESH_MS)
+    return () => {
+        document.removeEventListener('visibilitychange', onVisibility)
+        window.removeEventListener('focus', refresh)
+        window.clearInterval(timer)
+    }
+}
