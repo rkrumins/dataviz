@@ -23,9 +23,19 @@ export function useOntologyAdoption(id: string | undefined, params: AdoptionPara
   })
 }
 
+/**
+ * The list cache key. Exported because the DASHBOARD reads this same list (its
+ * Semantic Layers section) and must land on the SAME cache entry — it used to
+ * hand-roll a second fetch under ['dashboard','ontologies'], so publishing a
+ * layer here left the dashboard serving a stale copy. One builder, one key: the
+ * two can't drift apart by a typo.
+ */
+export const ontologyListKey = (includeDeleted = false) =>
+  [...ONTOLOGY_KEYS.list(), { includeDeleted }] as const
+
 export function useOntologies(includeDeleted = false) {
   return useQuery({
-    queryKey: [...ONTOLOGY_KEYS.list(), { includeDeleted }],
+    queryKey: ontologyListKey(includeDeleted),
     queryFn: () => ontologyDefinitionService.list(false, includeDeleted),
     staleTime: 30_000,
   })

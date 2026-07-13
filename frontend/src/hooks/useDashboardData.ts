@@ -6,6 +6,11 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
+import { ontologyListKey } from '@/features/ontology/hooks/useOntologies'
+import {
+    ontologyDefinitionService,
+    type OntologyDefinitionResponse,
+} from '@/services/ontologyDefinitionService'
 
 export interface DashboardStats {
     totalWorkspaces: number
@@ -30,14 +35,18 @@ export interface TemplateBrief {
     entityTypesCount?: number
 }
 
-export interface OntologyBrief {
-    id: string
-    name: string
-    description?: string
-    version?: number
-    isPublished?: boolean
-    createdAt?: string
-}
+/**
+ * The dashboard used to declare its own narrow shape here and fetch
+ * /api/v1/admin/ontologies by hand — a SECOND cache of the same endpoint the
+ * Semantic Layers page already reads through `useOntologies`. Two caches of one
+ * resource drift: publish a layer on that page and the dashboard kept serving
+ * the stale copy for its 5-minute staleTime, and the projection threw away every
+ * fact worth showing (how many entity types it defines, whether it's published).
+ *
+ * It is now the SAME record, from the SAME query key, so an edit on the schema
+ * page invalidates both.
+ */
+export type OntologyBrief = OntologyDefinitionResponse
 
 /** @deprecated Use OntologyBrief */
 export type BlueprintBrief = OntologyBrief
@@ -175,14 +184,14 @@ export function useDashboardData() {
         },
     })
 
+    // Same query key + same fetcher as `useOntologies` on the Semantic Layers
+    // page, so the two share ONE cache entry. The permission gate stays here:
+    // without it a user who can't read ontologies fires a pointless 403.
     const ontologiesQuery = useQuery({
-        queryKey: ['dashboard', 'ontologies'],
+        queryKey: ontologyListKey(false),
         enabled: canReadOntologies,
-        staleTime: 5 * 60 * 1000,
-        queryFn: async () => {
-            const res = await fetchWithTimeout('/api/v1/admin/ontologies', { silent403: true })
-            return res.ok ? (((await res.json()) as OntologyBrief[]) ?? EMPTY_ONTOLOGIES) : EMPTY_ONTOLOGIES
-        },
+        staleTime: 30_000,
+        queryFn: () => ontologyDefinitionService.list(false, false),
     })
 
     const templates = templatesQuery.data ?? EMPTY_TEMPLATES

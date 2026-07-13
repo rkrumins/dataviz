@@ -44,9 +44,10 @@ import { DashboardWorkHub } from './DashboardWorkHub'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
+import { DashboardSemanticLayers } from './DashboardSemanticLayers'
 import { DashboardOnboarding } from './DashboardOnboarding'
 import { motion } from 'framer-motion'
-import { LayoutTemplate, BookOpen } from 'lucide-react'
+import { LayoutTemplate } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -296,22 +297,18 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 7. Semantic layers — the shared business meaning of the data */}
-                {ontologies.length > 0 && (
-                    <motion.div
-                        initial={{ opacity: 0, y: MOTION.sectionY }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: MOTION.sectionStagger * 6, ...MOTION.sectionEntry }}
-                    >
-                        <BlueprintGrid
-                            title="Semantic Layers"
-                            subtitle="The shared business meaning behind your data"
-                            items={ontologies}
-                            icon={BookOpen}
-                            onBrowseAll={() => navigate('/schema')}
-                        />
-                    </motion.div>
-                )}
+                {/* 7. Semantic layers — the REAL ones, from the same cache the
+                       Semantic Layers page reads, each card opening its layer.
+                       It used to render through the starter-TEMPLATE grid: the cards
+                       weren't clickable, and it inherited a category filter no
+                       semantic layer has. */}
+                <motion.div
+                    initial={{ opacity: 0, y: MOTION.sectionY }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: MOTION.sectionStagger * 6, ...MOTION.sectionEntry }}
+                >
+                    <DashboardSemanticLayers layers={ontologies} />
+                </motion.div>
 
             </PageContainer>
         </div>
