@@ -4210,22 +4210,36 @@ class GraphVersioningService:
             res = dict(resolutions or {})
             merged: Dict[str, Optional[dict]] = {}
             conflicts: List[dict] = []
+            overridden: List[dict] = []
+            # `external_wins` is a FIELD-level policy, not an entity-level one. It used to be
+            # `merged[eid] = theirs` — replacing the whole entity with the external payload and
+            # discarding the field merge entirely. One disputed field therefore took the entire
+            # entity down with it, silently deleting any curation the source had never heard of
+            # (`businessOwner`, `classification`, …). It destroyed most where the graph was worth
+            # most. Now the source wins the FIELDS it disputes; everything a human added that the
+            # source never touched survives.
+            policy = "theirs" if strategy == "external_wins" else "ours"
             for eid in sorted(set(base) | set(ours) | set(theirs)):
                 if eid in res:
                     merged[eid] = _normalize_resolution(res[eid])
                     continue
-                out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
-                if out.conflicts and strategy == "external_wins":
-                    merged[eid] = theirs.get(eid)            # external overrides the user edit
-                    continue
+                out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields,
+                                      on_conflict=policy)
                 merged[eid] = out.merged
                 for c in out.conflicts:
-                    conflicts.append({
+                    row = {
                         "entity_id": eid, "path": list(c.path),
                         "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
-                    })
+                    }
+                    # Under external_wins the conflict is not an error to resolve — it is a
+                    # RECEIPT. Overwriting someone's work is allowed; doing it silently is not,
+                    # so the caller gets back exactly which edits the source overruled.
+                    (overridden if policy == "theirs" else conflicts).append(row)
             if conflicts:
                 raise MergeConflict(conflicts)
+            if overridden:
+                logger.info("sync overrode %d user edit(s) on graph %s (external_wins)",
+                            len(overridden), graph_id)
 
             _collapse_empty_payloads(merged)                            # {} → tombstone before guards
             self._cascade_containment(merged, containment_edge_types)   # drop orphaned descendants
@@ -4234,7 +4248,10 @@ class GraphVersioningService:
             deltas = net_delta(ours, merged)                 # changes to apply on top of current main
             if not deltas:
                 return {"commit_id": None, "commit_seq": graph.main_head_commit_seq,
-                        "applied": 0, "rejected": rejected, "idempotent_replay": False}
+                        "applied": 0, "rejected": rejected, "idempotent_replay": False,
+                        # WHICH user edits the source overruled. Overwriting a
+                        # person's work is allowed; doing it silently is not.
+                        "overridden": overridden[:200]}
 
             kind_by_entity = {eid: ("edge" if _is_edge_payload(p) else "node")
                               for eid, p in ours.items() if p is not None}
@@ -4260,7 +4277,10 @@ class GraphVersioningService:
             if ps is not None:
                 ps.target_commit_seq = new_seq
             return {"commit_id": commit.id, "commit_seq": new_seq,
-                    "applied": len(deltas), "rejected": rejected, "idempotent_replay": False}
+                    "applied": len(deltas), "rejected": rejected, "idempotent_replay": False,
+                        # WHICH user edits the source overruled. Overwriting a
+                        # person's work is allowed; doing it silently is not.
+                        "overridden": overridden[:200]}
 
     @staticmethod
     def _external_state(rows, ours: Mapping[str, Optional[dict]]):

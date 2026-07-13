@@ -216,40 +216,63 @@ async def _t_source_delete_vs_user_modify_conflicts():
 
 # ── 4. external_wins — PINNING A BUG ON PURPOSE ──────────────────────────────
 
-async def _t_external_wins_TODAY_destroys_untouched_curation():
-    """CHARACTERISATION OF A DEFECT, recorded so the fix is a visible semantic change.
+async def _t_external_wins_takes_the_DISPUTED_FIELDS_and_nothing_else():
+    """THE CONTRACT CHANGE. This test previously asserted the opposite, and passed.
 
-    `external_wins` reads as "the source wins the disagreement". It does not. It is
+    `external_wins` used to be `merged[eid] = theirs.get(eid)` — the ENTIRE external payload,
+    with the careful field-level merge discarded. So a single disputed field took the whole
+    entity down with it, and `businessOwner` / `classification` — which the source has never
+    heard of and did not touch — were silently deleted. The blast radius scaled with curation:
+    it destroyed most where the graph was worth most.
 
-        merged[eid] = theirs.get(eid)          # the ENTIRE external payload
-
-    — the careful field-level merge is DISCARDED. So a single conflicting field takes the whole
-    entity down with it: `businessOwner` and `classification`, which the source has never heard
-    of and did not touch, are silently deleted.
-
-    The blast radius scales with curation: the more valuable the graph, the more this destroys.
-    When we make external_wins field-level, THIS TEST MUST BE REWRITTEN — and that rewrite is
-    the record that we changed the contract deliberately.
+    It is now a FIELD-level policy. The source wins what it actually disputes. Everything a
+    human added that the source never touched survives. That is what "let the source win"
+    means to the person who says it.
     """
     svc = GraphVersioningService()
     gid, main = await _seed(svc, [_node("u:A", owner="team1")])
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
     await _user_edits(svc, gid, _eid(st, "u:A"), {
         "urn": "u:A", "entityType": "Dataset",
-        "owner": "user-choice",              # ← conflicts with the source
+        "owner": "user-choice",              # ← disputed: the source changes this too
         "businessOwner": "Jane",             # ← the source has never heard of these
         "classification": "PII",
     })
 
-    await svc.sync_ingest(graph_id=gid, rows=[_node("u:A", owner="source-choice")],
-                          actor="ext", strategy="external_wins")
+    res = await svc.sync_ingest(graph_id=gid, rows=[_node("u:A", owner="source-choice")],
+                                actor="ext", strategy="external_wins")
 
     a = _find(await svc.materialize_state(graph_id=gid, branch_id=main), "u:A")
-    assert a["owner"] == "source-choice", "the source wins the conflicting field — as intended"
-    assert "businessOwner" not in a, (
-        "TODAY: untouched curation is DESTROYED. This assertion is the bug, pinned. "
-        "After the fix it becomes  a['businessOwner'] == 'Jane'.")
-    assert "classification" not in a
+    assert a["owner"] == "source-choice", "the source wins the field it disputes"
+    assert a["businessOwner"] == "Jane", "curation the source never touched must SURVIVE"
+    assert a["classification"] == "PII"
+
+    # …and it says what it overrode. Overwriting someone's work is allowed. Doing it silently
+    # is not — a user must be able to find out that their edit was overruled, and which one.
+    assert res["overridden"], "the override must be reported, not swallowed"
+    assert any(o["path"] == ["owner"] for o in res["overridden"]), res["overridden"]
+
+
+async def _t_external_wins_lets_the_source_delete_what_a_user_was_editing():
+    """The other half of "authoritative": the source is authoritative about EXISTENCE too.
+
+    Under `merge` this is a delete/modify conflict a human must settle. Under `external_wins`
+    the source dropped it, so it goes — even though someone was working on it. That is the
+    deal `external_wins` makes, and it is destructive, which is exactly why it is reported.
+    """
+    svc = GraphVersioningService()
+    gid, main = await _seed(svc, [_node("u:A"), _node("u:B", owner="t1")])
+    st = await svc.materialize_state(graph_id=gid, branch_id=main)
+    await _user_edits(svc, gid, _eid(st, "u:B"),
+                      {"urn": "u:B", "entityType": "Dataset", "owner": "carefully-curated"})
+
+    res = await svc.sync_ingest(graph_id=gid, rows=[_node("u:A")],   # B dropped by the source
+                                actor="ext", strategy="external_wins")
+
+    st = await svc.materialize_state(graph_id=gid, branch_id=main)
+    assert _find(st, "u:B") is None, "the source is authoritative about existence"
+    assert any(o["kind"] == "delete/modify" for o in res["overridden"]), (
+        "and the destroyed edit is REPORTED, not silently dropped")
 
 
 # ── 5. identity: a re-sync must UPDATE, never duplicate ──────────────────────

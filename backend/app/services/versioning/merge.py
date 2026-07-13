@@ -93,8 +93,29 @@ def three_way_merge(
     ours: Optional[Mapping[str, Any]],
     theirs: Optional[Mapping[str, Any]],
     set_fields: FrozenSet[str] = frozenset(),
+    *,
+    on_conflict: str = "ours",
 ) -> MergeOutcome:
-    """3-way merge one entity. ``None`` means absent/tombstoned on that side."""
+    """3-way merge one entity. ``None`` means absent/tombstoned on that side.
+
+    ``on_conflict`` decides who wins a field BOTH sides changed differently:
+
+    * ``"ours"`` (default) — the human's value is kept as the tentative one and the conflict is
+      raised for a person to settle. This is the safe default and the one `strategy='merge'` uses.
+    * ``"theirs"`` — the SOURCE's value wins that field. This is what ``external_wins`` means, and
+      it is a FIELD-level decision, not an entity-level one.
+
+    That distinction is the whole point. ``external_wins`` used to be implemented one layer up as
+    ``merged[eid] = theirs`` — replacing the ENTIRE entity with the external payload and throwing
+    this careful merge away. So one disputed field took the whole entity down with it, and any
+    curation the source had never heard of (``businessOwner``, ``classification``, …) was silently
+    deleted along with it. The blast radius scaled with how much a human had enriched the graph —
+    i.e. it destroyed most where the product was worth most.
+
+    Either way the conflict is still RECORDED. Under ``"theirs"`` it is not an error to resolve,
+    it is a receipt: these are the human edits the source overruled, and the caller is expected to
+    tell somebody. Overwriting a person's work is allowed. Doing it silently is not.
+    """
     # ── entity-level create/delete ──────────────────────────────────────
     if ours is None and theirs is None:
         return MergeOutcome(None, [])
@@ -107,15 +128,17 @@ def three_way_merge(
         if present == base:
             # The surviving side didn't touch it → honour the deletion.
             return MergeOutcome(None, [])
-        # delete on one side, modify on the other → conflict (keep the modified
-        # side tentatively so the user can choose).
-        return MergeOutcome(
-            dict(present),
-            [Conflict((), dict(base), _orNone(ours), _orNone(theirs), kind="delete/modify")],
-        )
+        # delete on one side, modify on the other. Under "theirs" the source is authoritative
+        # about EXISTENCE too: if it dropped the entity, the entity goes, even though a human
+        # had been working on it — which is exactly why this still returns a Conflict for the
+        # caller to report.
+        conflict = Conflict((), dict(base), _orNone(ours), _orNone(theirs), kind="delete/modify")
+        if on_conflict == "theirs":
+            return MergeOutcome(dict(theirs) if theirs is not None else None, [conflict])
+        return MergeOutcome(dict(present), [conflict])
 
     # ── both present → recursive field merge ────────────────────────────
-    merged, conflicts = _merge_fields(base or {}, ours, theirs, set_fields, ())
+    merged, conflicts = _merge_fields(base or {}, ours, theirs, set_fields, (), on_conflict)
     return MergeOutcome(merged, conflicts)
 
 
@@ -125,6 +148,7 @@ def _merge_fields(
     theirs: Mapping[str, Any],
     set_fields: FrozenSet[str],
     path: Path,
+    on_conflict: str = "ours",
 ) -> Tuple[Dict[str, Any], List[Conflict]]:
     result: Dict[str, Any] = {}
     conflicts: List[Conflict] = []
@@ -132,7 +156,8 @@ def _merge_fields(
         bv = base.get(key, MISSING)
         ov = ours.get(key, MISSING)
         tv = theirs.get(key, MISSING)
-        value, confs = _merge_value(bv, ov, tv, key in set_fields, set_fields, path + (key,))
+        value, confs = _merge_value(
+            bv, ov, tv, key in set_fields, set_fields, path + (key,), on_conflict)
         conflicts.extend(confs)
         if value is not MISSING:
             result[key] = value
@@ -140,7 +165,8 @@ def _merge_fields(
 
 
 def _merge_value(
-    bv: Any, ov: Any, tv: Any, is_set: bool, set_fields: FrozenSet[str], path: Path
+    bv: Any, ov: Any, tv: Any, is_set: bool, set_fields: FrozenSet[str], path: Path,
+    on_conflict: str = "ours",
 ) -> Tuple[Any, List[Conflict]]:
     if ov == tv:
         return ov, []            # identical on both sides (incl. both removed)
@@ -155,11 +181,14 @@ def _merge_value(
 
     if isinstance(ov, dict) and isinstance(tv, dict) and (isinstance(bv, dict) or bv is MISSING):
         base_d = bv if isinstance(bv, dict) else {}
-        merged, confs = _merge_fields(base_d, ov, tv, set_fields, path)
+        merged, confs = _merge_fields(base_d, ov, tv, set_fields, path, on_conflict)
         return merged, confs
 
-    # Opaque scalar / array divergence → conflict (ours-biased tentative value).
-    return ov, [Conflict(path, _orNone(bv), _orNone(ov), _orNone(tv))]
+    # Opaque scalar / array divergence → conflict. THIS FIELD ONLY: the surrounding entity keeps
+    # everything else the merge worked out, including whatever the human added that the source
+    # has never heard of. Whoever wins here, they win a field — not an entity.
+    winner = tv if on_conflict == "theirs" else ov
+    return winner, [Conflict(path, _orNone(bv), _orNone(ov), _orNone(tv))]
 
 
 def _merge_set(bv: Any, ov: Any, tv: Any) -> List[Any]:
