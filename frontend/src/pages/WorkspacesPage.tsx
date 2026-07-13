@@ -796,6 +796,11 @@ export function WorkspacesPage() {
                 }
                 sections={impactSections(deletion.target?.impact ?? null)}
                 loadingImpact={deletion.target?.loading}
+                // The hook nulls the impact when a probe REJECTS. Without this, that landed in
+                // the green "This workspace is empty" panel — the hook's own comment says it
+                // must not, but until the dialog had somewhere else to put it, it did.
+                impactUnknown={!!deletion.target && !deletion.target.loading
+                    && deletion.target.impact === null}
                 safeMessage="This workspace is empty — no views, data sources or members will be lost."
                 caveat={DELETE_CAVEAT}
                 onClose={deletion.close}

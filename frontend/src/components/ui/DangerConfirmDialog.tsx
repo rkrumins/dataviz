@@ -46,6 +46,10 @@ export function DangerConfirmDialog({
     confirmLabel = 'Delete',
     sections,
     loadingImpact,
+    /**
+     * The impact probe FAILED. Distinct from "the impact is empty" — see below.
+     */
+    impactUnknown,
     /** Shown when every section is empty — the honest "this is safe" case. */
     safeMessage = 'Nothing else will be affected.',
     /** Anything the deletion does NOT do, that a reasonable person would assume it does. */
@@ -60,6 +64,7 @@ export function DangerConfirmDialog({
     confirmLabel?: string
     sections: ImpactSection[]
     loadingImpact?: boolean
+    impactUnknown?: boolean
     safeMessage?: string
     caveat?: string
     onClose: () => void
@@ -150,14 +155,30 @@ export function DangerConfirmDialog({
                             </div>
                         )}
 
-                        {!loadingImpact && total === 0 && (
+                        {/* "We could not find out" is NOT "there is nothing to find". A failed
+                            impact probe used to land in the green panel below and tell the user
+                            "Nothing else will be affected" — the single most dangerous sentence
+                            we could invent at exactly the moment we knew least. It gets its own
+                            state, and it is amber, not green. */}
+                        {!loadingImpact && impactUnknown && (
+                            <div className="rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-500/20 px-4 py-3.5 flex items-start gap-2.5">
+                                <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                <p className="text-sm text-amber-800 dark:text-amber-300">
+                                    We couldn&rsquo;t check what this will affect. It may destroy more
+                                    than you expect &mdash; try again in a moment, or continue only if
+                                    you are certain.
+                                </p>
+                            </div>
+                        )}
+
+                        {!loadingImpact && !impactUnknown && total === 0 && (
                             <div className="rounded-xl bg-emerald-50 dark:bg-emerald-500/[0.08] border border-emerald-200 dark:border-emerald-500/20 px-4 py-3.5 flex items-start gap-2.5">
                                 <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
                                 <p className="text-sm text-emerald-800 dark:text-emerald-300">{safeMessage}</p>
                             </div>
                         )}
 
-                        {!loadingImpact && total > 0 && (
+                        {!loadingImpact && !impactUnknown && total > 0 && (
                             <div className="rounded-xl bg-red-50 dark:bg-red-500/[0.08] border border-red-200 dark:border-red-500/20 px-4 py-3.5">
                                 <div className="flex items-center gap-2 mb-3">
                                     <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />

@@ -8,17 +8,19 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2,
-    Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
+    GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
     Users, ShieldOff, Send, GitPullRequestArrow,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
-import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
+import { workspaceService, type DataSourceResponse } from '@/services/workspaceService'
+import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import {
+    useDataSourceDeletion, impactSections, deleteCaveat,
+} from '@/components/admin/workspace/useDataSourceDeletion'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
-import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { accessRequestsService } from '@/services/accessRequestsService'
@@ -72,9 +74,6 @@ export function WorkspaceDetailPage() {
     const [showAddDs, setShowAddDs] = useState(false)
 
     // ── Delete confirm state ───────────────────────────────
-    const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null)
-    const [deleteImpact, setDeleteImpact] = useState<WorkspaceDataSourceImpactResponse | null>(null)
-    const [loadingImpact, setLoadingImpact] = useState(false)
 
     // ── Edit DS modal state ────────────────────────────────
 
@@ -177,27 +176,7 @@ export function WorkspaceDetailPage() {
         reload()
     }
 
-    const handleDeleteDsClick = async (dsId: string, label: string) => {
-        if (!wsId) return
-        setDeleteTarget({ id: dsId, label })
-        setLoadingImpact(true)
-        try {
-            const impact = await workspaceService.getDataSourceImpact(wsId, dsId)
-            setDeleteImpact(impact)
-        } catch (err) {
-            console.error(err)
-        } finally {
-            setLoadingImpact(false)
-        }
-    }
-
-    const handleDeleteDs = async () => {
-        if (!wsId || !deleteTarget) return
-        await workspaceService.removeDataSource(wsId, deleteTarget.id)
-        setDeleteTarget(null)
-        setDeleteImpact(null)
-        reload()
-    }
+    const deletion = useDataSourceDeletion(wsId, reload)
 
     /**
      * Persist the Aggregation tab as a single transaction. Only fields that
@@ -566,50 +545,24 @@ export function WorkspaceDetailPage() {
                 ontologies={ontologies}
             />
 
-            <Backdrop open={!!deleteTarget} onClick={() => !loadingImpact && setDeleteTarget(null)} zClassName="z-[60]" className="bg-black/60" />
-            {deleteTarget && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center pointer-events-none">
-                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200 pointer-events-auto">
-                        <div className="flex items-center gap-3 mb-4">
-                            <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
-                                <Trash2 className="w-5 h-5 text-red-500" />
-                            </div>
-                            <h3 className="text-lg font-bold text-ink">Remove Data Source</h3>
-                        </div>
-                        <p className="text-sm text-ink-secondary mb-4">
-                            Are you sure you want to decouple <strong>{deleteTarget.label}</strong> from this domain?
-                        </p>
-
-                        {loadingImpact ? (
-                            <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
-                        ) : deleteImpact && deleteImpact.views.length > 0 ? (
-                            <div className="mb-6 p-4 rounded-xl border border-red-500/20 bg-red-500/5 text-sm">
-                                <h4 className="font-bold text-red-500 mb-2 flex items-center gap-2"><ShieldAlert className="w-4 h-4" /> Blast Radius Warning</h4>
-                                <p className="text-red-400 mb-3 text-xs leading-relaxed">
-                                    Removing this data source will instantly break the following semantic views in this workspace:
-                                </p>
-                                <div className="space-y-2 text-xs text-red-500 font-medium max-h-48 overflow-y-auto mt-2 p-2 bg-red-500/10 rounded-lg">
-                                    <p className="font-bold underline mb-1">{deleteImpact.views.length} Semantic Views:</p>
-                                    <ul className="list-disc pl-4 space-y-0.5">
-                                        {deleteImpact.views.map(v => <li key={v.id}>{v.name}</li>)}
-                                    </ul>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="mb-6 p-3 rounded-lg bg-emerald-500/10 text-emerald-500 text-sm font-medium flex items-center gap-2">
-                                <ShieldAlert className="w-4 h-4" /> Safe to decouple. No views explicitly depend on this data source.
-                            </div>
-                        )}
-
-                        <div className="flex justify-end gap-3">
-                            <button onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">Cancel</button>
-                            <button onClick={handleDeleteDs} disabled={loadingImpact} className="px-4 py-2 rounded-xl text-sm font-semibold bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors flex items-center gap-2">
-                                {loadingImpact ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Confirm Removal
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/* Removing a data source also destroys its version history — the commits, the
+                colleagues' unpublished drafts, the hand-curated entities. The old dialog listed
+                only the views that would break, had no type-to-confirm, and showed a GREEN "Safe
+                to decouple" panel whenever the impact probe failed. */}
+            <DangerConfirmDialog
+                isOpen={!!deletion.target}
+                title="Remove data source"
+                subtitle={deletion.target?.label}
+                confirmPhrase={deletion.target?.label ?? ''}
+                confirmLabel="Remove data source"
+                sections={impactSections(deletion.target?.impact ?? null)}
+                loadingImpact={deletion.target?.loading}
+                impactUnknown={deletion.target?.unknown}
+                safeMessage="Nothing depends on this data source, and it has no version history."
+                caveat={deleteCaveat(deletion.target?.impact ?? null)}
+                onClose={deletion.close}
+                onConfirm={deletion.confirm}
+            />
 
             {/* Data source detail drawer (renders via portal — no scroll impact).
                 Editing is inline in the drawer now (no separate modal). */}
@@ -626,7 +579,7 @@ export function WorkspaceDetailPage() {
                 ontologies={ontologies}
                 onSaveEdit={handleEditDsSave}
                 onDelete={workspace.dataSources.length > 1 && selectedDs
-                    ? () => handleDeleteDsClick(selectedDs.id, selectedDs.label || selectedDs.id)
+                    ? () => deletion.open(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
