@@ -72,17 +72,12 @@ export function AddDataSourceWizard({
         staleTime: 30_000,
     })
 
-    const items: PickableCatalogItem[] = useMemo(() => {
-        const owner = new Map(
-            (bindingsQuery.data ?? []).map(b => [b.id, b]),
-        )
-        return catalogItems.map(item => {
-            const b = owner.get(item.id)
-            return b
-                ? { ...item, boundWorkspaceId: b.boundWorkspaceId, boundWorkspaceName: b.boundWorkspaceName }
-                : item
-        })
-    }, [catalogItems, bindingsQuery.data])
+    // Bindings ARE the catalog, plus who owns each item, which data source row owns
+    // it, and how many views are built on it. An earlier version merged only
+    // boundWorkspaceId/Name onto the page's list and dropped boundDataSourceId and
+    // boundViewCount — the exact two fields isMovable() needs — so nothing was ever
+    // offered as movable.
+    const items: PickableCatalogItem[] = bindingsQuery.data ?? catalogItems
 
     const selected = items.find(c => c.id === catalogItemId)
     const chosenOntology = ontologies.find(o => o.id === ontologyId)
