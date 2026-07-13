@@ -11,8 +11,10 @@
 import { useCallback, useMemo, useState, type ComponentType } from 'react'
 import { Loader2, Eye, Layers, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useFeature } from '@/store/features'
 import { useCommitLog, useViewCommitLog } from '../hooks/useVersioning'
 import { CommitRow } from './CommitRow'
+import { RevertDialog, RestoreDialog } from './RollbackDialogs'
 
 type Scope = 'draft' | 'view' | 'graph'
 
@@ -21,16 +23,26 @@ export function ViewHistoryTimeline({
   graphId,
   viewId,
   branchId,
+  canManage = false,
 }: {
   wsId: string
   graphId: string
   viewId?: string | null
   branchId?: string | null
+  /** Managers get rollback actions (undo a revision / restore to a point) on published rows. */
+  canManage?: boolean
 }) {
   const onDraft = !!branchId
   const [scope, setScope] = useState<Scope>(onDraft ? 'draft' : viewId ? 'view' : 'graph')
   const [limit, setLimit] = useState(25)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  // Rollback affordances: published (main) rows only — draft checkpoints aren't
+  // main commits. Manager + admin-flag gated; dialogs own the confirm/impact UX.
+  const versioningEnabled = useFeature('versioningEnabled')
+  const canRollback = canManage && versioningEnabled
+  const [revertTarget, setRevertTarget] = useState<Record<string, unknown> | null>(null)
+  const [restoreTarget, setRestoreTarget] = useState<Record<string, unknown> | null>(null)
 
   // Only the active scope fetches — pass graphId=null to disable the inactive hook.
   const draftQ = useCommitLog(wsId, scope === 'draft' ? graphId : null, branchId ?? null)
@@ -108,6 +120,8 @@ export function ViewHistoryTimeline({
                   userNames={q.data?.userNames}
                   expanded={expandedId === cid}
                   onToggle={toggle}
+                  onRevert={canRollback && scope !== 'draft' ? setRevertTarget : undefined}
+                  onRestore={canRollback && scope !== 'draft' ? setRestoreTarget : undefined}
                 />
               )
             })}
@@ -122,6 +136,27 @@ export function ViewHistoryTimeline({
           )}
         </>
       )}
+
+      <RevertDialog
+        open={revertTarget !== null}
+        commit={revertTarget}
+        wsId={wsId}
+        graphId={graphId}
+        userNames={q.data?.userNames}
+        onClose={() => setRevertTarget(null)}
+        onRestoreInstead={(target) => {
+          setRevertTarget(null)
+          setRestoreTarget(target)
+        }}
+      />
+      <RestoreDialog
+        open={restoreTarget !== null}
+        commit={restoreTarget}
+        wsId={wsId}
+        graphId={graphId}
+        userNames={q.data?.userNames}
+        onClose={() => setRestoreTarget(null)}
+      />
     </div>
   )
 }

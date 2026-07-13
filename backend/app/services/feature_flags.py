@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL_SECONDS = 30.0
 
 
+class FeatureDisabledError(Exception):
+    """A write was attempted against a feature an admin has turned off.
+
+    Raised outside the API layer (e.g. the versioned write-through provider) so
+    non-HTTP callers get a typed error; the API maps it to 403 ``feature_disabled``
+    via a global exception handler in ``main.py``.
+    """
+
+    def __init__(self, feature: str, message: str | None = None):
+        self.feature = feature
+        self.message = message or f"The '{feature}' feature is turned off for this deployment."
+        super().__init__(self.message)
+
+
 class FeatureFlagService:
     """Lightweight, cached feature flag evaluator."""
 
@@ -93,6 +107,20 @@ class FeatureFlagService:
         """Check if a boolean flag is enabled. Returns *default* if key missing."""
         val = await self.get_value(key, session, default=default)
         return bool(val)
+
+    async def is_enabled_self_session(self, key: str, default: bool = False) -> bool:
+        """Flag check for call sites OUTSIDE a request-scoped session (router-level
+        gates on hot paths, provider backstops).
+
+        Cache-first: while the TTL cache is fresh this never touches the DB or the
+        connection pool; only a stale cache opens one short-lived session to reload.
+        """
+        now = time.monotonic()
+        if self._cache is not None and (now - self._cache_ts) < self._ttl:
+            return bool(self._cache.get(key, default))
+        from backend.app.db.engine import get_async_session
+        async with get_async_session() as session:
+            return await self.is_enabled(key, session, default=default)
 
     @property
     def cached_version(self) -> int:

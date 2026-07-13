@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from backend.app.auth.dependencies import requires
+from .versioning_gate import versioning_write_gate
 from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
@@ -72,6 +73,11 @@ api_router.include_router(
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
     dependencies=[Depends(requires("system:admin"))],
+)
+# Public read-only flag values — the app shell needs them before/without a
+# session (mirrors branding.public_router). Values only, never admin metadata.
+api_router.include_router(
+    features.public_router, prefix="/features", tags=["features"],
 )
 api_router.include_router(
     announcements.admin_router, prefix="/admin/announcements", tags=["admin:announcements"],
@@ -247,8 +253,11 @@ api_router.include_router(
 # browser never touches the DB directly. Authenticated + RBAC-gated on the
 # data-source permissions (a graph is 1:1 with a data source), and every
 # graph id is checked to belong to {ws_id} for tenant isolation.
+# versioning_write_gate: every MUTATING route 403s when the admin turns the
+# ``versioningEnabled`` flag off (reads stay open — see versioning_gate.py).
 api_router.include_router(
     versioning.router, prefix="/{ws_id}/versioning", tags=["versioning:workspace"],
+    dependencies=[Depends(versioning_write_gate)],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────

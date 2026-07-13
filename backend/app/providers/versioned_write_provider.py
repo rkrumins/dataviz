@@ -18,9 +18,32 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import GraphEdge, GraphNode
+from backend.app.services.feature_flags import (
+    FeatureDisabledError,
+    feature_flags,
+)
 from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
+
+
+class VersioningNotEnabled(RuntimeError):
+    """A write reached a data source that has no versioned graph yet. Enablement is an
+    explicit, guided job (it copies the whole source graph) — never an implicit
+    side-effect of a write. Mapped to 409 by the app's exception handler."""
+
+
+async def _require_versioning_flag() -> None:
+    """Backstop for the admin ``versioningEnabled`` flag on the write-through path.
+
+    The API layer already 403s versioning routes, but canvas CRUD arrives through
+    the graph endpoints and lands here — one check blocks every such write (and the
+    implicit heavy enablement in ``_graph_id``) without touching each CRUD route.
+    Cache-first (30s TTL), so steady-state writes don't pay a DB round-trip. Maps
+    to 403 ``feature_disabled`` via the global handler in ``main.py``.
+    """
+    if not await feature_flags.is_enabled_self_session("versioningEnabled", default=True):
+        raise FeatureDisabledError("versioningEnabled")
 
 
 def _node_payload(node: GraphNode) -> dict:
@@ -85,31 +108,32 @@ class VersionedWriteProvider:
 
     # ------------------------------------------------------------------ #
     async def _graph_id(self) -> str:
-        """Resolve (and lazily create) the data source's versioned graph."""
+        """Resolve the data source's versioned graph.
+
+        Deliberately does NOT enable versioning on the fly. Enablement copies the
+        WHOLE source graph, which at real scale is a multi-minute job — kicking that
+        off from a stray canvas write made the web tier's memory O(graph) and left the
+        user staring at a hung request. It is now an explicit, guided, resumable flow
+        (``POST /graph/bootstrap``); a write to an un-versioned source says so.
+        """
         if self._gid is None:
             async with self._lock:
                 if self._gid is None:
                     res = await self._svc.resolve_graph(
                         data_source_id=self._ds, actor=self._actor,
                         workspace_id=self._ws, open_draft_if_absent=False)
-                    if res is not None:
-                        self._gid = res["graph_id"]
-                    else:
-                        # Atomic, complete, idempotent enablement: create-graph + full
-                        # provider import in one transaction (no half-enabled graph that
-                        # would hijack reads while empty), so every editable entity gets a
-                        # Postgres version row and edits can't spawn phantoms.
-                        self._gid = (await self._svc.enable_versioning(
-                            data_source_id=self._ds, workspace_id=self._ws,
-                            actor=self._actor, provider=self._inner,
-                            falkor_graph_name=self._falkor_graph_name,
-                            ontology_rules=self._ontology_rules))["graph_id"]
+                    if res is None:
+                        raise VersioningNotEnabled(
+                            "Version control isn't enabled for this data source yet — "
+                            "turn it on to start editing.")
+                    self._gid = res["graph_id"]
         return self._gid
 
     async def _record(self, ops: List[dict], message: str) -> None:
         ops = [o for o in ops if o is not None]
         if not ops:
             return
+        await _require_versioning_flag()
         await self._svc.apply_ops(graph_id=await self._graph_id(), ops=ops,
                                   actor=self._actor, message=message,
                                   containment_edge_types=self._containment_types,

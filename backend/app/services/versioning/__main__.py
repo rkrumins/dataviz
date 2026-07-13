@@ -17,6 +17,7 @@ import signal
 
 from . import config, db, models
 from .messaging import close_broker_redis
+from .bootstrap_worker import BootstrapRunner
 from .projection import FalkorProjector, make_falkor_graph_factory
 from .service import GraphVersioningService
 from .worker import ProjectionWorker
@@ -89,6 +90,9 @@ async def _amain() -> None:
         # GRAPHVER_FALKOR_* as fallback); the loop no-ops until a provider's
         # falkorMaxResident is set.
         evict_budget=make_registry_budget_resolver(),
+        # "Enable version control" jobs: a 10M-entity source is copied here, off the
+        # web tier, in resumable windows (see bootstrap_worker).
+        bootstrap=BootstrapRunner(graph_factory, consumer=os.getenv("HOSTNAME", "boot-1")),
     )
 
     loop = asyncio.get_running_loop()

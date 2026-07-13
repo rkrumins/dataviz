@@ -35,6 +35,9 @@ export interface ResolveResponse {
   myDraft?: DraftRef | null
   /** Graph provenance — "blank" for self-serve blank models, else the seed kind. */
   kind?: string
+  /** The in-flight (or failed) "enable version control" job — present only while the
+   *  graph is still at genesis, so a reload lands back on live progress. */
+  bootstrap?: BootstrapJob | null
 }
 
 /** Result of provisioning a blank lineage model (data source + genesis graph). */
@@ -476,20 +479,89 @@ export function getGraph(wsId: string, graphId: string): Promise<Graph> {
 }
 
 export interface BootstrapResult {
+  jobId?: string
   graphId?: string
-  nodes?: number
-  edges?: number
-  [k: string]: unknown
+  status?: BootstrapJobStatus
+  alreadyEnabled?: boolean
+}
+
+export type BootstrapJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type BootstrapPhase =
+  | 'counting' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
+
+/** One integrity check from the job's report — rendered verbatim in the report card. */
+export interface BootstrapCheck {
+  key: string
+  ok: boolean
+  detail: string
+  blocking: boolean
+}
+
+export interface BootstrapReport {
+  checks: BootstrapCheck[]
+  source: { nodes: number; edges: number }
+  stored: { nodes: number; edges: number }
+  labels: Record<string, number>
+  edgeTypes: Record<string, number>
+  sampleChecked: number
+  sampleMismatched: Array<Record<string, unknown>>
+  mergedDuplicateConnections: number
+  /** Entities with no identifier: invisible to the app (they never render, search or
+   *  trace), so they were not copied — stated plainly rather than hidden. */
+  skippedWithoutIdentifier?: { nodes: number; edges: number }
+  merkle: 'inline' | 'deferred' | 'pending'
+}
+
+export interface BootstrapJob {
+  jobId: string
+  graphId: string
+  status: BootstrapJobStatus
+  phase: BootstrapPhase | null
+  processed: number
+  total: number
+  percent: number
+  startedAt?: string | null
+  updatedAt?: string | null
+  error?: string | null
+  report?: BootstrapReport | null
 }
 
 /**
- * "Enable version control" — create-or-seed the data source's versioned graph from
- * its current live state (idempotent). Note: this is on the *graph* route, not the
- * versioning route, because it snapshots the live provider into the versioned base.
+ * "Enable version control" — copy the data source's whole graph into the versioned
+ * store. Returns **202 + a jobId**: the copy runs on the versioning worker in
+ * resumable windows (a large graph can't be paged into one request), so callers poll
+ * {@link getBootstrapStatus}. An already-versioned source returns `alreadyEnabled`.
  */
 export function bootstrapGraph(wsId: string, dataSourceId: string): Promise<BootstrapResult> {
   return vfetch<BootstrapResult>(
     `/api/v1/${wsId}/graph/bootstrap?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    { method: 'POST' },
+  )
+}
+
+/** Live progress of the enablement job (404 → never started). */
+export function getBootstrapStatus(wsId: string, dataSourceId: string): Promise<BootstrapJob> {
+  return vfetch<BootstrapJob>(
+    `/api/v1/${wsId}/graph/bootstrap/status?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+  )
+}
+
+/** `resume` continues from the last completed window; `restart` re-reads the source. */
+export function retryBootstrap(
+  wsId: string, dataSourceId: string, mode: 'resume' | 'restart' = 'resume',
+): Promise<{ jobId: string; status: BootstrapJobStatus }> {
+  return vfetch(
+    `/api/v1/${wsId}/graph/bootstrap/retry?dataSourceId=${encodeURIComponent(dataSourceId)}&mode=${mode}`,
+    { method: 'POST' },
+  )
+}
+
+/** Give up: everything the job imported is removed and the source reads as before. */
+export function abandonBootstrap(
+  wsId: string, dataSourceId: string,
+): Promise<{ jobId: string; status: BootstrapJobStatus }> {
+  return vfetch(
+    `/api/v1/${wsId}/graph/bootstrap/abandon?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     { method: 'POST' },
   )
 }
@@ -856,6 +928,59 @@ export function publishBranch(
   data: { message: string; resolutions?: ResolutionMap },
 ): Promise<CommitResponse> {
   return vfetch<CommitResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data))
+}
+
+// ============================================
+// Rollback: revert one commit / restore to a point in time
+// ============================================
+
+/** Undo ONE published commit as a new `revert` commit (keeps later work).
+ *  409 `MergeConflictError` when later commits touched the same entities. */
+export function revertCommit(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+  message?: string,
+): Promise<CommitResponse> {
+  return vfetch<CommitResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/revert`,
+    jsonBody(message ? { message } : {}),
+  )
+}
+
+/** Reset main to its state at `commitId` as ONE new `restore` commit —
+ *  rolls back everything after it. Never conflicts; history is kept. */
+export function restoreCommit(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+  message?: string,
+): Promise<CommitResponse> {
+  return vfetch<CommitResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/restore`,
+    jsonBody(message ? { message } : {}),
+  )
+}
+
+/** Impact a restore would have — powers the confirm dialog. Very large restores are
+ *  priced coarsely (`approximate`) rather than dragging millions of payloads through a
+ *  synchronous request just to render a dialog. */
+export interface RestorePreview {
+  commitsUndone: number
+  nodes: { create: number; update: number; delete: number }
+  edges: { create: number; update: number; delete: number }
+  approximate?: boolean
+  touchedEstimate?: number
+}
+
+export function getRestorePreview(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+): Promise<RestorePreview> {
+  return vfetch<RestorePreview>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/restore-preview`,
+  )
 }
 
 export function openMergeRequest(

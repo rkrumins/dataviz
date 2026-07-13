@@ -19,6 +19,7 @@
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useFeature } from '@/store/features'
 import { useToast } from '@/components/ui/toast'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
@@ -255,6 +256,9 @@ export interface ViewerActionsProps extends ComprehensionToolsProps {
 }
 
 export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }: ViewerActionsProps) {
+  // Editing IS versioning (edit mode = an open draft): when the admin turns
+  // versioning off, the Edit entry disappears entirely — not disabled-with-hint.
+  const versioningEnabled = useFeature('versioningEnabled')
   return (
     <>
       <ComprehensionTools {...tools} />
@@ -263,7 +267,7 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
           primary: on Published, reading is the main activity and the
           header should stay quiet). Clicking opens/resumes a draft;
           the amber versioning bar + header morph are the feedback. */}
-      {canManage && (
+      {canManage && versioningEnabled && (
         <>
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
           <button

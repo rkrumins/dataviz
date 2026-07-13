@@ -18,6 +18,7 @@ import {
   disablePermissionPolling,
 } from '@/store/permissionPoller'
 import { useBrandingStore } from '@/store/branding'
+import { startFeaturesSync, useFeaturesStore } from '@/store/features'
 import { usePreferencesStore } from '@/store/preferences'
 import { installRadixPointerEventsGuard } from '@/lib/radixPointerEventsGuard'
 
@@ -118,6 +119,13 @@ function MotionRoot({ children }: { children: React.ReactNode }) {
 // always correct even before this resolves). Fire-and-forget: a failure
 // keeps the seed in place.
 void useBrandingStore.getState().loadBranding()
+
+// Feature flags ride the same boot pattern (public, fail-open to seeds) so
+// admin-disabled areas (e.g. versioning) are hidden before first interaction.
+void useFeaturesStore.getState().loadFeatures()
+// …and keep them current. Without this, an admin turning a feature off reaches the database and
+// the API, and reaches no open tab — not even their own — until someone hard-refreshes.
+startFeaturesSync()
 
 // App-wide safety net for the Radix body pointer-events freeze: a modal layer
 // (Dialog / modal DropdownMenu) that unmounts while open can otherwise leave

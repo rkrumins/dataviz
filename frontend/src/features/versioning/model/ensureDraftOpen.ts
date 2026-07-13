@@ -18,6 +18,7 @@
  */
 import { useBranchStore } from '@/store/branchStore'
 import { useSchemaStore } from '@/store/schema'
+import { featureEnabled } from '@/store/features'
 import { resolveAndOpenDraft } from '@/services/versioningApiService'
 import { VERSIONING_KEYS } from '../hooks/useVersioning'
 
@@ -34,6 +35,9 @@ function invalidateVersioningCaches(): void {
 }
 
 export async function ensureDraftOpen(): Promise<string | null> {
+  // Admin flag backstop for EVERY authoring entry point: when versioning is
+  // off there are no drafts, so all editing is off ("null = cannot edit").
+  if (!featureEnabled('versioningEnabled')) return null
   const s = useBranchStore.getState()
   if (s.isDraftMode()) return s.currentBranchId
   const { workspaceId, dataSourceId, graphId } = s

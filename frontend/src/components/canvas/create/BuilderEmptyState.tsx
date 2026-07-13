@@ -16,10 +16,18 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useViewEntityTypes, useViewRootEntityTypes } from '@/hooks/useViewSchema'
 import { containmentChains } from '@/services/ontologyPreflightService'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
+import { useFeature } from '@/store/features'
 
 const MAX_TEMPLATES = 3
 
 export function BuilderEmptyState() {
+  // Every CTA below routes through `useHierarchyBuilderStore.open()`, which calls
+  // `ensureDraftOpen()` — and that returns null with version control off, because authoring
+  // exists only as drafts and commits. The guard is a correct BACKSTOP (nothing bad happens),
+  // but a button that silently does nothing is still a bug: the user clicks "Add your first
+  // entity", the canvas does not move, and they are left to conclude the app is broken. If it
+  // cannot be done, do not offer it — say what is true instead.
+  const versioningEnabled = useFeature('versioningEnabled')
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
   const typeById = useMemo(() => new Map(entityTypes.map((et) => [et.id, et])), [entityTypes])
@@ -53,11 +61,16 @@ export function BuilderEmptyState() {
         <span className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-accent-lineage/15 to-violet-500/10 border border-accent-lineage/20 mb-4">
           <Plus className="w-7 h-7 text-accent-lineage" />
         </span>
-        <h2 className="text-lg font-bold text-ink leading-tight">Start your model</h2>
+        <h2 className="text-lg font-bold text-ink leading-tight">
+          {versioningEnabled ? 'Start your model' : 'This model is empty'}
+        </h2>
         <p className="text-sm text-ink-muted mt-1.5">
-          Add entities, nest them into a hierarchy, or paste a list to bring in several at once.
+          {versioningEnabled
+            ? 'Add entities, nest them into a hierarchy, or paste a list to bring in several at once.'
+            : 'Editing is turned off for this workspace, so this model is view-only. An administrator can turn it back on.'}
         </p>
 
+        {versioningEnabled && (
         <div className="mt-5 flex items-center justify-center gap-2">
           <button
             onClick={() => useHierarchyBuilderStore.getState().open()}
@@ -74,8 +87,9 @@ export function BuilderEmptyState() {
             Build a lot at once
           </button>
         </div>
+        )}
 
-        {templates.length > 0 && (
+        {versioningEnabled && templates.length > 0 && (
           <div className="mt-4">
             <p className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wide text-ink-muted/70 mb-2">
               <Sparkles className="w-3 h-3" />Start from a template
@@ -105,9 +119,11 @@ export function BuilderEmptyState() {
           </div>
         )}
 
-        <p className="mt-5 text-[11px] text-ink-muted/80">
-          or press <kbd className="px-1.5 py-0.5 rounded border border-glass-border bg-canvas-overlay text-[10px] font-semibold">N</kbd>
-        </p>
+        {versioningEnabled && (
+          <p className="mt-5 text-[11px] text-ink-muted/80">
+            or press <kbd className="px-1.5 py-0.5 rounded border border-glass-border bg-canvas-overlay text-[10px] font-semibold">N</kbd>
+          </p>
+        )}
       </motion.div>
     </div>
   )

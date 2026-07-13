@@ -10,6 +10,7 @@
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
+import { useFeature } from '@/store/features'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
@@ -694,10 +695,19 @@ function NoDataSourcesState({
 // ─── Blank-model mode ──────────────────────────────────────────────
 
 function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: ScopeMode) => void }) {
+    // A blank model IS a versioned model — it exists only as drafts and commits. With version
+    // control off it cannot be created at all, and the server refuses it. Offering the choice
+    // and then bouncing the user back to "Use existing data" (which is what the guard further
+    // down does on its own) is the worst of both: the option looks available, does nothing, and
+    // explains nothing. If it cannot be chosen, it must not be shown.
+    const blankAvailable = useFeature('versioningEnabled')
     const options: { id: ScopeMode; label: string; icon: ReactNode }[] = [
         { id: 'existing', label: 'Use existing data', icon: <Database className="w-4 h-4" /> },
-        { id: 'blank', label: 'Start from blank', icon: <Sparkles className="w-4 h-4" /> },
+        ...(blankAvailable
+            ? [{ id: 'blank' as const, label: 'Start from blank', icon: <Sparkles className="w-4 h-4" /> }]
+            : []),
     ]
+    if (options.length < 2) return null            // nothing to toggle between
     return (
         <div className="inline-flex items-center rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-1">
             {options.map(opt => {
@@ -1102,6 +1112,12 @@ export function ScopeStep({
     onSelectOntology,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
+    // Blank models are versioning-native (authored via drafts/publishes) — the
+    // whole mode disappears when the admin turns version control off.
+    const blankModeAvailable = useFeature('versioningEnabled')
+    useEffect(() => {
+        if (!blankModeAvailable && scopeMode === 'blank') onScopeModeChange('existing')
+    }, [blankModeAvailable, scopeMode, onScopeModeChange])
     const [wsSearch, setWsSearch] = useState('')
     const [dsSearch, setDsSearch] = useState('')
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
@@ -1361,9 +1377,11 @@ export function ScopeStep({
             </motion.div>
 
             {/* Mode toggle */}
-            <div className="flex justify-center">
-                <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
-            </div>
+            {blankModeAvailable && (
+                <div className="flex justify-center">
+                    <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
+                </div>
+            )}
 
             {/* Two-panel layout */}
             <motion.div

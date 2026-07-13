@@ -134,8 +134,118 @@ curl -b cookies.txt -s "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BID/st
 | `GET  /pulls/{pr}` | PR metadata | `…:read` |
 | `GET  /pulls/{pr}/preview` | dry-run the PR merge | `…:read` |
 | `POST /pulls/{pr}/merge` | merge the PR into base main | `…:manage` |
+| `POST /graphs/{gid}/commits/{cid}/revert` | undo ONE published commit (409 `merge_conflict` if later commits touched the same entities) | `…:manage` |
+| `POST /graphs/{gid}/commits/{cid}/restore` | reset main to its state at that commit — point-in-time rollback, never conflicts | `…:manage` |
+| `GET  /graphs/{gid}/commits/{cid}/restore-preview` | exact impact of that restore (commits undone + per-kind counts) | `…:read` |
 
 `…` = `workspace:datasource` (a versioned graph is 1:1 with a data source).
+
+### Rollback: revert vs restore
+
+Both write a **new commit** — history is never rewritten, and the rollback itself is
+revertable.
+
+- **Revert** undoes one commit and keeps everything after it (git-revert). Because it
+  has to reconcile with later work, it *can* conflict: if a later commit changed the same
+  entities, it returns 409 with the blocking entity ids.
+- **Restore** resets main to its state at commit *K*: entities modified after *K* go back,
+  entities created after *K* are deleted, entities deleted after *K* come back. It
+  overrides everything after *K* by definition, so it **cannot conflict** — which makes it
+  the escape hatch when a revert is blocked. The UI offers exactly that (a blocked revert
+  offers "restore to just before it instead"). Restoring to genesis is the well-defined
+  "empty the graph".
+
+The UI reaches both from the history timeline (per-revision menu) and offers "Revert this
+merge" on a merged PR (which maps to its `resulting_commit_id`).
+
+### "Enable version control" (`/api/v1/{ws_id}/graph/bootstrap`)
+
+Copying a whole source graph into version history is a **job**, not a request — a 10M-entity
+graph cannot be paged into one HTTP call, and doing so made the web tier's memory O(graph).
+
+| Method & path | Purpose | Permission |
+|---|---|---|
+| `POST /graph/bootstrap?dataSourceId=` | start the copy → **202** `{jobId, graphId, status}` (200 `{alreadyEnabled}` if versioned) | `…:manage` |
+| `GET  /graph/bootstrap/status?dataSourceId=` | phase / processed / total / percent / error / integrity report | `…:read` |
+| `POST /graph/bootstrap/retry?dataSourceId=&mode=resume\|restart` | resume from the last window, or re-read the source | `…:manage` |
+| `POST /graph/bootstrap/abandon?dataSourceId=` | drop everything the job imported; the source reads as before | `…:manage` |
+
+Phases: `counting → nodes → edges → validate → heads → merkle → backfill → finalize`.
+
+**`finalize` is last, and it is the only irreversible step** — it flips the head, which makes
+the graph live and writable. Everything the live graph depends on must already be true when
+it runs, including `backfill`, which stamps the projector's delete/update anchors
+(`n.entityId`, `r.id`) onto the source graph. Finalizing first would leave a window — and,
+if backfill then failed, a permanent state — where the graph is editable but the projector
+cannot anchor: an edit MERGEs a duplicate node beside the original, and a delete matches
+nothing and silently leaves the entity on the canvas.
+
+Properties worth knowing:
+
+- **Bounded memory.** The source is scanned in ID-range windows (never OFFSET) and written
+  in per-window transactions: peak memory is O(window), not O(graph).
+- **Resumable.** Rows, tallies and the cursor commit in ONE transaction, and version rows
+  carry deterministic ids (`ON CONFLICT DO NOTHING`), so a crashed worker resumes exactly
+  and a replayed window is a no-op. A `running` job whose heartbeat goes stale is taken over.
+- **Invisible until proven.** The import commit sits at seq 2 while the head stays at
+  genesis; every read composes bounded by `main_head_commit_seq`. Validation runs *before*
+  `entity_heads` is written, so a failed copy leaves the data source reading exactly as it
+  did — there is nothing to unwind. A failed job therefore also **blocks writes** to that
+  graph (resume it or abandon it): editing around it would advance the head past the partial
+  import commit, un-park the projection watermark, and let the projector drop and reseed the
+  source graph from a fraction of the data.
+- **Proven.** Source counts vs what landed, per node label AND per edge type (the
+  containment/lineage preservation proof), no duplicate identifiers, no dangling endpoints,
+  plus a random sample re-read from the source and content-hash-compared. The report is
+  persisted on the job and rendered in the UI.
+- **No reseed.** The graph is pinned to the source FalkorDB graph the canvas already reads,
+  and validation just proved they agree, so finalize *fast-forwards* the projection
+  watermark. (During the copy the watermark is parked at genesis on purpose: a projector
+  that thought it had work would DROP that graph and reseed it from an empty genesis.)
+- What the copy contains is **exactly what the application can see**: the reader ignores
+  nodes without a `urn` and edges whose endpoints have none, so those are counted and
+  disclosed in the report rather than copied. Derived artifacts (`:AGGREGATED`,
+  `_GVRollupMeta`, `_AggMeta`, `_Projection`) are never imported.
+- **Survives the infrastructure.** A copy of a 10M-entity graph runs for tens of minutes —
+  long enough to span a FalkorDB restart, a Postgres failover, a node rotation or a network
+  blip. Those are waited out with backoff (`BOOTSTRAP_RETRY_BUDGET_SECS`), not treated as
+  fatal; a *fault that shrinking can fix* (a window too fat for the server's query budget)
+  shrinks the window instead. The number of interruptions ridden out is recorded on the job.
+  Beyond the budget the job fails honestly and stays resumable from its cursor.
+- **FalkorDB only, and it says so up front.** The scan is FalkorDB-shaped (`ID(n)` windows,
+  FalkorDB row decoding). A data source on any other provider is refused at the door with
+  `422 provider_unsupported` — before a graph shell exists — rather than accepted with a 202
+  and failed later, which would leave the data source write-blocked behind an impossible job.
+
+#### Tuning (all optional; defaults are sized for a 10M-entity graph)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `GRAPHVER_BOOTSTRAP_SCAN_WIDTH` | 100000 | Node-id span per scan window (`config.py:235`). |
+| `GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH` | 10000 | Floor the halve-on-oversize ladder stops at (`config.py:236`). |
+| `GRAPHVER_BOOTSTRAP_EDGE_TARGET` | 50000 | Edges per window. Node ids cluster by type, so the edge phase counts a window's edges first and shrinks the node span until it fits (`config.py:242`). |
+| `GRAPHVER_BOOTSTRAP_WINDOW` | 50000 | Rows per Postgres write transaction (`config.py:244`). |
+| `GRAPHVER_BOOTSTRAP_SAMPLE_K` | 64 | Entities re-read from the source and content-hash-compared during validation (`config.py:246`). |
+| `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | 1000000 | Above this the import commit's Merkle root is left NULL and the report says `merkle: deferred`, rather than building a 10M-entity tree in memory (`config.py:250`). |
+| `GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS` | 600 | How long an OUTAGE may last before the job gives up. Per unit of work — a successful window resets it — so it does not bound how long the job may take (`config.py:270`). |
+| `GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS` | 30 | Ceiling on the exponential backoff between retries (`config.py:271`). |
+| `GRAPHVER_INGEST_POLL_SECS` | 5 | Worker pickup cadence (`config.py:253`). |
+| `GRAPHVER_INGEST_STALE_SECS` | 120 | Heartbeat age after which a `running` job is presumed dead and taken over (`config.py:254`). |
+| `GRAPHVER_RESYNC_MAX_ENTITIES` | 250000 | Largest graph a RE-SYNC may attempt. A guard rail over a real limit, not a policy: `sync_ingest` rebuilds the whole graph several times to 3-way merge it — **measured 2.03 GB of RSS to compute 808 changes on a 478k graph**, in one request on the web tier; the 7.7M model would ask for ~30 GB and take the API down. Above the limit it refuses with a `422 graph_too_large_to_sync` quoting the entity count and the estimate. Set `0` to disable if you know the memory is there. Exists to be DELETED — see [docs/versioning/11-resync-at-any-scale.md](versioning/11-resync-at-any-scale.md) (`config.py:255`). |
+| `GRAPHVER_INGEST_HEARTBEAT_SECS` | 30 | How often a running worker says "still alive" — a TIMER, not a per-window commit. Must stay well under the stale window: a scan halving down its ladder, or a validate anti-joining a 10M-row commit, works for minutes without committing anything, and a worker that only beat on commit would be declared dead by a colleague while perfectly healthy (`config.py:262`). |
+
+Operationally: the k8s worker takes these via `envFrom: worker-config` (edit the ConfigMap and
+restart the pod — no image rebuild). Note that ConfigMap is shared with the aggregation worker.
+
+### The `versioningEnabled` admin flag
+
+`Admin → Features → Lineage → Version control` (a `feature_flags` boolean, default ON).
+When off: every **mutating** versioning route returns 403
+`{"type": "feature_disabled", "feature": "versioningEnabled"}` and the UI hides drafts,
+reviews, history, blank models and the Edit entry — canvases become view-only. **Reads stay
+open** and nothing is deleted: existing versioned graphs and blank models remain viewable,
+and background projection keeps running. The frontend reads the flag from the public
+`GET /api/v1/features/values` (no auth) at boot.
 
 ---
 

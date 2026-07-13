@@ -174,6 +174,37 @@ export interface OverviewSection {
     commits?: number
 }
 
+/**
+ * "Enable version control" jobs. Needed here because they are invisible to every other
+ * section by construction: a bootstrapping graph parks its projection watermark (so the
+ * projector never drops the source graph mid-copy), which makes it read as idle, lag-free
+ * and FRESH to the projection probe. A copy that failed days ago — and is silently blocking
+ * writes to that data source — would otherwise render as "in sync".
+ */
+export interface BootstrapJobEntry {
+    jobId: string
+    graphId: string
+    dataSourceId: string | null
+    workspaceId: string | null
+    status: 'pending' | 'running' | 'failed' | 'completed' | 'cancelled'
+    phase: string | null
+    processed: number
+    total: number
+    error: string | null
+    updatedAt: string | null
+}
+
+export interface BootstrapJobsSection {
+    running: number
+    pending: number
+    failed: number
+    completed: number
+    /** `running`, but the worker's heartbeat is older than the takeover window and nobody
+     *  has claimed it — i.e. the whole worker tier is gone, not merely one pod. */
+    stalled: number
+    jobs: BootstrapJobEntry[]
+}
+
 export interface SystemStatusSnapshot {
     status: 'healthy' | 'degraded' | 'down'
     generatedAt: string
@@ -184,6 +215,7 @@ export interface SystemStatusSnapshot {
     streams: StreamsSection | null
     projection: ProjectionSection | null
     aggregationJobs: AggregationJobsSection | null
+    bootstrapJobs: BootstrapJobsSection | null
     statsPolling: StatsPollingSection | null
     outbox: OutboxSection | null
 }

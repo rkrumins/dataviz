@@ -4,6 +4,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { featuresService, FeaturesConcurrencyError, type FeaturesResponse } from '@/services/featuresService'
+import { useFeaturesStore } from '@/store/features'
 
 export const SEARCH_MIN_FEATURES = 10
 
@@ -51,6 +52,11 @@ export function useAdminFeatures() {
           version: data.version,
         } as Record<string, unknown> & { version: number })
         setData(res)
+        // Tell the RUNNING APP, not just this page. Without this the admin flips a switch, the
+        // database and the API agree it is off, the server starts refusing the writes — and the
+        // admin's own tab keeps offering the buttons until they hard-refresh. They are then
+        // looking at a UI they have personally disabled, which reads as "the toggle is broken".
+        useFeaturesStore.getState().setValues(res.values)
         setToastVisible(true)
       } catch (err) {
         if (err instanceof FeaturesConcurrencyError) {
@@ -86,6 +92,7 @@ export function useAdminFeatures() {
     try {
       const res = await featuresService.reset(data?.version ?? 0)
       setData(res)
+      useFeaturesStore.getState().setValues(res.values)   // same reason as handleChange
       setResetConfirmOpen(false)
       setToastVisible(true)
     } catch (err) {

@@ -1282,3 +1282,70 @@ async def probe_overview(app_state) -> Optional[dict]:
         logger.warning("overview graphver scale failed: %s", exc)
 
     return out or None
+
+
+async def probe_bootstrap_jobs() -> Optional[dict]:
+    """"Enable version control" jobs — the one long-running job with no ops surface.
+
+    This exists because its absence was worse than a blind spot. A bootstrap parks the
+    graph's projection watermark at genesis so the projector never touches the pinned
+    SOURCE graph mid-copy — which means `probe_projection_lag` sees lag=0, status='idle'
+    and no error, and counts the graph as FRESH. A 7.7M-entity copy grinding for an hour,
+    or one that FAILED three days ago and is silently blocking writes to that data source,
+    both render on the dashboard as "in sync". Nothing else reads `graphver.jobs`.
+
+    `stalled` is the honest liveness question: a `running` job whose heartbeat has aged past
+    the takeover threshold and that no worker has picked up — i.e. the whole worker tier is
+    gone, not merely one pod. It reuses `claim_one`'s own staleness predicate, so the
+    dashboard and the worker cannot disagree about what "dead" means.
+    """
+    from sqlalchemy import case, func, select
+
+    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning.bootstrap_worker import (
+        BOOTSTRAP_JOB_TYPE,
+        _now_minus,
+    )
+    from backend.app.services.versioning.db import graphver_session
+    from backend.app.services.versioning.models import JobORM
+
+    try:
+        async with asyncio.timeout(_BUDGET_DB):
+            stale_before = _now_minus(gv_config.INGEST_STALE_SECS)
+            async with graphver_session() as s:
+                counts = dict((await s.execute(
+                    select(JobORM.status, func.count())
+                    .where(JobORM.job_type == BOOTSTRAP_JOB_TYPE)
+                    .group_by(JobORM.status))).all())
+                stalled = (await s.scalar(
+                    select(func.count()).select_from(JobORM).where(
+                        JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                        JobORM.status == "running",
+                        JobORM.updated_at < stale_before))) or 0
+                # Whose, and how far — enough to act on without opening a SQL client.
+                worst = (await s.execute(
+                    select(JobORM.id, JobORM.graph_id, JobORM.data_source_id,
+                           JobORM.workspace_id, JobORM.status, JobORM.current_phase,
+                           JobORM.processed, JobORM.total, JobORM.error_message,
+                           JobORM.updated_at)
+                    .where(JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                           JobORM.status.in_(("running", "pending", "failed")))
+                    .order_by(case((JobORM.status == "failed", 0), else_=1),
+                              JobORM.updated_at.asc())
+                    .limit(8))).all()
+    except Exception as exc:
+        logger.warning("bootstrap-jobs probe failed: %s", exc)
+        return None
+
+    return {
+        "running": int(counts.get("running", 0)),
+        "pending": int(counts.get("pending", 0)),
+        "failed": int(counts.get("failed", 0)),
+        "completed": int(counts.get("completed", 0)),
+        "stalled": int(stalled),
+        "jobs": [{
+            "jobId": r[0], "graphId": r[1], "dataSourceId": r[2], "workspaceId": r[3],
+            "status": r[4], "phase": r[5], "processed": int(r[6] or 0),
+            "total": int(r[7] or 0), "error": r[8], "updatedAt": r[9],
+        } for r in worst],
+    }

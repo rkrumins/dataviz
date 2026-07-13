@@ -17,6 +17,7 @@ import { ProjectionPanel } from './ProjectionPanel'
 import { StreamsPanel } from './StreamsPanel'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
+import { BootstrapJobsPanel } from './BootstrapJobsPanel'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -228,6 +229,7 @@ export function AdminInfrastructure() {
                     {/* Diagnostics & remediation — what's wrong, why, how to fix */}
                     <DiagnosticsPanel snapshot={data} />
 
+                    <BootstrapJobsPanel jobs={data.bootstrapJobs} />
                     <ProjectionPanel projection={data.projection} providers={data.graphProviders} />
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>

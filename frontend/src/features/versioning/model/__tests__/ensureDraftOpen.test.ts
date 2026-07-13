@@ -29,6 +29,7 @@ vi.mock('@/main', () => ({
 
 import { resolveAndOpenDraft } from '@/services/versioningApiService'
 import { useBranchStore } from '@/store/branchStore'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { ensureDraftOpen } from '../ensureDraftOpen'
 
 const resolveAndOpenDraftMock = vi.mocked(resolveAndOpenDraft)
@@ -36,6 +37,7 @@ const resolveAndOpenDraftMock = vi.mocked(resolveAndOpenDraft)
 beforeEach(() => {
   vi.clearAllMocks()
   getActiveView.mockReturnValue({ id: 'view1' })
+  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
   useBranchStore.getState().reset()
   useBranchStore.setState({
     workspaceId: 'ws1',
@@ -124,5 +126,26 @@ describe('ensureDraftOpen', () => {
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
     expect(useBranchStore.getState().currentBranchId).toBeNull()
+  })
+
+  it('returns null without any network call when versioning is admin-disabled', async () => {
+    useFeaturesStore.setState({ values: { versioningEnabled: false } })
+
+    await expect(ensureDraftOpen()).resolves.toBeNull()
+    expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
+  })
+
+  it('flag off wins even when a draft would otherwise be resumable', async () => {
+    useFeaturesStore.setState({ values: { versioningEnabled: false } })
+    resolveAndOpenDraftMock.mockResolvedValue({
+      graphId: 'g1',
+      mainBranchId: 'br_main',
+      mainHeadCommitSeq: 5,
+      myDraft: { branchId: 'br_mine', originatingViewId: 'view1' },
+    })
+
+    await expect(ensureDraftOpen()).resolves.toBeNull()
+    expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()
   })
 })

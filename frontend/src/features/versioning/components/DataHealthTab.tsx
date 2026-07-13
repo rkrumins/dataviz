@@ -18,6 +18,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
 import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
 
@@ -218,12 +219,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
             </p>
 
             {state === 'rebuilding' && progressPct !== null && (
-              <div className="mt-2.5 h-1.5 rounded-full bg-canvas-overlay overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-600 transition-[width] duration-700 ease-out"
-                  style={{ width: `${Math.max(2, progressPct)}%` }}
-                />
-              </div>
+              <ProgressBar value={progressPct} label="Rebuilding the fast read layer" className="mt-2.5" />
             )}
 
             <p className="mt-2 text-[11px] text-ink-muted/70">

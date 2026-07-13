@@ -2900,6 +2900,10 @@ export function ContextViewCanvas({
                 layer={layer}
                 nodes={renderByLayer.get(layer.id) ?? []}
                 schema={schema}
+                // An empty column means something different in each: in a Context View the
+                // entities exist and just aren't assigned here; in a blank model nothing has
+                // been created at all. The column says whichever is true.
+                isBlankModel={isBlankModel}
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedNodes}
                 searchResults={matchedNodeIds}

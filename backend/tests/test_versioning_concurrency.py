@@ -21,7 +21,7 @@ import contextlib
 import pytest
 
 from backend.app.services.versioning.models import BranchORM, GraphORM
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 
 
 class _StopAfterLock(Exception):
@@ -34,11 +34,18 @@ class _Obj:
 
 
 class _FakeSession:
-    def __init__(self, rows):
+    def __init__(self, rows, bootstrap_status=None):
         self._rows = rows                       # {(Model, key): obj}
+        self._bootstrap_status = bootstrap_status
 
     async def get(self, model, key):
         return self._rows.get((model, key))
+
+    async def scalar(self, _stmt):
+        # `_apply_ops_once` first asks whether an "enable version control" job is still
+        # unfinished for this graph (writing to a half-imported graph is destructive —
+        # see GraphVersioningService._assert_not_bootstrapping). None = no such job.
+        return self._bootstrap_status
 
 
 def _factory(rows):
@@ -96,3 +103,22 @@ def test_fork_merge_missing_base_raises():
 
     with pytest.raises(ValueError, match="fork_base_commit_seq"):
         asyncio.run(svc._compute_fork_merge(s, fork, {}))
+
+
+@pytest.mark.parametrize("job_status,expected", [
+    ("running", "still being enabled"),
+    ("pending", "still being enabled"),
+    # The dangerous one: a FAILED enablement leaves the graph's head and projection
+    # watermark parked. A write would advance the head past the partial import commit,
+    # un-park the watermark, and let the projector drop the pinned SOURCE graph and
+    # reseed it from a fraction of the data. Editing around it is never allowed.
+    ("failed", "didn't finish"),
+])
+def test_writes_refused_while_enablement_is_unfinished(job_status, expected):
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield _FakeSession({}, bootstrap_status=job_status)
+
+    svc = GraphVersioningService(session_factory=_session)
+    with pytest.raises(ConcurrencyError, match=expected):
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id=None, ops=_DEL_OP))

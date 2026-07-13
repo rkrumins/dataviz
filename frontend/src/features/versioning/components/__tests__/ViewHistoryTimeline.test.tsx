@@ -31,9 +31,17 @@ vi.mock('../../hooks/useVersioning', () => ({
     isLoading: false,
   }),
   useCommitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) => useCommitDiffSummary(ws, gid, cid),
+  useSquashedCommits: () => ({ data: undefined, isLoading: false }),
+  // The timeline hosts the rollback dialogs (revert / restore-to-here).
+  useRevertCommit: () => ({ mutate: vi.fn(), isPending: false }),
+  useRestoreCommit: () => ({ mutate: vi.fn(), isPending: false }),
+  useRestorePreview: () => ({ data: undefined, isLoading: false }),
 }))
 
-vi.mock('@/services/versioningApiService', () => ({ getCommitDiffChildren: vi.fn() }))
+vi.mock('@/services/versioningApiService', () => ({
+  getCommitDiffChildren: vi.fn(),
+  MergeConflictError: class MergeConflictError extends Error {},
+}))
 
 import { ViewHistoryTimeline } from '../ViewHistoryTimeline'
 

@@ -23,6 +23,7 @@ import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
@@ -132,6 +133,7 @@ export function DataSourceDetailPanel({
     onClose,
 }: DataSourceDetailPanelProps) {
     const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
+    const versioningEnabled = useFeature('versioningEnabled')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
     // Inline edit (label + ontology) — replaces the old modal-over-drawer.
@@ -330,7 +332,9 @@ export function DataSourceDetailPanel({
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
-                            <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
+                            {versioningEnabled && (
+                                <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
+                            )}
                         </div>
                         )}
 
@@ -584,7 +588,7 @@ export function DataSourceDetailPanel({
                             )}
 
                             {/* ─── Versioning Tab ───────────────────────── */}
-                            {activeTab === 'versioning' && (
+                            {versioningEnabled && activeTab === 'versioning' && (
                                 <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
                             )}
                             </>)}

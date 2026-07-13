@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useFeature } from '@/store/features'
 
 export interface ImportExportMenuProps {
   onImport?: () => void
@@ -24,6 +25,9 @@ export interface ImportExportMenuProps {
 const POPOVER_WIDTH = 268
 
 export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMenuProps) {
+  // Bulk import writes to a draft — pointless (and misleading) when the admin
+  // has versioning off, so the item is hidden entirely. Export stays.
+  const versioningEnabled = useFeature('versioningEnabled')
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -100,29 +104,31 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
               className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden py-1.5"
             >
               {/* Import — needs Edit mode + a branch (import writes to the working draft). */}
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!isDraft || !onImport}
-                onClick={() => { if (isDraft && onImport) runItem(onImport) }}
-                title={isDraft ? undefined : 'Import needs Edit mode — start a branch first'}
-                className={cn(
-                  'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
-                  isDraft
-                    ? 'text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12]'
-                    : 'text-ink-muted/50 cursor-not-allowed',
-                )}
-              >
-                <LucideIcons.Upload className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
-                <span className="min-w-0">
-                  <span className="block text-[13px] font-medium">Import…</span>
-                  <span className="block text-[11px] text-ink-muted/80 leading-snug">
-                    {isDraft
-                      ? 'Bring entities in from CSV, Excel or NDJSON.'
-                      : 'Available in Edit mode — start a branch to import.'}
+              {versioningEnabled && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!isDraft || !onImport}
+                  onClick={() => { if (isDraft && onImport) runItem(onImport) }}
+                  title={isDraft ? undefined : 'Import needs Edit mode — start a branch first'}
+                  className={cn(
+                    'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
+                    isDraft
+                      ? 'text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12]'
+                      : 'text-ink-muted/50 cursor-not-allowed',
+                  )}
+                >
+                  <LucideIcons.Upload className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-medium">Import…</span>
+                    <span className="block text-[11px] text-ink-muted/80 leading-snug">
+                      {isDraft
+                        ? 'Bring entities in from CSV, Excel or NDJSON.'
+                        : 'Available in Edit mode — start a branch to import.'}
+                    </span>
                   </span>
-                </span>
-              </button>
+                </button>
+              )}
 
               {/* Export — always available (published state is fine; it’s a re-importable backup). */}
               <button

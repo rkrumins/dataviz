@@ -23,6 +23,7 @@ from backend.app.models.graph import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import SearchQuery
+from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.fair_share import get_fair_share
 from backend.app.services.graph_cache import (
@@ -110,32 +111,163 @@ async def get_context_engine(
     )
 
 
-@router.post("/bootstrap")
+@router.post("/bootstrap", status_code=202)
 async def bootstrap_versioned_graph_endpoint(
     ws_id: str,
+    response: Response,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to seed."),
+    # Flag gate FIRST: dependencies resolve in declaration order, and a disabled
+    # feature must 403 before any provider/engine work happens.
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
-    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """Seed the data source's versioned graph from the provider's current state so branches
-    and history cover the whole graph. Idempotent — safe to re-run as a backfill.
+    """Start "enable version control" for a data source: copy its whole graph into the
+    versioned store as an auditable ``import`` commit.
 
-    ATOMIC: create-graph + seed run in ONE transaction, so a failure never leaves a
-    half-enabled graph (a graph row with no imported data). Provider reads happen first,
-    outside the transaction."""
-    from backend.app.services.versioning.service import GraphVersioningService
+    **202 + a job id** — the copy runs on the versioning worker in resumable windows
+    (a 10M-entity source cannot be paged into one request, and the old inline path
+    made the web tier's memory O(graph)). Poll ``GET /graph/bootstrap/status``.
+    Idempotent: an in-flight job returns itself; an already-versioned data source
+    returns 200 ``alreadyEnabled``. Nothing becomes visible until the copy has been
+    integrity-checked against the source."""
+    from backend.app.services.versioning.bootstrap_worker import create_bootstrap_job
     actor = user.id if user else "system"
-    svc = GraphVersioningService()
-    # Seed-time canonicalization (Task E): if the source has an assigned ontology, pass
-    # its rules so the bootstrap import writes OUR copy in canonical casing. None (no
-    # assigned ontology) leaves source spellings untouched.
-    ontology_rules = await _resolve_ontology_rules(engine)
-    # Single idempotent enablement path: already-enabled → returns the graph untouched;
-    # else create-graph + full provider import in ONE transaction (paging happens outside
-    # it). Never leaves a half-enabled graph that would hijack reads while empty.
-    return await svc.enable_versioning(
-        data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
-        provider=engine.provider, ontology_rules=ontology_rules)
+    provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
+    try:
+        res = await create_bootstrap_job(
+            data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
+            falkor_graph_name=graph_name, falkor_provider=provider_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if res.get("already_enabled"):
+        response.status_code = 200
+        return {"graphId": res["graph_id"], "alreadyEnabled": True}
+    return {"jobId": res["job_id"], "graphId": res["graph_id"], "status": res["status"]}
+
+
+@router.get("/bootstrap/status")
+async def bootstrap_status_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose enablement job to read."),
+    _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Live progress of the enablement job — phase, counts, percent, and (on a terminal
+    job) the integrity report. Deliberately NOT flag-gated: a job started before an
+    admin turned versioning off must still be observable. Scoped to ``ws_id`` so a job
+    is never visible (nor its existence leaked) across tenants."""
+    from backend.app.services.versioning.bootstrap_worker import bootstrap_status
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="no enablement job for this data source")
+    return status
+
+
+@router.post("/bootstrap/retry", status_code=202)
+async def bootstrap_retry_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(...),
+    mode: str = Query("resume", description="resume (from the last window) | restart (re-read the source)"),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Resume a failed copy from its last committed window, or start it over (for a
+    source that changed while it was being read)."""
+    from backend.app.services.versioning.bootstrap_worker import retry_bootstrap
+    if mode not in ("resume", "restart"):
+        raise HTTPException(status_code=422, detail="mode must be resume or restart")
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        return await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
+                                     workspace_id=ws_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/bootstrap/abandon")
+async def bootstrap_abandon_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Give up on enablement: everything the job imported is removed and the data source
+    reads exactly as it did before. Refused once version control is actually live."""
+    from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
+    from backend.app.services.versioning.service import ConcurrencyError
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        return await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id)
+    except ConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, ws_id: str):
+    """TENANT ISOLATION for the bootstrap routes.
+
+    ``require_ws_manage`` proves the caller may manage *the workspace in the URL* — it says
+    nothing about the data source in the query string. Without this check a manager of
+    workspace A could pass workspace B's ``dataSourceId`` and enable, restart or (worst)
+    ABANDON — i.e. delete — B's versioned graph. The versioning router gets the same
+    guarantee from its ``graph_in_workspace`` dependency; these routes live on the graph
+    router and must do it themselves. 404, not 403: existence isn't leaked across tenants.
+    """
+    from backend.app.db.repositories import data_source_repo
+    ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    if ds is None or getattr(ds, "workspace_id", None) != ws_id:
+        raise HTTPException(status_code=404, detail="unknown data source")
+    return ds
+
+
+async def _pin_projection_target(session: AsyncSession, data_source_id: str, ws_id: str):
+    """The data source's REAL FalkorDB graph + provider — the graph the canvas already
+    reads. The versioned graph is pinned to it (the same target
+    ``projection_target.repair_projection_target`` self-heals to) so the import's
+    projection is a fast-forward, not a drop-and-reseed of data we just copied."""
+    ds = await _data_source_in_workspace(session, data_source_id, ws_id)
+    await _assert_copyable(session, getattr(ds, "provider_id", None))
+    return getattr(ds, "provider_id", None), getattr(ds, "graph_name", None)
+
+
+async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) -> None:
+    """Refuse a provider whose graph we cannot copy — BEFORE anything durable is written.
+
+    The copy is FalkorDB-shaped end to end: it windows over ``ID(n)`` ranges and decodes rows
+    with the FalkorDB property/label readers. Pointed at a Neo4j, Spanner or DataHub source it
+    cannot work — and without this check it fails in the worst possible way: the route answers
+    202, a graph shell + genesis + a seq-2 import commit are already committed, and only then
+    does the worker die on ``ProviderConfigurationError`` — reported as a transient
+    "infrastructure" fault inviting a resume that can never succeed. Worse, a FAILED copy
+    blocks writes to that graph, so the data source is left read-only until an admin abandons
+    a job that was never possible. Fail at the door instead, with the reason.
+
+    ``supports_copy`` already encodes exactly this and was, until now, consulted by nothing.
+    """
+    if provider_id in (None, "", "default"):
+        return                                     # env-default instance: FalkorDB by definition
+    from backend.app.db.repositories import provider_repo
+    from backend.common.interfaces.provider import capability_for
+
+    prov = await provider_repo.get_provider_orm(session, provider_id)
+    ptype = getattr(prov, "provider_type", None)
+    if prov is None or not ptype:
+        raise HTTPException(status_code=404, detail="unknown provider")
+    if not capability_for(ptype).supports_copy:
+        raise HTTPException(status_code=422, detail={
+            "type": "provider_unsupported",
+            "message": (f"Version control can't be enabled for a '{ptype}' data source yet — "
+                        "copying its graph into version history is only supported for "
+                        "FalkorDB sources."),
+        })
 
 
 @router.post("/resync")
@@ -143,6 +275,15 @@ async def resync_versioned_graph_endpoint(
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
     strategy: str = Query("merge", description="merge | external_wins"),
+    _gate: None = Depends(require_versioning_enabled),
+    # A WRITE gated on READ. The graph router's blanket dependency is
+    # `workspace:datasource:read`, and this route added nothing on top — so any member who
+    # could merely LOOK at a data source could commit a `sync` to its main branch, overwriting
+    # source-authoritative fields across the whole graph. Every other write on this router
+    # (bootstrap, and its retry/abandon siblings) requires manage; this one was simply missed.
+    # Tightening is deliberate and is a breaking change for any caller relying on read-only
+    # access — which is precisely the access that should never have worked.
+    _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):

@@ -320,7 +320,12 @@ class JobORM(VersioningBase):
             name="ck_jobs_status",
         ),
         CheckConstraint(
-            "job_type IN ('ingest','projection','rebuild','export')", name="ck_jobs_type"
+            # 'bootstrap' = "enable version control" (bootstrap_worker). Deliberately NOT
+            # 'ingest': that is the file-import worker's type, and a worker claims by
+            # job_type — sharing one would have the two run each other's jobs. Existing
+            # DBs get it via migration 20260713_1400_jobs_bootstrap.
+            "job_type IN ('ingest','projection','rebuild','export','bootstrap')",
+            name="ck_jobs_type",
         ),
     )
 
@@ -390,8 +395,10 @@ class CommitORM(VersioningBase):
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
         Index("ix_commits_idem", "graph_id", "idempotency_key"),
         CheckConstraint(
+            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind
+            # (create_all never alters live tables); keep the sets in sync.
             "kind IN ('genesis','edit','checkpoint','squash_publish','import',"
-            "'sync','revert')",
+            "'sync','revert','restore')",
             name="ck_commits_kind",
         ),
     )
