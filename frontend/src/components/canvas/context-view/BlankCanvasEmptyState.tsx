@@ -17,6 +17,7 @@ import { PenLine, Plus, Shapes, Info, ChevronDown } from 'lucide-react'
 import { useEntityTypes, useRootEntityTypes } from '@/store/schema'
 import type { EntityTypeSchema } from '@/types/schema'
 import { DeclaredVsPhysical } from '@/features/ontology/components/DeclaredVsPhysical'
+import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 
 const MAX_QUICK_TYPES = 4
@@ -47,6 +48,14 @@ export function BlankCanvasEmptyState({
   const rootTypeIds = useRootEntityTypes()
   const [showBlueprint, setShowBlueprint] = useState(false)
 
+  // A blank model IS a versioned model — it exists as nothing but drafts and commits. With
+  // version control off it cannot be built AT ALL: `ensureDraftOpen()` returns null and the
+  // server refuses the writes. Offering "Start building" anyway produced a button that did
+  // nothing at all when clicked, and said nothing about why. Permission and availability are
+  // different reasons to be read-only, and the user is owed the one that is actually true.
+  const versioningEnabled = useFeature('versioningEnabled')
+  const canBuild = canManage && versioningEnabled
+
   // Root types first (the natural tops of the containment tree); pad with the
   // lowest-level types when the ontology declares no explicit roots.
   const quickTypes = useMemo(() => {
@@ -70,12 +79,18 @@ export function BlankCanvasEmptyState({
           <PenLine className="w-7 h-7 text-accent-lineage" />
         </span>
         <h2 className="text-lg font-bold text-ink leading-tight">
-          {modelName ? `Start building ${modelName}` : 'Start building your model'}
+          {canBuild
+            ? (modelName ? `Start building ${modelName}` : 'Start building your model')
+            : (modelName ? `${modelName} is empty` : 'This model is empty')}
         </h2>
         <p className="text-sm text-ink-muted mt-1.5">
-          {ontologyName
-            ? <>This blank model follows the <span className="font-medium text-ink">{ontologyName}</span> blueprint — it guides which entities can go where, so everything you add stays consistent.</>
-            : 'Add entities, nest them into a hierarchy, and connect them to map your data flows.'}
+          {!canBuild
+            ? (ontologyName
+              ? <>This blank model follows the <span className="font-medium text-ink">{ontologyName}</span> blueprint. Nothing has been added to it yet.</>
+              : 'Nothing has been added to this model yet.')
+            : ontologyName
+              ? <>This blank model follows the <span className="font-medium text-ink">{ontologyName}</span> blueprint — it guides which entities can go where, so everything you add stays consistent.</>
+              : 'Add entities, nest them into a hierarchy, and connect them to map your data flows.'}
         </p>
 
         {ontologyName && (
@@ -100,7 +115,7 @@ export function BlankCanvasEmptyState({
           </div>
         )}
 
-        {isDraft ? (
+        {isDraft && canBuild ? (
           <>
             <button
               onClick={() => onAddEntity()}
@@ -133,7 +148,7 @@ export function BlankCanvasEmptyState({
               add an entity, <kbd className="px-1.5 py-0.5 rounded border border-glass-border bg-canvas-overlay text-[10px] font-semibold">C</kbd> to connect two.
             </p>
           </>
-        ) : canManage ? (
+        ) : canBuild ? (
           <button
             onClick={onStartBuilding}
             className="mt-5 inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-lg shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -141,6 +156,13 @@ export function BlankCanvasEmptyState({
             <PenLine className="w-4 h-4" />
             Start building
           </button>
+        ) : !versioningEnabled ? (
+          // Not a permissions problem, and saying it is would send the user to ask the wrong
+          // person. Nobody can build here — the capability itself is switched off.
+          <p className="mt-4 text-xs text-ink-muted">
+            Editing is turned off for this workspace, so this model is view-only.
+            An administrator can turn it back on.
+          </p>
         ) : (
           <p className="mt-4 text-xs text-ink-muted">
             Nothing has been added yet. Someone with edit access can start building this model.

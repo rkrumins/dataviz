@@ -43,6 +43,16 @@ interface LayerColumnProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
+  /**
+   * True only for a `kind === 'blank'` model — one authored from nothing.
+   *
+   * It changes what an empty column MEANS, and therefore what it must say. In a Context View
+   * the entities exist perfectly well in the graph; this column simply has none ASSIGNED to it,
+   * and telling the user "No entities yet" says their data is missing when it is not — the most
+   * alarming thing you can tell someone about their own graph. In a blank model nothing has been
+   * created yet, and "No entities yet" is exactly right.
+   */
+  isBlankModel?: boolean
   /** "Build a lot at once" scoped to this layer — a quieter sibling of onAddToLayer. */
   onBuildToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
@@ -102,6 +112,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDoubleClick,
   onAddChild,
   onAddToLayer,
+  isBlankModel = false,
   onBuildToLayer,
   onBeginConnect,
   onLayerContextMenu,
@@ -1107,8 +1118,19 @@ export const LayerColumn = React.memo(function LayerColumn({
                       style={{ color: `${layer.color}40` }}
                     />
                   </div>
-                  <p className="text-sm font-medium text-ink-muted/60">No entities yet</p>
-                  <p className="text-xs text-ink-muted/40 mt-1">Click + to add entities</p>
+                  <p className="text-sm font-medium text-ink-muted/60">
+                    {isBlankModel ? 'No entities yet' : 'No assigned entities yet'}
+                  </p>
+                  {/* The hint follows the affordance. `onAddToLayer` is what renders the "+"
+                      (see the header above), and the caller only passes it inside a draft — so
+                      with editing unavailable (read-only, or version control switched off) there
+                      is no "+" anywhere on screen, and telling someone to click one is just a
+                      small lie in the corner of the page. */}
+                  {onAddToLayer && (
+                    <p className="text-xs text-ink-muted/40 mt-1">
+                      {isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
+                    </p>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>
