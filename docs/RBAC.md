@@ -6,9 +6,19 @@
 > workspace deletion cascade). The Phase-5 migration
 > `20260603_1100_rbac_uplift` is unchanged.
 
+> **Note on "Phase N" numbering.** The phase numbers in this document
+> (Phase 5 / 6 / 7 …) track *RBAC role-taxonomy* evolution only. A
+> separate document — `docs/audits/rbac-sso-audit-2026-06-05.md` —
+> references a migration it calls "Phase 18"
+> (`20260605_1200_phase18_ws_reads.py`), which belongs to an unrelated
+> workspace-reads scaling work-stream. The two counters are
+> independent; don't read them as one sequence.
+
 ## TL;DR
 
-* Five built-in roles. Two global, three workspace-scoped.
+* Eight built-in roles. Four global-tier (including the default `user`
+  tier for anyone without an explicit global role), four
+  workspace-scoped.
 * Permissions are namespaced by category — `system:*` or `workspace:*`.
   The resolver only emits perms whose category matches the binding's
   scope; cross-category leaves are silently dropped.
@@ -18,20 +28,26 @@
   check — the `org_admin` tier acts in every workspace without
   per-workspace bindings.
 
-## The five roles
+## The eight roles
 
 | Role               | Scope     | Carries (after resolve)                                  | When to bind                                                    |
 |--------------------|-----------|----------------------------------------------------------|-----------------------------------------------------------------|
 | `super_admin`      | global    | `system:admin` (implies everything)                      | Platform owner / SRE break-glass. Bind sparingly.               |
 | `org_admin`        | global    | `system:org-admin`, `system:workspaces:create`, `system:groups:manage`, `workspace:*` (via shortcut) | Org-wide operator who curates workspaces but doesn't own users / SSO. |
+| `org_auditor`      | global    | `system:org-viewer`, `system:audit:read`, `system:bindings:read` (read-only cross-workspace via the org-viewer shortcut) | Compliance / audit reviewer — sees every workspace, all bindings, and the audit log; mutates nothing. |
+| `user`             | global    | *(nothing — the implicit default tier; no bindings, no workspace access)* | Not bound directly. The default tier for any account without an explicit global role. |
 | `workspace_admin`  | workspace | `workspace:admin` (auto-implies all `workspace:*`)       | Workspace owner who manages members + settings.                 |
+| `workspace_data_engineer` | workspace | `workspace:datasource:*`, `workspace:view:*`, `workspace:ontology:*`, `workspace:catalog:*`, `workspace:provider:read` | Owns data products in a workspace (sources, views, ontology, catalog) without managing members or settings. |
 | `workspace_member` | workspace | `workspace:view:*`, `workspace:datasource:*`             | Standard contributor — edit views + manage data sources.         |
 | `workspace_viewer` | workspace | `workspace:view:read`, `workspace:datasource:read`       | Read-only auditor / executive who shouldn't be able to edit.    |
 
-The two **global** roles live at `scope_type='global'`, `scope_id=NULL`.
-The three **workspace** roles are stored at global scope too (they're
-templates that bind to any workspace), but binding them only emits
-workspace-category perms thanks to the resolver's filter.
+The **global** roles `super_admin`, `org_admin`, and `org_auditor`
+live at `scope_type='global'`, `scope_id=NULL`; `user` is the implicit
+default tier for any account without a global binding (nothing is
+stored for it). The four **workspace** roles are stored at global
+scope too (they're templates that bind to any workspace), but binding
+them only emits workspace-category perms thanks to the resolver's
+filter.
 
 ## Permission catalogue
 
@@ -42,6 +58,9 @@ workspace-category perms thanks to the resolver's filter.
 | `system:users:manage`           | system    | `super_admin`                      |
 | `system:groups:manage`          | system    | `super_admin`, `org_admin`         |
 | `system:workspaces:create`      | system    | `super_admin`, `org_admin`         |
+| `system:org-viewer`             | system    | `super_admin`, `org_auditor`       |
+| `system:audit:read`             | system    | `super_admin`, `org_auditor`       |
+| `system:bindings:read`          | system    | `super_admin`, `org_auditor`       |
 | `workspace:admin`               | workspace | `super_admin`, `org_admin`, `workspace_admin` |
 | `workspace:datasource:manage`   | workspace | `super_admin`, `org_admin`, `workspace_admin`*, `workspace_member` |
 | `workspace:datasource:read`     | workspace | + `workspace_viewer`               |

@@ -6,7 +6,7 @@
 
 ## System Overview
 
-Synodic is composed of three primary layers: a **React 19 frontend**, a **dual-service FastAPI backend**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Mock).
+Synodic is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Mock).
 
 ```mermaid
 graph TB
@@ -26,11 +26,6 @@ graph TB
         Repos[Repository Layer<br/>SQLAlchemy 2.0 Async]
     end
 
-    subgraph GraphService["Graph Service (Port 8001)"]
-        GS_API[FastAPI Routers<br/>/graph/v1/*]
-        GS_Providers[Provider Discovery<br/>Connectivity Testing]
-    end
-
     subgraph Storage["Data Layer"]
         MgmtDB[(Management DB<br/>SQLite / PostgreSQL)]
         FDB[(FalkorDB<br/>Redis Protocol)]
@@ -42,7 +37,6 @@ graph TB
     Stores --> GPC
     GPC --> RQ
     RQ -->|HTTP + JWT| API
-    RQ -->|HTTP| GS_API
 
     API --> Auth
     Auth --> CE
@@ -54,13 +48,8 @@ graph TB
     PR -->|Cached Instances| DH
     Repos --> MgmtDB
 
-    GS_API --> GS_Providers
-    GS_Providers -.->|Stateless Test| FDB
-    GS_Providers -.->|Stateless Test| Neo4j
-
     style Frontend fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
     style VizService fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
-    style GraphService fill:#1e293b,stroke:#10b981,color:#e2e8f0
     style Storage fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
 ```
 
@@ -246,16 +235,13 @@ graph LR
     style Providers fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
-### Graph Service (Port 8001)
+### In-Process Provider Connectivity
 
-A stateless companion service for **pre-registration** provider testing. It accepts connection parameters in the request body and requires no database access.
+Pre-registration provider testing (list supported provider types, test connectivity before registration, enumerate available graphs/databases) is handled **inside viz-service** via `/admin/providers/test-connection`, which is bulkheaded from the stateful request path.
 
-**Responsibilities:**
-- List supported provider types and capabilities
-- Test connectivity to graph databases before registration
-- Enumerate available graphs/databases on a provider
+A standalone `graph-service` (port 8001) once hosted this probe surface as a separate process, but it was built and deployed yet never actually invoked. The standalone HTTP service was removed; the same provider connectivity now lives in-process, while the underlying Neo4j/DataHub/Spanner adapters (`backend/graph/adapters/`) survive and are imported directly by viz-service.
 
-> See [DECISIONS.md ADR-002](DECISIONS.md#adr-002) for why services are separated.
+> See [DECISIONS.md ADR-018](DECISIONS.md#adr-018) for why the standalone service was retired.
 
 ---
 
@@ -323,10 +309,10 @@ graph TB
         Rate[Rate Limiting<br/>slowapi]
     end
 
-    subgraph Roles["Role-Based Access"]
-        Admin[admin<br/>Full access]
-        User[user<br/>Workspace access]
-        Viewer[viewer<br/>Read-only]
+    subgraph Roles["Authorization (see RBAC.md)"]
+        GlobalR[Global-tier roles<br/>organization-wide]
+        WSR[Workspace-scoped roles<br/>per-workspace]
+        Scopes[Permission scopes<br/>checked per request]
     end
 
     Login --> Argon
@@ -335,14 +321,16 @@ graph TB
     Signup -->|status=pending| Approve
     Approve -->|status=active| JWT
 
-    JWT --> Admin
-    JWT --> User
-    JWT --> Viewer
+    JWT --> Scopes
+    Scopes --> GlobalR
+    Scopes --> WSR
 
     style AuthFlow fill:#1e293b,stroke:#ef4444,color:#e2e8f0
     style Security fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
     style Roles fill:#1e293b,stroke:#10b981,color:#e2e8f0
 ```
+
+Authorization separates **global-tier roles** (organization-wide) from **workspace-scoped roles** (per-workspace), enforced through a permission-scope system checked on every request rather than a fixed set of coarse roles. See [RBAC.md](RBAC.md) for the current role and permission catalogue.
 
 ### Security Controls
 
@@ -375,7 +363,6 @@ graph TB
     subgraph Dev["Development (Local)"]
         Vite[Vite Dev Server<br/>:5173]
         Uvicorn1[Uvicorn<br/>backend.app :8000]
-        Uvicorn2[Uvicorn<br/>backend.graph :8001]
         SQLite[(SQLite<br/>nexus_core.db)]
         Docker[Docker<br/>FalkorDB :6379]
     end
@@ -383,7 +370,6 @@ graph TB
     subgraph Prod["Production"]
         Static[Static Files<br/>React Build]
         Gunicorn1[Gunicorn + Uvicorn Workers<br/>backend.app :8000]
-        Gunicorn2[Gunicorn + Uvicorn Workers<br/>backend.graph :8001]
         PG[(PostgreSQL)]
         FDB2[(FalkorDB Cluster)]
     end
@@ -405,7 +391,7 @@ graph TB
 **Option A — Docker Compose (recommended for first-time setup):**
 
 ```bash
-# Full platform — builds & starts all 5 services
+# Full platform — builds & starts all services
 docker compose up --build
 
 # With demo data (enterprise finance + ecommerce scenarios):
@@ -414,11 +400,10 @@ docker compose --profile seed up --build
 # Open the app:
 #   Frontend:              http://localhost:3080
 #   Viz Service (direct):  http://localhost:8000/health
-#   Graph Service (direct):http://localhost:8001/health
 #   FalkorDB Browser:      http://localhost:3000
 #
 # Default admin login:
-#   Email:    admin@synodic.local
+#   Email:    admin@nexuslineage.local
 #   Password: admin123
 ```
 
@@ -431,10 +416,7 @@ docker compose up -d falkordb postgres
 # 2. Start Backend (Visualization Service)
 GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8000 --reload
 
-# 3. Start Backend (Graph Service)
-uvicorn backend.graph.main:app --port 8001 --reload
-
-# 4. Start Frontend
+# 3. Start Frontend
 cd frontend && npm run dev
 ```
 
@@ -458,10 +440,9 @@ synodic/
 │   ├── common/                       # Shared kernel
 │   │   ├── interfaces/provider.py    # GraphDataProvider ABC
 │   │   └── models/                   # Pydantic DTOs (graph, management, auth)
-│   ├── graph/                        # Graph Service (port 8001)
-│   │   ├── main.py                   # Stateless FastAPI app
-│   │   └── api/v1/endpoints/         # Provider discovery routes
-│   └── stats_service/                # Stats polling background service
+│   ├── graph/                        # Provider adapters (imported in-process by viz-service)
+│   │   └── adapters/                 # Neo4j, DataHub, Spanner connectivity
+│   └── insights_service/             # Insights collection & caching background service
 ├── frontend/
 │   ├── src/
 │   │   ├── components/               # React components by feature
@@ -488,7 +469,6 @@ synodic/
 │   ├── nginx.conf                    # Reverse proxy + SPA config
 │   └── package.json
 │   ├── Dockerfile.viz                   # Visualization Service container
-│   ├── Dockerfile.graph                 # Graph Service container
 │   ├── requirements.txt                 # Python dependencies
 │   └── scripts/
 │       ├── seed_falkordb.py             # Enterprise data generator
@@ -530,16 +510,15 @@ synodic/
 
 ### Container Images
 
-The platform ships as three container images. Source files:
+The platform ships as two container images. Source files:
 
 | Image | Dockerfile | Description |
 |-------|-----------|-------------|
 | **Frontend** | `frontend/Dockerfile` | Multi-stage: Node 20 build + Nginx 1.27 serving |
 | **Visualization Service** | `backend/Dockerfile.viz` | Python 3.13 + Gunicorn/Uvicorn, port 8000 |
-| **Graph Service** | `backend/Dockerfile.graph` | Python 3.13 + Gunicorn/Uvicorn, port 8001 |
 
 Supporting files:
-- `frontend/nginx.conf` — Reverse-proxies `/api/*` to viz-service and `/graph/*` to graph-service; SPA fallback routing; static asset caching
+- `frontend/nginx.conf` — Reverse-proxies `/api/*` to viz-service; SPA fallback routing; static asset caching
 - `.dockerignore` — Excludes `.git`, `node_modules`, `__pycache__`, local DB files, secrets
 
 ### Docker Compose
@@ -550,8 +529,7 @@ The `docker-compose.yml` at the repo root defines the full platform:
 |---------|--------------|-------|---------|
 | `falkordb` | `falkordb/falkordb:latest` | 6379, 3000 (Browser UI) | Graph database |
 | `postgres` | `postgres:16-alpine` | 5432 | Management DB |
-| `viz-service` | `backend/Dockerfile.viz` | 8000 | Auth, workspaces, graph queries, ontology |
-| `graph-service` | `backend/Dockerfile.graph` | 8001 | Provider discovery & connectivity testing |
+| `viz-service` | `backend/Dockerfile.viz` | 8000 | Auth, workspaces, graph queries, ontology, provider connectivity |
 | `frontend` | `frontend/Dockerfile` | 3080 | React SPA + nginx reverse proxy |
 | `seed` | *(profile: seed)* | — | One-shot demo data loader |
 
@@ -559,7 +537,7 @@ The `docker-compose.yml` at the repo root defines the full platform:
 1. PostgreSQL and FalkorDB start and pass health checks
 2. `viz-service` starts, runs `init_db()` (creates all tables in PostgreSQL)
 3. Seeds context model templates, feature registry, system default ontology
-4. Bootstraps admin user (`admin@synodic.local` / `admin123`)
+4. Bootstraps admin user (`admin@nexuslineage.local` / `admin123`)
 5. Bootstraps a default FalkorDB provider + workspace from env vars
 6. Frontend becomes available at `http://localhost:3080`
 
@@ -708,62 +686,6 @@ spec:
       targetPort: 8000
 ```
 
-#### Graph Service
-
-```yaml
-# k8s/graph-service.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: graph-service
-  namespace: synodic
-  labels:
-    app: graph-service
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: graph-service
-  template:
-    metadata:
-      labels:
-        app: graph-service
-    spec:
-      containers:
-        - name: graph-service
-          image: ghcr.io/rkrumins/synodic/graph-service:latest
-          ports:
-            - containerPort: 8001
-          envFrom:
-            - configMapRef:
-                name: synodic-config
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8001
-            initialDelaySeconds: 5
-            periodSeconds: 10
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: graph-service
-  namespace: synodic
-spec:
-  selector:
-    app: graph-service
-  ports:
-    - port: 8001
-      targetPort: 8001
-```
-
 #### Frontend
 
 ```yaml
@@ -835,13 +757,6 @@ spec:
                 name: viz-service
                 port:
                   number: 8000
-          - path: /graph
-            pathType: Prefix
-            backend:
-              service:
-                name: graph-service
-                port:
-                  number: 8001
           - path: /
             pathType: Prefix
             backend:
@@ -864,7 +779,6 @@ kubectl apply -f k8s/
 
 # Check rollout status
 kubectl -n synodic rollout status deployment/viz-service
-kubectl -n synodic rollout status deployment/graph-service
 kubectl -n synodic rollout status deployment/frontend
 
 # View pods

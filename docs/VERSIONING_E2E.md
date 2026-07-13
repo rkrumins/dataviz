@@ -44,7 +44,7 @@ schema is at head.
 | viz-service API (direct) | http://localhost:8000 |
 | viz-service via nginx | http://localhost:3080/api |
 | Swagger | http://localhost:8000/docs |
-| Admin login | `admin@synodic.local` / `admin123` |
+| Admin login | `admin@nexuslineage.local` / `admin123` |
 
 ### Local dev (uvicorn, hot reload)
 
@@ -70,7 +70,7 @@ First boot seeds the admin user (local `.env.dev` uses `admin@nexuslineage.local
 ```bash
 pip install httpx
 python scripts/versioning_smoke.py --base http://localhost:8000 \
-    --email admin@synodic.local --password admin123
+    --email admin@nexuslineage.local --password admin123
 ```
 
 It logs in, then runs the whole MVP over HTTP and prints a green checklist:
@@ -92,7 +92,7 @@ BASE=http://localhost:8000
 # 1) login (persist cookies) and grab the CSRF token
 curl -c cookies.txt -s -X POST $BASE/api/v1/auth/login \
   -H 'content-type: application/json' \
-  -d '{"email":"admin@synodic.local","password":"admin123"}' >/dev/null
+  -d '{"email":"admin@nexuslineage.local","password":"admin123"}' >/dev/null
 CSRF=$(awk '/nx_csrf/{print $7}' cookies.txt)
 WS=ws_demo          # any id works for admin; or pick one from GET /api/v1/admin/workspaces
 

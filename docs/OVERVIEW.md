@@ -1,10 +1,10 @@
-# Synodic: Project Overview, Vision & Roadmap
+# {brand}: Project Overview, Vision & Roadmap
 
 ---
 
-## What is Synodic?
+## What is {brand}?
 
-Synodic is a **workspace-centric data lineage and governance platform** that transforms how organizations explore, understand, and govern their data relationships. It provides an interactive graph visualization experience over heterogeneous data backends, unified by a flexible semantic layer (ontology system).
+{brand} is a **workspace-centric data lineage and governance platform** that transforms how organizations explore, understand, and govern their data relationships. It provides an interactive graph visualization experience over heterogeneous data backends, unified by a flexible semantic layer (ontology system).
 
 ---
 
@@ -54,7 +54,7 @@ Synodic is a **workspace-centric data lineage and governance platform** that tra
 
 ```mermaid
 mindmap
-  root((Synodic))
+  root(({brand}))
     Interactive Lineage
       Trace upstream/downstream
       Multi-granularity zoom
@@ -298,7 +298,7 @@ quadrantChart
     title Lineage Platform Landscape
     x-axis Static Visualization --> Interactive Exploration
     y-axis Single Backend --> Multi-Backend
-    quadrant-1 Synodic Target
+    quadrant-1 {brand} Target
     quadrant-2 Emerging
     quadrant-3 Traditional
     quadrant-4 Specialized
@@ -307,10 +307,10 @@ quadrantChart
     Amundsen: [0.3, 0.2]
     Marquez: [0.25, 0.35]
     OpenLineage: [0.15, 0.7]
-    Synodic: [0.8, 0.8]
+    {brand}: [0.8, 0.8]
 ```
 
-| Aspect | Synodic | DataHub | Atlas | Marquez |
+| Aspect | {brand} | DataHub | Atlas | Marquez |
 |--------|---------|---------|-------|---------|
 | **Graph Backend** | Pluggable (FalkorDB, Neo4j, DataHub) | Neo4j only | JanusGraph | PostgreSQL |
 | **Schema Model** | Versioned ontologies with evolution policies | Fixed schema | Fixed schema | OpenLineage spec |
@@ -320,7 +320,7 @@ quadrantChart
 | **Governance** | Impact analysis, drift detection, evolution policies | Basic | Basic | None |
 | **Deployment** | Docker/K8s, self-hosted or SaaS-ready | Docker/K8s | Docker | Docker |
 
-### Synodic's Differentiators
+### {brand}'s Differentiators
 
 1. **Interactive exploration** over static reports -- trace, zoom, filter in real-time
 2. **Backend-agnostic** -- works with your existing graph infrastructure, no migration required
@@ -347,9 +347,7 @@ graph TB
     end
 
     subgraph Backend["FastAPI Backend"]
-        VizSvc["Visualization Service :8000<br/>Auth, Workspaces, Graph Queries"]
-        GraphSvc["Graph Service :8001<br/>Provider Discovery, Testing"]
-        StatsSvc["Stats Service<br/>Async Polling Sidecar"]
+        VizSvc["Visualization Service :8000<br/>Auth, Workspaces, Graph Queries,<br/>Ontology, Provider Connectivity"]
     end
 
     subgraph Semantic["Semantic Layer"]
@@ -369,11 +367,9 @@ graph TB
     PA --> Admin
 
     Frontend -->|JWT| VizSvc
-    Frontend --> GraphSvc
 
     VizSvc --> Ontology
     VizSvc --> Registry
-    StatsSvc --> Registry
 
     Registry --> FDB
     Registry --> Neo
@@ -406,7 +402,7 @@ The platform has a solid architectural foundation with the core capabilities bui
 
 ```mermaid
 timeline
-    title Synodic Development Phases
+    title {brand} Development Phases
     section Completed
         Core Architecture : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
                           : Pluggable provider system (FalkorDB, Neo4j, DataHub, Mock)
@@ -441,7 +437,6 @@ timeline
     section In Progress
         Data Integrations : Additional provider adapters
                           : Schema drift detection
-                          : Stats polling sidecar service
         UX Refinement     : Layer Studio (WYSIWYG editor)
                           : Smart assignment and auto-organize
                           : Context lenses
