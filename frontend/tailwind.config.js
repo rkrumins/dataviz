@@ -9,6 +9,28 @@ export default {
   darkMode: 'class',
   theme: {
     extend: {
+      screens: {
+        /**
+         * `wide` — the viewport at which the capped page container can host ONE
+         * MORE ~300px column without cramping the cards.
+         *
+         * Do NOT reach for `2xl` (1536px) here. Tailwind's breakpoints measure
+         * the VIEWPORT, but cards live inside PageContainer, which has already
+         * lost 260px to the sidebar and 96px to its gutters, and is capped at
+         * 1760px. At a 1536px viewport that leaves ~1180px of content — five
+         * columns there would be 212px each. A 16" MacBook (1728px) is likewise
+         * still only ~1372px of content: five columns = 255px. Both are cramped.
+         *
+         * 1950px is where `min(1760, vw-260) - 96` first reaches 1596px, which
+         * is exactly five 300px columns plus four 24px gaps. Below it, laptops
+         * keep their current layout untouched; above it, a QHD monitor gains a
+         * column instead of stretching the existing ones.
+         *
+         * Only for TOP-LEVEL pages. Admin panes sit behind a second 288px nav,
+         * so this viewport threshold overshoots there — keep admin grids on `lg:`.
+         */
+        wide: '1950px',
+      },
       colors: {
         // Adaptive backgrounds
         canvas: {

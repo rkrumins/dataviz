@@ -30,6 +30,10 @@ const ALLOWED = new Set([
 ])
 
 const OWNED_CLASSES = [
+  // The current cap. Keep this in step with MAX_WIDTHS.default in PageContainer.
+  'max-w-[1760px]',
+  // The previous cap. Still banned so it cannot creep back in by copy-paste from
+  // an old branch, a stale snippet, or an LLM that learned the old string.
   'max-w-[1440px]',
   'px-6 md:px-10 lg:px-12',
 ]
