@@ -30,6 +30,8 @@ import { TIMEOUTS } from '@/config/timeouts'
 import { useQueryClient } from '@tanstack/react-query'
 import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { cn } from '@/lib/utils'
+import { Check } from 'lucide-react'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -607,6 +609,50 @@ export function WorkspacesPage() {
                 </div>
             )}
 
+            {/* Select-all lived only in the list header, so in grid view bulk
+                selection had no entry point at all. */}
+            {!isLoading && filtered.length > 0 && (
+                <div className="flex items-center justify-between gap-3 -mb-2">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const allSelected = filtered.every(w => selectedIds.has(w.id))
+                            setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
+                        }}
+                        className="inline-flex items-center gap-2 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+                    >
+                        <span className={cn(
+                            'w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-colors',
+                            filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                ? 'bg-indigo-500 border-indigo-500'
+                                : selectedIds.size > 0
+                                    ? 'border-indigo-400/70'
+                                    : 'border-ink-muted/35 hover:border-indigo-500',
+                        )}>
+                            {filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                ? <Check className="w-3 h-3 text-white" strokeWidth={3} />
+                                // Partial selection reads as a dash, not a tick.
+                                : selectedIds.size > 0
+                                    ? <span className="w-2 h-0.5 rounded-full bg-indigo-400" />
+                                    : null}
+                        </span>
+                        {selectedIds.size > 0
+                            ? `${selectedIds.size} selected`
+                            : `Select all ${filtered.length}`}
+                    </button>
+
+                    {selectedIds.size > 0 && (
+                        <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                        >
+                            Clear
+                        </button>
+                    )}
+                </div>
+            )}
+
             {/* ── Filter toolbar ── */}
             <WorkspaceFilterToolbar
                 search={searchInput}
@@ -647,6 +693,7 @@ export function WorkspacesPage() {
                                 ws={ws}
                                 isSelected={selectedIds.has(ws.id)}
                                 onToggleSelect={() => toggleSelect(ws.id)}
+                                selectionActive={selectedIds.size > 0}
                                 stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
                                 healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}

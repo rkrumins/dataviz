@@ -39,6 +39,9 @@ interface WorkspaceCardProps {
     /** Bulk selection. Omit both to render a non-selectable card. */
     isSelected?: boolean
     onToggleSelect?: () => void
+    /** True once ANY card is selected — the whole grid switches to selection mode,
+     *  so every checkbox becomes solid rather than a hover-only hint. */
+    selectionActive?: boolean
     stats: { nodes: number; edges: number; types: number }
     healthStatus?: WorkspaceHealth
     dsProviders: WsDataSourceProviderInfo[]
@@ -99,6 +102,7 @@ export function WorkspaceCard({
     ws,
     isSelected = false,
     onToggleSelect,
+    selectionActive = false,
     stats,
     healthStatus,
     dsProviders,
@@ -150,21 +154,34 @@ export function WorkspaceCard({
             {/* ── Identity ── */}
             <div className="px-5 pt-4 pb-3">
                 <div className="flex items-start gap-3">
-                    {/* Selection — visible when selected, on hover otherwise, so the
-                        card doesn't wear a permanent checkbox it rarely needs. */}
+                    {/* Selection.
+                        It used to be opacity-0 until you hovered the card, with a
+                        border-glass-border box that is nearly invisible on dark — so
+                        the only way to find it was to already know it was there. It is
+                        now ALWAYS drawn: muted while idle, solid the moment the grid is
+                        in selection mode. The hit target is padded well past the 18px
+                        box, because a checkbox you have to aim at is its own bug. */}
                     {onToggleSelect && (
                         <button
                             type="button"
                             onClick={e => { e.stopPropagation(); onToggleSelect() }}
                             aria-label={isSelected ? 'Deselect workspace' : 'Select workspace'}
-                            className={cn(
-                                'shrink-0 mt-0.5 w-4 h-4 rounded border flex items-center justify-center transition-all',
-                                isSelected
-                                    ? 'bg-indigo-500 border-indigo-500 opacity-100'
-                                    : 'border-glass-border bg-canvas opacity-0 group-hover:opacity-100 hover:border-indigo-500',
-                            )}
+                            aria-pressed={isSelected}
+                            title={isSelected ? 'Deselect' : 'Select for bulk actions'}
+                            className="shrink-0 -m-1.5 p-1.5 group/check"
                         >
-                            {isSelected && <Check className="w-3 h-3 text-white" />}
+                            <span className={cn(
+                                'block w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-all',
+                                isSelected
+                                    ? 'bg-indigo-500 border-indigo-500 shadow-sm shadow-indigo-500/40'
+                                    : selectionActive
+                                        // Mid-selection: make every box obvious so the
+                                        // next click is a target, not a hunt.
+                                        ? 'border-indigo-400/70 bg-canvas group-hover/check:border-indigo-500'
+                                        : 'border-ink-muted/35 bg-canvas/60 group-hover:border-ink-muted/70 group-hover/check:!border-indigo-500 group-hover/check:bg-indigo-500/10',
+                            )}>
+                                {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                            </span>
                         </button>
                     )}
 
