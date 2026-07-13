@@ -169,6 +169,11 @@ export const docKeyJourneys: DocKeyJourney[] = [
   },
 ]
 
+// TEMP DIAGNOSTIC — glob-based raw import, testing whether this sidesteps
+// the broken per-literal `import('@docs/X.md?raw')` path.
+const rawDocsTest = import.meta.glob('../../../../docs/**/*.md', { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>
+console.log('[diagnostic] rawDocsTest keys:', Object.keys(rawDocsTest))
+
 // ── Document Entries ───────────────────────────────────────────────
 // Adding a new doc? Add one entry here — that's it.
 
@@ -179,7 +184,11 @@ export const docEntries: DocEntry[] = [
     section: 'getting-started',
     title: 'Project Overview',
     description: 'What {brand} is and how the platform works',
-    importFn: () => import('@docs/OVERVIEW.md?raw'),
+    importFn: () => {
+      const key = Object.keys(rawDocsTest).find((k) => k.endsWith('OVERVIEW.md'))
+      if (!key) return Promise.reject(new Error('glob key not found'))
+      return rawDocsTest[key]().then((text) => ({ default: text }))
+    },
   },
 
   // Architecture
