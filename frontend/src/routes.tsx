@@ -45,6 +45,7 @@ const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => (
 
 // Docs (public, self-contained layout)
 const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
+const DocsHome = lazy(() => import('@/components/docs/DocsHome').then(m => ({ default: m.DocsHome })))
 const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m => ({ default: m.DocsContent })))
 const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
 
@@ -83,7 +84,7 @@ export const router = createBrowserRouter([
     path: '/docs',
     element: <Lazy><DocsPage /></Lazy>,
     children: [
-      { index: true, element: <Navigate to="overview" replace /> },
+      { index: true, element: <Lazy><DocsHome /></Lazy> },
       { path: 'faq', element: <Lazy><DocsFAQ /></Lazy> },
       { path: ':slug', element: <Lazy><DocsContent /></Lazy> },
     ],

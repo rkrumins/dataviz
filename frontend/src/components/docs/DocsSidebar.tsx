@@ -72,7 +72,7 @@ export function DocsSidebar() {
           const SectionIcon = section.icon
           return (
             <div key={section.id} className="space-y-0.5">
-              <div className="flex items-center gap-2 px-2 py-1.5">
+              <div className="sticky top-0 z-10 flex items-center gap-2 px-2 py-1.5 bg-canvas-elevated">
                 <SectionIcon className="w-3.5 h-3.5 text-ink-muted" />
                 <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
                   {section.label}

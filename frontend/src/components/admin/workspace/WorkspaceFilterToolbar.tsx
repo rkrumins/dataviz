@@ -29,7 +29,7 @@ export type WorkspaceSortKey =
   | 'most-sources'
   | 'most-entities'
 
-export type HealthFilter = 'all' | 'healthy' | 'warning' | 'critical' | 'idle' | 'empty'
+export type HealthFilter = 'all' | 'healthy' | 'warning' | 'critical' | 'no-data' | 'empty'
 
 interface WorkspaceFilterToolbarProps {
   search: string
@@ -74,8 +74,8 @@ const HEALTH_OPTIONS: { key: HealthFilter; label: string; dot: string | null }[]
   { key: 'healthy', label: 'Ready', dot: 'bg-emerald-500' },
   { key: 'warning', label: 'Syncing', dot: 'bg-amber-500' },
   { key: 'critical', label: 'Needs attention', dot: 'bg-red-500' },
-  { key: 'idle', label: 'Not aggregated', dot: 'bg-slate-400' },
-  { key: 'empty', label: 'No data', dot: 'bg-slate-300' },
+  { key: 'no-data', label: 'No data yet', dot: 'bg-slate-400' },
+  { key: 'empty', label: 'No sources', dot: 'bg-slate-300' },
 ]
 
 /* ------------------------------------------------------------------ */

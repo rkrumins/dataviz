@@ -212,12 +212,25 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
   }, [allWorkspaceViews])
 
   // Derived: healthStatus
+  //
+  // Health asks "can I use this workspace", so it needs the node count — a
+  // workspace with data is Ready even when its rollups have never run. Passing
+  // nothing here would report every workspace as "Checking…" forever.
   const healthStatus = useMemo(() => {
     if (!workspace) return 'unknown' as const
     const entries = Object.values(readinessMap)
     if (entries.length === 0) return 'unknown' as const
-    return deriveWorkspaceHealth(entries.map(r => ({ aggregationStatus: r.aggregationStatus })))
-  }, [workspace, readinessMap])
+
+    const statsLoaded = Object.keys(dsStatsMap).length > 0
+    const nodeCount = statsLoaded
+      ? Object.values(dsStatsMap).reduce((n, s) => n + s.nodeCount, 0)
+      : undefined
+
+    return deriveWorkspaceHealth(
+      entries.map(r => ({ aggregationStatus: r.aggregationStatus })),
+      { nodeCount },
+    )
+  }, [workspace, readinessMap, dsStatsMap])
 
   // Derived: aggregateStats
   const aggregateStats = useMemo(() => {

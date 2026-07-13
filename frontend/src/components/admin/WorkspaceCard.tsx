@@ -369,6 +369,15 @@ export function WorkspaceCard({
                     <span className="text-[10px] text-ink-muted truncate" title={new Date(ws.updatedAt).toLocaleString()}>
                         Updated {timeAgo(ws.updatedAt)}
                     </span>
+                    {/* When it came into existence. The card only ever said when it was
+                        last touched, which says nothing about how long it has been here. */}
+                    <span className="w-px h-3 bg-glass-border shrink-0 hidden sm:block" />
+                    <span
+                        className="text-[10px] text-ink-muted/70 truncate hidden sm:block"
+                        title={`Created ${new Date(ws.createdAt).toLocaleString()}`}
+                    >
+                        Created {timeAgo(ws.createdAt)}
+                    </span>
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {onManageMembers && (

@@ -442,7 +442,9 @@
   }
 
   .prose-synodic img {
-    @apply rounded-xl max-w-full my-4;
+    @apply rounded-2xl max-w-full my-6 border;
+    border-color: var(--nx-border-glass);
+    box-shadow: var(--nx-shadow-lg);
   }
 
   .prose-synodic .task-list-item {

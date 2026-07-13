@@ -54,6 +54,12 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         accessLevel=row.access_level,
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
+        # The column existed and was never mapped, so DataSourceResponse fell back to
+        # its "none" default for EVERY source. The workspace list therefore reported
+        # the whole estate as un-aggregated — a workspace holding 2.1M nodes across 8
+        # sources rendered a grey "Not aggregated" chip, and the Health filter's
+        # Ready / Syncing / Needs-attention options could never match anything.
+        aggregationStatus=row.aggregation_status or "none",
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )

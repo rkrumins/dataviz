@@ -211,3 +211,35 @@ async def test_attaching_the_same_item_twice_to_the_SAME_workspace_is_a_409(
         f"/api/v1/admin/workspaces/{ws}/data-sources", json={"catalogItemId": item},
     )
     assert again.status_code == 409
+
+
+async def test_data_source_response_reports_the_REAL_aggregation_status(
+    test_client: AsyncClient, db_session: AsyncSession,
+):
+    """DataSourceResponse.aggregation_status defaults to "none", and the repo never
+    mapped the column — so the API reported the ENTIRE estate as un-aggregated
+    regardless of the database. A workspace holding 2.1M nodes across 8 sources
+    rendered a grey "Not aggregated" chip, and the Health filter's Ready / Syncing /
+    Needs-attention options could never match a single workspace."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories import workspace_repo
+
+    ws_id = await _workspace(test_client, "Aggregated WS")
+    item = await _catalog_item(test_client, "Agg Source")
+    resp = await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_id}/data-sources", json={"catalogItemId": item},
+    )
+    assert resp.status_code in (200, 201)
+    ds_id = resp.json()["id"]
+
+    # The aggregation worker marks it ready.
+    ds = await db_session.get(WorkspaceDataSourceORM, ds_id)
+    ds.aggregation_status = "ready"
+    await db_session.commit()
+
+    rows = await workspace_repo.list_workspaces(db_session)
+    ws = next(w for w in rows if w.id == ws_id)
+
+    assert ws.data_sources[0].aggregation_status == "ready", (
+        "the column is mapped nowhere, so this silently fell back to 'none'"
+    )

@@ -127,7 +127,19 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
                 <span className="font-semibold">{stats.types > 0 ? stats.types : '\u2014'}</span>
             </div>
 
-            <span className="text-[11px] text-ink-muted">{new Date(ws.updatedAt).toLocaleDateString()}</span>
+            {/* Created, then Updated. The list only ever showed the latter. */}
+            <span
+                className="text-[11px] text-ink-muted/70"
+                title={new Date(ws.createdAt).toLocaleString()}
+            >
+                {new Date(ws.createdAt).toLocaleDateString()}
+            </span>
+            <span
+                className="text-[11px] text-ink-muted"
+                title={new Date(ws.updatedAt).toLocaleString()}
+            >
+                {new Date(ws.updatedAt).toLocaleDateString()}
+            </span>
 
             <WorkspaceRowActions
                 ws={ws}

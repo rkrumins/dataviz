@@ -380,7 +380,9 @@ export function WorkspacesPage() {
         }
 
         if (healthFilter !== 'all') {
-            result = result.filter(ws => deriveWorkspaceHealth(ws.dataSources || []) === healthFilter)
+            result = result.filter(ws =>
+                deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })
+                    === healthFilter)
         }
 
         result = [...result].sort((a, b) => {
@@ -410,11 +412,11 @@ export function WorkspacesPage() {
     const healthCounts = useMemo(() => {
         const counts: Record<string, number> = { all: workspaces.length }
         for (const ws of workspaces) {
-            const h = deriveWorkspaceHealth(ws.dataSources || [])
+            const h = deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })
             counts[h] = (counts[h] ?? 0) + 1
         }
         return counts
-    }, [workspaces])
+    }, [workspaces, dsStats])
 
     const selectedWorkspaces = useMemo(
         () => workspaces.filter(w => selectedIds.has(w.id)),
@@ -695,7 +697,7 @@ export function WorkspacesPage() {
                                 onToggleSelect={() => toggleSelect(ws.id)}
                                 selectionActive={selectedIds.size > 0}
                                 stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
-                                healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
+                                healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}
                                 schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
                                 onOpen={() => navigate(`/workspaces/${ws.id}`)}
@@ -713,7 +715,7 @@ export function WorkspacesPage() {
                 </div>
             ) : (
                 <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                    <div className="grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                    <div className="grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
                         {/* Select-all: the fastest way to bulk-act, and it selects only
                             what's currently FILTERED — not the whole catalogue. */}
                         <button
@@ -725,7 +727,7 @@ export function WorkspacesPage() {
                             aria-label="Select all workspaces"
                             className="w-4 h-4 rounded border border-glass-border bg-canvas hover:border-indigo-500 transition-colors"
                         />
-                        <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Updated</span><span></span>
+                        <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Created</span><span>Updated</span><span></span>
                     </div>
                     {filtered.map((ws, i) => (
                         <WorkspaceListRow
@@ -735,7 +737,7 @@ export function WorkspacesPage() {
                             isSelected={selectedIds.has(ws.id)}
                             onToggleSelect={() => toggleSelect(ws.id)}
                             stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
-                            healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
+                            healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
                             dsProviders={wsProviderInfoMap[ws.id] || []}
                             onOpen={() => navigate(`/workspaces/${ws.id}`)}
                             onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
