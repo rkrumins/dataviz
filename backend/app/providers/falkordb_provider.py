@@ -1289,7 +1289,9 @@ class FalkorDBProvider(GraphDataProvider):
         async with self._failover_lock:
             if seen_generation != self._conn_generation:
                 return  # someone else already rebuilt for this failure
-            from backend.app.providers.falkordb_connection import build_graph_client
+            from backend.app.providers.falkordb_connection import (
+                build_graph_client, aclose_graph_client,
+            )
 
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
@@ -1299,6 +1301,7 @@ class FalkorDBProvider(GraphDataProvider):
             pool_kwargs = self._build_pool_kwargs(socket_timeout)
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
+            old_db, old_proj_db = self._db, self._proj_db
             self._db, self._pool = await build_graph_client(
                 self._conn_cfg, graph_name=self._graph_name, pool_kwargs=pool_kwargs,
             )
@@ -1318,14 +1321,16 @@ class FalkorDBProvider(GraphDataProvider):
                 "FalkorDB %s: rebuilt client after failover (generation %d, %s).",
                 self._graph_name, self._conn_generation, self._conn_cfg.describe(),
             )
-            # Best-effort close of superseded pools. In-flight ops on them
-            # either complete or fail and are retried by _run_guarded.
-            for p in (old_pool, old_proj_pool):
-                if p is not None and p is not self._pool and p is not self._proj_pool:
-                    try:
-                        await p.aclose()
-                    except Exception:
-                        pass
+            # Best-effort close of superseded clients AND pools. Closing the pool
+            # alone is not enough in cluster mode: the client is a RedisCluster
+            # holding a pool PER node, which the pinned pool does not own. In-flight
+            # ops on them either complete or fail and are retried by _run_guarded.
+            for old_d, old_p in ((old_db, old_pool), (old_proj_db, old_proj_pool)):
+                if old_d is self._db or old_d is self._proj_db:
+                    old_d = None            # still in use — rebuilt to the same object
+                if old_p is self._pool or old_p is self._proj_pool:
+                    old_p = None
+                await aclose_graph_client(old_d, old_p)
 
     async def _run_guarded(self, call: Callable[[], Awaitable[Any]]) -> Any:
         """Execute a graph call with transparent retries for transient
@@ -8572,14 +8577,28 @@ class FalkorDBProvider(GraphDataProvider):
                 await asyncio.wait_for(self._redis.aclose(), timeout=_close_timeout)
             if self._redis_pool is not None:
                 await asyncio.wait_for(self._redis_pool.aclose(), timeout=_close_timeout)
-            if self._pool is not None:
-                await asyncio.wait_for(self._pool.aclose(), timeout=_close_timeout)
+            # Close the graph CLIENTS as well as the pinned pools: in cluster mode
+            # the client is a RedisCluster owning a pool per node, so closing
+            # self._pool alone leaked every node pool. _proj_db is self._db outside
+            # cluster mode, where the second close is a harmless no-op.
+            from backend.app.providers.falkordb_connection import aclose_graph_client
+
+            await asyncio.wait_for(
+                aclose_graph_client(self._db, self._pool), timeout=_close_timeout,
+            )
+            if self._proj_db is not None:
+                await asyncio.wait_for(
+                    aclose_graph_client(self._proj_db, self._proj_pool),
+                    timeout=_close_timeout,
+                )
         except Exception as exc:
             logger.warning("Error closing FalkorDB pools: %s", exc)
         finally:
             self._graph = None
             self._proj_graph = None
             self._pool = None
+            self._proj_pool = None
             self._redis_pool = None
             self._redis = None
             self._db = None
+            self._proj_db = None
