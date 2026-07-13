@@ -750,6 +750,17 @@ export interface WorkspaceSchema {
    * Derived from ontology resolution.
    */
   rootEntityTypes?: string[];
+
+  /**
+   * SHA-256 of the ontology this schema was derived from, carried through from
+   * `GraphSchema.ontologyDigest`. A view stamps the same hash onto its row when
+   * saved, so the ViewWizard can compare the two and warn that the ontology has
+   * moved underneath it (see `hasOntologyDrifted`).
+   *
+   * Null means "can't check" — a synthetic cache-miss schema, or an ontology the
+   * backend couldn't digest. The drift check treats null as skip, never as drift.
+   */
+  ontologyDigest?: string | null;
 }
 
 export interface GlobalVisualConfig {
