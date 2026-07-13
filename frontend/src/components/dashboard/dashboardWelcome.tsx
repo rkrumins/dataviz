@@ -16,15 +16,27 @@ import { Plus, Compass, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ViewActivityEntry } from '@/services/viewApiService'
 
-/** Time-of-day greeting. Local clock — this is a pleasantry, not a timestamp. */
-export function greetingFor(name: string | undefined, hour: number): string {
-    const part =
-        hour < 5 ? 'Working late' :
-        hour < 12 ? 'Good morning' :
-        hour < 18 ? 'Good afternoon' :
-        'Good evening'
+/**
+ * Time-of-day salutation. Local clock — this is a pleasantry, not a timestamp.
+ *
+ * Returned WITHOUT the name so the hero can render the name as its own element:
+ * the greeting is the headline now, and the person's name is the part that
+ * should catch the eye.
+ */
+export function salutationFor(hour: number): string {
+    if (hour < 5) return 'Working late'
+    if (hour < 12) return 'Good morning'
+    if (hour < 18) return 'Good afternoon'
+    return 'Good evening'
+}
 
-    return name ? `${part}, ${name}` : part
+/** Initials for the welcome avatar. "System Admin" → "SA". */
+export function initialsOf(first?: string, last?: string): string {
+    const f = (first ?? '').trim()
+    const l = (last ?? '').trim()
+    if (f && l) return (f[0] + l[0]).toUpperCase()
+    if (f) return f.slice(0, 2).toUpperCase()
+    return '?'
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -60,14 +72,14 @@ export function whatsNewLine(
 // ── CTAs ───────────────────────────────────────────────────────────────────
 
 const PRIMARY = cn(
-    'group inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold',
+    'group inline-flex items-center gap-2.5 rounded-2xl px-6 py-3.5 text-[15px] font-bold',
     'bg-gradient-to-r from-accent-lineage to-violet-600 text-white',
-    'shadow-lg shadow-accent-lineage/20 hover:shadow-xl hover:-translate-y-0.5',
+    'shadow-xl shadow-accent-lineage/25 hover:shadow-2xl hover:shadow-accent-lineage/30 hover:-translate-y-0.5',
     'transition-all duration-200',
 )
 
 const SECONDARY = cn(
-    'group inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold',
+    'group inline-flex items-center gap-2 rounded-2xl px-5 py-3.5 text-[15px] font-semibold',
     'glass-panel border border-glass-border text-ink',
     'hover:border-accent-business/40 hover:-translate-y-0.5 transition-all duration-200',
 )
@@ -82,7 +94,7 @@ export function HeroActions({ onCreateView, onResume, resumeLabel, onBrowse }: {
     return (
         <>
             <button type="button" onClick={onCreateView} className={PRIMARY}>
-                <Plus className="w-4 h-4 transition-transform group-hover:rotate-90 duration-200" />
+                <Plus className="w-[18px] h-[18px] transition-transform group-hover:rotate-90 duration-200" />
                 Build a new view
             </button>
 
@@ -90,12 +102,12 @@ export function HeroActions({ onCreateView, onResume, resumeLabel, onBrowse }: {
                 <button type="button" onClick={onResume} className={SECONDARY}>
                     <span className="text-ink-muted font-medium">Pick up</span>
                     <span className="max-w-[14rem] truncate">{resumeLabel}</span>
-                    <ArrowRight className="w-3.5 h-3.5 text-ink-muted transition-transform group-hover:translate-x-0.5" />
+                    <ArrowRight className="w-4 h-4 text-ink-muted transition-transform group-hover:translate-x-0.5" />
                 </button>
             )}
 
             <button type="button" onClick={onBrowse} className={SECONDARY}>
-                <Compass className="w-4 h-4 text-ink-muted" />
+                <Compass className="w-[18px] h-[18px] text-ink-muted" />
                 Browse all views
             </button>
         </>

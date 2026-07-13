@@ -7,7 +7,7 @@
  * "Jump Back In" list this page used to ship.
  */
 import { describe, it, expect } from 'vitest'
-import { greetingFor, whatsNewLine } from './dashboardWelcome'
+import { salutationFor, initialsOf, whatsNewLine } from './dashboardWelcome'
 import type { ViewActivityEntry } from '@/services/viewApiService'
 
 const NOW = new Date('2026-07-13T12:00:00Z').getTime()
@@ -26,24 +26,38 @@ function entry(over: Partial<ViewActivityEntry> & { id: string }): ViewActivityE
     } as ViewActivityEntry
 }
 
-describe('greetingFor', () => {
+describe('salutationFor', () => {
     it('greets by time of day', () => {
-        expect(greetingFor('Priya', 9)).toBe('Good morning, Priya')
-        expect(greetingFor('Priya', 14)).toBe('Good afternoon, Priya')
-        expect(greetingFor('Priya', 20)).toBe('Good evening, Priya')
-        expect(greetingFor('Priya', 3)).toBe('Working late, Priya')
+        expect(salutationFor(9)).toBe('Good morning')
+        expect(salutationFor(14)).toBe('Good afternoon')
+        expect(salutationFor(20)).toBe('Good evening')
+        expect(salutationFor(3)).toBe('Working late')
     })
 
     it('handles the boundaries', () => {
-        expect(greetingFor('P', 5)).toBe('Good morning, P')
-        expect(greetingFor('P', 11)).toBe('Good morning, P')
-        expect(greetingFor('P', 12)).toBe('Good afternoon, P')
-        expect(greetingFor('P', 17)).toBe('Good afternoon, P')
-        expect(greetingFor('P', 18)).toBe('Good evening, P')
+        expect(salutationFor(5)).toBe('Good morning')
+        expect(salutationFor(11)).toBe('Good morning')
+        expect(salutationFor(12)).toBe('Good afternoon')
+        expect(salutationFor(17)).toBe('Good afternoon')
+        expect(salutationFor(18)).toBe('Good evening')
+        expect(salutationFor(0)).toBe('Working late')
+        expect(salutationFor(23)).toBe('Good evening')
+    })
+})
+
+describe('initialsOf', () => {
+    it('takes one letter from each name', () => {
+        expect(initialsOf('System', 'Admin')).toBe('SA')
+        expect(initialsOf('priya', 'sharma')).toBe('PS')
     })
 
-    it('drops the name when we do not have one', () => {
-        expect(greetingFor(undefined, 14)).toBe('Good afternoon')
+    it('falls back to the first two letters of a lone first name', () => {
+        expect(initialsOf('Priya')).toBe('PR')
+    })
+
+    it('never renders an empty avatar', () => {
+        expect(initialsOf()).toBe('?')
+        expect(initialsOf('', '  ')).toBe('?')
     })
 })
 

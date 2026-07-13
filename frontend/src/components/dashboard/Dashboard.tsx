@@ -34,7 +34,7 @@ import { useAuthStore } from '@/store/auth'
 import { useMyActivityFeed, MY_FEED_LIMIT } from '@/hooks/useViewActivity'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
-import { greetingFor, whatsNewLine, HeroActions } from './dashboardWelcome'
+import { salutationFor, initialsOf, whatsNewLine, HeroActions } from './dashboardWelcome'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
@@ -87,7 +87,13 @@ export function Dashboard() {
     const { recent } = useRecentViews()
     const { openViewEditor } = useViewEditorModal()
 
-    const greeting = greetingFor(user?.firstName || undefined, new Date().getHours())
+    const greeting = user
+        ? {
+            salutation: salutationFor(new Date().getHours()),
+            name: user.firstName || undefined,
+            initials: initialsOf(user.firstName, user.lastName),
+        }
+        : undefined
     const statusLine = whatsNewLine(feed ?? [], MY_FEED_LIMIT)
     const resumeTarget = recent?.[0]
 

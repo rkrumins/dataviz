@@ -35,10 +35,11 @@ interface DashboardHeroProps {
     recentSearches?: string[]
     onRemoveRecentSearch?: (q: string) => void
     onClearRecentSearches?: () => void
-    /** "Good evening, Priya" — a greeting, not a job title. The old chip read
-     *  "System · Super Admin · 25 business areas", which is a fact about the
-     *  account, not something the person can act on. */
-    greeting?: string
+    /** The welcome headline — a greeting, not a job title. The old chip read
+     *  "System · Super Admin · 25 business areas": facts about the account, not
+     *  something the person can act on. Absent (signed out / no profile) → the
+     *  hero falls back to its generic headline. */
+    greeting?: { salutation: string; name?: string; initials: string }
     /** One honest line about what changed while they were away. Replaces the
      *  static "Search across workspaces…" blurb when we have something to say. */
     statusLine?: React.ReactNode
@@ -136,21 +137,55 @@ export function DashboardHero({
                 transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
                 className="relative z-10 w-full max-w-2xl"
             >
-                <motion.div
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ delay: 0.05, duration: 0.2 }}
-                    className="inline-flex items-center gap-2 mb-5 px-4 py-1.5 rounded-full glass-panel border border-accent-business/30 text-accent-business text-sm font-semibold"
-                >
-                    <Zap className="w-3.5 h-3.5" />
-                    {greeting ?? 'Data Intelligence Platform'}
-                </motion.div>
-                <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
-                    What would you like<br className="hidden md:block" /> to{' '}
-                    <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
-                        explore?
-                    </span>
-                </h1>
+                {/* The welcome IS the headline. It used to be a small pill above a
+                    generic "What would you like to explore?", so the one personal
+                    thing on the page was the smallest text in the hero. */}
+                {greeting ? (
+                    <>
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.85 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: 0.05, duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                            className="mx-auto mb-5 w-16 h-16 rounded-2xl flex items-center justify-center
+                                       bg-gradient-to-br from-accent-business to-accent-lineage
+                                       text-white text-xl font-black tracking-tight
+                                       shadow-xl shadow-accent-business/25 ring-4 ring-canvas"
+                        >
+                            {greeting.initials}
+                        </motion.div>
+
+                        <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
+                            {greeting.salutation}
+                            {greeting.name && (
+                                <>
+                                    ,{' '}
+                                    <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
+                                        {greeting.name}
+                                    </span>
+                                </>
+                            )}
+                        </h1>
+                    </>
+                ) : (
+                    <>
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: 0.05, duration: 0.2 }}
+                            className="inline-flex items-center gap-2 mb-5 px-4 py-1.5 rounded-full glass-panel border border-accent-business/30 text-accent-business text-sm font-semibold"
+                        >
+                            <Zap className="w-3.5 h-3.5" />
+                            Data Intelligence Platform
+                        </motion.div>
+                        <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
+                            What would you like<br className="hidden md:block" /> to{' '}
+                            <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
+                                explore?
+                            </span>
+                        </h1>
+                    </>
+                )}
+
                 <p className="text-base text-ink-muted mb-8 max-w-lg mx-auto">
                     {statusLine ?? 'Search across your business areas, views, and data sources — or start from a template.'}
                 </p>
