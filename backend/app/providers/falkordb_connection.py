@@ -605,17 +605,9 @@ async def build_graph_client(
         node_kwargs.setdefault("username", cfg.username)
         node_kwargs.setdefault("password", cfg.password)
         pool = ConnectionPool(host=host, port=port, **node_kwargs)
-        # ``Cluster_Conn`` DESTRUCTIVELY pops host/port/username/password (and
-        # retry/retry_on_error) off ``pool.connection_kwargs`` to rebuild its own
-        # RedisCluster. That mutates the very pool we hand back to the caller —
-        # which the provider reuses for its verification ``Redis(connection_pool=
-        # pool).ping()`` and for teardown. Stripped of host/port, redis-py then
-        # silently falls back to **localhost:6379** and the connect fails with a
-        # bogus "connection refused to localhost" (observed against a live
-        # cluster). Snapshot and restore so the returned pool stays usable.
-        _kwargs_before = dict(pool.connection_kwargs)
-        db = FalkorDB(connection_pool=pool)
-        pool.connection_kwargs.update(_kwargs_before)
+        # Cluster_Conn destroys the pool it is handed — see
+        # ``falkordb_client_preserving_pool``.
+        db = falkordb_client_preserving_pool(pool)
         logger.info(
             "falkordb_connection: cluster graph %r routed to owning node %s:%d%s",
             graph_name, host, port,
@@ -733,6 +725,29 @@ def build_graph_pool_kwargs(
     return kw
 
 
+def falkordb_client_preserving_pool(pool: Any) -> Any:
+    """``FalkorDB(connection_pool=pool)`` that does not destroy ``pool``.
+
+    The falkordb client wraps ANY pool whose server is cluster-enabled in
+    ``falkordb.asyncio.cluster.Cluster_Conn``, which rebuilds its own RedisCluster
+    by DESTRUCTIVELY popping ``host`` / ``port`` / ``username`` / ``password`` off
+    ``pool.connection_kwargs``. That mutates the pool we hand back — and every
+    caller reuses it for direct Redis ops (notably the connection-verifying
+    ``Redis(connection_pool=pool).ping()``) and for teardown. Stripped of
+    host/port, redis-py silently reconnects to **localhost:6379** and the connect
+    fails with a bogus "connection refused to localhost".
+
+    Snapshot + restore. Use this at EVERY FalkorDB-from-pool construction site
+    that can face a cluster node, so the hazard cannot be reintroduced.
+    """
+    from falkordb.asyncio import FalkorDB
+
+    _before = dict(pool.connection_kwargs)
+    db = FalkorDB(connection_pool=pool)
+    pool.connection_kwargs.update(_before)
+    return db
+
+
 def build_node_client(
     cfg: FalkorDBConnConfig, host: str, port: int, pool_kwargs: dict,
 ) -> Tuple[Any, Any]:
@@ -742,13 +757,12 @@ def build_node_client(
     slot lookup is not repeated per graph) — TLS still applied here, since raw
     pools need ``connection_class=SSLConnection``.
     """
-    from falkordb.asyncio import FalkorDB
     from redis.asyncio import ConnectionPool
 
     pool = ConnectionPool(
         host=host, port=port, **pool_kwargs, **tls_pool_kwargs(cfg.tls_settings()),
     )
-    return FalkorDB(connection_pool=pool), pool
+    return falkordb_client_preserving_pool(pool), pool
 
 
 def env_conn_config() -> FalkorDBConnConfig:
