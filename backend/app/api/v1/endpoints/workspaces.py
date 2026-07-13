@@ -12,10 +12,10 @@ returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=fals
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM
+from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
 from backend.app.auth.dependencies import (
     get_current_user,
@@ -50,6 +50,7 @@ from backend.common.models.management import (
     DataSourceResponse,
     WorkspaceDataSourceImpactResponse,
     WorkspaceImpactResponse,
+    DataSourceMoveRequest,
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
@@ -511,6 +512,119 @@ async def remove_data_source(
 
     await provider_registry.evict_workspace(workspace_id, session)
     await data_source_repo.delete_data_source(session, ds_id)
+
+@router.post(
+    "/{workspace_id}/data-sources/{ds_id}/move",
+    response_model=DataSourceResponse,
+)
+async def move_data_source(
+    workspace_id: str = Path(...),
+    ds_id: str = Path(...),
+    req: DataSourceMoveRequest = Body(...),
+    user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Re-home a data source into another workspace — ONLY if nothing is built on it.
+
+    A catalog item belongs to exactly one workspace (``uq_ds_catalog_item``), and it
+    is allocated at onboarding. Getting that allocation wrong currently has no
+    remedy short of detaching, which is destructive. This is the remedy, restricted
+    to the case where it is provably safe.
+
+    WHY ZERO VIEWS IS NOT A CONSERVATIVE CHOICE BUT THE ONLY CORRECT ONE:
+
+      * ``views.data_source_id`` is ON DELETE SET NULL. Detach-and-re-add does not
+        delete the old workspace's views — it silently ORPHANS them: alive, pointing
+        at nothing.
+      * Moving the row in place (what this does) keeps ``data_source_id`` valid, but
+        a view still carries ``workspace_id = A`` while its source now lives in B.
+        Members of A would be reading B's data through a workspace-scoped RBAC check
+        that no longer describes reality.
+
+    Soft-deleted views count. Restoring one afterwards would recreate exactly the
+    situation above, so a source with a view in the trash cannot move either.
+
+    Requires datasource:manage on BOTH workspaces — the decorator covers the source
+    workspace; the target is checked below. Moving a source INTO a workspace you
+    don't administer would otherwise be a way to plant data in it.
+    """
+    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    if not ds or ds.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+
+    target_id = req.target_workspace_id
+    if target_id == workspace_id:
+        raise HTTPException(status_code=422, detail="The data source is already in this workspace")
+
+    target = await workspace_repo.get_workspace_orm(session, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Workspace '{target_id}' not found")
+
+    if not has_permission(claims, "workspace:datasource:manage", workspace_id=target_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You don't have permission to add data sources to '{target.name}'",
+        )
+
+    # THE precondition. Counts trashed views too — see the docstring.
+    view_count = (await session.execute(
+        select(func.count())
+        .select_from(ViewORM)
+        .where(ViewORM.data_source_id == ds_id)
+    )).scalar_one()
+    if view_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{view_count} view{'s are' if view_count != 1 else ' is'} built on this "
+                "data source. Moving it would leave them reading a source in another "
+                "workspace. Delete or rebuild them first."
+            ),
+        )
+
+    # A workspace can't hold the same provider+graph twice (uq_ds_ws_prov_graph).
+    if ds.provider_id and ds.graph_name:
+        clash = (await session.execute(
+            select(WorkspaceDataSourceORM.id).where(
+                WorkspaceDataSourceORM.workspace_id == target_id,
+                WorkspaceDataSourceORM.provider_id == ds.provider_id,
+                WorkspaceDataSourceORM.graph_name == ds.graph_name,
+            )
+        )).first()
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{target.name}' already has this graph connected",
+            )
+
+    source_ws_name = (await workspace_repo.get_workspace_orm(session, workspace_id)).name
+
+    # The row keeps its id, so stats, polling config and aggregation state follow it
+    # for free. Only its owner changes.
+    ds.workspace_id = target_id
+    ds.is_primary = False  # primacy is per-workspace; it isn't inherited
+    await session.flush()
+
+    # Both workspaces' cached provider handles now describe the wrong shape.
+    await provider_registry.evict_workspace(workspace_id, session)
+    await provider_registry.evict_workspace(target_id, session)
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="workspace.datasource.moved",
+        payload={
+            "data_source_id": ds_id,
+            "from_workspace_id": workspace_id,
+            "from_workspace_name": source_ws_name,
+            "to_workspace_id": target_id,
+            "to_workspace_name": target.name,
+            "actor_id": user.id,
+        },
+    )
+
+    return await data_source_repo.get_data_source(session, ds_id)
+
 
 @router.get("/{workspace_id}/data-sources/{ds_id}/impact", response_model=WorkspaceDataSourceImpactResponse)
 async def get_data_source_impact(

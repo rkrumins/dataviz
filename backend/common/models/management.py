@@ -997,6 +997,15 @@ class WorkspaceDataSourceImpactResponse(BaseModel):
     views: List[ImpactedEntity] = []
 
 
+class DataSourceMoveRequest(BaseModel):
+    """Re-home a data source into another workspace."""
+
+    target_workspace_id: str = Field(alias="targetWorkspaceId")
+
+    class Config:
+        populate_by_name = True
+
+
 class WorkspaceImpactResponse(BaseModel):
     """Blast-radius report for DELETING a whole workspace.
 

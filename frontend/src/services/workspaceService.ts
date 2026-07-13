@@ -278,6 +278,21 @@ export const workspaceService = {
         })
     },
 
+    /**
+     * Re-home a data source into another workspace.
+     *
+     * The server refuses (409) unless ZERO views are built on it — including
+     * trashed ones. That isn't caution: views.data_source_id is ON DELETE SET
+     * NULL, and a view left in workspace A pointing at a source now owned by
+     * workspace B would read B's data through A's RBAC check.
+     */
+    moveDataSource(workspaceId: string, dataSourceId: string, targetWorkspaceId: string): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(
+            `${ADMIN_API}/${workspaceId}/data-sources/${dataSourceId}/move`,
+            { method: 'POST', body: JSON.stringify({ targetWorkspaceId }) },
+        )
+    },
+
     /** Blast radius of deleting the whole workspace. */
     getImpact(workspaceId: string): Promise<WorkspaceImpactResponse> {
         return request<WorkspaceImpactResponse>(`${ADMIN_API}/${workspaceId}/impact`)

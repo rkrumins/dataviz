@@ -19,11 +19,11 @@ import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Boxes, Database, ClipboardCheck, Sparkles, AlertTriangle, Check,
-    Loader2, ArrowRight, Users,
+    Loader2, ArrowRight, Users, MoveRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
-import { CatalogItemPicker, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
+import { CatalogItemPicker, isMovable, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
 import {
     workspaceService,
     type WorkspaceCreateRequest,
@@ -92,7 +92,6 @@ export function CreateWorkspaceWizard({
     })
 
     const items: PickableCatalogItem[] = bindingsQuery.data ?? catalogItems
-    const freeItems = useMemo(() => items.filter(c => !c.boundWorkspaceId), [items])
 
     // The step list stays STABLE. It is derived from a fetch that lands after the
     // wizard opens, so deriving the STEPS from it would change the wizard's shape
@@ -118,10 +117,20 @@ export function CreateWorkspaceWizard({
 
     const selectedItem = items.find(c => c.id === catalogItemId)
 
+    // A source that already belongs to a workspace but has NOTHING built on it can
+    // be re-homed. Here that cannot happen at create time — the move endpoint needs
+    // a target workspace, and it doesn't exist yet — so the submit is two phases:
+    // create, then move into what we just created.
+    const isMove = Boolean(selectedItem && isMovable(selectedItem))
+
+    // Set when the workspace was created but the move failed. The workspace EXISTS —
+    // pretending the whole thing failed would send the user to create it again.
+    const [moveFailed, setMoveFailed] = useState<string | null>(null)
+
     const reset = useCallback(() => {
         setStep('basics'); setName(''); setDescription('')
         setCatalogItemId(''); setLabel('')
-        setPhase('steps'); setCreated(null); setError(null)
+        setPhase('steps'); setCreated(null); setError(null); setMoveFailed(null)
     }, [])
 
     const handleClose = useCallback(() => {
@@ -133,23 +142,46 @@ export function CreateWorkspaceWizard({
     const handleSubmit = useCallback(async () => {
         setPhase('creating')
         setError(null)
+        setMoveFailed(null)
         try {
             const req: WorkspaceCreateRequest = {
                 name: trimmed,
                 description: description.trim() || undefined,
-                dataSources: catalogItemId
+                // A move can't ride along with the create: the source is still owned
+                // by another workspace, and the POST would hit uq_ds_catalog_item.
+                dataSources: catalogItemId && !isMove
                     ? [{ catalogItemId, label: label.trim() || undefined }]
                     : [],
             }
             const ws = await workspaceService.create(req)
             setCreated(ws)
+
+            if (isMove && selectedItem?.boundWorkspaceId && selectedItem.boundDataSourceId) {
+                try {
+                    await workspaceService.moveDataSource(
+                        selectedItem.boundWorkspaceId,
+                        selectedItem.boundDataSourceId,
+                        ws.id,
+                    )
+                    if (label.trim()) {
+                        await workspaceService.updateDataSource(ws.id, selectedItem.boundDataSourceId, {
+                            label: label.trim(),
+                        })
+                    }
+                } catch (err) {
+                    // The workspace is real. Say what happened instead of rolling it
+                    // back or claiming the whole thing failed — either would be a lie.
+                    setMoveFailed(err instanceof Error ? err.message : 'The data source could not be moved.')
+                }
+            }
+
             setPhase('success')
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not create the workspace.')
             setPhase('steps')
             setStep('review')
         }
-    }, [trimmed, description, catalogItemId, label])
+    }, [trimmed, description, catalogItemId, label, isMove, selectedItem])
 
     if (!isOpen) return null
 
@@ -221,15 +253,30 @@ export function CreateWorkspaceWizard({
                     >
                         <Check className="w-8 h-8 text-white" />
                     </motion.div>
-                    <div>
+                    <div className="max-w-md">
                         <h3 className="text-xl font-bold text-slate-900 dark:text-white">
                             “{created?.name}” is ready
                         </h3>
                         <p className="text-sm text-slate-500 mt-1">
-                            {catalogItemId
-                                ? 'Your data source is attached. Open it to build a view.'
-                                : 'It has no data yet — open it to attach a data source.'}
+                            {moveFailed
+                                ? 'The workspace was created, but the data source stayed where it was.'
+                                : catalogItemId
+                                    ? isMove
+                                        ? `${selectedItem?.name} was moved here.`
+                                        : 'Your data source is attached. Open it to build a view.'
+                                    : 'It has no data yet — open it to attach a data source.'}
                         </p>
+
+                        {/* The workspace EXISTS. Claiming the whole thing failed would
+                            send them off to create a second one. */}
+                        {moveFailed && (
+                            <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-left">
+                                <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                                    {moveFailed} You can try again from the workspace's Data Sources tab.
+                                </p>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
@@ -259,6 +306,7 @@ export function CreateWorkspaceWizard({
                         selectedId={catalogItemId}
                         onSelect={setCatalogItemId}
                         allowSkip
+                        allowMove
                     />
                     {catalogItemId && (
                         <div>
@@ -287,19 +335,29 @@ export function CreateWorkspaceWizard({
                         subtitle="Check it over — you can change all of this afterwards."
                     />
 
+                    {isMove && (
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
+                            <MoveRight className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                            <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                                <span className="font-semibold">
+                                    “{selectedItem?.name}” will be moved out of {selectedItem?.boundWorkspaceName ?? 'its workspace'}.
+                                </span>{' '}
+                                Nothing is built on it, so nothing breaks — it keeps its aggregation
+                                state and stats. The workspace is created first, then the source moves
+                                into it.
+                            </p>
+                        </div>
+                    )}
+
                     <div className="rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 overflow-hidden">
                         <ReviewRow label="Name" value={trimmed || '—'} />
                         <ReviewRow label="Description" value={description.trim() || 'None'} />
                         <ReviewRow
                             label="Data source"
-                            value={selectedItem?.name
-                                ?? (freeItems.length > 0
-                                    ? 'None — attach one later'
-                                    : 'None available')}
-                            hint={selectedItem?.sourceIdentifier
-                                ?? (freeItems.length > 0
-                                    ? undefined
-                                    : 'Every source is allocated to a workspace. Onboard assets in Ingestion to get more.')}
+                            value={selectedItem?.name ?? 'None — attach one later'}
+                            hint={isMove
+                                ? `Moving from ${selectedItem?.boundWorkspaceName ?? 'another workspace'}`
+                                : selectedItem?.sourceIdentifier}
                         />
                         <ReviewRow label="Members" value="Just you, for now" icon={<Users className="w-3.5 h-3.5" />} />
                     </div>

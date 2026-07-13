@@ -40,6 +40,16 @@ class CatalogItemBindingResponse(BaseModel):
     name: str
     bound_workspace_id: Optional[str] = Field(None, alias="boundWorkspaceId")
     bound_workspace_name: Optional[str] = Field(None, alias="boundWorkspaceName")
+    #: The data source row that owns this item, when bound. Needed to MOVE it.
+    bound_data_source_id: Optional[str] = Field(None, alias="boundDataSourceId")
+    #: How many views are built on that data source — INCLUDING soft-deleted ones.
+    #: A source can only be moved when this is zero: `views.data_source_id` is
+    #: ON DELETE SET NULL, so detaching would silently orphan the views (alive,
+    #: pointing at nothing), and moving the row in place would leave a view in
+    #: workspace A reading a source now owned by workspace B — past the
+    #: workspace-scoped RBAC check. A trashed view counts because restoring it
+    #: would recreate exactly that situation.
+    bound_view_count: int = Field(0, alias="boundViewCount")
 
     class Config:
         populate_by_name = True
@@ -95,6 +105,18 @@ async def list_catalog_bindings(
     """
     from backend.app.db.models import CatalogItemORM, WorkspaceORM
 
+    from backend.app.db.models import ViewORM
+    from sqlalchemy import func
+
+    # Every view row that references the bound data source, trashed ones included.
+    view_count = (
+        select(func.count())
+        .select_from(ViewORM)
+        .where(ViewORM.data_source_id == WorkspaceDataSourceORM.id)
+        .correlate(WorkspaceDataSourceORM)
+        .scalar_subquery()
+    )
+
     stmt = (
         select(
             CatalogItemORM.id,
@@ -102,7 +124,9 @@ async def list_catalog_bindings(
             CatalogItemORM.source_identifier,
             CatalogItemORM.name,
             WorkspaceDataSourceORM.workspace_id,
+            WorkspaceDataSourceORM.id.label("data_source_id"),
             WorkspaceORM.name.label("workspace_name"),
+            view_count.label("view_count"),
         )
         .outerjoin(
             WorkspaceDataSourceORM,
@@ -131,6 +155,8 @@ async def list_catalog_bindings(
             name=row.name,
             boundWorkspaceId=row.workspace_id,
             boundWorkspaceName=row.workspace_name,
+            boundDataSourceId=row.data_source_id,
+            boundViewCount=int(row.view_count or 0),
         )
         for row in rows
     ]
