@@ -20,6 +20,11 @@ import { WorkspaceListRow } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
+import { WorkspaceBulkBar } from '@/components/admin/workspace/WorkspaceBulkBar'
+import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import {
+    useWorkspaceDeletion, impactSections, DELETE_CAVEAT,
+} from '@/components/admin/workspace/useWorkspaceDeletion'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useQueryClient } from '@tanstack/react-query'
@@ -111,6 +116,20 @@ export function WorkspacesPage() {
 
     const [totalViews, setTotalViews] = useState(0)
     const [viewCountByWs, setViewCountByWs] = useState<Record<string, number>>({})
+
+    /* ── Bulk selection ── */
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+
+    const toggleSelect = useCallback((wsId: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev)
+            if (next.has(wsId)) next.delete(wsId)
+            else next.add(wsId)
+            return next
+        })
+    }, [])
+
+    const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
 
     /* ── Per-workspace provider info map ── */
     const wsProviderInfoMap = useMemo(() => {
@@ -316,11 +335,20 @@ export function WorkspacesPage() {
     }, [showWizard, canCreateWorkspace])
 
     /* ── Actions ── */
-    const handleDelete = async (wsId: string) => {
-        if (!confirm('Delete this workspace and all its data sources?')) return
-        await workspaceService.delete(wsId)
+    // The old guard was `confirm('Delete this workspace and all its data
+    // sources?')` — wrong by omission. The backend cascade also HARD-deletes every
+    // VIEW in the workspace (including ones already in the trash awaiting restore),
+    // every member's access, and any workspace-scoped custom roles. One line of
+    // browser chrome stood between a click and someone else's dashboards.
+    const deletion = useWorkspaceDeletion(useCallback(() => {
+        clearSelection()
         loadData()
-    }
+    }, [clearSelection, loadData]))
+
+    const handleDelete = useCallback((wsId: string) => {
+        const ws = workspaces.find(w => w.id === wsId)
+        if (ws) void deletion.open([ws])
+    }, [workspaces, deletion])
 
     const handleSetDefault = async (wsId: string) => {
         await workspaceService.setDefault(wsId)
@@ -428,6 +456,29 @@ export function WorkspacesPage() {
     // providers list is expected (they never fetched it), so the nudge
     // would mislead them into clicking a CTA they can't use.
     const showPipelineNudge = !isLoading && isPlatformAdmin && providers.length === 0
+
+    // Live counts per health state. Without these the Health menu offered filters
+    // that matched nothing (every workspace was "unknown"), so choosing one just
+    // blanked the page.
+    const healthCounts = useMemo(() => {
+        const counts: Record<string, number> = { all: workspaces.length }
+        for (const ws of workspaces) {
+            const h = deriveWorkspaceHealth(ws.dataSources || [])
+            counts[h] = (counts[h] ?? 0) + 1
+        }
+        return counts
+    }, [workspaces])
+
+    const selectedWorkspaces = useMemo(
+        () => workspaces.filter(w => selectedIds.has(w.id)),
+        [workspaces, selectedIds],
+    )
+
+    // Deleting a workspace needs workspace:admin ON THAT workspace. Offering a
+    // bulk delete that would 403 on half the selection is worse than not offering
+    // it, so the affordance disappears (with a reason) unless every one qualifies.
+    const canDeleteAllSelected = selectedWorkspaces.length > 0
+        && selectedWorkspaces.every(w => can('workspace:admin', w.id))
 
     /* ── Render ── */
     return (
@@ -604,6 +655,7 @@ export function WorkspacesPage() {
                 onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
                 healthFilter={healthFilter}
                 onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
+                healthCounts={healthCounts}
                 totalCount={workspaces.length}
                 filteredCount={filtered.length}
             />
@@ -631,7 +683,8 @@ export function WorkspacesPage() {
                         <div key={ws.id} className="ws-card-stagger" style={{ animationDelay: `${Math.min(i * 40, 300)}ms` }}>
                             <WorkspaceCard
                                 ws={ws}
-                                index={i}
+                                isSelected={selectedIds.has(ws.id)}
+                                onToggleSelect={() => toggleSelect(ws.id)}
                                 stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
                                 healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}
@@ -651,7 +704,18 @@ export function WorkspacesPage() {
                 </div>
             ) : (
                 <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                    <div className="grid grid-cols-[16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                    <div className="grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                        {/* Select-all: the fastest way to bulk-act, and it selects only
+                            what's currently FILTERED — not the whole catalogue. */}
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const allSelected = filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
+                            }}
+                            aria-label="Select all workspaces"
+                            className="w-4 h-4 rounded border border-glass-border bg-canvas hover:border-indigo-500 transition-colors"
+                        />
                         <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Updated</span><span></span>
                     </div>
                     {filtered.map((ws, i) => (
@@ -659,6 +723,8 @@ export function WorkspacesPage() {
                             key={ws.id}
                             ws={ws}
                             index={i}
+                            isSelected={selectedIds.has(ws.id)}
+                            onToggleSelect={() => toggleSelect(ws.id)}
                             stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
                             healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                             dsProviders={wsProviderInfoMap[ws.id] || []}
@@ -675,6 +741,47 @@ export function WorkspacesPage() {
                     ))}
                 </div>
             )}
+
+            {/* Bulk selection bar */}
+            <WorkspaceBulkBar
+                selectedCount={selectedIds.size}
+                onDelete={canDeleteAllSelected ? () => void deletion.open(selectedWorkspaces) : undefined}
+                onClearSelection={clearSelection}
+                blockedReason="You can only delete workspaces you administer"
+            />
+
+            {/* Delete — single or bulk, same honest blast radius */}
+            <DangerConfirmDialog
+                isOpen={!!deletion.target}
+                title={
+                    (deletion.target?.workspaces.length ?? 0) > 1
+                        ? `Delete ${deletion.target?.workspaces.length} workspaces`
+                        : 'Delete workspace'
+                }
+                subtitle={
+                    (deletion.target?.workspaces.length ?? 0) > 1
+                        ? deletion.target?.workspaces.map(w => w.name).join(', ')
+                        : deletion.target?.workspaces[0]?.name
+                }
+                // Bulk can't ask you to type N names, so it asks for the count —
+                // the same phrase the Explorer's bulk delete uses.
+                confirmPhrase={
+                    (deletion.target?.workspaces.length ?? 0) > 1
+                        ? `delete ${deletion.target?.workspaces.length}`
+                        : deletion.target?.workspaces[0]?.name ?? ''
+                }
+                confirmLabel={
+                    (deletion.target?.workspaces.length ?? 0) > 1
+                        ? `Delete ${deletion.target?.workspaces.length} workspaces`
+                        : 'Delete workspace'
+                }
+                sections={impactSections(deletion.target?.impact ?? null)}
+                loadingImpact={deletion.target?.loading}
+                safeMessage="This workspace is empty — no views, data sources or members will be lost."
+                caveat={DELETE_CAVEAT}
+                onClose={deletion.close}
+                onConfirm={deletion.confirm}
+            />
 
             {/* Create Workspace Wizard */}
             <AdminWizard title="Create Workspace" steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); resetWizard() }} onComplete={handleWizardComplete} isSubmitting={wizSubmitting} completionLabel="Create Workspace" />

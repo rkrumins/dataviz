@@ -686,6 +686,11 @@ class WorkspaceResponse(BaseModel):
     is_active: bool = Field(alias="isActive")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    #: People and groups with access. The cards could not show "who works here"
+    #: without it, and asking per-workspace would be one request per card.
+    member_count: int = Field(0, alias="memberCount")
+    #: Live (non-deleted) views built on this workspace.
+    view_count: int = Field(0, alias="viewCount")
 
     class Config:
         populate_by_name = True
@@ -990,6 +995,28 @@ class ProviderImpactResponse(BaseModel):
 class WorkspaceDataSourceImpactResponse(BaseModel):
     """Blast-radius report when removing a Data Source from a Workspace."""
     views: List[ImpactedEntity] = []
+
+
+class WorkspaceImpactResponse(BaseModel):
+    """Blast-radius report for DELETING a whole workspace.
+
+    Deleting a workspace is not a soft delete of a container — the FK from
+    ``views.workspace_id`` is ON DELETE CASCADE, so every view inside it is
+    HARD-deleted (it never reaches the soft-delete/restore path that the
+    Explorer's own delete uses). Data sources, workspace-scoped role bindings
+    and workspace-scoped custom roles go with it. The UI must be able to say all
+    of that BEFORE the click, not after.
+    """
+    views: List[ImpactedEntity] = []
+    data_sources: List[ImpactedEntity] = Field(default_factory=list, alias="dataSources")
+    member_count: int = Field(0, alias="memberCount")
+    custom_role_count: int = Field(0, alias="customRoleCount")
+    #: Entities held by the workspace's graphs — the data itself is NOT deleted
+    #: from the provider, and the dialog says so rather than implying it is.
+    node_count: int = Field(0, alias="nodeCount")
+
+    class Config:
+        populate_by_name = True
 
 
 # ─── Physical asset stats ──────────────────────────────────────────────────────

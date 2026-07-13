@@ -46,6 +46,7 @@ from backend.common.models.management import (
     DataSourceUpdateRequest,
     DataSourceResponse,
     WorkspaceDataSourceImpactResponse,
+    WorkspaceImpactResponse,
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
@@ -203,6 +204,31 @@ async def update_workspace(
         },
     )
     return ws
+
+
+@router.get("/{workspace_id}/impact", response_model=WorkspaceImpactResponse)
+async def get_workspace_impact(
+    workspace_id: str = Path(...),
+    _user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The blast radius of DELETING this workspace.
+
+    Deleting a workspace is a HARD delete with a cascade, not the tidy soft
+    delete the Explorer performs on a view: ``views.workspace_id`` is
+    ON DELETE CASCADE, so every view in the workspace is destroyed — including
+    ones already soft-deleted and awaiting restore. Data sources, workspace role
+    bindings (i.e. every member's access) and workspace-scoped custom roles go
+    too.
+
+    The UI needs those numbers BEFORE the click. Until now the only guard was a
+    browser ``confirm()`` reading "Delete this workspace and all its data
+    sources?" — which doesn't mention the views at all.
+    """
+    ws = await workspace_repo.get_workspace_orm(session, workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+    return await workspace_repo.get_workspace_impact(session, workspace_id)
 
 
 @router.delete("/{workspace_id}", status_code=204)

@@ -29,7 +29,7 @@ export type WorkspaceSortKey =
   | 'most-sources'
   | 'most-entities'
 
-export type HealthFilter = 'all' | 'healthy' | 'warning' | 'critical'
+export type HealthFilter = 'all' | 'healthy' | 'warning' | 'critical' | 'idle' | 'empty'
 
 interface WorkspaceFilterToolbarProps {
   search: string
@@ -40,6 +40,9 @@ interface WorkspaceFilterToolbarProps {
   onLayoutChange: (l: 'grid' | 'list') => void
   healthFilter: HealthFilter
   onHealthFilterChange: (h: HealthFilter) => void
+  /** How many workspaces sit in each state — an option that matches nothing is
+   *  shown as empty and can't be selected, instead of silently blanking the page. */
+  healthCounts?: Partial<Record<HealthFilter, number>>
   totalCount: number
   filteredCount: number
 }
@@ -57,11 +60,22 @@ const SORT_OPTIONS: { key: WorkspaceSortKey; label: string }[] = [
   { key: 'most-entities', label: 'Most Entities' },
 ]
 
+/**
+ * The old list offered Healthy / Warning / Critical only — three states that this
+ * instance's data never produces, because a source that has never been aggregated
+ * ('none') and a workspace with no sources both fell through to "unknown". Picking
+ * any of them returned an empty page, which is why the filter looked dead.
+ *
+ * These are the states that actually occur, and each option carries its live count
+ * so a filter that would return nothing is visibly, unclickably empty.
+ */
 const HEALTH_OPTIONS: { key: HealthFilter; label: string; dot: string | null }[] = [
   { key: 'all', label: 'All', dot: null },
-  { key: 'healthy', label: 'Healthy', dot: 'bg-emerald-500' },
-  { key: 'warning', label: 'Warning', dot: 'bg-amber-500' },
-  { key: 'critical', label: 'Critical', dot: 'bg-red-500' },
+  { key: 'healthy', label: 'Ready', dot: 'bg-emerald-500' },
+  { key: 'warning', label: 'Syncing', dot: 'bg-amber-500' },
+  { key: 'critical', label: 'Needs attention', dot: 'bg-red-500' },
+  { key: 'idle', label: 'Not aggregated', dot: 'bg-slate-400' },
+  { key: 'empty', label: 'No data', dot: 'bg-slate-300' },
 ]
 
 /* ------------------------------------------------------------------ */
@@ -94,6 +108,7 @@ export function WorkspaceFilterToolbar({
   onLayoutChange,
   healthFilter,
   onHealthFilterChange,
+  healthCounts,
   totalCount,
   filteredCount,
 }: WorkspaceFilterToolbarProps) {
@@ -156,24 +171,37 @@ export function WorkspaceFilterToolbar({
           </button>
 
           {healthOpen && (
-            <div className="absolute right-0 mt-1 w-44 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg z-10 py-1">
-              {HEALTH_OPTIONS.map(opt => (
-                <button
-                  key={opt.key}
-                  onClick={() => { onHealthFilterChange(opt.key); setHealthOpen(false) }}
-                  className={cn(
-                    'w-full px-3 py-2 text-sm flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors',
-                    healthFilter === opt.key && 'font-semibold text-indigo-600 dark:text-indigo-400',
-                  )}
-                >
-                  {opt.dot ? (
-                    <span className={cn('h-2 w-2 rounded-full', opt.dot)} />
-                  ) : (
-                    <span className="h-2 w-2" />
-                  )}
-                  {opt.label}
-                </button>
-              ))}
+            <div className="absolute right-0 mt-1 w-56 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg z-10 py-1">
+              {HEALTH_OPTIONS.map(opt => {
+                const count = opt.key === 'all'
+                  ? (healthCounts?.all ?? undefined)
+                  : healthCounts?.[opt.key]
+                const isEmpty = count === 0 && opt.key !== 'all'
+                return (
+                  <button
+                    key={opt.key}
+                    disabled={isEmpty}
+                    onClick={() => { onHealthFilterChange(opt.key); setHealthOpen(false) }}
+                    className={cn(
+                      'w-full px-3 py-2 text-sm flex items-center gap-2 transition-colors',
+                      isEmpty
+                        ? 'opacity-40 cursor-not-allowed'
+                        : 'hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer',
+                      healthFilter === opt.key && 'font-semibold text-indigo-600 dark:text-indigo-400',
+                    )}
+                  >
+                    {opt.dot ? (
+                      <span className={cn('h-2 w-2 rounded-full shrink-0', opt.dot)} />
+                    ) : (
+                      <span className="h-2 w-2 shrink-0" />
+                    )}
+                    <span className="flex-1 text-left truncate">{opt.label}</span>
+                    {count !== undefined && (
+                      <span className="text-[10px] tabular-nums text-ink-muted">{count}</span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>

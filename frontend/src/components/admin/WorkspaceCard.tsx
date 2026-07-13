@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, FolderOpen, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users } from 'lucide-react'
+import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
-import { WorkspaceHealthBadge } from './workspace/WorkspaceHealthBadge'
+import { WorkspaceHealthBadge, type WorkspaceHealth } from './workspace/WorkspaceHealthBadge'
 import { getProviderLogo } from './ProviderLogos'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -35,9 +36,11 @@ export interface WorkspaceSchemaSummary {
 
 interface WorkspaceCardProps {
     ws: WorkspaceResponse
-    index: number
+    /** Bulk selection. Omit both to render a non-selectable card. */
+    isSelected?: boolean
+    onToggleSelect?: () => void
     stats: { nodes: number; edges: number; types: number }
-    healthStatus?: 'healthy' | 'warning' | 'critical' | 'unknown'
+    healthStatus?: WorkspaceHealth
     dsProviders: WsDataSourceProviderInfo[]
     schemaSummary: WorkspaceSchemaSummary
     onOpen: () => void
@@ -68,11 +71,34 @@ const GRADIENT_ACCENTS = [
     'from-cyan-500 to-blue-500',
 ]
 
+/** Initials for the workspace tile. "Major Refactor Agg" → "MR". */
+export function monogram(name: string): string {
+    const parts = name.trim().split(/\s+/).filter(Boolean)
+    if (parts.length === 0) return '?'
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+    return (parts[0][0] + parts[1][0]).toUpperCase()
+}
+
+/**
+ * A stable colour per workspace ID — not per grid position.
+ *
+ * The accent used to be `GRADIENT_ACCENTS[index % 6]`, so a card's colour came
+ * from WHERE IT SAT in the list: re-sort, and every workspace changed colour.
+ * Keyed on the id, the colour becomes part of the workspace's identity and you
+ * can learn to recognise it.
+ */
+export function accentFor(id: string): string {
+    let hash = 0
+    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+    return GRADIENT_ACCENTS[hash % GRADIENT_ACCENTS.length]
+}
+
 // ── Component ────────────────────────────────────────────────────────
 
 export function WorkspaceCard({
     ws,
-    index,
+    isSelected = false,
+    onToggleSelect,
     stats,
     healthStatus,
     dsProviders,
@@ -85,8 +111,9 @@ export function WorkspaceCard({
 }: WorkspaceCardProps) {
     const [showSources, setShowSources] = useState(false)
     const prefetchHandlers = useIntentPrefetch(onPrefetch)
-    const gradient = GRADIENT_ACCENTS[index % GRADIENT_ACCENTS.length]
+    const gradient = accentFor(ws.id)
     const { uniqueEntityTypes, uniqueRelationshipTypes, ontologyNames, providerGroups, viewCount } = schemaSummary
+    const memberCount = ws.memberCount ?? 0
     // Workspace deletion + set-default both gate on system:admin
     // (matches WorkspaceListRow). Workspace admins manage their own
     // workspace from inside the detail page; the platform-wide list
@@ -106,9 +133,13 @@ export function WorkspaceCard({
     return (
         <div
             className={cn(
-                "group border rounded-xl bg-canvas-elevated cursor-pointer flex flex-col h-full overflow-hidden",
+                "group border rounded-xl bg-canvas-elevated cursor-pointer flex flex-col h-full overflow-hidden relative",
                 "hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200",
-                ws.isDefault ? "border-indigo-500/30 ring-1 ring-indigo-500/10" : "border-glass-border hover:border-indigo-500/20"
+                isSelected
+                    ? "border-indigo-500 ring-2 ring-indigo-500/30"
+                    : ws.isDefault
+                        ? "border-indigo-500/30 ring-1 ring-indigo-500/10"
+                        : "border-glass-border hover:border-indigo-500/20"
             )}
             {...prefetchHandlers}
             onClick={onOpen}
@@ -119,9 +150,33 @@ export function WorkspaceCard({
             {/* ── Identity ── */}
             <div className="px-5 pt-4 pb-3">
                 <div className="flex items-start gap-3">
+                    {/* Selection — visible when selected, on hover otherwise, so the
+                        card doesn't wear a permanent checkbox it rarely needs. */}
+                    {onToggleSelect && (
+                        <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); onToggleSelect() }}
+                            aria-label={isSelected ? 'Deselect workspace' : 'Select workspace'}
+                            className={cn(
+                                'shrink-0 mt-0.5 w-4 h-4 rounded border flex items-center justify-center transition-all',
+                                isSelected
+                                    ? 'bg-indigo-500 border-indigo-500 opacity-100'
+                                    : 'border-glass-border bg-canvas opacity-0 group-hover:opacity-100 hover:border-indigo-500',
+                            )}
+                        >
+                            {isSelected && <Check className="w-3 h-3 text-white" />}
+                        </button>
+                    )}
+
                     <div className="relative shrink-0">
-                        <div className="w-11 h-11 rounded-xl border border-glass-border flex items-center justify-center bg-gradient-to-br from-black/[0.02] to-black/[0.05] dark:from-white/[0.02] dark:to-white/[0.05]">
-                            <FolderOpen className="w-5 h-5 text-ink-muted" />
+                        {/* The tile used to be the SAME grey folder on every card, so
+                            nine workspaces sharing a name were nine identical tiles.
+                            A monogram in the workspace's own colour makes it findable. */}
+                        <div className={cn(
+                            'w-11 h-11 rounded-xl flex items-center justify-center text-white text-xs font-black tracking-tight shadow-sm bg-gradient-to-br',
+                            gradient,
+                        )}>
+                            {monogram(ws.name)}
                         </div>
                         <span className="absolute -top-1 -left-1">
                             <WorkspaceHealthBadge status={healthStatus || 'unknown'} />
@@ -134,6 +189,11 @@ export function WorkspaceCard({
                                 <span className="shrink-0 px-1.5 py-0.5 text-[9px] font-bold rounded bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">DEFAULT</span>
                             )}
                         </div>
+                        {/* The status was a 2px dot with no label, grey on nearly every
+                            card. Say what it means. */}
+                        <span className="inline-flex items-center gap-1.5 mb-1">
+                            <WorkspaceHealthBadge status={healthStatus || 'unknown'} showLabel />
+                        </span>
                         {ws.description ? (
                             <p className="text-xs text-ink-muted line-clamp-2">{ws.description}</p>
                         ) : (
@@ -159,7 +219,19 @@ export function WorkspaceCard({
                 ))}
             </div>
 
-            {/* ── Data Sources preview ── */}
+            {/* An empty workspace is a workspace waiting for a data source, not a
+                broken one. Say that, and give it the next step. */}
+            {dsProviders.length === 0 ? (
+                <div className="mx-5 mb-3 rounded-lg border border-dashed border-glass-border px-3 py-3 flex items-center gap-2.5">
+                    <span className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/5 flex items-center justify-center shrink-0">
+                        <Plug className="w-3.5 h-3.5 text-ink-muted" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block text-[11px] font-semibold text-ink">No data connected yet</span>
+                        <span className="block text-[10px] text-ink-muted">Open it to attach a source</span>
+                    </span>
+                </div>
+            ) : (
             <div className="mx-5 mb-3 rounded-lg border border-glass-border overflow-hidden">
                 {/* Header — always visible */}
                 <button
@@ -233,6 +305,8 @@ export function WorkspaceCard({
                 )}
             </div>
 
+            )}
+
             {/* ── Schema — ontology-governed types ── */}
             {(uniqueEntityTypes > 0 || uniqueRelationshipTypes > 0 || ontologyNames.length > 0) && (
                 <div className="mx-5 mb-3 p-2.5 rounded-lg bg-violet-500/[0.03] dark:bg-violet-500/[0.05] border border-violet-500/10">
@@ -263,9 +337,21 @@ export function WorkspaceCard({
             )}
 
             {/* ── Footer ── */}
-            <div className="px-5 py-2.5 border-t border-glass-border flex items-center justify-between mt-auto">
-                <span className="text-[10px] text-ink-muted">
-                    Updated {new Date(ws.updatedAt).toLocaleDateString()}
+            <div className="px-5 py-2.5 border-t border-glass-border flex items-center justify-between gap-2 mt-auto">
+                <span className="flex items-center gap-2.5 min-w-0">
+                    {/* "X many users" — the thing the cards never said. It rides along
+                        with the workspace list, so this costs no extra request. */}
+                    <span
+                        className="inline-flex items-center gap-1 text-[10px] text-ink-muted shrink-0"
+                        title={`${memberCount} ${memberCount === 1 ? 'person or group has' : 'people and groups have'} access`}
+                    >
+                        <Users className="w-3 h-3" />
+                        <span className="font-semibold text-ink">{memberCount}</span>
+                    </span>
+                    <span className="w-px h-3 bg-glass-border shrink-0" />
+                    <span className="text-[10px] text-ink-muted truncate" title={new Date(ws.updatedAt).toLocaleString()}>
+                        Updated {timeAgo(ws.updatedAt)}
+                    </span>
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {onManageMembers && (
