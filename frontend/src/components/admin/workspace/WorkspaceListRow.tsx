@@ -1,9 +1,10 @@
 import { memo } from 'react'
-import { Database, FolderOpen, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers, Users } from 'lucide-react'
+import { Database, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers, Users, Check } from 'lucide-react'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
-import type { WsDataSourceProviderInfo } from '../WorkspaceCard'
+import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
+import { cn } from '@/lib/utils'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
 
@@ -16,6 +17,9 @@ function compactNum(n: number): string {
 interface WorkspaceListRowProps {
     ws: WorkspaceResponse
     index: number
+    /** Bulk selection — same contract as the card. */
+    isSelected?: boolean
+    onToggleSelect?: () => void
     stats: { nodes: number; edges: number; types: number }
     healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
     dsProviders: WsDataSourceProviderInfo[]
@@ -29,7 +33,7 @@ interface WorkspaceListRowProps {
     onPrefetch?: () => void
 }
 
-function WorkspaceListRowBase({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers, onPrefetch }: WorkspaceListRowProps) {
+function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleSelect, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers, onPrefetch }: WorkspaceListRowProps) {
     const uniqueProviderTypes = Array.from(new Set(dsProviders.map(p => p.providerType).filter(t => t !== 'unknown')))
     const prefetchHandlers = useIntentPrefetch(onPrefetch)
 
@@ -37,12 +41,37 @@ function WorkspaceListRowBase({ ws, index: _index, stats, healthStatus, dsProvid
         <div
             {...prefetchHandlers}
             onClick={onOpen}
-            className="group grid grid-cols-[16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors"
+            className={cn(
+                "group grid grid-cols-[20px_16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border cursor-pointer transition-colors",
+                isSelected
+                    ? "bg-indigo-500/[0.06] hover:bg-indigo-500/[0.09]"
+                    : "hover:bg-black/[0.02] dark:hover:bg-white/[0.02]",
+            )}
         >
+            {onToggleSelect ? (
+                <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); onToggleSelect() }}
+                    aria-label={isSelected ? 'Deselect workspace' : 'Select workspace'}
+                    className={cn(
+                        'w-4 h-4 rounded border flex items-center justify-center transition-all',
+                        isSelected
+                            ? 'bg-indigo-500 border-indigo-500 opacity-100'
+                            : 'border-glass-border bg-canvas opacity-0 group-hover:opacity-100 hover:border-indigo-500',
+                    )}
+                >
+                    {isSelected && <Check className="w-3 h-3 text-white" />}
+                </button>
+            ) : <span />}
+
             <WorkspaceHealthBadge status={healthStatus} size="sm" />
 
-            <div className="w-8 h-8 rounded-lg border border-glass-border flex items-center justify-center bg-black/[0.02] dark:bg-white/[0.02]">
-                <FolderOpen className="w-4 h-4 text-ink-muted" />
+            {/* Same monogram as the card — one identity, two layouts. */}
+            <div className={cn(
+                'w-8 h-8 rounded-lg flex items-center justify-center text-white text-[10px] font-black tracking-tight bg-gradient-to-br',
+                accentFor(ws.id),
+            )}>
+                {monogram(ws.name)}
             </div>
 
             <div className="min-w-0">

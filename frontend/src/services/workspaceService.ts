@@ -89,6 +89,11 @@ export interface WorkspaceResponse {
     isActive: boolean
     createdAt: string
     updatedAt: string
+    /** People/groups with access. Rides along with the list — asking per card
+     *  would be one request per workspace. */
+    memberCount?: number
+    /** Live (non-deleted) views built on this workspace. */
+    viewCount?: number
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string
@@ -96,6 +101,27 @@ export interface WorkspaceResponse {
 
 export interface WorkspaceDataSourceImpactResponse {
     views: { id: string; name: string; type: string }[]
+}
+
+export interface ImpactedEntity {
+    id: string
+    name: string
+    type: string
+}
+
+/**
+ * What deleting a WORKSPACE destroys.
+ *
+ * This is not a soft delete of a container. `views.workspace_id` is
+ * ON DELETE CASCADE, so every view inside is HARD-deleted — including ones
+ * already in the trash awaiting restore. Data sources, every member's access
+ * (workspace role bindings) and workspace-scoped custom roles go with it.
+ */
+export interface WorkspaceImpactResponse {
+    views: ImpactedEntity[]
+    dataSources: ImpactedEntity[]
+    memberCount: number
+    customRoleCount: number
 }
 
 /**
@@ -250,6 +276,11 @@ export const workspaceService = {
             method: 'PATCH',
             body: JSON.stringify({ mode: mode === null ? "" : mode }) // Backend treats "" as null override
         })
+    },
+
+    /** Blast radius of deleting the whole workspace. */
+    getImpact(workspaceId: string): Promise<WorkspaceImpactResponse> {
+        return request<WorkspaceImpactResponse>(`${ADMIN_API}/${workspaceId}/impact`)
     },
 
     getDataSourceImpact(workspaceId: string, dataSourceId: string): Promise<WorkspaceDataSourceImpactResponse> {

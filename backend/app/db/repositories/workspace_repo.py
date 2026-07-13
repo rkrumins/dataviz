@@ -11,7 +11,13 @@ from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..models import WorkspaceORM, WorkspaceDataSourceORM
+from ..models import (
+    WorkspaceORM,
+    WorkspaceDataSourceORM,
+    ViewORM,
+    RoleBindingORM,
+    RoleORM,
+)
 from backend.common.models.management import (
     WorkspaceCreateRequest,
     WorkspaceUpdateRequest,
@@ -75,11 +81,42 @@ def _ws_query():
     return select(WorkspaceORM).options(selectinload(WorkspaceORM.data_sources))
 
 
+async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
+    """Members and live views per workspace, in TWO grouped queries.
+
+    Not N+1: the workspaces page renders 25 cards, and asking each one for its
+    own member count would be 25 round-trips for two numbers.
+    """
+    members = dict((await session.execute(
+        select(RoleBindingORM.scope_id, func.count())
+        .where(RoleBindingORM.scope_type == "workspace")
+        .group_by(RoleBindingORM.scope_id)
+    )).all())
+
+    views = dict((await session.execute(
+        select(ViewORM.workspace_id, func.count())
+        .where(ViewORM.deleted_at.is_(None))
+        .group_by(ViewORM.workspace_id)
+    )).all())
+
+    return members, views
+
+
 async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     result = await session.execute(
         _ws_query().order_by(WorkspaceORM.created_at)
     )
-    return [_to_response(r) for r in result.scalars().unique().all()]
+    rows = result.scalars().unique().all()
+
+    members, views = await _counts_by_workspace(session)
+
+    out: List[WorkspaceResponse] = []
+    for r in rows:
+        resp = _to_response(r)
+        resp.member_count = int(members.get(r.id, 0) or 0)
+        resp.view_count = int(views.get(r.id, 0) or 0)
+        out.append(resp)
+    return out
 
 
 async def list_workspaces_page(
@@ -262,3 +299,62 @@ async def set_default(
         .values(is_default=True, updated_at=datetime.now(timezone.utc).isoformat())
     )
     return result.rowcount > 0
+
+
+async def get_workspace_impact(
+    session: AsyncSession, workspace_id: str,
+) -> "WorkspaceImpactResponse":
+    """The blast radius of DELETING a workspace.
+
+    This is not "what is inside the container". Deleting a workspace CASCADES:
+    ``views.workspace_id`` is ON DELETE CASCADE, so its views are HARD-deleted —
+    they never reach the soft-delete/restore path the Explorer uses, and no
+    "Restore" will bring them back. The endpoint reports what will actually be
+    destroyed so the dialog can say it before the click, not after.
+
+    Deleted (soft-deleted) views are counted too: the cascade removes those rows
+    as well, so a view someone expected to restore later also disappears.
+    """
+    from backend.common.models.management import (
+        ImpactedEntity,
+        WorkspaceImpactResponse,
+    )
+
+    views = (await session.execute(
+        select(ViewORM.id, ViewORM.name)
+        .where(ViewORM.workspace_id == workspace_id)
+        .order_by(ViewORM.name)
+    )).all()
+
+    sources = (await session.execute(
+        select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+    )).all()
+
+    member_count = (await session.execute(
+        select(func.count())
+        .select_from(RoleBindingORM)
+        .where(
+            RoleBindingORM.scope_type == "workspace",
+            RoleBindingORM.scope_id == workspace_id,
+        )
+    )).scalar_one()
+
+    role_count = (await session.execute(
+        select(func.count())
+        .select_from(RoleORM)
+        .where(
+            RoleORM.scope_type == "workspace",
+            RoleORM.scope_id == workspace_id,
+        )
+    )).scalar_one()
+
+    return WorkspaceImpactResponse(
+        views=[ImpactedEntity(id=v.id, name=v.name, type="view") for v in views],
+        dataSources=[
+            ImpactedEntity(id=d.id, name=d.label or d.id, type="data_source")
+            for d in sources
+        ],
+        memberCount=int(member_count or 0),
+        customRoleCount=int(role_count or 0),
+    )
