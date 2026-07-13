@@ -1,21 +1,21 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useWorkspaces } from './useWorkspaces'
-import { useSchemaStore } from '@/store/schema'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
-import type { ViewConfiguration } from '@/types/schema'
-
-const EMPTY_VIEWS: ViewConfiguration[] = []
+import { ontologyListKey } from '@/features/ontology/hooks/useOntologies'
+import {
+    ontologyDefinitionService,
+    type OntologyDefinitionResponse,
+} from '@/services/ontologyDefinitionService'
 
 export interface DashboardStats {
     totalWorkspaces: number
     totalDataSources: number
     totalEntities: number
-    activeConnections: number
 }
 
 export interface DataSourceStats {
@@ -35,14 +35,18 @@ export interface TemplateBrief {
     entityTypesCount?: number
 }
 
-export interface OntologyBrief {
-    id: string
-    name: string
-    description?: string
-    version?: number
-    isPublished?: boolean
-    createdAt?: string
-}
+/**
+ * The dashboard used to declare its own narrow shape here and fetch
+ * /api/v1/admin/ontologies by hand — a SECOND cache of the same endpoint the
+ * Semantic Layers page already reads through `useOntologies`. Two caches of one
+ * resource drift: publish a layer on that page and the dashboard kept serving
+ * the stale copy for its 5-minute staleTime, and the projection threw away every
+ * fact worth showing (how many entity types it defines, whether it's published).
+ *
+ * It is now the SAME record, from the SAME query key, so an edit on the schema
+ * page invalidates both.
+ */
+export type OntologyBrief = OntologyDefinitionResponse
 
 /** @deprecated Use OntologyBrief */
 export type BlueprintBrief = OntologyBrief
@@ -54,18 +58,11 @@ const EMPTY_ONTOLOGIES: OntologyBrief[] = []
 
 export function useDashboardData() {
     const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
-    const views = useSchemaStore(s => s.schema?.views ?? EMPTY_VIEWS)
-    const activeScopeKey = useSchemaStore(s => s.activeScopeKey)
-    const visibleViews = useMemo(
-        () => views.filter(v => !v.scopeKey || v.scopeKey === activeScopeKey),
-        [views, activeScopeKey]
-    )
 
     const [stats, setStats] = useState<DashboardStats>({
         totalWorkspaces: 0,
         totalDataSources: 0,
         totalEntities: 0,
-        activeConnections: 0
     })
 
     // Per-datasource node/edge counts: key = "${wsId}/${dsId}"
@@ -79,22 +76,14 @@ export function useDashboardData() {
     useEffect(() => {
         if (workspaces) {
             let dsCount = 0
-            let activeCount = 0
-
             workspaces.forEach(ws => {
-                if (ws.dataSources) {
-                    dsCount += ws.dataSources.length
-                    ws.dataSources.forEach(() => {
-                        activeCount++
-                    })
-                }
+                if (ws.dataSources) dsCount += ws.dataSources.length
             })
 
             setStats(prev => ({
                 ...prev,
                 totalWorkspaces: workspaces.length,
                 totalDataSources: dsCount,
-                activeConnections: activeCount
             }))
         }
     }, [workspaces])
@@ -195,14 +184,14 @@ export function useDashboardData() {
         },
     })
 
+    // Same query key + same fetcher as `useOntologies` on the Semantic Layers
+    // page, so the two share ONE cache entry. The permission gate stays here:
+    // without it a user who can't read ontologies fires a pointless 403.
     const ontologiesQuery = useQuery({
-        queryKey: ['dashboard', 'ontologies'],
+        queryKey: ontologyListKey(false),
         enabled: canReadOntologies,
-        staleTime: 5 * 60 * 1000,
-        queryFn: async () => {
-            const res = await fetchWithTimeout('/api/v1/admin/ontologies', { silent403: true })
-            return res.ok ? (((await res.json()) as OntologyBrief[]) ?? EMPTY_ONTOLOGIES) : EMPTY_ONTOLOGIES
-        },
+        staleTime: 30_000,
+        queryFn: () => ontologyDefinitionService.list(false, false),
     })
 
     const templates = templatesQuery.data ?? EMPTY_TEMPLATES
@@ -213,33 +202,19 @@ export function useDashboardData() {
     // ontologies fetch failures (dsStats errors were never surfaced here).
     const error = (templatesQuery.error ?? ontologiesQuery.error ?? null) as Error | null
 
-    // Derive recent and popular views — memoized so downstream effects get stable refs
-    const recentViews = useMemo(
-        () => visibleViews.filter(v => !v.isDefault).slice(0, 8),
-        [visibleViews]
-    )
-    const popularViews = useMemo(
-        () => visibleViews.filter(v => v.isDefault).slice(0, 8),
-        [visibleViews]
-    )
-
-    // Dashboard tier: determines layout and which sections render
-    const dashboardTier = useMemo(() => {
-        if (!workspaces || workspaces.length === 0) return 'new' as const
-        if (workspaces.length <= 1 && recentViews.length <= 2) return 'beginner' as const
-        if (workspaces.length >= 5 || recentViews.length >= 10) return 'power' as const
-        return 'active' as const
-    }, [workspaces, recentViews.length])
+    // NOTE: this hook used to also return `recentViews`, `popularViews` and a
+    // `dashboardTier` derived from them. They were placeholders, not data:
+    //   recentViews  = views.filter(v => !v.isDefault).slice(0, 8)  ← not recency
+    //   popularViews = views.filter(v =>  v.isDefault)              ← not popularity
+    // The dashboard now uses the real sources instead — useRecentViews() (server
+    // -side per-user visits) and useViewStats() (authoritative catalog counts).
 
     return {
         stats,
         dataSourceStats,
         workspaces,
-        recentViews,
-        popularViews,
         templates,
         ontologies,
-        dashboardTier,
         /** @deprecated Use ontologies */
         blueprints: ontologies,
         isLoading: isLoadingWorkspaces || isLoadingTemplates || isLoadingOntologies,

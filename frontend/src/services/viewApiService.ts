@@ -368,6 +368,10 @@ export interface ViewActivityEntry {
     createdAt: string
     /** Present only in the workspace-wide feed. */
     viewName?: string | null
+    /** Which workspace the view lives in. View names are NOT unique — two views
+     *  can both be called "Data Lineage" — so a feed that names one without
+     *  saying where it lives is ambiguous. */
+    workspaceId?: string | null
     /** True for a synthesized anchor on a legacy view with no recorded rows. */
     synthetic: boolean
 }
@@ -382,6 +386,13 @@ export async function getViewActivity(
     if (opts?.limit) sp.set('limit', String(opts.limit))
     const qs = sp.toString()
     return apiFetch<ViewActivityEntry[]>(`/api/v1/views/${viewId}/activity${qs ? `?${qs}` : ''}`)
+}
+
+/** Recent activity across every view the CURRENT USER can see — the dashboard's
+ *  "What changed" feed. (Path is /me/feed, not /me/activity, which would bind
+ *  the /{view_id}/activity route with view_id="me".) */
+export async function getMyActivityFeed(limit = 15): Promise<ViewActivityEntry[]> {
+    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/me/feed?limit=${limit}`)
 }
 
 /** Recent activity across all of a workspace's views (each entry has viewName). */
@@ -478,6 +489,36 @@ interface RecentViewApi extends Omit<RecentViewEntry, 'icon' | 'workspaceId' | '
 
 /** The signed-in user's recently visited views — follows them across devices,
  *  and is joined against the live views (never a stale name / deleted entry). */
+/** One piece of the caller's unfinished work — an open, unpublished draft. */
+export interface MyDraftEntry {
+    draftId: string
+    graphId: string
+    viewId: string
+    viewName: string
+    viewType?: string
+    workspaceId?: string
+    /** Drafts are usually unnamed; the view is the label that matters. */
+    name?: string
+    createdAt: string
+    updatedAt: string
+}
+
+interface MyDraftApi extends Omit<MyDraftEntry, 'viewType' | 'workspaceId' | 'name'> {
+    viewType?: string | null
+    workspaceId?: string | null
+    name?: string | null
+}
+
+export async function getMyDrafts(limit = 6): Promise<MyDraftEntry[]> {
+    const raw = await apiFetch<MyDraftApi[]>(`/api/v1/views/me/drafts?limit=${limit}`)
+    return (raw ?? []).map(d => ({
+        ...d,
+        viewType: d.viewType ?? undefined,
+        workspaceId: d.workspaceId ?? undefined,
+        name: d.name ?? undefined,
+    }))
+}
+
 export async function getRecentViews(limit = 5): Promise<RecentViewEntry[]> {
     const raw = await apiFetch<RecentViewApi[]>(`/api/v1/views/me/recent?limit=${limit}`)
     // Normalise null → undefined at the boundary so consumers (sidebar, command

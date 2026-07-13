@@ -19,7 +19,10 @@ import { useRecentViews } from '@/hooks/useRecentViews'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 
 // ─── Component ──────────────────────────────────────────────────────────────
-export function ExplorerRecentStrip() {
+export function ExplorerRecentStrip({
+    title = 'Continue where you left off',
+    subtitle = 'Your recent views',
+}: { title?: string; subtitle?: string } = {}) {
     const { recent: recentViews } = useRecentViews()
 
     if (recentViews.length === 0) return null
@@ -32,12 +35,8 @@ export function ExplorerRecentStrip() {
                     <Clock className="h-4.5 w-4.5 text-ink-muted" />
                 </div>
                 <div className="flex items-baseline gap-2">
-                    <h2 className="text-ink text-sm font-bold">
-                        Continue where you left off
-                    </h2>
-                    <span className="text-ink-muted text-xs">
-                        Your recent views
-                    </span>
+                    <h2 className="text-ink text-sm font-bold">{title}</h2>
+                    <span className="text-ink-muted text-xs">{subtitle}</span>
                 </div>
             </div>
 

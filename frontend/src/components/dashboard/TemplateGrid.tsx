@@ -3,7 +3,7 @@ import { ArrowRight, ChevronRight, Sparkles, BookOpen, Package } from 'lucide-re
 import { motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { TEMPLATE_CATEGORIES } from './dashboard-constants'
-import type { TemplateBrief, OntologyBrief } from '@/hooks/useDashboardData'
+import type { TemplateBrief } from '@/hooks/useDashboardData'
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Template Grid  (extracted from DashboardComponents — formerly BlueprintGrid)
@@ -11,7 +11,7 @@ import type { TemplateBrief, OntologyBrief } from '@/hooks/useDashboardData'
 
 export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }: {
     title: string; subtitle?: string
-    items: (TemplateBrief | OntologyBrief)[]
+    items: TemplateBrief[]
     icon: React.ComponentType<{ className?: string }>
     onBrowseAll?: () => void
 }) {
@@ -24,7 +24,7 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
 
     if (items.length === 0) {
         return (
-            <section className="mb-16 px-4 md:px-0">
+            <section className="mb-16">
                 <div className="flex items-end justify-between mb-6">
                     <div className="flex items-center gap-3">
                         <div className="p-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">
@@ -50,7 +50,7 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
     const displayItems = filteredItems
 
     return (
-        <section className="mb-16 px-4 md:px-0">
+        <section className="mb-16">
             <div className="flex items-end justify-between mb-6">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-xl bg-accent-business/10 border border-accent-business/20">
@@ -114,9 +114,9 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
                                     <p className="text-sm text-ink-muted line-clamp-1">{displayItems[0].description || 'Ready-to-deploy semantic context model.'}</p>
                                 </div>
                                 <div className="shrink-0 flex items-center gap-2">
-                                    {'version' in displayItems[0] && (
-                                        <span className="text-xs font-semibold text-ink-muted border border-glass-border rounded-lg px-2 py-1">v{displayItems[0].version || 1}</span>
-                                    )}
+                                    {/* The version chip only ever applied to semantic layers, which
+                                        now have their own section (DashboardSemanticLayers).
+                                        Templates carry no version. */}
                                     <button
                                         disabled
                                         className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-business/40 text-white/70 font-semibold text-sm cursor-not-allowed shadow-md shadow-accent-business/10"
@@ -129,7 +129,7 @@ export function TemplateGrid({ title, subtitle, items, icon: Icon, onBrowseAll }
                     </div>
 
                     {displayItems.length > 1 && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 wide:grid-cols-4 gap-4">
                             {displayItems.slice(1).map((item, i) => (
                                 <motion.div key={item.id}
                                     initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03, duration: 0.2 }}

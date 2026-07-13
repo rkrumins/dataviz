@@ -430,7 +430,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
     const handleSelectWorkspace = (wsId: string) => setActiveWorkspace(wsId)
 
     return (
-        <section className="mb-20 px-4 md:px-0">
+        <section className="mb-20">
             {/* Header */}
             <div className="flex items-end justify-between mb-8">
                 <div className="flex items-center gap-3">
@@ -438,7 +438,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
                         <Globe className="w-5 h-5 text-accent-business" />
                     </div>
                     <div>
-                        <h2 className="text-2xl font-bold text-ink tracking-tight">Active Environments</h2>
+                        <h2 className="text-2xl font-bold text-ink tracking-tight">Your business areas</h2>
                         <p className="text-sm text-ink-muted mt-0.5">
                             {workspaces.length} workspace{workspaces.length !== 1 ? 's' : ''} · {totalSources} total data source{totalSources !== 1 ? 's' : ''}
                             {activeWorkspaceId && <span className="text-accent-business font-semibold"> · 1 active</span>}
@@ -472,7 +472,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
                     <p className="text-xs text-ink-muted">Try a different search term</p>
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 wide:grid-cols-4 gap-6">
                     {visibleWorkspaces.map((ws, i) => (
                         <WorkspaceCard
                             key={ws.id}

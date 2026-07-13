@@ -764,7 +764,6 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
                     selectedDataSourceId={selectedDsId}
-                    activeWorkspaceId={activeWorkspaceId}
                     onSelectWorkspace={handleSelectWorkspace}
                     onSelectDataSource={handleSelectDataSource}
                     providers={blankOptions.providers}

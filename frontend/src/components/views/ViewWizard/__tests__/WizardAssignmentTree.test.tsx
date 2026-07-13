@@ -72,7 +72,11 @@ const fakeBrowser = {
   expandNode: vi.fn(),
   loadMoreChildren: vi.fn(),
   loadMoreTopLevel: vi.fn(),
-  loadAllChildren: vi.fn().mockResolvedValue(undefined),
+  // loadAllChildren resolves the ids it loaded — the select-all path reads .length
+  // off it. Defaulting to undefined made every un-stubbed call reject *after* the
+  // assertions had run: green test, unhandled TypeError. [] is the honest "loaded
+  // nothing".
+  loadAllChildren: vi.fn().mockResolvedValue([] as string[]),
   loadAllTopLevel: vi.fn().mockResolvedValue(undefined),
   peekNode: (urn: string) => fakeBrowser.nodes.get(urn),
   topLevelHasMore: false,

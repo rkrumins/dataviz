@@ -34,6 +34,7 @@ import {
     WORKSPACE_TEMPLATE_ROLE_SET,
     type RoleName,
 } from '@/lib/roleNames'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 
 // Phase 11: classify a role for invite purposes from its catalogue
@@ -523,7 +524,7 @@ export function AdminUsers() {
     // ── Render ───────────────────────────────────────────────────────
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">
@@ -1275,7 +1276,7 @@ export function AdminUsers() {
                         </motion.aside>
                 )}
             </AnimatePresence>
-        </div>
+        </PageContainer>
     )
 }
 

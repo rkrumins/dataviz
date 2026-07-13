@@ -34,6 +34,13 @@
     --nx-accent-lineage-soft: rgba(99, 102, 241, 0.12);
     --nx-accent-business: #10b981;
     --nx-accent-business-soft: rgba(16, 185, 129, 0.12);
+    /* Sits between business (emerald) and lineage (indigo) on the wheel, which is
+       how every call site uses it: as the middle of a business→lineage ramp.
+       It was referenced in 6 components and defined in NONE, so `accent-explore`
+       resolved to nothing and those gradients silently lost a stop — text using
+       bg-clip-text faded out mid-word. */
+    --nx-accent-explore: #06b6d4;
+    --nx-accent-explore-soft: rgba(6, 182, 212, 0.12);
     --nx-accent-technical: #f59e0b;
     --nx-accent-technical-soft: rgba(245, 158, 11, 0.12);
     --nx-accent-warning: #ef4444;

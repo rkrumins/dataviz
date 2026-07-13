@@ -24,6 +24,7 @@ import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useQueryClient } from '@tanstack/react-query'
 import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspaceDetailData'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -431,7 +432,7 @@ export function WorkspacesPage() {
     /* ── Render ── */
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 space-y-6 animate-in fade-in duration-500">
+        <PageContainer className="py-8 space-y-6 animate-in fade-in duration-500">
             <style>{`
 @keyframes card-in {
     from { opacity: 0; transform: translateY(12px); }
@@ -677,7 +678,7 @@ export function WorkspacesPage() {
 
             {/* Create Workspace Wizard */}
             <AdminWizard title="Create Workspace" steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); resetWizard() }} onComplete={handleWizardComplete} isSubmitting={wizSubmitting} completionLabel="Create Workspace" />
-        </div>
+        </PageContainer>
         </div>
     )
 }

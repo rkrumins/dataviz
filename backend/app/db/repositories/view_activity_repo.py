@@ -46,6 +46,11 @@ class ViewActivityEntry(BaseModel):
     createdAt: str
     # Populated only in the workspace-wide feed (redundant in a per-view view).
     viewName: Optional[str] = None
+    # View names are NOT unique. Two different views can both be called "Data
+    # Lineage", and a feed that names one without saying where it lives is
+    # ambiguous. The client already holds the workspace list, so the id is
+    # enough — it resolves the name itself.
+    workspaceId: Optional[str] = None
     # True for synthesized legacy anchors (no real row existed).
     synthetic: bool = False
 
@@ -145,6 +150,7 @@ def _to_entry(
         summary=r.summary,
         changes=json.loads(r.changes) if r.changes else None,
         createdAt=r.created_at,
+        workspaceId=r.workspace_id,
         synthetic=synthetic,
     )
 
@@ -181,6 +187,38 @@ async def get_workspace_activity(
     return out
 
 
+async def get_recent_activity(
+    session: AsyncSession,
+    *,
+    limit: int = 60,
+) -> list[tuple[ViewActivityEntry, ViewORM]]:
+    """Most recent activity across ALL live views — the dashboard's "What
+    changed" feed.
+
+    Returns each entry paired with its ViewORM so the CALLER can apply the same
+    per-view read check the views list uses (``view_access.can_read_view``). This
+    read is deliberately un-scoped; scoping is the endpoint's job, so a feed can
+    never surface a view the user isn't allowed to see.
+    """
+    rows = (await session.execute(
+        select(ViewActivityLogORM, ViewORM)
+        .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
+        .where(ViewORM.deleted_at.is_(None))
+        .order_by(ViewActivityLogORM.created_at.desc())
+        .limit(limit)
+    )).all()
+    if not rows:
+        return []
+
+    actor_map = await resolve_user_ids(session, {log.actor for log, _ in rows})
+    out: list[tuple[ViewActivityEntry, ViewORM]] = []
+    for log, view in rows:
+        entry = _to_entry(log, actor_map)
+        entry.viewName = view.name
+        out.append((entry, view))
+    return out
+
+
 async def _synthetic_anchor(
     session: AsyncSession, view_id: str,
 ) -> list[ViewActivityEntry]:
@@ -199,13 +237,13 @@ async def _synthetic_anchor(
             id=f"{view_id}:anchor-updated", viewId=view_id, action="updated",
             actor=row.updated_by, actorName=un, actorEmail=ue,
             summary="Last edited before activity tracking",
-            createdAt=row.updated_at, synthetic=True,
+            createdAt=row.updated_at, workspaceId=row.workspace_id, synthetic=True,
         ))
     cn, ce = actor_map.get(row.created_by or "", (None, None))
     out.append(ViewActivityEntry(
         id=f"{view_id}:anchor-created", viewId=view_id, action="created",
         actor=row.created_by, actorName=cn, actorEmail=ce,
         summary="Created before activity tracking",
-        createdAt=row.created_at, synthetic=True,
+        createdAt=row.created_at, workspaceId=row.workspace_id, synthetic=True,
     ))
     return out
