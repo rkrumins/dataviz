@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
     ArrowRight,
-    Zap,
     X,
     Globe,
     Database,
@@ -43,6 +42,8 @@ interface DashboardHeroProps {
     /** One honest line about what changed while they were away. Replaces the
      *  static "Search across workspaces…" blurb when we have something to say. */
     statusLine?: React.ReactNode
+    /** Jumps to the activity the status line is counting. */
+    onStatusClick?: () => void
     /** The CTA row under the search box — the point of the page. */
     actions?: React.ReactNode
 }
@@ -58,6 +59,7 @@ export function DashboardHero({
     onClearRecentSearches,
     greeting,
     statusLine,
+    onStatusClick,
     actions,
 }: DashboardHeroProps) {
     const [focused, setFocused] = useState(false)
@@ -137,58 +139,75 @@ export function DashboardHero({
                 transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
                 className="relative z-10 w-full max-w-2xl"
             >
-                {/* The welcome IS the headline. It used to be a small pill above a
-                    generic "What would you like to explore?", so the one personal
-                    thing on the page was the smallest text in the hero. */}
-                {greeting ? (
-                    <>
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.85 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: 0.05, duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-                            className="mx-auto mb-5 w-16 h-16 rounded-2xl flex items-center justify-center
-                                       bg-gradient-to-br from-accent-business to-accent-lineage
-                                       text-white text-xl font-black tracking-tight
-                                       shadow-xl shadow-accent-business/25 ring-4 ring-canvas"
-                        >
+                {/* Two things have to coexist here, and each attempt so far sacrificed
+                    one for the other: WHO the person is (a pill was too timid) and
+                    WHAT this product does (a greeting alone is a generic SaaS hello).
+                    So the greeting is a real, avatar-led line — unmistakably personal —
+                    and the headline goes back to the product's question. */}
+                {greeting && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.05, duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                        className="inline-flex items-center gap-3 mb-5"
+                    >
+                        <span className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0
+                                         bg-gradient-to-br from-accent-lineage to-accent-business
+                                         text-white text-sm font-black tracking-tight
+                                         shadow-lg shadow-accent-lineage/25 ring-2 ring-canvas">
                             {greeting.initials}
-                        </motion.div>
-
-                        <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
+                        </span>
+                        <span className="text-xl md:text-2xl font-bold text-ink tracking-tight">
                             {greeting.salutation}
                             {greeting.name && (
                                 <>
                                     ,{' '}
-                                    <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
+                                    {/* inline-block + a hair of padding: bg-clip-text
+                                        crops the final glyph without it. */}
+                                    <span className="inline-block pr-0.5 bg-gradient-to-r from-accent-lineage to-accent-business bg-clip-text text-transparent">
                                         {greeting.name}
                                     </span>
                                 </>
                             )}
-                        </h1>
-                    </>
-                ) : (
-                    <>
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.9 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: 0.05, duration: 0.2 }}
-                            className="inline-flex items-center gap-2 mb-5 px-4 py-1.5 rounded-full glass-panel border border-accent-business/30 text-accent-business text-sm font-semibold"
-                        >
-                            <Zap className="w-3.5 h-3.5" />
-                            Data Intelligence Platform
-                        </motion.div>
-                        <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
-                            What would you like<br className="hidden md:block" /> to{' '}
-                            <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
-                                explore?
-                            </span>
-                        </h1>
-                    </>
+                        </span>
+                    </motion.div>
                 )}
 
-                <p className="text-base text-ink-muted mb-8 max-w-lg mx-auto">
-                    {statusLine ?? 'Search across your business areas, views, and data sources — or start from a template.'}
-                </p>
+                <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-4 leading-[1.1]">
+                    What would you like<br className="hidden md:block" /> to{' '}
+                    {/* accent-explore was never defined in the Tailwind config, so this
+                        gradient had ONE stop and faded the word to transparent. */}
+                    <span className="inline-block pr-1 bg-gradient-to-r from-accent-lineage to-accent-business bg-clip-text text-transparent">
+                        explore?
+                    </span>
+                </h1>
+
+                {/* The live line — what changed while they were away. It's a button, not
+                    a caption: the whole point is to send them to the activity it counts. */}
+                {statusLine ? (
+                    <motion.button
+                        type="button"
+                        onClick={onStatusClick}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ delay: 0.12 }}
+                        className="group inline-flex items-center gap-2 mb-8 px-3.5 py-1.5 rounded-full
+                                   glass-panel border border-glass-border
+                                   text-sm text-ink-muted hover:text-ink hover:border-accent-business/40
+                                   transition-colors"
+                    >
+                        <span className="relative flex w-2 h-2 shrink-0">
+                            <span className="absolute inline-flex w-full h-full rounded-full bg-accent-business opacity-60 animate-ping" />
+                            <span className="relative inline-flex w-2 h-2 rounded-full bg-accent-business" />
+                        </span>
+                        {statusLine}
+                        <ArrowRight className="w-3.5 h-3.5 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
+                    </motion.button>
+                ) : (
+                    <p className="text-base text-ink-muted mb-8 max-w-lg mx-auto">
+                        Search across your business areas, views, and data sources — or start from a template.
+                    </p>
+                )}
 
                 {/* Search box + dropdown */}
                 <div ref={containerRef} className={cn('relative group transition-all duration-500', focused ? 'scale-[1.02]' : 'scale-100')}>

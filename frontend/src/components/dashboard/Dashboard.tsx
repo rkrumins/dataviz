@@ -219,6 +219,10 @@ export function Dashboard() {
                         onClearRecentSearches={clearRecentSearches}
                         greeting={greeting}
                         statusLine={statusLine}
+                        onStatusClick={() => {
+                            document.getElementById('dashboard-activity')
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                        }}
                         actions={
                             <HeroActions
                                 onCreateView={() => openViewEditor()}
@@ -244,6 +248,7 @@ export function Dashboard() {
 
                 {/* 3. What the team has been doing, in the user's workspaces */}
                 <motion.div
+                    id="dashboard-activity"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
