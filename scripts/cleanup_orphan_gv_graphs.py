@@ -59,6 +59,11 @@ async def _falkor_handle():
         port=int(os.getenv("FALKORDB_PORT", "6379")),
         max_connections=int(os.getenv("FALKORDB_POOL_SIZE", "10")),
     )
+    # Speaks PLAIN standalone Redis: against a Cluster this reaches only the slots
+    # of one node and against Sentinel it can land on a demoted replica — a wipe or
+    # GRAPH.DELETE would half-apply and a reindex would silently skip shards.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+    assert_standalone_env("cleanup_orphan_gv_graphs.py")
     return FalkorDB(connection_pool=pool)
 
 

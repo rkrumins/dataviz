@@ -2081,6 +2081,11 @@ async def push_to_falkordb(builder: DataLakeBuilder, graph_name: str = "data_lak
     host = os.getenv("FALKORDB_HOST", "localhost")
     port = int(os.getenv("FALKORDB_PORT", "6379"))
 
+    # Speaks PLAIN standalone Redis: against a Cluster this reaches only the slots
+    # of one node and against Sentinel it can land on a demoted replica — a wipe or
+    # GRAPH.DELETE would half-apply and a reindex would silently skip shards.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+    assert_standalone_env("seed_data_lake.py")
     db = FalkorDB(host=host, port=port)
     graph = db.select_graph(graph_name)
 
