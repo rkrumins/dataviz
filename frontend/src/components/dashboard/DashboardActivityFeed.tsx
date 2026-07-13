@@ -37,57 +37,16 @@
  * layout, on error we render a quiet failure with a retry — never silence — and
  * only a confirmed-empty feed collapses to nothing.
  */
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Users, ArrowRight, RefreshCw, AlertCircle, Pencil, Database } from 'lucide-react'
 import { useMyActivityFeed, MY_FEED_LIMIT } from '@/hooks/useViewActivity'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { ActivityFeedList } from '@/components/views/ActivityFeedList'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import type { ViewActivityEntry } from '@/services/viewApiService'
-
-/** The data channel. Everything else is a person changing something. */
-const DATA_ACTIONS = new Set(['data_changed'])
-
-const isDataEvent = (e: ViewActivityEntry) => DATA_ACTIONS.has(e.action)
-
-type Channel = 'all' | 'people' | 'data'
-
-interface Summary {
-    total: number
-    dataUpdates: number
-    peopleChanges: number
-    /** Views touched most in this window, busiest first. */
-    busiest: { viewId: string; viewName: string; count: number }[]
-    /** Oldest event loaded — bounds what the summary can honestly claim. */
-    oldestAt: string | null
-}
-
-function summarise(entries: ViewActivityEntry[]): Summary {
-    const byView = new Map<string, { viewId: string; viewName: string; count: number }>()
-    let dataUpdates = 0
-    let peopleChanges = 0
-
-    for (const e of entries) {
-        if (isDataEvent(e)) dataUpdates += 1
-        else peopleChanges += 1
-
-        if (!e.viewName) continue
-        const seen = byView.get(e.viewId)
-        if (seen) seen.count += 1
-        else byView.set(e.viewId, { viewId: e.viewId, viewName: e.viewName, count: 1 })
-    }
-
-    return {
-        total: entries.length,
-        dataUpdates,
-        peopleChanges,
-        busiest: [...byView.values()].sort((a, b) => b.count - a.count).slice(0, 4),
-        // Entries arrive newest-first.
-        oldestAt: entries.length > 0 ? entries[entries.length - 1].createdAt : null,
-    }
-}
+import { summarise, isDataEvent, type Channel, type Summary } from './activitySummary'
 
 // ── Pieces ─────────────────────────────────────────────────────────────────
 
@@ -250,9 +209,19 @@ function SectionHeader({ children }: { children?: React.ReactNode }) {
 export function DashboardActivityFeed() {
     const { data, isLoading, isError, refetch, isFetching } = useMyActivityFeed(MY_FEED_LIMIT)
     const [channel, setChannel] = useState<Channel>('all')
+    const workspaces = useWorkspacesStore(s => s.workspaces)
 
     const entries = useMemo(() => data ?? [], [data])
-    const summary = useMemo(() => summarise(entries), [entries])
+
+    const workspaceNameFor = useCallback(
+        (id?: string | null) => workspaces.find(w => w.id === id)?.name,
+        [workspaces],
+    )
+
+    const summary = useMemo(
+        () => summarise(entries, workspaceNameFor),
+        [entries, workspaceNameFor],
+    )
 
     const visible = useMemo(() => {
         if (channel === 'data') return entries.filter(isDataEvent)

@@ -46,6 +46,11 @@ class ViewActivityEntry(BaseModel):
     createdAt: str
     # Populated only in the workspace-wide feed (redundant in a per-view view).
     viewName: Optional[str] = None
+    # View names are NOT unique. Two different views can both be called "Data
+    # Lineage", and a feed that names one without saying where it lives is
+    # ambiguous. The client already holds the workspace list, so the id is
+    # enough — it resolves the name itself.
+    workspaceId: Optional[str] = None
     # True for synthesized legacy anchors (no real row existed).
     synthetic: bool = False
 
@@ -145,6 +150,7 @@ def _to_entry(
         summary=r.summary,
         changes=json.loads(r.changes) if r.changes else None,
         createdAt=r.created_at,
+        workspaceId=r.workspace_id,
         synthetic=synthetic,
     )
 
@@ -231,13 +237,13 @@ async def _synthetic_anchor(
             id=f"{view_id}:anchor-updated", viewId=view_id, action="updated",
             actor=row.updated_by, actorName=un, actorEmail=ue,
             summary="Last edited before activity tracking",
-            createdAt=row.updated_at, synthetic=True,
+            createdAt=row.updated_at, workspaceId=row.workspace_id, synthetic=True,
         ))
     cn, ce = actor_map.get(row.created_by or "", (None, None))
     out.append(ViewActivityEntry(
         id=f"{view_id}:anchor-created", viewId=view_id, action="created",
         actor=row.created_by, actorName=cn, actorEmail=ce,
         summary="Created before activity tracking",
-        createdAt=row.created_at, synthetic=True,
+        createdAt=row.created_at, workspaceId=row.workspace_id, synthetic=True,
     ))
     return out

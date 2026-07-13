@@ -368,6 +368,10 @@ export interface ViewActivityEntry {
     createdAt: string
     /** Present only in the workspace-wide feed. */
     viewName?: string | null
+    /** Which workspace the view lives in. View names are NOT unique — two views
+     *  can both be called "Data Lineage" — so a feed that names one without
+     *  saying where it lives is ambiguous. */
+    workspaceId?: string | null
     /** True for a synthesized anchor on a legacy view with no recorded rows. */
     synthetic: boolean
 }
