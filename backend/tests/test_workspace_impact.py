@@ -136,3 +136,78 @@ async def test_view_count_excludes_soft_deleted_views(
     impact_names = sorted(v.name for v in impact.views)
     assert impact_names == ["Gone", "Keep"], "the cascade takes both — say so"
     assert keep.id != gone.id
+
+
+# ── Exclusive ownership ────────────────────────────────────────────────────
+#
+# `uq_ds_catalog_item` is a UNIQUE constraint on workspace_data_sources
+# .catalog_item_id: a catalog item belongs to exactly ONE workspace. That is not
+# an edge case, it is the model — in this instance all 37 catalog items are
+# allocated and none are free.
+#
+# The UI offered already-owned items anyway (the workspace detail page filters on
+# permittedWorkspaces, which says who MAY use an item, not who HAS it), so picking
+# one hit the constraint. The handler only recognised uq_ds_ws_prov_graph, so the
+# IntegrityError went unhandled → 500.
+
+
+async def _provider(client: AsyncClient, name: str = "Impact Provider") -> str:
+    resp = await client.post(
+        "/api/v1/admin/providers",
+        json={"name": name, "providerType": "falkordb"},
+    )
+    assert resp.status_code in (200, 201), resp.text
+    return resp.json()["id"]
+
+
+async def _catalog_item(client: AsyncClient, name: str = "Shared Asset") -> str:
+    provider_id = await _provider(client, f"Prov for {name}")
+    resp = await client.post("/api/v1/admin/catalog", json={
+        "name": name,
+        "providerId": provider_id,
+        "sourceIdentifier": f"graph_{name.replace(' ', '_')}",
+    })
+    assert resp.status_code in (200, 201), resp.text
+    return resp.json()["id"]
+
+
+async def test_attaching_an_already_owned_catalog_item_is_a_409_not_a_500(
+    test_client: AsyncClient,
+):
+    """The click-path that used to return an unhandled IntegrityError."""
+    owner = await _workspace(test_client, "Owner WS")
+    other = await _workspace(test_client, "Other WS")
+    item = await _catalog_item(test_client)
+
+    first = await test_client.post(
+        f"/api/v1/admin/workspaces/{owner}/data-sources",
+        json={"catalogItemId": item},
+    )
+    assert first.status_code in (200, 201), first.text
+
+    # The second workspace tries to take it.
+    second = await test_client.post(
+        f"/api/v1/admin/workspaces/{other}/data-sources",
+        json={"catalogItemId": item},
+    )
+    assert second.status_code == 409, (
+        f"expected a clean conflict, got {second.status_code}: {second.text}"
+    )
+    # And it names who has it, so the UI can say so.
+    assert "Owner WS" in second.json()["detail"]
+
+
+async def test_attaching_the_same_item_twice_to_the_SAME_workspace_is_a_409(
+    test_client: AsyncClient,
+):
+    ws = await _workspace(test_client, "Double Add")
+    item = await _catalog_item(test_client, "Double Asset")
+
+    assert (await test_client.post(
+        f"/api/v1/admin/workspaces/{ws}/data-sources", json={"catalogItemId": item},
+    )).status_code in (200, 201)
+
+    again = await test_client.post(
+        f"/api/v1/admin/workspaces/{ws}/data-sources", json={"catalogItemId": item},
+    )
+    assert again.status_code == 409

@@ -22,7 +22,9 @@ import {
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { CatalogItemPicker, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
+import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
+import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
@@ -59,7 +61,30 @@ export function AddDataSourceWizard({
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
 
-    const selected = catalogItems.find(c => c.id === catalogItemId)
+    // OWNERSHIP, not permission. The page's catalog list is filtered by
+    // `permittedWorkspaces` — who MAY use an item — which says nothing about who
+    // HAS it. That is why already-owned sources were offered as selectable and the
+    // POST died on the unique constraint. Bindings are the only thing that knows.
+    const bindingsQuery = useQuery({
+        queryKey: ['catalog', 'bindings'],
+        queryFn: () => catalogService.listWithBindings(),
+        enabled: isOpen,
+        staleTime: 30_000,
+    })
+
+    const items: PickableCatalogItem[] = useMemo(() => {
+        const owner = new Map(
+            (bindingsQuery.data ?? []).map(b => [b.id, b]),
+        )
+        return catalogItems.map(item => {
+            const b = owner.get(item.id)
+            return b
+                ? { ...item, boundWorkspaceId: b.boundWorkspaceId, boundWorkspaceName: b.boundWorkspaceName }
+                : item
+        })
+    }, [catalogItems, bindingsQuery.data])
+
+    const selected = items.find(c => c.id === catalogItemId)
     const chosenOntology = ontologies.find(o => o.id === ontologyId)
 
     const stepIndex = STEPS.findIndex(s => s.id === step)
@@ -191,10 +216,11 @@ export function AddDataSourceWizard({
                             : 'Pick the catalog item to attach to this workspace.'}
                     />
                     <CatalogItemPicker
-                        items={catalogItems}
+                        items={items}
                         providers={providers}
                         selectedId={catalogItemId}
                         onSelect={setCatalogItemId}
+                        currentWorkspaceId={workspaceId}
                     />
                     {catalogItemId && (
                         <div>

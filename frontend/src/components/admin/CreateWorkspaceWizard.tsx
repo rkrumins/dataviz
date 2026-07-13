@@ -15,6 +15,7 @@
  *     instance has NINE workspaces called "Solidatus Test WS".
  */
 import { useState, useMemo, useCallback, startTransition } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Boxes, Database, ClipboardCheck, Sparkles, AlertTriangle, Check,
@@ -28,13 +29,12 @@ import {
     type WorkspaceCreateRequest,
     type WorkspaceResponse,
 } from '@/services/workspaceService'
+import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 
-const STEPS: WizardStepDef[] = [
-    { id: 'basics', label: 'Basics', icon: <Boxes className="w-6 h-6" /> },
-    { id: 'data', label: 'Data', icon: <Database className="w-6 h-6" /> },
-    { id: 'review', label: 'Review', icon: <ClipboardCheck className="w-6 h-6" /> },
-]
+const BASICS: WizardStepDef = { id: 'basics', label: 'Basics', icon: <Boxes className="w-6 h-6" /> }
+const DATA: WizardStepDef = { id: 'data', label: 'Data', icon: <Database className="w-6 h-6" /> }
+const REVIEW: WizardStepDef = { id: 'review', label: 'Review', icon: <ClipboardCheck className="w-6 h-6" /> }
 
 /** A free name near the one they wanted. Nine "Solidatus Test WS" is not an accident. */
 function suggestFreeName(base: string, taken: Set<string>): string | null {
@@ -81,6 +81,24 @@ export function CreateWorkspaceWizard({
     const isDuplicate = trimmed.length > 0 && takenNames.has(trimmed.toLowerCase())
     const freeName = isDuplicate ? suggestFreeName(trimmed, takenNames) : null
 
+    // Ownership, not permission: a catalog item belongs to exactly one workspace
+    // (uq_ds_catalog_item), and it's allocated at ONBOARDING. So "free" is usually
+    // empty — the picker's empty state explains that rather than looking broken.
+    const bindingsQuery = useQuery({
+        queryKey: ['catalog', 'bindings'],
+        queryFn: () => catalogService.listWithBindings(),
+        enabled: isOpen,
+        staleTime: 30_000,
+    })
+
+    const items: PickableCatalogItem[] = bindingsQuery.data ?? catalogItems
+    const freeItems = useMemo(() => items.filter(c => !c.boundWorkspaceId), [items])
+
+    // The step list stays STABLE. It is derived from a fetch that lands after the
+    // wizard opens, so deriving the STEPS from it would change the wizard's shape
+    // mid-flight.
+    const STEPS = useMemo<WizardStepDef[]>(() => [BASICS, DATA, REVIEW], [])
+
     const stepIndex = STEPS.findIndex(s => s.id === step)
     const isLastStep = stepIndex === STEPS.length - 1
 
@@ -98,7 +116,7 @@ export function CreateWorkspaceWizard({
         return null
     }, [step, trimmed, isDuplicate])
 
-    const selectedItem = catalogItems.find(c => c.id === catalogItemId)
+    const selectedItem = items.find(c => c.id === catalogItemId)
 
     const reset = useCallback(() => {
         setStep('basics'); setName(''); setDescription('')
@@ -236,7 +254,7 @@ export function CreateWorkspaceWizard({
                         subtitle="Attach a data source now, or leave it empty and connect one later."
                     />
                     <CatalogItemPicker
-                        items={catalogItems}
+                        items={items}
                         providers={providers}
                         selectedId={catalogItemId}
                         onSelect={setCatalogItemId}
@@ -274,8 +292,14 @@ export function CreateWorkspaceWizard({
                         <ReviewRow label="Description" value={description.trim() || 'None'} />
                         <ReviewRow
                             label="Data source"
-                            value={selectedItem?.name ?? 'None — attach one later'}
-                            hint={selectedItem?.sourceIdentifier}
+                            value={selectedItem?.name
+                                ?? (freeItems.length > 0
+                                    ? 'None — attach one later'
+                                    : 'None available')}
+                            hint={selectedItem?.sourceIdentifier
+                                ?? (freeItems.length > 0
+                                    ? undefined
+                                    : 'Every source is allocated to a workspace. Onboard assets in Ingestion to get more.')}
                         />
                         <ReviewRow label="Members" value="Just you, for now" icon={<Users className="w-3.5 h-3.5" />} />
                     </div>
