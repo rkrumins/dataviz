@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { TimeStamp } from '@/components/ui/TimeStamp'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
@@ -372,22 +373,25 @@ export function WorkspaceCard({
 
                     <span className="w-px h-3.5 bg-glass-border shrink-0" />
 
-                    <span
-                        className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary truncate"
-                        title={`Last updated ${new Date(ws.updatedAt).toLocaleString()}`}
-                    >
-                        <Clock className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-                        {timeAgo(ws.updatedAt)}
-                    </span>
+                    {/* The same age-coloured chip the Explorer cards use: green while
+                        fresh, amber past a month, red beyond. A workspace nobody has
+                        touched in eight months should not look identical to one edited
+                        a minute ago — which is exactly what flat grey did. */}
+                    <TimeStamp
+                        at={ws.updatedAt}
+                        icon={Clock}
+                        tooltipLines={[`Last updated ${timeAgo(ws.updatedAt)}`]}
+                    />
 
-                    {/* Age is context, so it sits quieter — but readable, and it says
-                        the exact date on hover. */}
-                    <span
-                        className="text-[11px] text-ink-muted truncate hidden lg:block"
-                        title={`Created ${new Date(ws.createdAt).toLocaleString()}`}
-                    >
-                        · created {timeAgo(ws.createdAt)}
-                    </span>
+                    {/* Age is context, not health — so it stays quiet and uncoloured. */}
+                    <TimeStamp
+                        at={ws.createdAt}
+                        icon={null}
+                        colorByAge={false}
+                        prefix="· created"
+                        className="hidden lg:inline-flex"
+                        tooltipLines={['When this workspace was created']}
+                    />
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     {onManageMembers && (

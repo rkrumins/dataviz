@@ -19,6 +19,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
@@ -237,18 +238,22 @@ export function ExplorerListRow({
           {view.favouriteCount}
         </span>
 
-        {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both ── */}
+        {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both.
+               This row printed FLAT GREY while the card beside it carried the
+               age-coloured chip: the same view, two different stories about how
+               stale it is, depending on which layout you happened to pick. ── */}
         {(() => {
           const dataAt = view.dataUpdatedAt ?? null
           const freshest = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
-          const title = [
-            dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
-            `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
-          ].filter(Boolean).join('\n')
           return (
-            <span className="text-xs text-ink-muted" title={title}>
-              {timeAgo(freshest)}
-            </span>
+            <TimeStamp
+              at={freshest}
+              icon={null}
+              tooltipLines={[
+                dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
+                `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
+              ]}
+            />
           )
         })()}
 

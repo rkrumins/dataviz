@@ -16,7 +16,6 @@ import {
   Box,
   ExternalLink,
   Pencil,
-  RefreshCw,
   AlertTriangle,
   Check,
   RotateCcw,
@@ -26,6 +25,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
@@ -537,24 +537,23 @@ export function ExplorerViewCard({
           })()}
 
           {/* Sync indicator — right. Freshest of settings-edit vs data-publish, with both
-              stories in the tooltip ("Data updated … by X" / "Settings edited … by Y"). */}
+              stories in the tooltip ("Data updated … by X" / "Settings edited … by Y").
+              The chip itself now lives in components/ui/TimeStamp — it was the only
+              age-coloured timestamp in the app, and every other surface printed flat
+              grey. Same output, one definition. */}
           {(() => {
             const dataAt = view.dataUpdatedAt ?? null
             const freshest = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
-            const ageDays = (Date.now() - new Date(freshest).getTime()) / (1000 * 60 * 60 * 24)
-            const syncColor = ageDays <= 7 ? 'text-emerald-500' : ageDays <= 30 ? 'text-amber-500' : 'text-red-500'
-            const title = [
-              dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
-              `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
-            ].filter(Boolean).join('\n')
             return (
-              <span
-                className={cn('inline-flex items-center gap-1 text-[10px] font-medium ml-auto', syncColor)}
-                title={title}
-              >
-                <RefreshCw className="h-2.5 w-2.5" />
-                {timeAgo(freshest)}
-              </span>
+              <TimeStamp
+                at={freshest}
+                className="ml-auto text-[10px]"
+                iconClassName="h-2.5 w-2.5"
+                tooltipLines={[
+                  dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
+                  `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
+                ]}
+              />
             )
           })()}
         </div>

@@ -6,6 +6,7 @@ import { getProviderLogo } from '../ProviderLogos'
 import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { TimeStamp } from '@/components/ui/TimeStamp'
 
 /**
  * The list grid — ONE definition, used by the header in WorkspacesPage and by every
@@ -146,21 +147,22 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
                 <span className="font-semibold">{stats.types > 0 ? stats.types : '\u2014'}</span>
             </div>
 
-            {/* Created, then Updated. The list only ever showed the latter, and both
-                were near-invisible grey. Created is an exact date (you look it up);
-                Updated is relative (you scan it). */}
+            {/* Created is an exact date — you look it up, you don't scan it. */}
             <span
                 className="text-[11px] text-ink-secondary tabular-nums truncate"
                 title={`Created ${new Date(ws.createdAt).toLocaleString()}`}
             >
                 {shortDate(ws.createdAt)}
             </span>
-            <span
-                className="text-[11px] font-medium text-ink-secondary truncate"
-                title={`Updated ${new Date(ws.updatedAt).toLocaleString()}`}
-            >
-                {timeAgo(ws.updatedAt)}
-            </span>
+
+            {/* Updated is the age-coloured chip, so a stale workspace shows up while
+                you're scanning the column rather than only when you read it. */}
+            <TimeStamp
+                at={ws.updatedAt}
+                icon={null}
+                tooltipLines={[`Last updated ${timeAgo(ws.updatedAt)}`]}
+                className="truncate"
+            />
 
             <WorkspaceRowActions
                 ws={ws}
