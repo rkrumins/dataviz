@@ -24,6 +24,7 @@ from backend.app.models.graph import (
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
+from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.fair_share import get_fair_share
 from backend.app.services.graph_cache import (
@@ -61,6 +62,13 @@ router = APIRouter()
 # write routes additionally require ``workspace:datasource:manage`` so a
 # read-only workspace member cannot mutate the graph.
 require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
+
+# The server half of two admin toggles that, until now, toggled nothing. A flag that only hides
+# a button is a lie — the endpoint is still there and anyone who knows the URL still has the
+# feature. Both fail OPEN (a database hiccup must not black out a product area); only the
+# SECURITY flag (signupEnabled, in auth.py) fails closed.
+require_trace = require_feature("traceEnabled")        # POST /trace*
+require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 
 
 # ------------------------------------------------------------------ #
@@ -490,7 +498,7 @@ async def _resolve_data_source_id(
 _V1_TRACE_SUNSET = "Mon, 25 May 2026 00:00:00 GMT"
 
 
-@router.post("/trace", response_model=None, response_model_by_alias=False, deprecated=True)
+@router.post("/trace", response_model=None, response_model_by_alias=False, deprecated=True, dependencies=[Depends(require_trace)])
 async def get_lineage_trace_deprecated(request: Request):
     """**REMOVED — V1 trace is no longer served.**
 
@@ -546,7 +554,7 @@ async def get_lineage_trace_deprecated(request: Request):
 # ----------------------------------------------------------------------------- #
 
 
-@router.post("/trace/v2", response_model=TraceResult, response_model_by_alias=True)
+@router.post("/trace/v2", response_model=TraceResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])
 async def trace_v2(
     response: Response,
     request: TraceRequest = Body(...),
@@ -586,7 +594,7 @@ async def trace_v2(
     )
 
 
-@router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True)
+@router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])
 async def trace_expand(
     response: Response,
     request: ExpandRequest = Body(...),
@@ -639,7 +647,7 @@ class _TraceExpandBatchRequest(BaseModel):
         populate_by_name = True
 
 
-@router.post("/trace/expand-batch", response_model=TraceResult, response_model_by_alias=True)
+@router.post("/trace/expand-batch", response_model=TraceResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])
 async def trace_expand_batch(
     response: Response,
     request: _TraceExpandBatchRequest = Body(...),
@@ -1876,7 +1884,7 @@ async def materialize_aggregated_edges(
     return JSONResponse(content=stats)
 
 
-@router.post("/nodes/create", response_model=CreateNodeResult, response_model_by_alias=True)
+@router.post("/nodes/create", response_model=CreateNodeResult, response_model_by_alias=True, dependencies=[Depends(require_edit_mode)])
 async def create_node(
     request: CreateNodeRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
@@ -1894,7 +1902,7 @@ async def create_node(
 
 # ─── Edge CRUD ────────────────────────────────────────────────────────────────
 
-@router.post("/edges", response_model=EdgeMutationResult, response_model_by_alias=True, status_code=201)
+@router.post("/edges", response_model=EdgeMutationResult, response_model_by_alias=True, status_code=201, dependencies=[Depends(require_edit_mode)])
 async def create_edge(
     request: CreateEdgeRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
@@ -1911,7 +1919,7 @@ async def create_edge(
     return result
 
 
-@router.patch("/edges/{edge_id}", response_model=EdgeMutationResult, response_model_by_alias=True)
+@router.patch("/edges/{edge_id}", response_model=EdgeMutationResult, response_model_by_alias=True, dependencies=[Depends(require_edit_mode)])
 async def update_edge(
     edge_id: str,
     request: UpdateEdgeRequest = Body(...),
@@ -1924,7 +1932,7 @@ async def update_edge(
     return result
 
 
-@router.delete("/edges/{edge_id}", status_code=204)
+@router.delete("/edges/{edge_id}", status_code=204, dependencies=[Depends(require_edit_mode)])
 async def delete_edge(
     edge_id: str,
     engine: ContextEngine = Depends(get_context_engine),
@@ -2074,7 +2082,7 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     return ops, assigned
 
 
-@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True)
+@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True, dependencies=[Depends(require_edit_mode)])
 async def apply_graph_changes(
     ws_id: str,
     request: GraphChangesRequest = Body(...),

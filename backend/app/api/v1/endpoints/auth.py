@@ -33,6 +33,8 @@ from backend.common.models.auth import (
     ResetPasswordRequest,
     InviteVerifyResponse,
 )
+from backend.app.api.v1.feature_gate import feature_disabled
+from backend.app.services.feature_flags import feature_flags
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,27 @@ async def signup(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invite link is invalid or has expired.",
             )
+
+    # 2a. SELF-REGISTRATION GATE.
+    #
+    # `signupEnabled` promised the admin that strangers could not create accounts, and enforced
+    # nothing: with the flag OFF, an anonymous POST here still returned 201 and still wrote a
+    # `pending` user row. The switch was decorative, which is worse than absent — an absent
+    # control is at least honest about what it does not do.
+    #
+    # The gate goes HERE, after the invite has been validated, because "self-registration is
+    # off" must never mean "invitations stop working": disabling the open door is precisely the
+    # moment invites become the ONLY way in, and closing that too would lock an admin out of
+    # their own onboarding.
+    #
+    # default=False, deliberately. Every other flag in this codebase fails OPEN so a database
+    # hiccup cannot black out a product area. This one is a security control, and the costs are
+    # not symmetric: failing open lets strangers in, failing closed inconveniences an invite.
+    # When we cannot read the flag, we assume the admin meant to keep the door shut.
+    if not invite_valid and not await feature_flags.is_enabled_self_session(
+            "signupEnabled", default=False):
+        logger.info("signup blocked: self-registration is disabled and no valid invite was given")
+        raise feature_disabled("signupEnabled")
 
     # 2b. Email pin (Phase 11): an email-bound invite can only be
     # accepted by the pinned address. We check BEFORE the
