@@ -3,12 +3,12 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import {
-    Database, Plus, Edit2, Settings, AlertTriangle,
+    Database, Plus, AlertTriangle,
     CircleDot, ArrowRightLeft, Eye, Sparkles, Boxes,
 } from 'lucide-react'
 import { listViews } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
-import { workspaceService, type WorkspaceResponse, type WorkspaceCreateRequest } from '@/services/workspaceService'
+import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse, type CatalogItemBindingResponse } from '@/services/catalogService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -19,7 +19,7 @@ import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from
 import { WorkspaceListRow } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
-import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
+import { CreateWorkspaceWizard } from '@/components/admin/CreateWorkspaceWizard'
 import { WorkspaceBulkBar } from '@/components/admin/workspace/WorkspaceBulkBar'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import {
@@ -106,13 +106,8 @@ export function WorkspacesPage() {
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [isLoading, setIsLoading] = useState(true)
 
-    /* ── Wizard state ── */
+    /* ── Create-workspace wizard ── */
     const [showWizard, setShowWizard] = useState(false)
-    const [wizName, setWizName] = useState('')
-    const [wizDesc, setWizDesc] = useState('')
-    const [wizCatalogItemId, setWizCatalogItemId] = useState('')
-    const [wizDsLabel, setWizDsLabel] = useState('')
-    const [wizSubmitting, setWizSubmitting] = useState(false)
 
     const [totalViews, setTotalViews] = useState(0)
     const [viewCountByWs, setViewCountByWs] = useState<Record<string, number>>({})
@@ -355,74 +350,6 @@ export function WorkspacesPage() {
         loadData()
     }
 
-    const resetWizard = () => { setWizName(''); setWizDesc(''); setWizCatalogItemId(''); setWizDsLabel('') }
-
-    const handleWizardComplete = async () => {
-        setWizSubmitting(true)
-        try {
-            const req: WorkspaceCreateRequest = {
-                name: wizName, description: wizDesc || undefined,
-                dataSources: wizCatalogItemId ? [{ catalogItemId: wizCatalogItemId, label: wizDsLabel || undefined }] : [],
-            }
-            await workspaceService.create(req)
-            setShowWizard(false); resetWizard(); loadData()
-        } catch (err) { console.error('Failed to create workspace', err) }
-        finally { setWizSubmitting(false) }
-    }
-
-    const wsNameDuplicate = workspaces.some(w => w.name.toLowerCase() === wizName.trim().toLowerCase())
-    const unboundCatalogs = catalogBindings.filter(b => !b.boundWorkspaceId)
-
-    const wizardSteps: WizardStep[] = [
-        {
-            id: 'basics', title: 'Basics', icon: Edit2, validate: () => wizName.trim() && !wsNameDuplicate ? true : !wizName.trim() ? 'Please enter a workspace name.' : 'A workspace with this name already exists.',
-            content: (
-                <div className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Workspace Name *</label>
-                        <input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Analytics" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                        {wsNameDuplicate && (
-                            <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
-                                <AlertTriangle className="w-3 h-3" />
-                                A workspace named &quot;{wizName.trim()}&quot; already exists
-                            </p>
-                        )}
-                    </div>
-                    <div><label className="block text-sm font-medium text-ink mb-1.5">Description</label><textarea value={wizDesc} onChange={e => setWizDesc(e.target.value)} placeholder="Optional description for this workspace" rows={3} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none" /></div>
-                </div>
-            ),
-        },
-        {
-            id: 'data-source', title: 'Data Source', icon: Database, validate: () => true,
-            content: (
-                <div className="space-y-4">
-                    <p className="text-xs text-ink-muted mb-4">You can connect an initial data source to this workspace now, or do it later.</p>
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Catalog Item</label>
-                        <select value={wizCatalogItemId} onChange={e => setWizCatalogItemId(e.target.value)} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"><option value="">Skip for now...</option>{unboundCatalogs.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}</select>
-                        <p className="mt-1.5 text-xs text-ink-muted">Only unallocated data sources are shown</p>
-                    </div>
-                    <div><label className="block text-sm font-medium text-ink mb-1.5">Label</label><input value={wizDsLabel} onChange={e => setWizDsLabel(e.target.value)} placeholder="e.g. Main Graph, Analytics DB" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
-                </div>
-            ),
-        },
-        {
-            id: 'review', title: 'Review', icon: Settings, validate: () => true,
-            content: (
-                <div className="space-y-4">
-                    <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
-                        <h4 className="text-sm font-bold text-ink mb-3">Workspace Summary</h4>
-                        <dl className="grid grid-cols-2 gap-3 text-sm">
-                            <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '\u2014'}</dd></div>
-                            <div><dt className="text-ink-muted">Description</dt><dd className="text-ink mt-0.5 line-clamp-2">{wizDesc || '\u2014'}</dd></div>
-                            <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === wizCatalogItemId)?.name || '\u2014'}</dd></div>
-                        </dl>
-                    </div>
-                </div>
-            ),
-        },
-    ]
-
     /* ── Client-side filtering + sorting ── */
     const filtered = useMemo(() => {
         let result = workspaces
@@ -504,7 +431,7 @@ export function WorkspacesPage() {
                     </div>
                 </div>
                 {canCreateWorkspace && (
-                    <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                    <button onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                         <Plus className="w-4 h-4" /> Create Workspace
                     </button>
                 )}
@@ -783,8 +710,15 @@ export function WorkspacesPage() {
                 onConfirm={deletion.confirm}
             />
 
-            {/* Create Workspace Wizard */}
-            <AdminWizard title="Create Workspace" steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); resetWizard() }} onComplete={handleWizardComplete} isSubmitting={wizSubmitting} completionLabel="Create Workspace" />
+            {/* Create Workspace — the premium shell, not the old AdminWizard */}
+            <CreateWorkspaceWizard
+                isOpen={showWizard}
+                onClose={() => setShowWizard(false)}
+                onCreated={ws => { loadData(); navigate(`/workspaces/${ws.id}`) }}
+                existingWorkspaces={workspaces}
+                catalogItems={catalogBindings}
+                providers={providers}
+            />
         </PageContainer>
         </div>
     )

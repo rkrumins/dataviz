@@ -8,7 +8,7 @@ import { aggregationService, type DataSourceReadinessResponse } from '@/services
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
-import { deriveWorkspaceHealth } from './WorkspaceHealthBadge'
+import { deriveWorkspaceHealth, type WorkspaceHealth } from './WorkspaceHealthBadge'
 import { withTimeout, mapWithConcurrency } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 
@@ -33,6 +33,7 @@ export interface DataSourceProviderInfo {
 export interface UseWorkspaceDetailDataReturn {
   workspace: WorkspaceResponse | null
   catalogItems: CatalogItemResponse[]
+  providers: ProviderResponse[]
   ontologies: OntologyDefinitionResponse[]
   ontologyMap: Record<string, OntologyDefinitionResponse>
   dsStatsMap: Record<string, DataSourceStats>
@@ -40,7 +41,7 @@ export interface UseWorkspaceDetailDataReturn {
   viewsByDs: Record<string, View[]>
   allWorkspaceViews: View[]
   readinessMap: Record<string, DataSourceReadinessResponse>
-  healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
+  healthStatus: WorkspaceHealth
   aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number }
   /** True only before the first successful fetch (or while navigating to a different wsId). */
   isLoading: boolean
@@ -234,6 +235,10 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
   return {
     workspace,
     catalogItems,
+    // The Add Data Source wizard needs the provider list to show WHICH provider each
+    // catalog item comes from — the old <select> couldn't, so every option looked
+    // identical. The query already ran; it just wasn't handed back.
+    providers,
     ontologies,
     ontologyMap,
     dsStatsMap,

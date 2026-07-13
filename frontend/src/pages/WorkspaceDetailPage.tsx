@@ -22,7 +22,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { accessRequestsService } from '@/services/accessRequestsService'
-import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
+import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
@@ -45,7 +45,7 @@ export function WorkspaceDetailPage() {
 
     // ── Data fetching via custom hook ──────────────────────
     const {
-        workspace, catalogItems, ontologies, ontologyMap, dsStatsMap, dsProviderMap,
+        workspace, catalogItems, providers, ontologies, ontologyMap, dsStatsMap, dsProviderMap,
         viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
         aggregateStats, isLoading, isRefreshing, reload
     } = useWorkspaceDetailData(wsId)
@@ -70,10 +70,6 @@ export function WorkspaceDetailPage() {
 
     // ── Add DS wizard state ────────────────────────────────
     const [showAddDs, setShowAddDs] = useState(false)
-    const [addDsCatalogId, setAddDsCatalogId] = useState('')
-    const [addDsLabel, setAddDsLabel] = useState('')
-    const [addDsOntologyId, setAddDsOntologyId] = useState('')
-    const [addDsSubmitting, setAddDsSubmitting] = useState(false)
 
     // ── Delete confirm state ───────────────────────────────
     const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null)
@@ -143,10 +139,17 @@ export function WorkspaceDetailPage() {
 
     const allowedCatalogItems = useMemo(() => {
         if (!wsId || !catalogItems) return []
-        return catalogItems.filter(item =>
-            item.permittedWorkspaces.includes('*') || item.permittedWorkspaces.includes(wsId)
-        )
-    }, [wsId, catalogItems])
+        const attached = new Set((workspace?.dataSources ?? []).map(ds => ds.catalogItemId))
+        return catalogItems
+            .filter(item =>
+                item.permittedWorkspaces.includes('*') || item.permittedWorkspaces.includes(wsId)
+            )
+            // Already attached HERE. The old dropdown offered these again, so the
+            // same source could be added to the workspace twice.
+            .map(item => attached.has(item.id)
+                ? { ...item, boundWorkspaceId: wsId, boundWorkspaceName: workspace?.name ?? 'this workspace' }
+                : item)
+    }, [wsId, catalogItems, workspace])
 
     const selectedDs = useMemo(() => {
         if (!workspace || !selectedDsId) return null
@@ -263,84 +266,6 @@ export function WorkspaceDetailPage() {
         }
     }
 
-    const resetAddDs = () => { setAddDsCatalogId(''); setAddDsLabel(''); setAddDsOntologyId('') }
-
-    const handleAddDsComplete = async () => {
-        if (!wsId) return
-        setAddDsSubmitting(true)
-        try {
-            await workspaceService.addDataSource(wsId, {
-                catalogItemId: addDsCatalogId,
-                label: addDsLabel || undefined,
-                ontologyId: addDsOntologyId || undefined,
-            })
-            setShowAddDs(false)
-            resetAddDs()
-            reload()
-        } finally {
-            setAddDsSubmitting(false)
-        }
-    }
-
-    // ── Add DS wizard steps ────────────────────────────────
-    const addDsSteps: WizardStep[] = [
-        {
-            id: 'source',
-            title: 'Select Data Source',
-            icon: Database,
-            validate: () => addDsCatalogId ? true : 'Please select a catalog item.',
-            content: (
-                <div className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Enterprise Catalog Item *</label>
-                        <select value={addDsCatalogId} onChange={e => setAddDsCatalogId(e.target.value)}
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
-                            <option value="">Select a data source...</option>
-                            {allowedCatalogItems.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}
-                        </select>
-                        {allowedCatalogItems.length === 0 && (
-                            <p className="text-xs text-amber-500 mt-2">No catalog items are permitted for this workspace. Contact your administrator.</p>
-                        )}
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Connection Label</label>
-                        <input value={addDsLabel} onChange={e => setAddDsLabel(e.target.value)} placeholder="Optional display label in this workspace"
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5 flex items-center gap-1.5">
-                            <GitBranch className="w-3.5 h-3.5 text-ink-muted" /> Ontology
-                        </label>
-                        <select value={addDsOntologyId} onChange={e => setAddDsOntologyId(e.target.value)}
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
-                            <option value="">None (use system defaults)</option>
-                            {ontologies.map(o => (
-                                <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>
-                            ))}
-                        </select>
-                        <p className="text-xs text-ink-muted mt-1">Optional. Assigns a semantic ontology for entity type and edge classification.</p>
-                    </div>
-                </div>
-            ),
-        },
-        {
-            id: 'confirm',
-            title: 'Confirm',
-            icon: Settings2,
-            validate: () => true,
-            content: (
-                <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
-                    <h4 className="text-sm font-bold text-ink mb-3">Data Source Summary</h4>
-                    <dl className="grid grid-cols-2 gap-3 text-sm">
-                        <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === addDsCatalogId)?.name || '\u2014'}</dd></div>
-                        <div><dt className="text-ink-muted">Label</dt><dd className="text-ink mt-0.5">{addDsLabel || '\u2014'}</dd></div>
-                        <div><dt className="text-ink-muted">Workspace</dt><dd className="text-ink mt-0.5">{workspace?.name || '\u2014'}</dd></div>
-                        <div><dt className="text-ink-muted">Ontology</dt><dd className="text-ink mt-0.5">{addDsOntologyId ? ontologies.find(o => o.id === addDsOntologyId)?.name || addDsOntologyId : 'System defaults'}</dd></div>
-                    </dl>
-                </div>
-            ),
-        },
-    ]
 
     // ── Render ─────────────────────────────────────────────
     if (isLoading) {
@@ -498,7 +423,7 @@ export function WorkspaceDetailPage() {
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>
                         {canManageDataSources && (
-                            <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                            <button onClick={() => setShowAddDs(true)}
                                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
                                 <Plus className="w-4 h-4" /> Add Source
                             </button>
@@ -519,7 +444,7 @@ export function WorkspaceDetailPage() {
                                 <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">4</span> Create views</span>
                             </div>
                             {canManageDataSources && (
-                                <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                                <button onClick={() => setShowAddDs(true)}
                                     className="flex items-center gap-2 px-4 py-2 mt-5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
                                     <Plus className="w-4 h-4" /> Add First Source
                                 </button>
@@ -630,14 +555,15 @@ export function WorkspaceDetailPage() {
             )}
 
             {/* ── Modals ──────────────────────────────────── */}
-            <AdminWizard
-                title="Add Data Source"
-                steps={addDsSteps}
+            <AddDataSourceWizard
                 isOpen={showAddDs}
-                onClose={() => { setShowAddDs(false); resetAddDs() }}
-                onComplete={handleAddDsComplete}
-                isSubmitting={addDsSubmitting}
-                completionLabel="Add Source"
+                workspaceId={wsId ?? ''}
+                workspaceName={workspace?.name}
+                onClose={() => setShowAddDs(false)}
+                onAdded={reload}
+                catalogItems={allowedCatalogItems}
+                providers={providers}
+                ontologies={ontologies}
             />
 
             <Backdrop open={!!deleteTarget} onClick={() => !loadingImpact && setDeleteTarget(null)} zClassName="z-[60]" className="bg-black/60" />
