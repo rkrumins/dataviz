@@ -132,10 +132,6 @@ class ViewVisitORM(Base):
     )
     user_id = Column(Text, nullable=False)
     visited_at = Column(Text, nullable=False, default=_now)
-    # How many times THIS user opened the view. The row is upserted, so without
-    # a counter the table knows when you last looked but not how often anyone
-    # did — which is exactly what popularity needs.
-    visit_count = Column(Integer, nullable=False, default=1, server_default="1")
 
     __table_args__ = (
         UniqueConstraint("view_id", "user_id", name="uq_view_user_visit"),

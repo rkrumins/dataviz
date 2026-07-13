@@ -9,20 +9,9 @@
  * every badge that applies to it, so nothing is lost: a draft that is also pinned
  * says so on a single card, and the filters still narrow to each subset.
  */
-import type { MostViewedEntry, MyDraftEntry, RecentViewEntry, View } from '@/services/viewApiService'
+import type { MyDraftEntry, RecentViewEntry, View } from '@/services/viewApiService'
 
-export type WorkBadge = 'draft' | 'pinned' | 'recent' | 'popular'
-
-/**
- * The badges that make something YOUR work. "Popular" deliberately isn't one:
- * a view the team opens constantly and you have never touched is a
- * recommendation, not something you left unfinished. It shows under its own
- * filter, and only joins the default list when you also have a reason to care.
- */
-const PERSONAL: WorkBadge[] = ['draft', 'pinned', 'recent']
-
-export const isPersonal = (item: WorkItem): boolean =>
-    item.badges.some(b => PERSONAL.includes(b))
+export type WorkBadge = 'draft' | 'pinned' | 'recent'
 
 export interface WorkItem {
     viewId: string
@@ -42,10 +31,6 @@ export interface WorkItem {
     /** The draft's own name, when the user gave it one. Most are unnamed, and
      *  printing "Unnamed draft" on four cards told the reader nothing. */
     draftName?: string
-    /** How many DISTINCT people have opened it (present iff `popular`). */
-    viewers?: number
-    /** How many times it has been opened in total (present iff `popular`). */
-    opens?: number
     /** Sort key: the most recent thing that happened to this item, for the user. */
     timestamp: string
     /** What that timestamp MEANS. A draft's "edited" and a visit's "opened" are
@@ -84,7 +69,6 @@ export function mergeWorkItems(
     drafts: MyDraftEntry[],
     pinned: View[],
     recents: RecentViewEntry[],
-    popular: MostViewedEntry[] = [],
 ): WorkItem[] {
     const byView = new Map<string, WorkItem>()
 
@@ -146,24 +130,6 @@ export function mergeWorkItems(
         if (!item.workspaceId) item.workspaceId = r.workspaceId
     }
 
-    // Popularity is a property of a view, not a reason it's yours — so it can
-    // decorate an item you already have, or stand alone under its own filter.
-    for (const v of popular) {
-        const item = touch(v.viewId, {
-            name: v.name,
-            viewType: v.viewType,
-            icon: v.icon,
-            workspaceId: v.workspaceId,
-            timestamp: v.lastOpenedAt ?? '',
-            timeVerb: 'Opened',
-        })
-        item.badges.push('popular')
-        item.viewers = v.viewers
-        item.opens = v.opens
-        if (!item.icon) item.icon = v.icon
-        if (!item.workspaceId) item.workspaceId = v.workspaceId
-    }
-
     const items = [...byView.values()]
 
     items.sort((a, b) => {
@@ -176,21 +142,11 @@ export function mergeWorkItems(
     return items
 }
 
-export type WorkFilter = 'all' | 'draft' | 'pinned' | 'recent' | 'popular'
+export type WorkFilter = 'all' | 'draft' | 'pinned' | 'recent'
 
 export function filterWorkItems(items: WorkItem[], filter: WorkFilter): WorkItem[] {
-    // "All" means all of YOUR work. A view you've never opened doesn't belong in
-    // it just because other people like it.
-    if (filter === 'all') return items.filter(isPersonal)
-
-    const matching = items.filter(i => i.badges.includes(filter))
-
-    // Popularity has its own order: the busiest first, not the most recent.
-    if (filter === 'popular') {
-        return [...matching].sort((a, b) =>
-            (b.viewers ?? 0) - (a.viewers ?? 0) || (b.opens ?? 0) - (a.opens ?? 0))
-    }
-    return matching
+    if (filter === 'all') return items
+    return items.filter(i => i.badges.includes(filter))
 }
 
 export function countBadge(items: WorkItem[], badge: WorkBadge): number {

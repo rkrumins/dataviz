@@ -4,8 +4,8 @@
  * says.
  */
 import { describe, it, expect } from 'vitest'
-import { mergeWorkItems, filterWorkItems, countBadge, isStaleDraft, isPersonal } from './workItems'
-import type { MostViewedEntry, MyDraftEntry, RecentViewEntry, View } from '@/services/viewApiService'
+import { mergeWorkItems, filterWorkItems, countBadge, isStaleDraft } from './workItems'
+import type { MyDraftEntry, RecentViewEntry, View } from '@/services/viewApiService'
 
 const NOW = new Date('2026-07-13T12:00:00Z').getTime()
 const hoursAgo = (h: number) => new Date(NOW - h * 60 * 60 * 1000).toISOString()
@@ -119,71 +119,6 @@ describe('mergeWorkItems', () => {
 
     it('handles all three sources being empty', () => {
         expect(mergeWorkItems([], [], [])).toEqual([])
-    })
-})
-
-const hot = (over: Partial<MostViewedEntry> & { viewId: string }): MostViewedEntry => ({
-    name: 'A View',
-    viewType: 'reference',
-    workspaceId: 'ws_1',
-    viewers: 3,
-    opens: 9,
-    lastOpenedAt: hoursAgo(1),
-    ...over,
-} as MostViewedEntry)
-
-describe('popularity', () => {
-    it('does NOT put a popular view you have never touched into "All"', () => {
-        // Otherwise "Your work" quietly fills up with other people's favourites.
-        const items = mergeWorkItems([], [], [], [hot({ viewId: 'team-fave' })])
-
-        expect(items).toHaveLength(1)
-        expect(isPersonal(items[0])).toBe(false)
-        expect(filterWorkItems(items, 'all')).toHaveLength(0)
-        expect(filterWorkItems(items, 'popular').map(i => i.viewId)).toEqual(['team-fave'])
-    })
-
-    it('decorates a view that IS yours with the popular badge, keeping it in "All"', () => {
-        const items = mergeWorkItems(
-            [draft({ viewId: 'v1' })], [], [], [hot({ viewId: 'v1', viewers: 5 })],
-        )
-
-        expect(items).toHaveLength(1)
-        expect(items[0].badges.sort()).toEqual(['draft', 'popular'])
-        expect(items[0].viewers).toBe(5)
-        expect(filterWorkItems(items, 'all')).toHaveLength(1)
-    })
-
-    it('ranks the popular tab by PEOPLE, not by raw hits', () => {
-        // One person opening something 80 times is not a recommendation.
-        const items = mergeWorkItems([], [], [], [
-            hot({ viewId: 'obsessive', viewers: 1, opens: 80 }),
-            hot({ viewId: 'genuinely-popular', viewers: 6, opens: 12 }),
-        ])
-
-        expect(filterWorkItems(items, 'popular').map(i => i.viewId))
-            .toEqual(['genuinely-popular', 'obsessive'])
-    })
-
-    it('breaks a viewer tie on total opens', () => {
-        const items = mergeWorkItems([], [], [], [
-            hot({ viewId: 'quieter', viewers: 3, opens: 4 }),
-            hot({ viewId: 'busier', viewers: 3, opens: 30 }),
-        ])
-
-        expect(filterWorkItems(items, 'popular').map(i => i.viewId)).toEqual(['busier', 'quieter'])
-    })
-
-    it('keeps "All" as your work when the two lists overlap partly', () => {
-        const items = mergeWorkItems(
-            [draft({ viewId: 'mine' })],
-            [],
-            [],
-            [hot({ viewId: 'mine' }), hot({ viewId: 'theirs' })],
-        )
-
-        expect(filterWorkItems(items, 'all').map(i => i.viewId)).toEqual(['mine'])
-        expect(filterWorkItems(items, 'popular').map(i => i.viewId).sort()).toEqual(['mine', 'theirs'])
     })
 })
 

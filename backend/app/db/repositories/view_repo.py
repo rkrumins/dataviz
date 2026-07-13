@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Sequence, Set
 from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from ..models import (
     ViewORM,
@@ -1059,76 +1059,9 @@ async def record_view_visit(
     )).scalar_one_or_none()
     if existing is not None:
         existing.visited_at = now
-        # Count the open. Without this the row says WHEN you last looked but not
-        # how often, so "most viewed" would have nothing to rank by.
-        existing.visit_count = (existing.visit_count or 0) + 1
     else:
-        session.add(ViewVisitORM(
-            view_id=view_id, user_id=user_id, visited_at=now, visit_count=1,
-        ))
+        session.add(ViewVisitORM(view_id=view_id, user_id=user_id, visited_at=now))
     await session.flush()
-
-
-class MostViewedEntry(BaseModel):
-    """One view in the "what the team opens most" list."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    view_id: str = Field(alias="viewId")
-    name: str
-    view_type: Optional[str] = Field(default=None, alias="viewType")
-    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
-    icon: Optional[str] = None
-    #: How many DISTINCT people have opened it — the social signal.
-    viewers: int
-    #: How many times it has been opened in total, across those people.
-    opens: int
-    last_opened_at: Optional[str] = Field(default=None, alias="lastOpenedAt")
-
-
-async def list_most_viewed(
-    session: AsyncSession, *, limit: int = 12,
-) -> List[tuple[MostViewedEntry, ViewORM]]:
-    """The most-opened LIVE views, busiest first.
-
-    Ranked by distinct viewers, then by total opens: "eight people opened this"
-    is a stronger signal than "one person opened it eighty times", and ordering
-    by raw hits alone would let a single obsessive refresher top the chart.
-
-    Returns (entry, ViewORM) pairs so the ENDPOINT applies ``can_read_view`` —
-    a popularity list must never become a way to discover the existence of views
-    you cannot open.
-    """
-    viewers = func.count(func.distinct(ViewVisitORM.user_id)).label("viewers")
-    opens = func.coalesce(func.sum(ViewVisitORM.visit_count), 0).label("opens")
-    last_at = func.max(ViewVisitORM.visited_at).label("last_at")
-
-    rows = (await session.execute(
-        select(ViewORM, viewers, opens, last_at)
-        .join(ViewVisitORM, ViewVisitORM.view_id == ViewORM.id)
-        .where(ViewORM.deleted_at.is_(None))
-        .group_by(ViewORM.id)
-        .order_by(viewers.desc(), opens.desc(), last_at.desc())
-        .limit(limit)
-    )).all()
-
-    out: List[tuple[MostViewedEntry, ViewORM]] = []
-    for view, n_viewers, n_opens, last in rows:
-        config = view.config if isinstance(view.config, dict) else {}
-        out.append((
-            MostViewedEntry(
-                viewId=view.id,
-                name=view.name,
-                viewType=view.view_type,
-                workspaceId=view.workspace_id,
-                icon=config.get("icon"),
-                viewers=int(n_viewers or 0),
-                opens=int(n_opens or 0),
-                lastOpenedAt=last,
-            ),
-            view,
-        ))
-    return out
 
 
 async def list_recent_views(

@@ -509,38 +509,6 @@ interface MyDraftApi extends Omit<MyDraftEntry, 'viewType' | 'workspaceId' | 'na
     name?: string | null
 }
 
-/** A view the team opens a lot — the "what is everyone looking at" signal. */
-export interface MostViewedEntry {
-    viewId: string
-    name: string
-    viewType?: string
-    workspaceId?: string
-    icon?: string
-    /** How many DISTINCT people have opened it. */
-    viewers: number
-    /** How many times it has been opened in total, across those people. */
-    opens: number
-    lastOpenedAt?: string
-}
-
-interface MostViewedApi extends Omit<MostViewedEntry, 'viewType' | 'workspaceId' | 'icon' | 'lastOpenedAt'> {
-    viewType?: string | null
-    workspaceId?: string | null
-    icon?: string | null
-    lastOpenedAt?: string | null
-}
-
-export async function getMostViewed(limit = 12): Promise<MostViewedEntry[]> {
-    const raw = await apiFetch<MostViewedApi[]>(`/api/v1/views/most-viewed?limit=${limit}`)
-    return (raw ?? []).map(v => ({
-        ...v,
-        viewType: v.viewType ?? undefined,
-        workspaceId: v.workspaceId ?? undefined,
-        icon: v.icon ?? undefined,
-        lastOpenedAt: v.lastOpenedAt ?? undefined,
-    }))
-}
-
 export async function getMyDrafts(limit = 6): Promise<MyDraftEntry[]> {
     const raw = await apiFetch<MyDraftApi[]>(`/api/v1/views/me/drafts?limit=${limit}`)
     return (raw ?? []).map(d => ({
