@@ -17,11 +17,11 @@
 import { useState, useMemo, useCallback, startTransition } from 'react'
 import { motion } from 'framer-motion'
 import {
-    Database, BookOpen, ClipboardCheck, Check, Loader2, AlertTriangle, Sparkles,
+    Database, BookOpen, ClipboardCheck, Check, Loader2, AlertTriangle, Sparkles, MoveRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
-import { CatalogItemPicker, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
+import { CatalogItemPicker, isMovable, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { catalogService } from '@/services/catalogService'
@@ -87,6 +87,11 @@ export function AddDataSourceWizard({
     const selected = items.find(c => c.id === catalogItemId)
     const chosenOntology = ontologies.find(o => o.id === ontologyId)
 
+    // Picking a source that ALREADY belongs to another workspace is a MOVE, not an
+    // attach. It only appears when nothing is built on it — the server refuses the
+    // rest with a 409.
+    const isMove = Boolean(selected && isMovable(selected, workspaceId))
+
     const stepIndex = STEPS.findIndex(s => s.id === step)
     const isLastStep = stepIndex === STEPS.length - 1
 
@@ -116,18 +121,38 @@ export function AddDataSourceWizard({
         setPhase('adding')
         setError(null)
         try {
-            await workspaceService.addDataSource(workspaceId, {
-                catalogItemId,
-                label: label.trim() || undefined,
-                ontologyId: ontologyId || undefined,
-            })
+            if (isMove && selected?.boundWorkspaceId && selected.boundDataSourceId) {
+                // Move keeps the SAME data source row, so its stats, polling config
+                // and aggregation state travel with it.
+                await workspaceService.moveDataSource(
+                    selected.boundWorkspaceId,
+                    selected.boundDataSourceId,
+                    workspaceId,
+                )
+                // Label/ontology are per-data-source and survive the move; apply any
+                // change the user made here on top.
+                if (label.trim() || ontologyId) {
+                    await workspaceService.updateDataSource(workspaceId, selected.boundDataSourceId, {
+                        label: label.trim() || undefined,
+                        ontologyId: ontologyId || undefined,
+                    })
+                }
+            } else {
+                await workspaceService.addDataSource(workspaceId, {
+                    catalogItemId,
+                    label: label.trim() || undefined,
+                    ontologyId: ontologyId || undefined,
+                })
+            }
             setPhase('success')
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Could not attach the data source.')
+            setError(err instanceof Error
+                ? err.message
+                : isMove ? 'Could not move the data source.' : 'Could not attach the data source.')
             setPhase('steps')
             setStep('review')
         }
-    }, [workspaceId, catalogItemId, label, ontologyId])
+    }, [workspaceId, catalogItemId, label, ontologyId, isMove, selected])
 
     if (!isOpen) return null
 
@@ -137,8 +162,8 @@ export function AddDataSourceWizard({
 
     return (
         <WizardShell
-            title="Add Data Source"
-            submitLabel="Add data source"
+            title={isMove ? 'Move Data Source' : 'Add Data Source'}
+            submitLabel={isMove ? 'Move it here' : 'Add data source'}
             currentStep={step}
             activeSteps={STEPS}
             currentStepIndex={stepIndex < 0 ? 0 : stepIndex}
@@ -151,11 +176,11 @@ export function AddDataSourceWizard({
             isSubmitting={phase === 'adding'}
             onSubmit={handleSubmit}
             terminalPhase={terminalPhase}
-            terminalLabel={phase === 'success' ? 'Added' : 'Adding'}
+            terminalLabel={phase === 'success' ? (isMove ? 'Moved' : 'Added') : (isMove ? 'Moving' : 'Adding')}
             terminalSubtitle={
                 phase === 'success'
-                    ? `${selected?.name} is attached`
-                    : 'Attaching the data source…'
+                    ? `${selected?.name} is ${isMove ? 'here' : 'attached'}`
+                    : isMove ? 'Moving the data source…' : 'Attaching the data source…'
             }
             hideClose={phase === 'adding'}
             wide={step === 'source'}
@@ -181,7 +206,9 @@ export function AddDataSourceWizard({
             {phase === 'adding' && (
                 <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
-                    <p className="text-sm text-slate-500">Attaching “{selected?.name}”…</p>
+                    <p className="text-sm text-slate-500">
+                        {isMove ? 'Moving' : 'Attaching'} “{selected?.name}”…
+                    </p>
                 </div>
             )}
 
@@ -197,10 +224,12 @@ export function AddDataSourceWizard({
                     </motion.div>
                     <div>
                         <h3 className="text-xl font-bold text-slate-900 dark:text-white">
-                            “{selected?.name}” is attached
+                            “{selected?.name}” is {isMove ? 'here' : 'attached'}
                         </h3>
                         <p className="text-sm text-slate-500 mt-1">
-                            Run aggregation when you're ready, then build a view on it.
+                            {isMove
+                                ? 'It kept its aggregation state and stats. Build a view on it whenever you like.'
+                                : "Run aggregation when you're ready, then build a view on it."}
                         </p>
                     </div>
                 </div>
@@ -221,6 +250,7 @@ export function AddDataSourceWizard({
                         selectedId={catalogItemId}
                         onSelect={setCatalogItemId}
                         currentWorkspaceId={workspaceId}
+                        allowMove
                     />
                     {catalogItemId && (
                         <div>
@@ -274,12 +304,33 @@ export function AddDataSourceWizard({
                 <div className="space-y-5">
                     <StepHeader
                         icon={<ClipboardCheck className="w-5 h-5" />}
-                        title="Ready to attach"
-                        subtitle="Nothing is aggregated yet — you choose when to run that."
+                        title={isMove ? 'Ready to move' : 'Ready to attach'}
+                        subtitle={isMove
+                            ? `It will leave ${selected?.boundWorkspaceName ?? 'its current workspace'} and live here instead.`
+                            : 'Nothing is aggregated yet — you choose when to run that.'}
                     />
+
+                    {isMove && (
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
+                            <MoveRight className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                            <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                                <span className="font-semibold">This moves the source out of {selected?.boundWorkspaceName ?? 'another workspace'}.</span>{' '}
+                                Nothing is built on it, so nothing breaks — its aggregation state and
+                                stats come with it. Members of {selected?.boundWorkspaceName ?? 'that workspace'} will
+                                no longer see it.
+                            </p>
+                        </div>
+                    )}
 
                     <div className="rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 overflow-hidden">
                         <ReviewRow label="Data source" value={selected?.name ?? '—'} hint={selected?.sourceIdentifier} />
+                        {isMove && (
+                            <ReviewRow
+                                label="Moving from"
+                                value={selected?.boundWorkspaceName ?? 'Another workspace'}
+                                hint="Nothing is built on it"
+                            />
+                        )}
                         <ReviewRow label="Label" value={label.trim() || selected?.name || '—'} />
                         <ReviewRow
                             label="Semantic layer"

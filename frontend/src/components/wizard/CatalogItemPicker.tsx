@@ -30,7 +30,7 @@
 import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Link } from 'react-router-dom'
-import { Search, Check, Database, SkipForward, Link2Off, Info, ArrowRight, ChevronDown } from 'lucide-react'
+import { Search, Check, Database, SkipForward, Link2Off, Info, ArrowRight, ChevronDown, MoveRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import type { ProviderResponse } from '@/services/providerService'
@@ -48,6 +48,28 @@ export interface PickableCatalogItem {
     sourceIdentifier?: string
     boundWorkspaceId?: string | null
     boundWorkspaceName?: string | null
+    /** The data source row that owns it. Present iff bound; needed to move it. */
+    boundDataSourceId?: string | null
+    /** Views built on it, trashed ones included. Zero = safely movable. */
+    boundViewCount?: number
+}
+
+/**
+ * Can this source be re-homed into `workspaceId`?
+ *
+ * Only when nothing is built on it. views.data_source_id is ON DELETE SET NULL, so
+ * a source that carries views cannot be moved without stranding them: they'd sit in
+ * the old workspace pointing at a source owned by the new one, readable through an
+ * RBAC check that no longer describes reality. The server enforces this (409); the
+ * UI just doesn't offer what the server will refuse.
+ */
+export function isMovable(item: PickableCatalogItem, intoWorkspaceId?: string): boolean {
+    return Boolean(
+        item.boundWorkspaceId
+        && item.boundDataSourceId
+        && item.boundWorkspaceId !== intoWorkspaceId
+        && (item.boundViewCount ?? 0) === 0,
+    )
 }
 
 export function CatalogItemPicker({
@@ -61,6 +83,8 @@ export function CatalogItemPicker({
     skipHint = 'Create it empty and attach data later',
     /** Lets the picker say "this workspace already has it" rather than naming it as an owner. */
     currentWorkspaceId,
+    /** Offer to re-home an unused source owned by another workspace. */
+    allowMove,
 }: {
     items: PickableCatalogItem[]
     providers: ProviderResponse[]
@@ -70,6 +94,7 @@ export function CatalogItemPicker({
     skipLabel?: string
     skipHint?: string
     currentWorkspaceId?: string
+    allowMove?: boolean
 }) {
     const [query, setQuery] = useState('')
     const [showTaken, setShowTaken] = useState(false)
@@ -94,7 +119,13 @@ export function CatalogItemPicker({
     }, [items, query])
 
     const nothingAtAll = items.length === 0
-    const noneFree = !nothingAtAll && filtered.available.length === 0 && !query.trim()
+    const movableCount = allowMove
+        ? items.filter(i => isMovable(i, currentWorkspaceId)).length
+        : 0
+    const noneFree = !nothingAtAll
+        && filtered.available.length === 0
+        && movableCount === 0
+        && !query.trim()
 
     return (
         <div className="space-y-4">
@@ -164,6 +195,31 @@ export function CatalogItemPicker({
                 {showTaken && filtered.taken.map(item => {
                     const Logo = getProviderLogo(providerType[item.providerId] ?? 'unknown')
                     const isMine = currentWorkspaceId && item.boundWorkspaceId === currentWorkspaceId
+                    const movable = allowMove && isMovable(item, currentWorkspaceId)
+                    const views = item.boundViewCount ?? 0
+
+                    // Owned elsewhere and UNUSED — it can be re-homed. That's the
+                    // remedy for "it was onboarded into the wrong workspace", which
+                    // previously had none short of a destructive detach.
+                    if (movable) {
+                        return (
+                            <PickerCard
+                                key={item.id}
+                                selected={selectedId === item.id}
+                                onClick={() => onSelect(item.id)}
+                                icon={<Logo className="w-4 h-4" />}
+                                title={item.name}
+                                subtitle={`In ${item.boundWorkspaceName ?? 'another workspace'} · nothing built on it`}
+                                badge={
+                                    <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+                                        <MoveRight className="w-2.5 h-2.5" />
+                                        Move
+                                    </span>
+                                }
+                            />
+                        )
+                    }
+
                     return (
                         <PickerCard
                             key={item.id}
@@ -173,7 +229,11 @@ export function CatalogItemPicker({
                             title={item.name}
                             subtitle={isMine
                                 ? 'Already on this workspace'
-                                : `Used by ${item.boundWorkspaceName ?? 'another workspace'}`}
+                                : views > 0
+                                    // Say WHY it can't move — otherwise "why is this
+                                    // one greyed out and that one isn't" is a mystery.
+                                    ? `Used by ${item.boundWorkspaceName ?? 'another workspace'} · ${views} view${views === 1 ? '' : 's'} built on it`
+                                    : `Used by ${item.boundWorkspaceName ?? 'another workspace'}`}
                             badge={<Link2Off className="w-3 h-3" />}
                         />
                     )
@@ -182,6 +242,25 @@ export function CatalogItemPicker({
 
             {/* Visible, but not in the way. The old dropdown omitted these entirely,
                 so a source you knew existed simply wasn't there and nothing said why. */}
+            {movableCount > 0 && !showTaken && (
+                <button
+                    type="button"
+                    onClick={() => setShowTaken(true)}
+                    className="w-full flex items-center gap-2 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/[0.08] px-4 py-3 text-left hover:border-amber-300 transition-colors"
+                >
+                    <MoveRight className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold text-slate-900 dark:text-white">
+                            {movableCount} source{movableCount === 1 ? '' : 's'} can be moved here
+                        </span>
+                        <span className="block text-xs text-slate-600 dark:text-slate-400">
+                            Allocated elsewhere, but nothing is built on {movableCount === 1 ? 'it' : 'them'} yet
+                        </span>
+                    </span>
+                    <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+                </button>
+            )}
+
             {filtered.taken.length > 0 && (
                 <button
                     type="button"

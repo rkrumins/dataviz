@@ -42,6 +42,10 @@ export interface CatalogItemBindingResponse {
     name: string
     boundWorkspaceId?: string | null
     boundWorkspaceName?: string | null
+    /** The data source row that owns it — needed to MOVE it. */
+    boundDataSourceId?: string | null
+    /** Views built on that source, INCLUDING trashed ones. Zero = safely movable. */
+    boundViewCount?: number
 }
 
 async function request<T>(
