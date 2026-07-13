@@ -975,6 +975,18 @@ async def import_ontology_into(
 async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),
     base_ontology_id: Optional[str] = None,
+    min_score: float = Query(
+        0.1,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Drop ontologies scoring below this Jaccard overlap. The default (0.1) "
+            "keeps the suggestion list to plausible candidates. Pass 0 to score EVERY "
+            "ontology — the Add/Move Data Source wizard does this so that a layer the "
+            "user expands to see carries the same numbers and warnings as the top "
+            "matches, instead of appearing with no score at all."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
@@ -1026,7 +1038,7 @@ async def suggest_ontology(
             union = graph_types | ont_types
             jaccard = len(intersection) / len(union) if union else 0.0
 
-            if jaccard > 0.1:
+            if jaccard >= min_score:
                 matches.append(OntologyMatchResult(
                     ontologyId=ont.id,
                     ontologyName=ont.name,
