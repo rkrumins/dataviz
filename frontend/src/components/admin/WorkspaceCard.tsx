@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug } from 'lucide-react'
+import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { type WorkspaceResponse } from '@/services/workspaceService'
@@ -354,29 +354,39 @@ export function WorkspaceCard({
             )}
 
             {/* ── Footer ── */}
-            <div className="px-5 py-2.5 border-t border-glass-border flex items-center justify-between gap-2 mt-auto">
+            {/* Footer.
+                It read "0 | Updated 1m ago  Created 25m ago" — three washed-out
+                fragments at the same weight, so nothing led and the eye had to parse
+                all of it. There is a hierarchy here: WHO can see it, WHEN it last
+                moved (the thing you scan for), and HOW OLD it is (context, not news).
+                Rank them, and give them enough contrast to actually read. */}
+            <div className="px-5 py-2.5 border-t border-glass-border flex items-center justify-between gap-3 mt-auto">
                 <span className="flex items-center gap-2.5 min-w-0">
-                    {/* "X many users" — the thing the cards never said. It rides along
-                        with the workspace list, so this costs no extra request. */}
                     <span
-                        className="inline-flex items-center gap-1 text-[10px] text-ink-muted shrink-0"
+                        className="inline-flex items-center gap-1.5 text-[11px] text-ink-secondary shrink-0"
                         title={`${memberCount} ${memberCount === 1 ? 'person or group has' : 'people and groups have'} access`}
                     >
-                        <Users className="w-3 h-3" />
-                        <span className="font-semibold text-ink">{memberCount}</span>
+                        <Users className="w-3.5 h-3.5 text-ink-muted" />
+                        <span className="font-bold text-ink tabular-nums">{memberCount}</span>
                     </span>
-                    <span className="w-px h-3 bg-glass-border shrink-0" />
-                    <span className="text-[10px] text-ink-muted truncate" title={new Date(ws.updatedAt).toLocaleString()}>
-                        Updated {timeAgo(ws.updatedAt)}
-                    </span>
-                    {/* When it came into existence. The card only ever said when it was
-                        last touched, which says nothing about how long it has been here. */}
-                    <span className="w-px h-3 bg-glass-border shrink-0 hidden sm:block" />
+
+                    <span className="w-px h-3.5 bg-glass-border shrink-0" />
+
                     <span
-                        className="text-[10px] text-ink-muted/70 truncate hidden sm:block"
+                        className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary truncate"
+                        title={`Last updated ${new Date(ws.updatedAt).toLocaleString()}`}
+                    >
+                        <Clock className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                        {timeAgo(ws.updatedAt)}
+                    </span>
+
+                    {/* Age is context, so it sits quieter — but readable, and it says
+                        the exact date on hover. */}
+                    <span
+                        className="text-[11px] text-ink-muted truncate hidden lg:block"
                         title={`Created ${new Date(ws.createdAt).toLocaleString()}`}
                     >
-                        Created {timeAgo(ws.createdAt)}
+                        · created {timeAgo(ws.createdAt)}
                     </span>
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
