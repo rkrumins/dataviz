@@ -1,6 +1,6 @@
 /**
  * The containment walk must terminate on the ontologies that actually exist —
- * the Solidatus one has a Node that contains a Node.
+ * the Roots/Node one has a Node that contains a Node.
  */
 import { describe, it, expect } from 'vitest'
 import {
@@ -9,7 +9,7 @@ import {
     type HierarchyPreviewRelationship,
 } from '../OntologyHierarchyPreview'
 
-const SOLIDATUS: HierarchyPreviewEntityType[] = [
+const ROOTS_NODE: HierarchyPreviewEntityType[] = [
     { id: 'Roots', name: 'Roots', hierarchy: { level: 0, canContain: ['Node'] } },
     { id: 'Node', name: 'Node', hierarchy: { level: 1, canContain: ['Node'] } },
 ]
@@ -24,7 +24,7 @@ const HAS: HierarchyPreviewRelationship = {
 
 describe('buildHierarchyLevels', () => {
     it('terminates on a self-containing type and marks it', () => {
-        const levels = buildHierarchyLevels(SOLIDATUS, [HAS], ['Roots'], ['HAS'])
+        const levels = buildHierarchyLevels(ROOTS_NODE, [HAS], ['Roots'], ['HAS'])
 
         expect(levels).toHaveLength(2)
         expect(levels[0].types.map(t => t.id)).toEqual(['Roots'])
@@ -74,10 +74,10 @@ describe('buildHierarchyLevels', () => {
 
     it('prefers the schema roots, then level 0, then never-contained', () => {
         // Schema roots win outright.
-        expect(buildHierarchyLevels(SOLIDATUS, [HAS], ['Node'], ['HAS'])[0].types[0].id).toBe('Node')
+        expect(buildHierarchyLevels(ROOTS_NODE, [HAS], ['Node'], ['HAS'])[0].types[0].id).toBe('Node')
 
         // No schema roots → explicit level 0.
-        expect(buildHierarchyLevels(SOLIDATUS, [HAS], [], ['HAS'])[0].types[0].id).toBe('Roots')
+        expect(buildHierarchyLevels(ROOTS_NODE, [HAS], [], ['HAS'])[0].types[0].id).toBe('Roots')
 
         // No levels either → types nothing else contains.
         const noLevels: HierarchyPreviewEntityType[] = [

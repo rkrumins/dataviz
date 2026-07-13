@@ -12,7 +12,7 @@
  *     workspace in the list. Creating is now the last step, with a success state.
  *   • The name field checked for duplicates only when you tried to advance. It
  *     now checks as you type, and offers a free name when yours is taken — this
- *     instance has NINE workspaces called "Solidatus Test WS".
+ *     instance has NINE workspaces called "Layered Lineage Test WS".
  */
 import { useState, useMemo, useCallback, startTransition } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -36,7 +36,7 @@ const BASICS: WizardStepDef = { id: 'basics', label: 'Basics', icon: <Boxes clas
 const DATA: WizardStepDef = { id: 'data', label: 'Data', icon: <Database className="w-6 h-6" /> }
 const REVIEW: WizardStepDef = { id: 'review', label: 'Review', icon: <ClipboardCheck className="w-6 h-6" /> }
 
-/** A free name near the one they wanted. Nine "Solidatus Test WS" is not an accident. */
+/** A free name near the one they wanted. Nine "Layered Lineage Test WS" is not an accident. */
 function suggestFreeName(base: string, taken: Set<string>): string | null {
     const trimmed = base.trim()
     if (!trimmed) return null
@@ -464,7 +464,7 @@ function BasicsStep({
                 />
 
                 {/* A duplicate name is caught AS YOU TYPE, with a free one offered —
-                    this instance has nine workspaces called "Solidatus Test WS". */}
+                    this instance has nine workspaces called "Layered Lineage Test WS". */}
                 {isDuplicate && (
                     <div className="mt-2 flex items-center gap-2 flex-wrap">
                         <span className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">

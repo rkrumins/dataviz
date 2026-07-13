@@ -1,4 +1,4 @@
-"""Schema-configurable conversion of generated Solidatus JSON into arbitrary
+"""Schema-configurable conversion of generated layered-lineage JSON into arbitrary
 declared ontologies.
 
 A :class:`ConversionSchema` maps the generator's structural roles (layer/
@@ -11,7 +11,7 @@ and ``emit`` lets a payload carry a case variant of the declared spelling
 canonicalizer and per-source alignment.
 
 Presets live in ``backend/scripts/schemas/<name>.json``. The identity preset
-(``solidatus_default``) reproduces the legacy ``SolidatusGraphBuilder`` output.
+(``layered_lineage_default``) reproduces the legacy ``LayeredLineageGraphBuilder`` output.
 
 Note: ``bulk_ingest`` does NOT enforce the ontology — seed-time validity comes
 structurally from deriving the ontology from the converted graph's observed
@@ -31,9 +31,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from backend.app.ontology.resolver import case_insensitive_type_id_collisions
 from backend.common.models.graph import GraphEdge, GraphNode
-from backend.scripts.import_solidatus import detect_entity_type_from_prefix, infer_entity_types
+from backend.scripts.import_layered_lineage import detect_entity_type_from_prefix, infer_entity_types
 
-logger = logging.getLogger("solidatus_schema")
+logger = logging.getLogger("layered_lineage_schema")
 
 ROLES = ("layer", "object", "group", "attribute")
 SCHEMAS_DIR = os.path.join(os.path.dirname(__file__), "schemas")
@@ -114,7 +114,7 @@ def load_schema(path_or_name: str) -> ConversionSchema:
         return schema_from_dict(json.load(f))
 
 
-IDENTITY_SCHEMA = load_schema("solidatus_default")
+IDENTITY_SCHEMA = load_schema("layered_lineage_default")
 
 
 @dataclass
@@ -132,9 +132,9 @@ class ConvertedGraph:
 def convert_model(
     data: Dict[str, Any],
     schema: ConversionSchema,
-    source_system: str = "solidatus",
+    source_system: str = "layered-lineage",
 ) -> ConvertedGraph:
-    """Convert a generated Solidatus model dict under the given schema."""
+    """Convert a generated layered-lineage model dict under the given schema."""
     entities: Dict[str, Any] = data.get("entities", {})
     root_ids: List[str] = data.get("layers", []) or data.get("roots", [])
     transitions: Dict[str, Any] = data.get("transitions", {})
@@ -173,7 +173,7 @@ def convert_model(
     for eid, edef in entities.items():
         role = role_map.get(eid, "object")
         props = dict(edef.get("properties", {}))
-        props["solidatusId"] = eid
+        props["sourceId"] = eid
         if eid in root_id_set:
             props["isLayer"] = True
         _add_node(eid, schema.entity_map[role], edef.get("name", eid), props)
@@ -210,10 +210,10 @@ def convert_model(
                 role = detect_entity_type_from_prefix(ref_id) or "attribute"
                 logger.info("Creating placeholder node for external reference %s", ref_id)
                 _add_node(ref_id, schema.entity_map[role], ref_id,
-                          {"solidatusId": ref_id, "placeholder": True})
+                          {"sourceId": ref_id, "placeholder": True})
         edge_type = schema.lineage[index % len(schema.lineage)]
         props = dict(tdef.get("properties", {}))
-        props["solidatusTransitionId"] = tid
+        props["sourceTransitionId"] = tid
         edges.append(GraphEdge(
             id=f"{edge_type.lower()}-{urn_of[source_id]}-{urn_of[target_id]}",
             sourceUrn=urn_of[source_id],
@@ -296,7 +296,7 @@ def derive_ontology_request(cg_schema: ConversionSchema, cg: ConvertedGraph, *, 
 
     return OntologyCreateRequest(
         name=name,
-        description=description or f"Derived from Solidatus conversion schema '{cg_schema.name}'",
+        description=description or f"Derived from layered-lineage conversion schema '{cg_schema.name}'",
         containment_edge_types=list(cg_schema.containment),
         lineage_edge_types=list(cg_schema.lineage),
         root_entity_types=[t for t in declared_entities if not parents_of[t]],
@@ -324,7 +324,7 @@ async def ingest_versioned(
     workspace_id: str,
     provider_id: str,
     graph_name: str,
-    actor: str = "import_solidatus",
+    actor: str = "import_layered_lineage",
     ontology_name: str = None,
     ontology_id: str = None,
     project: bool = True,
@@ -355,7 +355,7 @@ async def ingest_versioned(
     async with Session() as s:
         if ontology_id is None:
             ontology_id = await register_ontology(
-                s, schema, cg, name=ontology_name or f"Solidatus {schema.name}")
+                s, schema, cg, name=ontology_name or f"Layered Lineage {schema.name}")
         ds = await data_source_repo.create_data_source(s, workspace_id, DataSourceCreateRequest(
             provider_id=provider_id, ontology_id=ontology_id, graph_name=graph_name,
             label=graph_name, access_level="write"))
@@ -379,7 +379,7 @@ async def ingest_versioned(
     canonicalized = canonicalize_rows(rows, rules)
     report = await svc.bulk_ingest(
         graph_id=graph_id, rows=rows, actor=actor,
-        idempotency_key=f"solidatus:{graph_name}:{schema.name}")
+        idempotency_key=f"layered_lineage:{graph_name}:{schema.name}")
 
     if project:
         from backend.app.services.versioning.projection import (

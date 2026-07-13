@@ -4,16 +4,16 @@
 #  Synthetic data generation — guide & runnable cookbook
 # ============================================================================
 #
-# A guided tour of the Solidatus synthetic-data toolchain: generate a lineage
+# A guided tour of the layered-lineage synthetic-data toolchain: generate a lineage
 # graph, optionally convert it to a CUSTOM ontology, and load it into FalkorDB
 # — at any size from ~1k to ~5m elements.
 #
 # THE PIPELINE
-#   generate_solidatus_model.py   emits Solidatus JSON {entities, layers, transitions}
+#   generate_layered_lineage_model.py   emits layered-lineage JSON {entities, layers, transitions}
 #        |
-#   import_solidatus.py           (optionally --schema) → GraphNodes/GraphEdges → FalkorDB
+#   import_layered_lineage.py           (optionally --schema) → GraphNodes/GraphEdges → FalkorDB
 #
-# THREE MODES (import_solidatus.py)
+# THREE MODES (import_layered_lineage.py)
 #   dry-run   --dry-run --schema <s>            parse + print type counts, write nothing
 #   push      --schema <s> --graph <name>       convert + push straight to FalkorDB (fast)
 #   versioned --schema <s> --versioned ...       register+publish ontology, strict graph, project
@@ -29,7 +29,7 @@
 #   FALKORDB_SAVE_BATCH_SIZE=10000.
 #
 # PRESETS (backend/scripts/schemas/, pass the bare name to --schema)
-#   solidatus_default   identity — layer/object/group/attribute + HAS/FLOWS_TO (== legacy)
+#   layered_lineage_default   identity — layer/object/group/attribute + HAS/FLOWS_TO (== legacy)
 #   roots_node          Layer->Roots, everything else->Node, Has/Flows_To (emits lowercase 'has')
 #   multi_containment   Zone/Asset/Field, two containment types (Groups/Holds) alternated by depth
 #   ...or pass a path to your own JSON (see the `custom-schema` example below).
@@ -63,8 +63,8 @@ set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"   # absolute path to this script
 cd "$(dirname "$SELF")/../.." || exit 1                  # repo root, so `python backend/scripts/...` resolves
 
-GEN="python backend/scripts/generate_solidatus_model.py"
-IMP="python backend/scripts/import_solidatus.py"
+GEN="python backend/scripts/generate_layered_lineage_model.py"
+IMP="python backend/scripts/import_layered_lineage.py"
 MODE="${2:-dryrun}"                    # "push" to load into FalkorDB, else dry-run
 
 if [ -t 1 ]; then BOLD=$'\033[1m'; CYAN=$'\033[1;36m'; DIM=$'\033[2m'; OFF=$'\033[0m'
@@ -144,7 +144,7 @@ case "${1:-}" in
 
   # ── Ontologies (dry-run shows how the same data maps to each vocabulary) ──
   onto-default) note "identity mapping — same as the legacy importer"
-                run "$GEN --layers 4 --seed 1 | $IMP --dry-run --schema solidatus_default" ;;
+                run "$GEN --layers 4 --seed 1 | $IMP --dry-run --schema layered_lineage_default" ;;
   onto-roots-node) note "Layer->Roots, everything else->Node; note the lowercase 'has' payload"
                 run "$GEN --layers 4 --seed 1 | $IMP --dry-run --schema roots_node" ;;
   onto-multi) note "Zone/Asset/Field with two containment types alternated by depth"

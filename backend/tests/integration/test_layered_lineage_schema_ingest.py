@@ -1,12 +1,12 @@
-"""End-to-end proof that a Solidatus model converted under a CUSTOM ontology
+"""End-to-end proof that a layered-lineage model converted under a CUSTOM ontology
 (roots_node: Layer→Roots, everything else→Node, containment HAS, lineage
 FLOWS_TO — physical-uppercase) ingests, enforces, and nests through the whole
 versioned stack + a live FalkorDB projection with no source alias needed.
 
 Needs Postgres (GRAPHVER_E2E=1) and a real FalkorDB. Run:
   docker exec -w /app -e GRAPHVER_E2E=1 -e RUN_FALKOR_LIVE=1 synodic-dev-viz-service-1 \
-    python -m pytest backend/tests/integration/test_solidatus_schema_ingest.py -q
-or standalone: `python backend/tests/integration/test_solidatus_schema_ingest.py`.
+    python -m pytest backend/tests/integration/test_layered_lineage_schema_ingest.py -q
+or standalone: `python backend/tests/integration/test_layered_lineage_schema_ingest.py`.
 """
 import asyncio
 import os
@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from backend.app.services.versioning import db, models
-from backend.scripts.solidatus_schema import load_schema
+from backend.scripts.layered_lineage_schema import load_schema
 
 _GATE = os.getenv("GRAPHVER_E2E") != "1"
 
@@ -46,7 +46,7 @@ async def _run() -> None:
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     from backend.app.services.versioning.projection import make_falkor_graph_factory
     from backend.app.services.versioning.service import OntologyViolation
-    from backend.tests.integration.solidatus_helper import (
+    from backend.tests.integration.layered_lineage_helper import (
         provision_ingested_graph, seed_workspace_provider,
     )
 
@@ -118,7 +118,7 @@ async def _run() -> None:
         a_root = next(n for n in top.nodes if n.entity_type == "Roots")
         children = await prov.get_children(a_root.urn, edge_types=["HAS"])
         assert children, "a Roots node must contain children via HAS"
-        print("test_solidatus_schema_ingest: OK")
+        print("test_layered_lineage_schema_ingest: OK")
     finally:
         try:
             await make_falkor_graph_factory()(h.graph_name).delete()
@@ -129,7 +129,7 @@ async def _run() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(_GATE, reason="needs Postgres (GRAPHVER_E2E=1)")
-def test_solidatus_roots_node_end_to_end():
+def test_layered_lineage_roots_node_end_to_end():
     if not _falkordb_available():
         pytest.skip("needs a live FalkorDB")
     asyncio.run(_run())

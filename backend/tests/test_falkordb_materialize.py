@@ -1138,7 +1138,7 @@ def _seed_self_nesting_graph(fake, depth=3):
 
 def test_self_nesting_containers_materialize_every_depth():
     """CRITICAL regression (2026-07-11, live): a type that nests under
-    itself (Node ⊃ Node — folders, systems, Solidatus components) made
+    itself (Node ⊃ Node — folders, systems, layered-lineage Nodes) made
     every intermediate container a 'leaf' under the TYPE-level boundary,
     so only the root diagonal materialized (observed: 9 Roots→Roots
     cells on a graph with 246 Node→Node containments) and Context View

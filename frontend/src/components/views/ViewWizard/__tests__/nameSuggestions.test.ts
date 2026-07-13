@@ -16,7 +16,7 @@ describe('isHumanLabel', () => {
     it('rejects machine-minted identifiers', () => {
         expect(isHumanLabel('ds_930583737602')).toBe(false)   // snake_case + digit blob
         expect(isHumanLabel('roots-node')).toBe(false)        // lowercase slug
-        expect(isHumanLabel('urn:synodic:solidatus')).toBe(false)
+        expect(isHumanLabel('urn:synodic:layered-lineage')).toBe(false)
         expect(isHumanLabel('3e105c56b3b4')).toBe(false)      // doesn't start with a letter
         expect(isHumanLabel('warehouse/prod')).toBe(false)
     })
@@ -54,13 +54,13 @@ describe('buildNameSuggestions', () => {
 
     it('ignores workspace, ontology and entity types entirely (they read badly)', () => {
         const out = buildNameSuggestions(
-            { workspaceName: 'Overlay WS', ontologyName: 'Solidatus multi-containment' },
+            { workspaceName: 'Overlay WS', ontologyName: 'Layered Lineage multi-containment' },
             [{ id: 'zone', name: 'Zone', pluralName: 'Zones', hierarchy: { level: 0, canContain: ['asset'] } }],
         )
 
         expect(out).toEqual([...CURATED_SUGGESTIONS])
         expect(out).not.toContain('Overlay WS Overview')
-        expect(out).not.toContain('Solidatus multi-containment Model')
+        expect(out).not.toContain('Layered Lineage multi-containment Model')
         expect(out).not.toContain('Zones Landscape')
     })
 

@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.scripts.generate_solidatus_model import SolidatusModelGenerator
+from backend.scripts.generate_layered_lineage_model import LayeredLineageModelGenerator
 
 
 def _layer_of(m):
@@ -39,7 +39,7 @@ def _col_lineage(m):
 
 def test_realistic_backbone_traces_source_to_sink():
     L = 10
-    m = SolidatusModelGenerator(num_layers=L, seed=1, realistic=True, e2e_fraction=0.5).generate()
+    m = LayeredLineageModelGenerator(num_layers=L, seed=1, realistic=True, e2e_fraction=0.5).generate()
     lo = _layer_of(m)
     srcs = _col_lineage(m)
     last = L - 1
@@ -64,7 +64,7 @@ def test_realistic_backbone_traces_source_to_sink():
 
 def test_realistic_longest_path_spans_full_depth():
     L = 8
-    m = SolidatusModelGenerator(num_layers=L, seed=3, realistic=True).generate()
+    m = LayeredLineageModelGenerator(num_layers=L, seed=3, realistic=True).generate()
     srcs = dict(_col_lineage(m))
     memo = {}
 
@@ -77,7 +77,7 @@ def test_realistic_longest_path_spans_full_depth():
 
 
 def test_realistic_carry_edges_are_semantic():
-    m = SolidatusModelGenerator(num_layers=5, seed=1, realistic=True).generate()
+    m = LayeredLineageModelGenerator(num_layers=5, seed=1, realistic=True).generate()
     ents = m["entities"]
 
     def concept(aid):
@@ -89,13 +89,13 @@ def test_realistic_carry_edges_are_semantic():
 
 
 def test_realistic_lineage_is_column_level_by_default():
-    m = SolidatusModelGenerator(num_layers=4, seed=1, realistic=True).generate()
+    m = LayeredLineageModelGenerator(num_layers=4, seed=1, realistic=True).generate()
     assert all(t["source"].startswith("ATR-") and t["target"].startswith("ATR-")
                for t in m["transitions"].values())
 
 
 def test_realistic_fan_in_creates_joins():
-    m = SolidatusModelGenerator(num_layers=4, seed=1, realistic=True, fan_in=(3, 3)).generate()
+    m = LayeredLineageModelGenerator(num_layers=4, seed=1, realistic=True, fan_in=(3, 3)).generate()
     fanin = defaultdict(int)
     for t in m["transitions"].values():
         fanin[t["target"]] += 1
@@ -103,25 +103,25 @@ def test_realistic_fan_in_creates_joins():
 
 
 def test_realistic_table_lineage_opt_in():
-    with_tl = SolidatusModelGenerator(num_layers=4, seed=1, realistic=True, table_lineage=True).generate()
+    with_tl = LayeredLineageModelGenerator(num_layers=4, seed=1, realistic=True, table_lineage=True).generate()
     obj_edges = [t for t in with_tl["transitions"].values()
                  if t["source"].startswith("OBJ-") and t["target"].startswith("OBJ-")]
     assert obj_edges, "--table-lineage must emit object→object edges"
 
-    without = SolidatusModelGenerator(num_layers=4, seed=1, realistic=True).generate()
+    without = LayeredLineageModelGenerator(num_layers=4, seed=1, realistic=True).generate()
     assert not any(t["source"].startswith("OBJ-") for t in without["transitions"].values())
 
 
 def test_realistic_is_deterministic():
-    a = SolidatusModelGenerator(num_layers=6, seed=9, realistic=True, fan_in=(1, 3), fan_out=(1, 2),
+    a = LayeredLineageModelGenerator(num_layers=6, seed=9, realistic=True, fan_in=(1, 3), fan_out=(1, 2),
                                 table_lineage=True).generate()
-    b = SolidatusModelGenerator(num_layers=6, seed=9, realistic=True, fan_in=(1, 3), fan_out=(1, 2),
+    b = LayeredLineageModelGenerator(num_layers=6, seed=9, realistic=True, fan_in=(1, 3), fan_out=(1, 2),
                                 table_lineage=True).generate()
     assert json.dumps(a) == json.dumps(b)
 
 
 def test_default_mode_has_no_concepts():
-    m = SolidatusModelGenerator(num_layers=4, seed=1).generate()  # not realistic
+    m = LayeredLineageModelGenerator(num_layers=4, seed=1).generate()  # not realistic
     assert not any("concept" in e.get("properties", {}) for e in m["entities"].values())
 
 

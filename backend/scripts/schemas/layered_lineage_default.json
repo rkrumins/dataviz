@@ -1,5 +1,5 @@
 {
-  "name": "solidatus-default",
+  "name": "layered-lineage-default",
   "entityTypes": { "layer": "layer", "object": "object", "group": "group", "attribute": "attribute" },
   "edgeTypes":   { "containment": ["HAS"], "lineage": ["FLOWS_TO"] },
   "emit":        {}

@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Generate a sample Solidatus JSON model of configurable size.
+Generate a sample layered-lineage JSON model of configurable size.
 
-Produces a realistic data lineage graph with the Solidatus structure:
-  Layer → Object → Attribute, with Transitions (lineage) between attributes.
+Produces a realistic data lineage graph with a Layer → Object → Attribute
+structure, with Transitions (lineage) between attributes.
 
 The generated model follows a multi-tier data pipeline pattern:
   Source Systems → Staging → Warehouse → Reporting/Analytics
 
 Usage:
   # Small demo (default: 3 layers, 2-4 objects each, 3-6 attrs each)
-  python backend/scripts/generate_solidatus_model.py > model.json
+  python backend/scripts/generate_layered_lineage_model.py > model.json
 
   # Medium (~500 nodes)
-  python backend/scripts/generate_solidatus_model.py --layers 6 --objects 5 --attrs 8 > model.json
+  python backend/scripts/generate_layered_lineage_model.py --layers 6 --objects 5 --attrs 8 > model.json
 
   # Large (~5000 nodes)
-  python backend/scripts/generate_solidatus_model.py --layers 10 --objects 10 --attrs 15 > model.json
+  python backend/scripts/generate_layered_lineage_model.py --layers 10 --objects 10 --attrs 15 > model.json
 
   # Pipe directly into the importer
-  python backend/scripts/generate_solidatus_model.py --layers 5 | \\
-    python backend/scripts/import_solidatus.py --graph solidatus_demo
+  python backend/scripts/generate_layered_lineage_model.py --layers 5 | \\
+    python backend/scripts/import_layered_lineage.py --graph layered_lineage_demo
 
   # Write to file
-  python backend/scripts/generate_solidatus_model.py --layers 8 --output sample_model.json
+  python backend/scripts/generate_layered_lineage_model.py --layers 8 --output sample_model.json
 """
  
 import argparse
@@ -196,8 +196,8 @@ DEPARTMENTS = [
 # MODEL GENERATOR
 # ═══════════════════════════════════════════════════════════════════════════
 
-class SolidatusModelGenerator:
-    """Generate a realistic Solidatus JSON model."""
+class LayeredLineageModelGenerator:
+    """Generate a realistic layered-lineage JSON model."""
 
     def __init__(
         self,
@@ -556,7 +556,7 @@ class SolidatusModelGenerator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate a sample Solidatus JSON model of configurable size",
+        description="Generate a sample layered-lineage JSON model of configurable size",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Size examples:
@@ -567,8 +567,8 @@ Size examples:
   Huge  (~50000 nodes):  --layers 20 --max-objects 20 --max-attrs 30
 
 Pipeline:
-  python backend/scripts/generate_solidatus_model.py --layers 5 | \\
-    python backend/scripts/import_solidatus.py --graph solidatus_demo
+  python backend/scripts/generate_layered_lineage_model.py --layers 5 | \\
+    python backend/scripts/import_layered_lineage.py --graph layered_lineage_demo
         """,
     )
     parser.add_argument("--layers", type=int, default=4,
@@ -615,7 +615,7 @@ Pipeline:
         lo, _, hi = s.partition("-")
         return (int(lo), int(hi or lo))
 
-    gen = SolidatusModelGenerator(
+    gen = LayeredLineageModelGenerator(
         num_layers=args.layers,
         objects_per_layer=(args.min_objects, args.max_objects),
         attrs_per_object=(args.min_attrs, args.max_attrs),

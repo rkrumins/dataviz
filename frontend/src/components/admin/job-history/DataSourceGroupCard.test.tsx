@@ -28,7 +28,7 @@ beforeAll(() => {
 const group: DataSourceGroup = {
     dataSourceId: 'ds-1',
     meta: {
-        label: 'Perf-Load-Test-Solidatus',
+        label: 'Perf-Load-Test-Layered-Lineage',
         workspaceId: 'ws-1',
         workspaceName: 'Major Refactor Agg',
         providerId: 'p-1',

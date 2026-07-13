@@ -2,7 +2,7 @@
 
 Regression (2026-07-11, live): ``top_level_from_state`` discovered a fixed
 ``limit*4`` candidate window in arbitrary order and pruned the contained
-nodes AFTER — on a Solidatus-imported graph (10 Roots among 275 contained
+nodes AFTER — on a layered-lineage-imported graph (10 Roots among 275 contained
 Nodes) the wizard's default "All Types" browse returned ZERO rows and
 rendered "the graph may be empty", while the type-filter chips worked
 (their predicate narrows discovery BEFORE the sample). Discovery now grows

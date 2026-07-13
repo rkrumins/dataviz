@@ -14,7 +14,7 @@ never-504 semantics on multi-million-element graphs, over real network round-tri
 
 Reads that felt fine on a laptop were unusable in real deployments.
 
-On the primary test graph — `perf-load-test-solidatus`, **2,083,217 nodes /
+On the primary test graph — `perf-load-test-layered-lineage`, **2,083,217 nodes /
 5,605,218 edges (7.7M elements)** — a single canvas settle produced, in plain Docker
 Compose:
 

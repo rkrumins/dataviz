@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-#  Generate a VERY LARGE Solidatus graph with FULL end-to-end column lineage
+#  Generate a VERY LARGE layered-lineage graph with FULL end-to-end column lineage
 # ============================================================================
 #
 # Uses the generator's --realistic mode: data CONCEPTS flow through every layer,
@@ -46,8 +46,8 @@ SCHEMA=${SCHEMA:-roots_node}     # Roots (layers) + Node (tables/columns), HAS/F
 OUT=${OUT:-/tmp/large_lineage.json}
 GRAPH="${1:-}"                   # optional FalkorDB graph name to push into
 
-GEN="python backend/scripts/generate_solidatus_model.py"
-IMP="python backend/scripts/import_solidatus.py"
+GEN="python backend/scripts/generate_layered_lineage_model.py"
+IMP="python backend/scripts/import_layered_lineage.py"
 
 echo "==> Generating: --realistic layers=$LAYERS objects=$OBJECTS attrs=$ATTRS e2e=$E2E fan-in=$FAN_IN"
 t0=$(date +%s)

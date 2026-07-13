@@ -1,9 +1,9 @@
-"""Unit tests for backend/scripts/solidatus_schema.py — the schema-configurable
-Solidatus→ontology conversion seam.
+"""Unit tests for backend/scripts/layered_lineage_schema.py — the schema-configurable
+layered-lineage→ontology conversion seam.
 
 A ConversionSchema maps the generator's structural roles (layer/object/group/
 attribute + containment/lineage) onto arbitrary declared vocabularies. The
-identity preset must reproduce the legacy SolidatusGraphBuilder output; the
+identity preset must reproduce the legacy LayeredLineageGraphBuilder output; the
 roots_node preset is the canonical many-to-one collapse (Roots/Node + uppercase
 HAS/FLOWS_TO). The emit feature (case-variant payloads) is still exercised via
 inline schemas for canonicalization/alignment coverage.
@@ -15,9 +15,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.scripts.generate_solidatus_model import SolidatusModelGenerator
-from backend.scripts.import_solidatus import SolidatusGraphBuilder
-from backend.scripts.solidatus_schema import (
+from backend.scripts.generate_layered_lineage_model import LayeredLineageModelGenerator
+from backend.scripts.import_layered_lineage import LayeredLineageGraphBuilder
+from backend.scripts.layered_lineage_schema import (
     IDENTITY_SCHEMA,
     convert_model,
     load_schema,
@@ -26,7 +26,7 @@ from backend.scripts.solidatus_schema import (
 
 
 def _model(seed=42, num_layers=3, **kw):
-    return SolidatusModelGenerator(num_layers=num_layers, seed=seed, **kw).generate()
+    return LayeredLineageModelGenerator(num_layers=num_layers, seed=seed, **kw).generate()
 
 
 def _base_spec(**overrides):
@@ -80,7 +80,7 @@ def test_case_colliding_declared_edge_ids_raise():
 
 def test_identity_schema_matches_legacy_builder():
     model = _model()
-    legacy = SolidatusGraphBuilder()
+    legacy = LayeredLineageGraphBuilder()
     legacy.build(model)
     cg = convert_model(model, IDENTITY_SCHEMA)
     assert {(n.urn, n.entity_type) for n in cg.nodes} \
@@ -98,7 +98,7 @@ def test_roots_node_conversion_maps_types():
     assert {n.entity_type for n in cg.nodes} == {"Roots", "Node"}
     layer_ids = set(model["layers"])
     for n in cg.nodes:
-        expected = "Roots" if n.properties.get("solidatusId") in layer_ids else "Node"
+        expected = "Roots" if n.properties.get("sourceId") in layer_ids else "Node"
         assert n.entity_type == expected
 
     # Edges use the declared uppercase spellings (our data is physical-uppercase)
@@ -127,7 +127,7 @@ def test_inline_emit_schema_produces_case_variant():
 # ── Ontology derivation ──────────────────────────────────────────────────────
 
 def _derived(schema_name="roots_node", model=None):
-    from backend.scripts.solidatus_schema import derive_ontology_request
+    from backend.scripts.layered_lineage_schema import derive_ontology_request
     model = model or _model()
     schema = load_schema(schema_name)
     cg = convert_model(model, schema)
@@ -166,7 +166,7 @@ def test_derive_ontology_roots_node():
 # ── Ingest rows ──────────────────────────────────────────────────────────────
 
 def test_to_ingest_rows_shape_and_order():
-    from backend.scripts.solidatus_schema import to_ingest_rows
+    from backend.scripts.layered_lineage_schema import to_ingest_rows
 
     model = _model()
     cg = convert_model(model, load_schema("roots_node"))
@@ -182,12 +182,12 @@ def test_to_ingest_rows_shape_and_order():
     edge_row = rows[len(cg.nodes)]
     assert set(edge_row) >= {"kind", "id", "edgeType", "source", "target"}
     edge_props = {k for r in rows[len(cg.nodes):] for k in r}
-    assert "solidatusTransitionId" in edge_props  # edge properties are flattened into the row
+    assert "sourceTransitionId" in edge_props  # edge properties are flattened into the row
 
 
 def test_conversion_is_deterministic():
     import json as _json
-    from backend.scripts.solidatus_schema import to_ingest_rows
+    from backend.scripts.layered_lineage_schema import to_ingest_rows
 
     model = _model()
     a = _json.dumps(to_ingest_rows(convert_model(model, load_schema("multi_containment"))), sort_keys=True)
@@ -225,14 +225,14 @@ def test_multi_containment_assigns_edge_type_by_parent_depth():
 
 # ── Derived ontology must admit its own data ─────────────────────────────────
 
-@pytest.mark.parametrize("preset", ["solidatus_default", "roots_node", "multi_containment"])
+@pytest.mark.parametrize("preset", ["layered_lineage_default", "roots_node", "multi_containment"])
 def test_derived_ontology_admits_its_own_rows(preset):
     from types import SimpleNamespace
 
     from backend.app.ontology.resolver import parse_entity_definitions, parse_relationship_definitions
     from backend.app.ontology.rules import resolved_ontology_to_rules
     from backend.app.services.versioning.ontology import validate_entities_rich
-    from backend.scripts.solidatus_schema import derive_ontology_request, to_ingest_rows
+    from backend.scripts.layered_lineage_schema import derive_ontology_request, to_ingest_rows
 
     model = _model(groups_chance=1.0)
     schema = load_schema(preset)
@@ -264,7 +264,7 @@ def test_canonicalize_rows_restores_declared_casing():
     from backend.app.ontology.resolver import parse_entity_definitions, parse_relationship_definitions
     from backend.app.ontology.rules import resolved_ontology_to_rules
     from backend.app.providers.versioned_bootstrap import canonicalize_rows
-    from backend.scripts.solidatus_schema import derive_ontology_request, to_ingest_rows
+    from backend.scripts.layered_lineage_schema import derive_ontology_request, to_ingest_rows
 
     model = _model()
     # Inline schema simulating a federated source that emits lowercase spellings while the
@@ -309,7 +309,7 @@ def test_orphans_are_nodes_with_no_containment_pair():
     orphan_ids = set(model["entities"]) - contained - layer_ids
     assert len(orphan_ids) == 4
 
-    orphan_urns = {n.urn for n in cg.nodes if n.properties.get("solidatusId") in orphan_ids}
+    orphan_urns = {n.urn for n in cg.nodes if n.properties.get("sourceId") in orphan_ids}
     assert len(orphan_urns) == 4
     # An orphan is never the child endpoint of a containment edge
     child_urns = {e.target_urn for e in cg.edges if e.edge_type == "HAS"}

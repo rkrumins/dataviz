@@ -104,10 +104,10 @@ describe('ScopeStep — every card is the same size', () => {
       makeDataSource({ id: 'ds1', label: 'Pipeline' }),
       // A name long enough to wrap onto a second line — this is the one that used
       // to make its own card taller than the rest of the row.
-      makeDataSource({ id: 'ds2', label: 'Perf-Load-Test-Solidatus' }),
+      makeDataSource({ id: 'ds2', label: 'Perf-Load-Test-Layered-Lineage' }),
     ])
 
-    for (const name of ['Pipeline', 'Perf-Load-Test-Solidatus']) {
+    for (const name of ['Pipeline', 'Perf-Load-Test-Layered-Lineage']) {
       const card = cardFor(name)
       expect(card.className).toContain('h-full')
       expect(card.className).toContain('flex-col')
