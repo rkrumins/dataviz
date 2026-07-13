@@ -12,7 +12,10 @@ returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=fals
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM
 
 from backend.app.auth.dependencies import (
     get_current_user,
@@ -352,6 +355,27 @@ async def add_data_source(
         from backend.app.db.repositories import catalog_repo
         if not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
             raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
+
+        # A catalog item belongs to exactly ONE workspace — `uq_ds_catalog_item`
+        # enforces it. Without this check the insert hit that constraint and the
+        # handler below didn't recognise it (it only mapped uq_ds_ws_prov_graph),
+        # so the request died as an unhandled IntegrityError → 500. The UI happily
+        # offered already-owned items, so this was reachable by clicking.
+        owner = (await session.execute(
+            select(WorkspaceORM.id, WorkspaceORM.name)
+            .join(
+                WorkspaceDataSourceORM,
+                WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
+            )
+            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
+        )).first()
+        if owner:
+            detail = (
+                f"Already used by workspace '{owner.name}'"
+                if owner.id != workspace_id
+                else "This data source is already on this workspace"
+            )
+            raise HTTPException(status_code=409, detail=detail)
     elif not req.provider_id:
         raise HTTPException(status_code=422, detail="Either catalogItemId or providerId is required")
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
@@ -361,7 +385,11 @@ async def add_data_source(
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
-        if "uq_ds_ws_prov_graph" in str(e) or "already allocated" in str(e):
+        if (
+            "uq_ds_ws_prov_graph" in str(e)
+            or "uq_ds_catalog_item" in str(e)
+            or "already allocated" in str(e)
+        ):
             raise HTTPException(status_code=409, detail="This data source already exists on this workspace")
         raise
 
