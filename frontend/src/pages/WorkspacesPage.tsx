@@ -105,6 +105,8 @@ export function WorkspacesPage() {
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [isLoading, setIsLoading] = useState(true)
+    /** A provider/catalog/ontology probe failed — the extras on screen may be stale. */
+    const [probeFailed, setProbeFailed] = useState(false)
 
     /* ── Create-workspace wizard ── */
     const [showWizard, setShowWizard] = useState(false)
@@ -262,13 +264,29 @@ export function WorkspacesPage() {
                 ...adminProbes,
             ])
             const wsList = settled[0].status === 'fulfilled' ? settled[0].value as WorkspaceResponse[] : ([] as WorkspaceResponse[])
-            const catList = settled[1].status === 'fulfilled' ? settled[1].value as CatalogItemResponse[] : ([] as CatalogItemResponse[])
-            const provList = settled[2].status === 'fulfilled' ? settled[2].value as ProviderResponse[] : ([] as ProviderResponse[])
-            const ontoList = settled[3].status === 'fulfilled' ? settled[3].value as OntologyDefinitionResponse[] : ([] as OntologyDefinitionResponse[])
             setWorkspaces(wsList)
-            setCatalogItems(catList)
-            setProviders(provList)
-            setOntologies(ontoList)
+
+            // Keep what we already had when a probe FAILS.
+            //
+            // These three used to fall back to [] on any rejection — including a
+            // timeout, which withTimeout produces routinely on a slow provider. The
+            // page then re-rendered as if the estate had no providers, no catalog and
+            // no ontologies: the summary silently dropped "Governed by N ontologies"
+            // and "Connected via", and every card lost its provider logo and schema
+            // chips. Nothing said anything had failed — the UI just quietly asserted
+            // a smaller, false world, and only a page reload brought it back.
+            //
+            // Stale-but-true beats blank-and-false. A failed refresh means "we don't
+            // know right now", not "there are none".
+            if (settled[1].status === 'fulfilled') setCatalogItems(settled[1].value as CatalogItemResponse[])
+            if (settled[2].status === 'fulfilled') setProviders(settled[2].value as ProviderResponse[])
+            if (settled[3].status === 'fulfilled') setOntologies(settled[3].value as OntologyDefinitionResponse[])
+
+            const degraded = settled.slice(1).some(r => r.status === 'rejected')
+            setProbeFailed(degraded)
+            if (degraded) {
+                console.warn('[workspaces] provider/catalog/ontology refresh failed; keeping the last known values')
+            }
 
             listViews({ limit: 200 }).then(({ items, total }) => {
                 setTotalViews(total)
@@ -436,6 +454,23 @@ export function WorkspacesPage() {
                     </button>
                 )}
             </div>
+
+            {/* A failed refresh used to erase the provider/ontology detail silently.
+                Now it keeps it and admits it might be stale. */}
+            {probeFailed && !isLoading && (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5 flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                    <p className="text-xs text-ink-muted flex-1">
+                        Couldn't refresh provider and semantic-layer details — showing the last known values.
+                    </p>
+                    <button
+                        onClick={() => loadData()}
+                        className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+                    >
+                        Retry
+                    </button>
+                </div>
+            )}
 
             {/* Pipeline nudge when no providers exist */}
             {showPipelineNudge && (
