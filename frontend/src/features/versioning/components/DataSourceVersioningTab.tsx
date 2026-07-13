@@ -173,7 +173,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
           return (
             <div className="space-y-1.5">
               {active.slice(0, 4).map((pr) => (
-                <PrListRow key={pr.prId} pr={pr} onOpen={() => setOpenPrId(pr.prId)} />
+                <PrListRow key={pr.prId} wsId={wsId} pr={pr} onOpen={() => setOpenPrId(pr.prId)} />
               ))}
             </div>
           )
