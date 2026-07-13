@@ -35,11 +35,15 @@ interface DashboardHeroProps {
     recentSearches?: string[]
     onRemoveRecentSearch?: (q: string) => void
     onClearRecentSearches?: () => void
-    /** Who the person is, in business terms — their name, role, department (from
-     *  the IdP profile) and how many business areas they work across. Replaces the
-     *  generic "Data Intelligence Platform" marketing badge, which told the user
-     *  nothing they didn't already know. Omitted → falls back to the old label. */
-    contextLabel?: string
+    /** "Good evening, Priya" — a greeting, not a job title. The old chip read
+     *  "System · Super Admin · 25 business areas", which is a fact about the
+     *  account, not something the person can act on. */
+    greeting?: string
+    /** One honest line about what changed while they were away. Replaces the
+     *  static "Search across workspaces…" blurb when we have something to say. */
+    statusLine?: React.ReactNode
+    /** The CTA row under the search box — the point of the page. */
+    actions?: React.ReactNode
 }
 
 export function DashboardHero({
@@ -51,7 +55,9 @@ export function DashboardHero({
     recentSearches = [],
     onRemoveRecentSearch,
     onClearRecentSearches,
-    contextLabel,
+    greeting,
+    statusLine,
+    actions,
 }: DashboardHeroProps) {
     const [focused, setFocused] = useState(false)
     const [activeIndex, setActiveIndex] = useState(0)
@@ -137,7 +143,7 @@ export function DashboardHero({
                     className="inline-flex items-center gap-2 mb-5 px-4 py-1.5 rounded-full glass-panel border border-accent-business/30 text-accent-business text-sm font-semibold"
                 >
                     <Zap className="w-3.5 h-3.5" />
-                    {contextLabel ?? 'Data Intelligence Platform'}
+                    {greeting ?? 'Data Intelligence Platform'}
                 </motion.div>
                 <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
                     What would you like<br className="hidden md:block" /> to{' '}
@@ -145,8 +151,8 @@ export function DashboardHero({
                         explore?
                     </span>
                 </h1>
-                <p className="text-base text-ink-muted mb-8 max-w-md mx-auto">
-                    Search across your business areas, views, and data sources — or start from a template.
+                <p className="text-base text-ink-muted mb-8 max-w-lg mx-auto">
+                    {statusLine ?? 'Search across your business areas, views, and data sources — or start from a template.'}
                 </p>
 
                 {/* Search box + dropdown */}
@@ -236,6 +242,19 @@ export function DashboardHero({
                         )}
                     </AnimatePresence>
                 </div>
+
+                {/* Primary CTAs — what the page is FOR. Hidden while the dropdown is
+                    open so they can't sit under the results panel. */}
+                {actions && !showDropdown && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.1 }}
+                        className="mt-7 flex flex-wrap items-center justify-center gap-2.5"
+                    >
+                        {actions}
+                    </motion.div>
+                )}
 
                 {/* Quick suggestions — hide while the dropdown is open so it can't sit on top of recents/results. */}
                 {!value && !showDropdown && (
