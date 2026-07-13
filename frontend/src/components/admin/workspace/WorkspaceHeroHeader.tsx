@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
-import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
+import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
@@ -31,7 +31,7 @@ function compactNum(n: number): string {
 
 interface WorkspaceHeroHeaderProps {
   workspace: WorkspaceResponse
-  healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
+  healthStatus: WorkspaceHealth
   aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number }
   primaryOntologyName?: string
   providerInfos: DataSourceProviderInfo[]
