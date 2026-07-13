@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func, delete, update, or_
+from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -4202,39 +4202,84 @@ class GraphVersioningService:
                 CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
                 CommitORM.kind.in_(("import", "sync")),
             ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
-            base = await self._state_as_of(s, graph_id, main_id, last_seq)
-            ours = await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
-            theirs, rejected = self._external_state(rows, ours)
+
+            # BOUNDED. This used to be two full `_state_as_of` replays plus an `_external_state`
+            # that indexed the whole of `ours` — six whole-graph structures resident at once, and
+            # 2.03 GB of RSS measured to compute 808 changes on a 478k graph.
+            #
+            # It is exact to leave the rest out, for the same reason `_compute_merge_bounded`
+            # gives on the PR path: an entity identical on all three sides contributes nothing to
+            # `net_delta`. Here we can prove "identical" cheaply — if the external payload hashes
+            # to what `entity_heads` already holds, then theirs == ours, and three_way_merge
+            # returns ours whatever base was. So it is dropped the moment it is read.
+            #
+            # Deletions are the one thing that CANNOT be dropped, because they are defined by
+            # ABSENCE: an entity the snapshot no longer mentions must be deleted, and you cannot
+            # see an absence by looking at what is there. So the external id SET is kept (strings
+            # only) and the live head is streamed against it.
+            theirs, seen, rejected = await self._external_state_bounded(s, graph_id, main_id, rows)
+            deletions = await self._live_ids_absent_from(s, graph_id, main_id, seen)
+            changed = set(theirs) | deletions | set(resolutions or {})
+            base = await self._values_at(s, graph_id, main_id, changed, last_seq)
+            ours = await self._values_at(s, graph_id, main_id, changed, graph.main_head_commit_seq)
 
             set_fields = frozenset(config.SET_FIELDS)
             res = dict(resolutions or {})
             merged: Dict[str, Optional[dict]] = {}
             conflicts: List[dict] = []
-            for eid in sorted(set(base) | set(ours) | set(theirs)):
+            overridden: List[dict] = []
+            # `external_wins` is a FIELD-level policy, not an entity-level one. It used to be
+            # `merged[eid] = theirs` — replacing the whole entity with the external payload and
+            # discarding the field merge entirely. One disputed field therefore took the entire
+            # entity down with it, silently deleting any curation the source had never heard of
+            # (`businessOwner`, `classification`, …). It destroyed most where the graph was worth
+            # most. Now the source wins the FIELDS it disputes; everything a human added that the
+            # source never touched survives.
+            policy = "theirs" if strategy == "external_wins" else "ours"
+            # `changed` IS the union that matters — everything else is identical on all three
+            # sides by construction (see the note above), and would net to zero anyway.
+            for eid in sorted(changed):
                 if eid in res:
                     merged[eid] = _normalize_resolution(res[eid])
                     continue
-                out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
-                if out.conflicts and strategy == "external_wins":
-                    merged[eid] = theirs.get(eid)            # external overrides the user edit
-                    continue
+                out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields,
+                                      on_conflict=policy)
                 merged[eid] = out.merged
                 for c in out.conflicts:
-                    conflicts.append({
+                    row = {
                         "entity_id": eid, "path": list(c.path),
                         "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
-                    })
+                    }
+                    # Under external_wins the conflict is not an error to resolve — it is a
+                    # RECEIPT. Overwriting someone's work is allowed; doing it silently is not,
+                    # so the caller gets back exactly which edits the source overruled.
+                    (overridden if policy == "theirs" else conflicts).append(row)
             if conflicts:
                 raise MergeConflict(conflicts)
+            if overridden:
+                logger.info("sync overrode %d user edit(s) on graph %s (external_wins)",
+                            len(overridden), graph_id)
 
             _collapse_empty_payloads(merged)                            # {} → tombstone before guards
+            # `merged` is now SPARSE, and the three guards below only reason about entities that
+            # are IN the dict. Without this, a node deleted by the source would not cascade to an
+            # edge the snapshot never mentioned (dangling edge = corruption), and an edge between
+            # two unchanged nodes would trip a false "dangling endpoint" error because neither
+            # endpoint is in the dict. Hydrating the live neighbourhood is how the PR merge path
+            # already solves exactly this — do NOT try to window the cascades themselves; that is
+            # where a silent, data-losing bug would come from. Bounded by the degree of the
+            # deleted nodes, never by the graph.
+            await self._hydrate_merge_neighborhood(s, graph_id, main_id, merged, ours)
             self._cascade_containment(merged, containment_edge_types)   # drop orphaned descendants
             self._cascade_incident_edges(merged)                        # then their dangling edges
             self._assert_referential_integrity(merged)
             deltas = net_delta(ours, merged)                 # changes to apply on top of current main
             if not deltas:
                 return {"commit_id": None, "commit_seq": graph.main_head_commit_seq,
-                        "applied": 0, "rejected": rejected, "idempotent_replay": False}
+                        "applied": 0, "rejected": rejected, "idempotent_replay": False,
+                        # WHICH user edits the source overruled. Overwriting a
+                        # person's work is allowed; doing it silently is not.
+                        "overridden": overridden[:200]}
 
             kind_by_entity = {eid: ("edge" if _is_edge_payload(p) else "node")
                               for eid, p in ours.items() if p is not None}
@@ -4260,7 +4305,175 @@ class GraphVersioningService:
             if ps is not None:
                 ps.target_commit_seq = new_seq
             return {"commit_id": commit.id, "commit_seq": new_seq,
-                    "applied": len(deltas), "rejected": rejected, "idempotent_replay": False}
+                    "applied": len(deltas), "rejected": rejected, "idempotent_replay": False,
+                        # WHICH user edits the source overruled. Overwriting a
+                        # person's work is allowed; doing it silently is not.
+                        "overridden": overridden[:200]}
+
+    async def _external_state_bounded(self, s, graph_id: str, main_id: str, rows):
+        """`_external_state`, without holding the graph.
+
+        Returns ``(theirs, seen, rejected)`` where
+
+        * ``theirs`` — {entity_id: payload} for ONLY the rows that can produce a delta, i.e.
+          those that are new, or whose payload differs from what main already holds;
+        * ``seen``   — every external entity id, including the discarded ones. This set is the
+          price of authoritative deletion and cannot be avoided: an entity the snapshot no longer
+          mentions must be DELETED, and you cannot see an absence by looking at what is present.
+          Strings only — a few tens of MB at 478k, versus the gigabytes the payloads cost.
+
+        The discard rule is exact, not a heuristic. If the external payload hashes to what
+        ``entity_heads`` already holds then theirs == ours, and ``three_way_merge(base, X, X)``
+        returns X for any base: no conflict, no delta, nothing to do. A tombstoned head is never
+        discarded — there, "same hash" would mean the user DELETED something the source still has,
+        which is a real decision the merge has to make.
+
+        The old code instead built ``urn_index`` and ``edge_index`` by iterating the whole of
+        ``ours``, which is what made even a ONE-ROW /sync call O(graph).
+        """
+        # The SAME hash the write path stamps onto entity_heads (`_write_deltas` → merkle
+        # .content_hash). If it were a different function the discard rule would be silently
+        # wrong: every entity would look changed, or worse, changed ones would look identical.
+        _ch = content_hash
+
+        rows = list(rows)
+        theirs: Dict[str, dict] = {}
+        seen: set = set()
+        rejected: List[dict] = []
+
+        # ── nodes ────────────────────────────────────────────────────────────
+        node_rows = [(i, r) for i, r in enumerate(rows) if (r or {}).get("kind") == "node"]
+        urns = [r.get("urn") for _, r in node_rows if r.get("urn")]
+        known = await self._heads_by_urn(s, graph_id, main_id, urns)   # urn -> (eid, hash, tomb)
+        urn_to_eid: Dict[str, str] = {}
+        for i, row in node_rows:
+            if not row.get("entityType"):
+                rejected.append({"row": i, "reason": "node missing entityType"})
+                continue
+            urn = row.get("urn")
+            hit = known.get(urn) if urn else None
+            eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
+                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+            payload = _sanitize_node_properties(
+                {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+            seen.add(eid)
+            if urn:
+                urn_to_eid[urn] = eid
+            if row.get("id"):
+                urn_to_eid[row["id"]] = eid
+            urn_to_eid[eid] = eid
+            if hit and not hit[2] and hit[1] == _ch(payload):
+                continue                       # identical to what we hold → cannot produce a delta
+            theirs[eid] = payload
+
+        # ── edges ────────────────────────────────────────────────────────────
+        edge_rows = [(i, r) for i, r in enumerate(rows) if (r or {}).get("kind") == "edge"]
+        # Endpoints the node pass did not resolve (an edge may reference a node the snapshot
+        # doesn't re-send). Batch-look those up rather than indexing the whole graph.
+        need = {u for _, r in edge_rows for u in (r.get("source"), r.get("target"))
+                if u and u not in urn_to_eid}
+        for urn, hit in (await self._heads_by_urn(s, graph_id, main_id, list(need))).items():
+            urn_to_eid[urn] = hit[0]
+
+        triples = []
+        for _, r in edge_rows:
+            se, te = urn_to_eid.get(r.get("source")), urn_to_eid.get(r.get("target"))
+            if se and te and r.get("edgeType"):
+                triples.append((se, te, r["edgeType"]))
+        by_triple = await self._heads_by_edge_triple(s, graph_id, main_id, triples)
+
+        for i, row in edge_rows:
+            et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
+            if not (et and src and tgt):
+                rejected.append({"row": i, "reason": "edge missing edgeType/source/target"})
+                continue
+            seid, teid = urn_to_eid.get(src), urn_to_eid.get(tgt)
+            if not (seid and teid):
+                rejected.append({"row": i, "reason": "edge endpoint not found"})
+                continue
+            hit = by_triple.get((seid, teid, et))
+            eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
+                   or f"sync:e:{seid}->{teid}:{et}")
+            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
+                       **{k: v for k, v in row.items()
+                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            seen.add(eid)
+            if hit and not hit[2] and hit[1] == _ch(payload):
+                continue
+            theirs[eid] = payload
+
+        return theirs, seen, rejected
+
+    async def _heads_by_urn(self, s, graph_id: str, main_id: str, urns):
+        """urn → (entity_id, content_hash, is_tombstone) at main's head. O(urns), via ix_nv_urn."""
+        out: Dict[str, tuple] = {}
+        uniq = [u for u in dict.fromkeys(urns) if u]
+        for chunk in _chunks(uniq, 5000):
+            rows = (await s.execute(
+                select(NodeVersionORM.urn, EntityHeadORM.entity_id,
+                       EntityHeadORM.content_hash, EntityHeadORM.is_tombstone)
+                .join(NodeVersionORM,
+                      (NodeVersionORM.graph_id == EntityHeadORM.graph_id)
+                      & (NodeVersionORM.id == EntityHeadORM.head_version_id))
+                .where(EntityHeadORM.graph_id == graph_id,
+                       EntityHeadORM.branch_id == main_id,
+                       NodeVersionORM.urn.in_(list(chunk)))
+            )).all()
+            for urn, eid, ch, tomb in rows:
+                out[urn] = (eid, ch, bool(tomb))
+        return out
+
+    async def _heads_by_edge_triple(self, s, graph_id: str, main_id: str, triples):
+        """(source, target, type) → (entity_id, content_hash, is_tombstone). O(triples).
+
+        Edge identity in a sync is the endpoint triple, not a urn — the same keying the old
+        `_external_state` used, except that one built the whole index in memory."""
+        out: Dict[tuple, tuple] = {}
+        uniq = list(dict.fromkeys(triples))
+        for chunk in _chunks(uniq, 3000):
+            rows = (await s.execute(
+                select(EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id,
+                       EdgeVersionORM.edge_type, EntityHeadORM.entity_id,
+                       EntityHeadORM.content_hash, EntityHeadORM.is_tombstone)
+                .join(EdgeVersionORM,
+                      (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                      & (EdgeVersionORM.id == EntityHeadORM.head_version_id))
+                .where(EntityHeadORM.graph_id == graph_id,
+                       EntityHeadORM.branch_id == main_id,
+                       tuple_(EdgeVersionORM.source_entity_id,
+                              EdgeVersionORM.target_entity_id,
+                              EdgeVersionORM.edge_type).in_(list(chunk)))
+            )).all()
+            for se, te, et, eid, ch, tomb in rows:
+                out[(se, te, et)] = (eid, ch, bool(tomb))
+        return out
+
+    async def _live_ids_absent_from(self, s, graph_id: str, main_id: str, seen: set) -> set:
+        """Live entities on main the snapshot no longer mentions — i.e. the DELETIONS.
+
+        Streamed in keyset windows and membership-tested against `seen`, so main's head is never
+        held in memory. This is the one thing a bounded sync cannot dodge: absence is only visible
+        by looking at everything present and subtracting. Get it wrong and the sync silently stops
+        deleting, which is the failure nobody notices until the graph is quietly wrong.
+        """
+        gone: set = set()
+        after = ""
+        while True:
+            rows = (await s.execute(
+                select(EntityHeadORM.entity_id)
+                .where(EntityHeadORM.graph_id == graph_id,
+                       EntityHeadORM.branch_id == main_id,
+                       EntityHeadORM.is_tombstone.is_(False),
+                       EntityHeadORM.entity_id > after)
+                .order_by(EntityHeadORM.entity_id)
+                .limit(20000)
+            )).all()
+            if not rows:
+                return gone
+            for (eid,) in rows:
+                if eid not in seen:
+                    gone.add(eid)
+            after = rows[-1][0]
 
     @staticmethod
     def _external_state(rows, ours: Mapping[str, Optional[dict]]):
