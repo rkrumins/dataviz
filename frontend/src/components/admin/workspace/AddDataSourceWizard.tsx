@@ -14,7 +14,7 @@
  *     option of a second dropdown, with no hint that the choice decides how your
  *     entities get classified.
  */
-import { useState, useMemo, useCallback, startTransition } from 'react'
+import { useState, useMemo, useCallback, useEffect, startTransition } from 'react'
 import { motion } from 'framer-motion'
 import {
     Database, BookOpen, ClipboardCheck, Check, Loader2, AlertTriangle, Sparkles, MoveRight,
@@ -22,6 +22,12 @@ import {
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { CatalogItemPicker, isMovable, type PickableCatalogItem } from '@/components/wizard/CatalogItemPicker'
+import { useOntologyMatches } from '@/components/wizard/useOntologyMatches'
+// The same coverage visuals the onboarding wizard uses — one look, one meaning.
+import {
+    CoverageRing, MiniBar, coverageColor, coverageBarClass,
+} from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
+import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { catalogService } from '@/services/catalogService'
@@ -87,6 +93,41 @@ export function AddDataSourceWizard({
     // rest with a 409.
     const isMove = Boolean(selected && isMovable(selected, workspaceId))
 
+    // Score every semantic layer against THIS graph. Without it the step asks the
+    // user to choose between eight cards all called "Roots-node".
+    const matching = useOntologyMatches({
+        providerId: selected?.providerId,
+        // The graph as the provider knows it — the label is a workspace-local alias.
+        assetName: selected?.sourceIdentifier || selected?.name,
+        enabled: step === 'semantics' && !!selected,
+    })
+
+    const scoreOf = useMemo(() => {
+        const map = new Map<string, OntologyMatchResult>()
+        for (const m of matching.matches) map.set(m.ontologyId, m)
+        return map
+    }, [matching.matches])
+
+    // Rank the cards by fit, not by creation order.
+    const rankedOntologies = useMemo(() => {
+        return [...ontologies].sort((a, b) => {
+            const sa = scoreOf.get(a.id)?.jaccardScore ?? -1
+            const sb = scoreOf.get(b.id)?.jaccardScore ?? -1
+            return sb - sa
+        })
+    }, [ontologies, scoreOf])
+
+    const bestId = matching.best?.ontologyId ?? null
+
+    // Pre-select the best fit once, and only if the user hasn't chosen — a
+    // recommendation, not a hijack.
+    const [pickedOntology, setPickedOntology] = useState(false)
+    useEffect(() => {
+        if (matching.phase === 'ready' && bestId && !pickedOntology && ontologyId === '') {
+            setOntologyId(bestId)
+        }
+    }, [matching.phase, bestId, pickedOntology, ontologyId])
+
     const stepIndex = STEPS.findIndex(s => s.id === step)
     const isLastStep = stepIndex === STEPS.length - 1
 
@@ -103,7 +144,7 @@ export function AddDataSourceWizard({
 
     const reset = useCallback(() => {
         setStep('source'); setCatalogItemId(''); setLabel(''); setOntologyId('')
-        setPhase('steps'); setError(null)
+        setPhase('steps'); setError(null); setPickedOntology(false)
     }, [])
 
     const handleClose = useCallback(() => {
@@ -271,26 +312,80 @@ export function AddDataSourceWizard({
                         subtitle="A semantic layer decides which entity and relationship types this source's data maps onto. You can change it later."
                     />
 
+                    {/* Profiling the graph. The list is unreadable without it — eight
+                        of these layers share a name. */}
+                    {matching.phase === 'analyzing' && (
+                        <div className="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-3">
+                            <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
+                            <p className="text-sm text-slate-600 dark:text-slate-400">
+                                Matching “{selected?.name}” against your semantic layers…
+                            </p>
+                        </div>
+                    )}
+
+                    {matching.phase === 'error' && (
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
+                            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                                <p className="text-xs text-amber-800 dark:text-amber-300">{matching.error}</p>
+                                <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80 mt-1">
+                                    You can still choose a layer by hand — it just won't be scored.
+                                </p>
+                            </div>
+                            {matching.retriable && (
+                                <button
+                                    type="button"
+                                    onClick={matching.analyze}
+                                    className="shrink-0 text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline"
+                                >
+                                    Retry
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {matching.phase === 'ready' && (
+                        <div className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 px-4 py-2.5">
+                            <Sparkles className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                            {/* The denominator behind every percentage below. */}
+                            <p className="text-xs text-slate-600 dark:text-slate-400">
+                                This graph has <span className="font-bold text-slate-900 dark:text-white">{matching.graphCounts.entities}</span> entity
+                                {' '}type{matching.graphCounts.entities === 1 ? '' : 's'} and
+                                {' '}<span className="font-bold text-slate-900 dark:text-white">{matching.graphCounts.rels}</span> relationship
+                                {' '}type{matching.graphCounts.rels === 1 ? '' : 's'}. Layers are ranked by how much of it they cover.
+                            </p>
+                        </div>
+                    )}
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <OntologyCard
                             selected={ontologyId === ''}
-                            onClick={() => setOntologyId('')}
+                            onClick={() => { setPickedOntology(true); setOntologyId('') }}
                             title="System defaults"
                             subtitle="Classify with the built-in types"
-                            meta="Recommended if you're not sure"
+                            meta="Use this if nothing fits"
                             dashed
                         />
-                        {ontologies.map(o => (
-                            <OntologyCard
-                                key={o.id}
-                                selected={ontologyId === o.id}
-                                onClick={() => setOntologyId(o.id)}
-                                title={o.name}
-                                subtitle={o.description || `Version ${o.version}`}
-                                meta={`${Object.keys(o.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(o.relationshipTypeDefinitions ?? {}).length} relationships`}
-                                published={o.isPublished}
-                            />
-                        ))}
+                        {rankedOntologies.map(o => {
+                            const match = scoreOf.get(o.id)
+                            return (
+                                <OntologyCard
+                                    key={o.id}
+                                    selected={ontologyId === o.id}
+                                    onClick={() => { setPickedOntology(true); setOntologyId(o.id) }}
+                                    title={o.name}
+                                    subtitle={o.description || `Version ${o.version}`}
+                                    meta={`${Object.keys(o.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(o.relationshipTypeDefinitions ?? {}).length} relationships`}
+                                    published={o.isPublished}
+                                    match={match}
+                                    isBest={bestId === o.id && matching.phase === 'ready'}
+                                    // The server drops anything under 10% overlap, so
+                                    // "analysed, but absent" means "doesn't fit" — not
+                                    // "not analysed". Different claims; say which.
+                                    noOverlap={matching.phase === 'ready' && !match}
+                                />
+                            )
+                        })}
                     </div>
                 </div>
             )}
@@ -330,7 +425,19 @@ export function AddDataSourceWizard({
                         <ReviewRow
                             label="Semantic layer"
                             value={chosenOntology?.name ?? 'System defaults'}
-                            hint={chosenOntology ? `v${chosenOntology.version}` : 'Built-in entity + relationship types'}
+                            hint={(() => {
+                                if (!chosenOntology) return 'Built-in entity + relationship types'
+                                const m = scoreOf.get(chosenOntology.id)
+                                if (!m) return `v${chosenOntology.version}`
+                                const covered = m.coveredEntityTypes.length + m.coveredRelationshipTypes.length
+                                const total = covered
+                                    + m.uncoveredEntityTypes.length
+                                    + m.uncoveredRelationshipTypes.length
+                                const pct = total > 0 ? Math.round((covered / total) * 100) : 0
+                                // Carry the number into the summary — a choice made on a
+                                // score should still show it when you confirm.
+                                return `v${chosenOntology.version} · covers ${pct}% of this graph's types`
+                            })()}
                         />
                     </div>
 
@@ -383,7 +490,7 @@ function ReviewRow({ label, value, hint }: { label: string; value: string; hint?
     )
 }
 
-function OntologyCard({ selected, onClick, title, subtitle, meta, published, dashed }: {
+function OntologyCard({ selected, onClick, title, subtitle, meta, published, dashed, match, isBest, noOverlap }: {
     selected: boolean
     onClick: () => void
     title: string
@@ -391,7 +498,26 @@ function OntologyCard({ selected, onClick, title, subtitle, meta, published, das
     meta: string
     published?: boolean
     dashed?: boolean
+    /** Absent until the graph has been profiled — the card degrades to plain. */
+    match?: OntologyMatchResult
+    isBest?: boolean
+    /** Analysed, and it doesn't overlap this graph (the server drops <10%). */
+    noOverlap?: boolean
 }) {
+    // The SAME percentage the onboarding wizard shows: how much of the graph's
+    // vocabulary — entity types AND relationship types — this layer accounts for.
+    // Jaccard is what ranks them; coverage is what the human reads.
+    const entityTotal = match
+        ? match.coveredEntityTypes.length + match.uncoveredEntityTypes.length
+        : 0
+    const relTotal = match
+        ? match.coveredRelationshipTypes.length + match.uncoveredRelationshipTypes.length
+        : 0
+    const totalAll = entityTotal + relTotal
+    const totalCovered = match
+        ? match.coveredEntityTypes.length + match.coveredRelationshipTypes.length
+        : 0
+    const pct = match && totalAll > 0 ? Math.round((totalCovered / totalAll) * 100) : 0
     return (
         <motion.button
             type="button"
@@ -404,21 +530,76 @@ function OntologyCard({ selected, onClick, title, subtitle, meta, published, das
                 selected
                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 ring-4 ring-blue-500/10'
                     : 'border-slate-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700',
+                // Still selectable — the score is advice, not a gate — but it stops
+                // competing with the layers that actually fit.
+                noOverlap && !selected && 'opacity-60',
             )}
         >
-            <span className="flex items-center gap-2 min-w-0">
-                {dashed
-                    ? <Sparkles className="w-4 h-4 text-slate-400 shrink-0" />
-                    : <BookOpen className="w-4 h-4 text-slate-400 shrink-0" />}
-                <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">{title}</span>
-                {published === false && (
-                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
-                        DRAFT
-                    </span>
+            <span className="flex items-start gap-3 min-w-0">
+                {/* The score, where the eye lands first. Without it these cards are
+                    eight identical names. */}
+                {match && (
+                    <CoverageRing percent={pct} size={44} stroke={4} color={coverageColor(pct)} />
                 )}
+
+                <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                        {!match && (dashed
+                            ? <Sparkles className="w-4 h-4 text-slate-400 shrink-0" />
+                            : <BookOpen className="w-4 h-4 text-slate-400 shrink-0" />)}
+                        <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">{title}</span>
+                        {isBest && (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400">
+                                BEST FIT
+                            </span>
+                        )}
+                        {published === false && (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+                                DRAFT
+                            </span>
+                        )}
+                    </span>
+
+                    {match ? (
+                        <span className="block mt-1.5 space-y-1">
+                            <MiniBar
+                                covered={match.coveredEntityTypes.length}
+                                total={entityTotal}
+                                label="Entity types"
+                                colorClass={coverageBarClass(entityTotal > 0
+                                    ? Math.round((match.coveredEntityTypes.length / entityTotal) * 100)
+                                    : 0)}
+                            />
+                            <MiniBar
+                                covered={match.coveredRelationshipTypes.length}
+                                total={relTotal}
+                                label="Relationships"
+                                colorClass={coverageBarClass(relTotal > 0
+                                    ? Math.round((match.coveredRelationshipTypes.length / relTotal) * 100)
+                                    : 0)}
+                            />
+                            {/* What it MISSES. A 60% match sounds fine until you see
+                                which of your types it can't name. */}
+                            {match.uncoveredEntityTypes.length > 0 && (
+                                <span className="block text-[10px] text-amber-600 dark:text-amber-400 truncate">
+                                    Doesn't cover: {match.uncoveredEntityTypes.slice(0, 3).join(', ')}
+                                    {match.uncoveredEntityTypes.length > 3 && ` +${match.uncoveredEntityTypes.length - 3}`}
+                                </span>
+                            )}
+                        </span>
+                    ) : (
+                        <>
+                            <span className="block text-xs text-slate-500 truncate">{subtitle}</span>
+                            <span className="block text-[11px] text-slate-400 truncate">{meta}</span>
+                            {noOverlap && (
+                                <span className="block text-[10px] text-slate-400 mt-1">
+                                    No overlap with this graph's types
+                                </span>
+                            )}
+                        </>
+                    )}
+                </span>
             </span>
-            <span className="text-xs text-slate-500 truncate">{subtitle}</span>
-            <span className="text-[11px] text-slate-400 truncate">{meta}</span>
 
             {selected && (
                 <motion.span
