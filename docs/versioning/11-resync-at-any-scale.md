@@ -145,3 +145,47 @@ not an afterthought.
 4. Move it onto the worker as a `resync` job (202 + progress + resumable).
 5. Stage the id set into `import_rows` for the unbounded case.
 6. Delete the guard, the knob, the 422 and the guard's tests.
+
+---
+
+## ⚠️ A failed attempt, and the trap that caused it — READ THIS FIRST
+
+The bounded merge described above was implemented, **passed all 15 characterisation tests**, and
+was then measured against the real 478,430-entity graph. The result:
+
+| | before | after the "optimisation" |
+|---|---|---|
+| peak RSS | 2,095 MiB | **5,495 MiB** — 2.6× WORSE |
+| elapsed | 90 s | **696 s** |
+| deltas applied | **808** | **956,860** |
+
+956,860 ≈ **2 × 478,430**. It deleted the entire graph and re-created it. The change was reverted.
+
+### Why the tests did not catch it
+
+**The characterisation tests build their graphs with `bulk_ingest`. Real graphs are built by the
+BOOTSTRAP WORKER.** The two derive `entity_id` differently, and the bounded merge's whole
+correctness rests on resolving an external row back to *the entity id the graph actually has*.
+On a `bulk_ingest` graph the resolution happened to agree; on a bootstrapped graph it did not,
+so every entity looked new (mass create) and every existing entity looked absent from the
+snapshot (mass delete — because deletion is defined by absence, and `seen` held the wrong ids).
+
+The old code never had this problem because it built `urn_index` from `ours` — the actual stored
+payloads — so it resolved to whatever id the graph really had, whatever wrote it. That whole-graph
+index was the bug *and* the thing making it correct.
+
+### What the next attempt must do
+
+1. **Test against a BOOTSTRAPPED graph, not just `bulk_ingest`.** Add a characterisation case
+   that runs the bootstrap worker (or replicates its exact id derivation) and re-syncs it. A
+   suite that only exercises one of the two writers is not a safety net; it is a false one.
+2. **Verify identity resolution BEFORE trusting the discard.** Assert that
+   `_heads_by_urn`/`_heads_by_edge_triple` resolve to the SAME entity ids the old
+   `urn_index`/`edge_index` produced, on both kinds of graph. If identity is wrong, everything
+   downstream is wrong — and it fails as mass deletion, which is the worst possible failure mode.
+3. **Instrument before optimising.** `applied` going from 808 to 956,860 was visible in the
+   result payload the entire time. A cheap assertion — "a re-sync of an unchanged source applies
+   ~0 deltas" — would have caught this in seconds instead of after a 700-second run.
+
+The measured 2.03 GB problem is real and the design above is still, I believe, the right one.
+But the identity seam is where it lives or dies, and it is not a detail.
