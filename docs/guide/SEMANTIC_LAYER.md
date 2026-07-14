@@ -79,6 +79,18 @@ To change a published ontology you **clone** it into a new draft, edit, validate
 and publish a new version — leaving the old one (and everything depending on it)
 intact.
 
+### This is ontology versioning — not data versioning
+
+> 💡 **Two different things share the word "versioning."** This page is about
+> versioning the **ontology** — the *meaning* layer (what entity types and colours
+> stand for), where publishing freezes a version so your Views keep rendering
+> correctly. That's separate from versioning the **graph data itself** — opening a
+> draft branch on the actual nodes and edges, editing them, and going through a
+> review-and-publish flow before they reach the shared main branch, with the
+> ability to revert a single change or roll back to an earlier point in time. That
+> "git for graphs" workflow is covered in
+> [Versioning & Change Control](/guide/versioning-change-control).
+
 ---
 
 ## The lifecycle, end to end
@@ -103,6 +115,14 @@ OpenMetadata type name), **source mappings** translate those external labels int
 your Synodic entity types. Synodic can also flag **drift** — external types it
 finds that *aren't* yet mapped — so your dictionary stays complete as sources
 evolve.
+
+The ontology's **Health** tab shows this at a glance: every type is marked
+**exact** (matches perfectly), **case drift** (present, but the wrong
+capitalisation — invisible to anything that depends on exact naming), or
+**unmapped** (not in your ontology at all), with a plain-language verdict up
+top.
+
+![The Health tab showing a fully-aligned ontology, with a per-source breakdown below](/docs-assets/guide/semantic-layer-hero.png)
 
 ---
 

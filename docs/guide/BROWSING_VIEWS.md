@@ -8,6 +8,8 @@ built. This page covers finding, opening, and keeping track of them.
 > right nodes, layout, and filters to tell a clear story. Browsing is the
 > low-effort, high-signal way to learn your data landscape.
 
+![The View gallery, with stats and a "Continue where you left off" strip](/docs-assets/guide/browsing-views-hero.png)
+
 ---
 
 ## The View Gallery
@@ -86,9 +88,10 @@ Favourites are personal — yours won't clutter anyone else's sidebar.
 ## Switching context
 
 Remember that Views belong to a **workspace**. If a View looks empty or you can't
-find one you expect, check that you're in the right workspace using the
-sidebar's **workspace switcher**. Switching changes which Views — and which data
-— are available.
+find one you expect, open **Workspaces** from the sidebar to see the ones you have
+access to, then enter the one you want to work in — each screen shows you which
+workspace you're in, there's no separate global switcher to keep in sync. Entering
+a different workspace changes which Views — and which data — are available.
 
 ---
 

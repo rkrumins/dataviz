@@ -128,6 +128,12 @@ groups, and grants — is covered in [Users & Access](/guide/users-access).
 
 ## Where to next
 
+Once you're past first-time setup, ongoing workspace operations — managing data
+sources, moving them between workspaces, governing your Views collection, and
+checking ontology health — are covered in
+[Workspace Admin](/guide/workspace-admin).
+
+- Run day-2 workspace operations → [Workspace Admin](/guide/workspace-admin)
 - Manage people and permissions → [Users & Access](/guide/users-access)
 - Keep the platform healthy → [Governance & Operations](/guide/governance-ops)
 - Understand the ontology deeply → [The Semantic Layer](/guide/semantic-layer)

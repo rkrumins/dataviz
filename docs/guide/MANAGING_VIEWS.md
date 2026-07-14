@@ -96,7 +96,7 @@ See recommended cadence and conventions in [Ways of Working](/guide/ways-of-work
 | Symptom | Likely cause / fix |
 | --- | --- |
 | A teammate can't find your View | Visibility too narrow, or wrong workspace — widen visibility or share explicitly |
-| View opens empty | Wrong workspace active, or its data source changed — check the workspace switcher |
+| View opens empty | You're in the wrong workspace, or its data source changed — open **Workspaces** from the sidebar to confirm you're in the right one |
 | Can't edit a View | You have *viewer* access only — ask the owner for an *editor* grant |
 
 More in [Troubleshooting](/guide/troubleshooting).

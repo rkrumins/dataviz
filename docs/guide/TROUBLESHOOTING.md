@@ -16,12 +16,14 @@ unhealthy provider** — start there.
 - You may not have **access** — its visibility could be too narrow, or it wasn't
   shared with you explicitly. Ask the owner to set Team/Enterprise visibility or
   grant you access. See [Browsing Views](/guide/browsing-views).
-- You might be in the **wrong workspace**. Views belong to a workspace — switch
-  using the sidebar's workspace switcher.
+- You might be in the **wrong workspace**. Views belong to a workspace — open
+  **Workspaces** from the sidebar to see the ones you have access to, then enter
+  the one you want. Each screen shows you which workspace you're in; there's no
+  separate global switcher to keep in sync.
 
 ### A View or the Explorer looks empty
-- Check the **active workspace** — an empty picture usually means you're not where
-  you think you are.
+- Check that you're in the right **workspace** for what you're trying to see — an
+  empty picture usually means you're not where you think you are.
 - The workspace's **data source** may be missing or its provider unhealthy. Ask an
   admin to confirm (see admin section below).
 

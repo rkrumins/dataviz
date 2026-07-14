@@ -24,8 +24,7 @@ After logging in you land on the **Dashboard**. Take a moment to notice the
 layout:
 
 - **Left sidebar** — your main navigation: *Dashboard, Explore, Workspaces,
-  Ingestion, Semantic Layers,* and (if you're an admin) *Administration*. The
-  active **workspace switcher** lives here too.
+  Ingestion, Semantic Layers,* and (if you're an admin) *Administration*.
 - **Top bar** — global search (press `⌘K` / `Ctrl-K`), the **Business/Technical
   persona toggle**, notifications, and your profile menu.
 - **Main area** — the Dashboard shows your workspaces and a gallery of popular
@@ -38,10 +37,12 @@ layout:
 
 ## Step 2 — Pick a workspace
 
-Use the **workspace switcher** in the left sidebar to select the workspace you
-want to explore. The workspace determines which data you'll see.
+Open **Workspaces** from the left sidebar to see the ones you have access to,
+then enter the one you want to work in. Each screen shows you which workspace
+you're in — there's no separate global switcher to keep in sync. The workspace
+determines which data you'll see.
 
-When you switch, Synodic loads that workspace's **data source** and its
+When you enter a workspace, Synodic loads its **data source** and its
 **ontology** (the colours and meanings). The canvas will re-render around the new
 context.
 
