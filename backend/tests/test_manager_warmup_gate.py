@@ -212,3 +212,70 @@ async def test_get_provider_returns_cached_without_consulting_gate(monkeypatch):
     result = await mgr.get_provider("ws_1", fake_session, data_source_id="ds_1")
 
     assert result is cached
+
+
+# ── Auth must NOT pre-trip the instantiation breaker (reachable-but-misconfigured)
+#
+# Regression: a provider whose GRAPH connection auth is missing/wrong makes the
+# preflight return ok=False reason=auth_required/auth_failed. That was counted as a
+# downstream failure — warmup pre-tripped the instantiation breaker (reason
+# auth_required) and the fast-fail gate blocked requests — so the provider stayed
+# down even after the operator fixed the credentials. The instance ANSWERED (it's
+# reachable); only the config is wrong. Verified live against an auth FalkorDB.
+
+@pytest.mark.asyncio
+async def test_auth_reason_does_not_pretrip_the_instantiation_breaker():
+    from backend.common.adapters import BreakerState
+
+    m = ProviderManager()
+    key = ("prov-auth", "g")
+    m._ensure_state(key)
+    breaker = m._get_instantiation_breaker(key)
+
+    # Feed auth failures well past the pre-trip threshold.
+    for _ in range(m._PRE_TRIP_AFTER_N + 3):
+        await m.record_probe_failure("prov-auth", reason="auth_required", source="warmup")
+
+    state = m._provider_states[key]
+    assert breaker.current_state != BreakerState.OPEN.value   # breaker stays closed
+    assert state.consecutive_failures == 0                    # reachable → streak reset
+    assert state.is_recent_unhealthy() is False               # gate won't block requests
+
+
+@pytest.mark.asyncio
+async def test_real_outage_still_pretrips():
+    """The fix must not weaken resilience: a genuine unreachability still trips."""
+    from backend.common.adapters import BreakerState
+
+    m = ProviderManager()
+    key = ("prov-down", "g")
+    m._ensure_state(key)
+    breaker = m._get_instantiation_breaker(key)
+
+    for _ in range(m._PRE_TRIP_AFTER_N + 1):
+        await m.record_probe_failure("prov-down", reason="tcp_refused", source="warmup")
+
+    assert breaker.current_state == BreakerState.OPEN.value
+
+
+def test_reachability_verdict_auth_raises_config_error_not_unavailable():
+    from backend.common.interfaces.provider import ProviderConfigurationError
+
+    m = ProviderManager()
+    key = ("p", "g")
+    # 'auth' verdict → a LOGICAL config error (breaker ignores it), NOT an outage.
+    with pytest.raises(ProviderConfigurationError):
+        m._raise_for_verdict(key, "auth")
+    # a genuine 'down' verdict is still a ProviderUnavailable outage.
+    with pytest.raises(ProviderUnavailable):
+        m._raise_for_verdict(key, "down")
+
+
+def test_is_auth_reachable_reason_classifier():
+    from backend.common.interfaces.preflight import is_auth_reachable_reason
+    assert is_auth_reachable_reason("auth_required") is True
+    assert is_auth_reachable_reason("auth_failed") is True
+    assert is_auth_reachable_reason("tcp_refused") is False
+    assert is_auth_reachable_reason("dns_unresolvable") is False
+    assert is_auth_reachable_reason("auth_not_configured") is False  # already healthy
+    assert is_auth_reachable_reason(None) is False

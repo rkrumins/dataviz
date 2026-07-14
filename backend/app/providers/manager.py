@@ -38,7 +38,11 @@ from backend.common.adapters import (
     ProviderLoading,
     ProviderUnavailable,
 )
-from backend.common.interfaces.provider import GraphDataProvider
+from backend.common.interfaces.provider import (
+    GraphDataProvider,
+    ProviderConfigurationError,
+)
+from backend.common.interfaces.preflight import is_auth_reachable_reason
 
 from .state import ProbeOutcome, ProviderState
 
@@ -422,6 +426,19 @@ class ProviderManager:
                 reason="graph is starting up (loading dataset into memory)",
                 retry_after_seconds=5,
             )
+        if verdict == "auth":
+            # Reachable, but the graph credentials are missing/wrong. This is a
+            # CONFIGURATION error, not an outage: raising ProviderUnavailable here
+            # would tag it as unreachable with a 30s retry window and (via warmup)
+            # pre-trip the instantiation breaker — so the provider would stay blocked
+            # even after the operator fixes the credentials. ProviderConfigurationError
+            # is a LOGICAL error the circuit breaker ignores, so the moment the
+            # credentials are corrected the next request succeeds.
+            raise ProviderConfigurationError(
+                f"FalkorDB provider {cp} is reachable but its graph credentials are "
+                f"missing or rejected — add/correct the provider's username/password "
+                f"(or disable auth on the instance)."
+            )
         raise ProviderUnavailable(
             provider_name=cp,
             reason="provider unreachable (preflight failed)",
@@ -463,10 +480,17 @@ class ProviderManager:
                     preflight(deadline_s=_REACHABLE_PROBE_DEADLINE_S),
                     timeout=_REACHABLE_PROBE_DEADLINE_S + 1.0,
                 )
+                pf_reason = str(getattr(pf, "reason", ""))
                 if getattr(pf, "ok", False):
                     verdict = "ok"
-                elif "loading" in str(getattr(pf, "reason", "")).lower():
+                elif "loading" in pf_reason.lower():
                     verdict = "loading"
+                elif is_auth_reachable_reason(pf_reason):
+                    # Reachable but missing/wrong graph auth — a config error, not
+                    # an outage. Do NOT let it become verdict "down" (which blocks
+                    # the request as unreachable and, via warmup, pre-trips the
+                    # instantiation breaker).
+                    verdict = "auth"
             except Exception:
                 verdict = "down"
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
@@ -667,16 +691,46 @@ class ProviderManager:
             no socket I/O. Idempotent — calling .open() on an already-open
             breaker is a no-op.
 
-        Schema/auth/config errors should NOT call this — they're caller
-        bugs, not downstream failure (already filtered at the proxy layer
-        via _DEFAULT_IGNORED_EXCEPTIONS in circuit.py).
+        Schema/auth/config errors should NOT count as a downstream failure —
+        they're already filtered at the proxy layer via _DEFAULT_IGNORED_EXCEPTIONS
+        in circuit.py. This method ENFORCES that for reachable-but-misconfigured
+        auth reasons rather than trusting every caller to pre-filter (see below).
         """
+        cache_keys = self._resolve_state_for_provider(provider_id)
+
+        # Reachable-but-misconfigured (missing/wrong graph auth): the instance
+        # ANSWERED, so it is NOT an outage. Counting it toward the pre-trip counter
+        # would open the instantiation breaker with reason=auth_required and block
+        # the provider even after the operator fixes the credentials (until the
+        # breaker resets); storing an ok=False observation would also make the
+        # fast-fail gate short-circuit requests. Record it as REACHABLE (breaker +
+        # gate stay clear) while preserving the reason for status, reset the failure
+        # streak, and never pre-trip. The real connection path surfaces the precise
+        # ProviderConfigurationError (which the circuit breaker ignores).
+        if is_auth_reachable_reason(reason):
+            reachable = (
+                ProbeOutcome.from_warmup(ok=True, reason=reason, elapsed_ms=elapsed_ms)
+                if source == "warmup"
+                else ProbeOutcome.from_traffic(ok=True, reason=reason, elapsed_ms=elapsed_ms)
+            )
+            async with self._state_lock:
+                for cache_key in cache_keys:
+                    state = self._ensure_state(cache_key)
+                    state.last_observation = reachable
+                    state.consecutive_failures = 0
+                    if source == "warmup":
+                        state.last_warmup_at = reachable.observed_at
+            logger.info(
+                "Provider %s reachable but misconfigured (%s) — instantiation "
+                "breaker left closed", provider_id, reason,
+            )
+            return
+
         outcome = (
             ProbeOutcome.from_warmup(ok=False, reason=reason, elapsed_ms=elapsed_ms)
             if source == "warmup"
             else ProbeOutcome.from_traffic(ok=False, reason=reason, elapsed_ms=elapsed_ms)
         )
-        cache_keys = self._resolve_state_for_provider(provider_id)
         pre_trip_targets: List[Tuple[Tuple[str, str], AsyncCircuitBreaker]] = []
 
         async with self._state_lock:

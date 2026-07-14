@@ -128,6 +128,25 @@ def _redis_auth_reason(line: bytes, *, had_password: bool) -> str | None:
     return None
 
 
+# Preflight reasons that mean "the instance ANSWERED, but the graph credentials
+# are missing/wrong" — i.e. reachable-but-misconfigured, NOT an outage. A caller
+# deciding whether to gate/pre-trip a provider MUST treat these differently from a
+# real unreachability (tcp_refused, dns, timeout): the network path works, only the
+# config is wrong, so blocking behind a breaker would keep the provider down even
+# after the operator fixes the credentials. ``auth_not_configured`` is NOT here —
+# the preflight already treats it as healthy (it falls through to PING).
+AUTH_REACHABLE_REASONS = ("auth_required", "auth_failed")
+
+
+def is_auth_reachable_reason(reason: str | None) -> bool:
+    """True when a preflight failure reason means reachable-but-misconfigured
+    (missing/wrong graph auth), rather than a genuine outage."""
+    if not reason:
+        return False
+    r = reason.strip().lower()
+    return any(m in r for m in AUTH_REACHABLE_REASONS)
+
+
 def _resp_auth(username: str | None, password: str) -> bytes:
     """RESP-encode ``AUTH [username] password``. The two-arg form is required
     for Redis 6+ ACL named users; the one-arg form targets the default user."""
