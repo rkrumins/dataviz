@@ -8,7 +8,7 @@
  *
  * So it is pinned here, from the outside, the way a user meets it.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminFeatures } from '../index'
@@ -99,28 +99,40 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
 
 beforeEach(() => handleChange.mockClear())
 
+/** The selected feature has a switch in the index AND in the spec pane. Both are real ways to take
+ *  a capability away from every user, so both have to ask — a confirmation on one route only is a
+ *  confirmation you can walk around. `which` picks the route. */
+const switchesFor = (name: RegExp) => screen.getAllByRole('switch', { name })
+
 describe('AdminFeatures — turning things off', () => {
-    it('does NOT turn a feature off on the first click — it shows the impact and waits', async () => {
+    it.each([
+        ['from the index', 0],
+        ['from the spec pane', 1],
+    ])('does NOT turn a feature off on the first click %s — it shows the impact and waits', async (_label, which) => {
         const user = userEvent.setup()
         render(<AdminFeatures />)
 
-        await user.click(screen.getByRole('switch', { name: /Turn Lineage trace off/i }))
+        const controls = switchesFor(/Turn Lineage trace off/i)
+        expect(controls.length).toBe(2)
+        await user.click(controls[which as number])
 
         // Nothing saved yet. The admin has been shown what it costs and asked.
         expect(handleChange).not.toHaveBeenCalled()
-        expect(await screen.findByText(/Turn off Lineage trace\?/i)).toBeInTheDocument()
-        expect(
-            screen.getByText(/the server refuses trace requests/i),
-        ).toBeInTheDocument()
+
+        // Scoped to the dialog on purpose: the impact copy is ALSO on the spec pane behind it, and
+        // an unscoped match would pass even if the dialog showed nothing at all.
+        const dialog = await screen.findByRole('dialog')
+        expect(within(dialog).getByText(/Turn off Lineage trace\?/i)).toBeInTheDocument()
+        expect(within(dialog).getByText(/the server refuses trace requests/i)).toBeInTheDocument()
         // ...and what it does NOT cost, which is the half that lets people use the switch.
-        expect(screen.getByText(/Browsing the graph by hand/i)).toBeInTheDocument()
+        expect(within(dialog).getByText(/Browsing the graph by hand/i)).toBeInTheDocument()
     })
 
     it('turns it off once confirmed', async () => {
         const user = userEvent.setup()
         render(<AdminFeatures />)
 
-        await user.click(screen.getByRole('switch', { name: /Turn Lineage trace off/i }))
+        await user.click(switchesFor(/Turn Lineage trace off/i)[0])
         await user.click(await screen.findByRole('button', { name: /Turn off for everyone/i }))
 
         await waitFor(() => expect(handleChange).toHaveBeenCalledWith('traceEnabled', false))
@@ -130,7 +142,7 @@ describe('AdminFeatures — turning things off', () => {
         const user = userEvent.setup()
         render(<AdminFeatures />)
 
-        await user.click(screen.getByRole('switch', { name: /Turn Lineage trace off/i }))
+        await user.click(switchesFor(/Turn Lineage trace off/i)[0])
         await user.click(await screen.findByRole('button', { name: /Keep it on/i }))
 
         expect(handleChange).not.toHaveBeenCalled()
@@ -143,7 +155,7 @@ describe('AdminFeatures — turning things off', () => {
         const user = userEvent.setup()
         render(<AdminFeatures />)
 
-        await user.click(screen.getByRole('switch', { name: /Turn Self-registration on/i }))
+        await user.click(switchesFor(/Turn Self-registration on/i)[0])
 
         expect(handleChange).toHaveBeenCalledWith('signupEnabled', true)
         expect(screen.queryByText(/Turn off/i)).not.toBeInTheDocument()

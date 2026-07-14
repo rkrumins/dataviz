@@ -51,14 +51,14 @@ export function FeatureHero({
     const decorative = live.filter(f => f.enforcedServerSide !== true)
 
     return (
-        <section className="mb-8 rounded-3xl border border-glass-border bg-canvas-elevated overflow-hidden">
-            <div className="p-6 sm:p-8">
+        <section className="mb-6 rounded-3xl border border-glass-border bg-canvas-elevated overflow-hidden">
+            <div className="p-5 sm:p-6">
                 <div className="flex flex-wrap items-end justify-between gap-6">
                     <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
                             This deployment
                         </p>
-                        <p className="mt-2 text-3xl sm:text-4xl font-bold tracking-tight text-ink">
+                        <p className="mt-1 text-2xl sm:text-3xl font-bold tracking-tight text-ink">
                             {active.length} of {live.length}{' '}
                             <span className="text-ink-muted font-semibold">features available</span>
                         </p>
@@ -98,7 +98,7 @@ export function FeatureHero({
 
                 {/* One segment per feature. A wall of green is a healthy deployment; anything else
                     is a question, and it is answerable by clicking. */}
-                <div className="mt-6 flex gap-1" role="list" aria-label="Feature status">
+                <div className="mt-5 flex gap-1" role="list" aria-label="Feature status">
                     {withState.map(({ feature, state }) => (
                         <button
                             key={feature.key}
@@ -165,7 +165,7 @@ function Callout({
     onSelect: (key: string) => void
 }) {
     return (
-        <div className={cn('px-6 sm:px-8 py-4', tone === 'warning' && 'bg-amber-500/[0.05]')}>
+        <div className={cn('px-5 sm:px-6 py-3', tone === 'warning' && 'bg-amber-500/[0.05]')}>
             <p className="text-xs font-semibold text-ink">
                 {title}
                 {hint && <span className="ml-1.5 font-normal text-ink-muted">{hint}</span>}

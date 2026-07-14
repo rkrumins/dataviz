@@ -1,24 +1,34 @@
 /**
  * Admin → Features.
  *
- * This page decides what every user of the deployment can and cannot do, and for most of its life
- * it was a list of switches with a name and a sentence each. That shape asks an admin to make a
- * decision it gives them no information to make: it says what a feature is CALLED, never what
- * turning it off would do to the people using the product, and — until the gates went in — eight
- * of its twelve switches did nothing at all.
+ * This page decides what every user of the deployment can and cannot do. For most of its life it
+ * was a list of switches with a name and a sentence each — a shape that asks an admin to make a
+ * decision it gives them nothing to make it with. It said what a feature was CALLED and never what
+ * turning it off would do to the people using the product.
  *
- * So it is now a console, in three layers:
+ * It is now a two-pane console, and the two panes answer the two questions people actually arrive
+ * with:
  *
- *   POSTURE   (FeatureHero)       what is my deployment doing right now? answered before you read
- *                                 a single switch, because that is the question you came with.
- *   TILES     (FeatureTile)       one card per feature. State on its face; an OFF feature carries
- *                                 its consequence without being asked.
- *   THE SPEC  (FeatureDetailSheet) what it is, when-on vs when-off side by side, which endpoints
- *                                 refuse, what still works, what depends on it.
+ *   LEFT   "what have I got, and what state is it in?"   — all twelve at once, scannable, with the
+ *                                                          switch right there, because the common
+ *                                                          case is flipping something you already
+ *                                                          understand.
+ *   RIGHT  "what IS this, and what happens if I touch it?" — the full spec, ALWAYS open. It used to
+ *                                                          be a modal, which meant the default state
+ *                                                          of the page explained nothing, and an
+ *                                                          explanation you have to go and ask for is
+ *                                                          one most people never see.
  *
- * And one asymmetry that matters more than any of the layout: TURNING A FEATURE OFF ASKS FIRST
- * (ConfirmTurnOff); turning it back on does not. Off is the direction that silently takes
- * something away from everybody, and the person doing it is not the person who will notice.
+ * Above both, the posture strip: what your users cannot do right now, answered before you read a
+ * single switch, because that is the question that brought you here.
+ *
+ * The layout it replaces spent a full screen of scrolling on twelve items — six category headings,
+ * each followed by ONE card in a three-column grid, so most of the page was the empty space beside a
+ * lone tile. Categories are dividers now, not sections.
+ *
+ * One asymmetry, and it matters more than the layout: TURNING A FEATURE OFF ASKS FIRST
+ * (ConfirmTurnOff); turning it back on does not. Off silently takes something away from every user
+ * at once, and the person doing it is by definition not the person who will notice.
  */
 import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -26,12 +36,11 @@ import { AlertCircle, BookOpen, HelpCircle, Pencil, RotateCcw, Search, ToggleLef
 import { featuresService, type FeatureCategory, type FeatureDefinition } from '@/services/featuresService'
 import { useAdminFeatures, SEARCH_MIN_FEATURES } from '@/hooks/useAdminFeatures'
 import { PageContainer } from '@/components/layout/PageContainer'
-import { resolveCategoryStyle } from './constants'
 import { ConfirmTurnOff } from './ConfirmTurnOff'
 import { ExperimentalNoticeBanner } from './ExperimentalNoticeBanner'
-import { FeatureDetailSheet } from './FeatureDetailSheet'
 import { FeatureHero } from './FeatureHero'
-import { FeatureTile } from './FeatureTile'
+import { FeatureList } from './FeatureList'
+import { FeatureSpec } from './FeatureSpec'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
 import { SkeletonCards } from './SkeletonCards'
 import { Toast } from './Toast'
@@ -64,8 +73,8 @@ export function AdminFeatures() {
   } = useAdminFeatures()
 
   const [editNoticeOpen, setEditNoticeOpen] = useState(false)
-  /** The feature whose spec sheet is open. */
-  const [openKey, setOpenKey] = useState<string | null>(null)
+  /** Which feature the spec pane is explaining. Null means "the first one". */
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
   /** The feature we are about to turn OFF, pending confirmation. */
   const [pendingOff, setPendingOff] = useState<FeatureDefinition | null>(null)
 
@@ -77,37 +86,42 @@ export function AdminFeatures() {
 
   const live = useMemo(() => schema.filter(f => !f.deprecated), [schema])
   const categoryMetaById = useMemo(
-    () => Object.fromEntries(categories.map(c => [c.id, c])),
+    () => Object.fromEntries(categories.map(c => [c.id, c])) as Record<string, FeatureCategory>,
     [categories]
   )
 
-  const { byCategory, categoryIds } = useMemo(() => {
+  /** Categories in display order, each with its features — the left index, and nothing else. */
+  const grouped = useMemo<[string, FeatureDefinition[]][]>(() => {
     const byCat = live.reduce<Record<string, FeatureDefinition[]>>((acc, f) => {
       if (showSearch && q) {
-        const match =
-          f.name.toLowerCase().includes(q) ||
-          f.description.toLowerCase().includes(q) ||
-          (f.impactWhenOff ?? '').toLowerCase().includes(q) ||
-          (f.category || '').toLowerCase().includes(q)
-        if (!match) return acc
+        const haystack = [f.name, f.description, f.impactWhenOff ?? '', f.category ?? '']
+          .join(' ')
+          .toLowerCase()
+        if (!haystack.includes(q)) return acc
       }
       const cat = f.category || 'other'
-      if (!acc[cat]) acc[cat] = []
-      acc[cat].push(f)
+      ;(acc[cat] ??= []).push(f)
       return acc
     }, {})
-    Object.keys(byCat).forEach(cat => {
-      byCat[cat].sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99))
-    })
-    const ids = Object.keys(byCat).sort(
-      (a, b) => (categoryMetaById[a]?.sortOrder ?? 99) - (categoryMetaById[b]?.sortOrder ?? 99)
-    )
-    return { byCategory: byCat, categoryIds: ids }
+
+    return Object.entries(byCat)
+      .map(([cat, fs]) => {
+        fs.sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99))
+        return [cat, fs] as [string, FeatureDefinition[]]
+      })
+      .sort(
+        ([a], [b]) =>
+          (categoryMetaById[a]?.sortOrder ?? 99) - (categoryMetaById[b]?.sortOrder ?? 99)
+      )
   }, [live, showSearch, q, categoryMetaById])
 
   if (isLoading) return <SkeletonCards />
 
-  const openFeature = live.find(f => f.key === openKey) ?? null
+  const visible = grouped.flatMap(([, fs]) => fs)
+  // The spec pane is never empty: land on something, so the page explains a feature the moment it
+  // opens instead of asking you to pick one before it will tell you anything.
+  const selected = visible.find(f => f.key === selectedKey) ?? visible[0] ?? null
+
   const lastSavedAt = data?.updatedAt
     ? new Date(data.updatedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : null
@@ -117,7 +131,7 @@ export function AdminFeatures() {
    * ON is instant. OFF asks first.
    *
    * Not friction for its own sake: this is the only moment an admin is guaranteed to be looking at
-   * the consequence of what they're about to do to every user at once.
+   * the consequence of what they are about to do to every user at once.
    */
   const requestToggle = (feature: FeatureDefinition, next: boolean) => {
     if (!next && isOn(feature, values)) {
@@ -166,7 +180,7 @@ export function AdminFeatures() {
         )}
       </AnimatePresence>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 mb-6">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
             <ToggleLeft className="w-6 h-6 text-white" />
@@ -216,24 +230,7 @@ export function AdminFeatures() {
         </div>
       </div>
 
-      <FeatureHero features={live} values={values} onSelect={setOpenKey} />
-
-      {showSearch && (
-        <div className="mb-8">
-          <label htmlFor="features-search" className="sr-only">Search features</label>
-          <div className="relative">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted pointer-events-none" />
-            <input
-              id="features-search"
-              type="search"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search features — by name, what they do, or what happens when they're off…"
-              className="w-full max-w-xl pl-10 pr-4 py-3 rounded-2xl border border-glass-border bg-canvas-elevated text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/30"
-            />
-          </div>
-        </div>
-      )}
+      <FeatureHero features={live} values={values} onSelect={setSelectedKey} />
 
       <AnimatePresence>
         {error && (
@@ -256,60 +253,58 @@ export function AdminFeatures() {
         )}
       </AnimatePresence>
 
-      {showSearch && q && categoryIds.length === 0 ? (
-        <p className="text-sm text-ink-muted py-16 text-center">
-          Nothing matches "{searchQuery}".
-        </p>
-      ) : (
-        <div className="space-y-10">
-          {categoryIds.map(categoryId => {
-            const features = byCategory[categoryId]
-            if (!features?.length) return null
-            const meta = categoryMetaById[categoryId]
-            const { Icon, style, label } = resolveCategoryStyle(meta, categoryId)
+      <div className="grid gap-6 lg:grid-cols-[minmax(300px,360px)_1fr] items-start">
+        {/* INDEX — all of them, at once. */}
+        <div className="lg:sticky lg:top-6 space-y-3">
+          {showSearch && (
+            <div className="relative">
+              <label htmlFor="features-search" className="sr-only">Search features</label>
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted pointer-events-none" />
+              <input
+                id="features-search"
+                type="search"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search features…"
+                className="w-full pl-10 pr-4 py-2.5 rounded-2xl border border-glass-border bg-canvas-elevated text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/30"
+              />
+            </div>
+          )}
 
-            return (
-              <section key={categoryId}>
-                <div className="flex items-center gap-2.5 mb-4">
-                  <div className={`w-7 h-7 rounded-lg border flex items-center justify-center shrink-0 ${style.iconBg}`}>
-                    <Icon className="w-3.5 h-3.5" />
-                  </div>
-                  <h2 className="text-sm font-semibold tracking-wide uppercase text-ink-secondary">
-                    {label}
-                  </h2>
-                  <span className="text-xs text-ink-muted">{features.length}</span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {features.map(feature => (
-                    <FeatureTile
-                      key={feature.key}
-                      feature={feature}
-                      allFeatures={live}
-                      values={values}
-                      meta={meta}
-                      saving={savingKey === feature.key}
-                      onToggle={next => requestToggle(feature, next)}
-                      onOpen={() => setOpenKey(feature.key)}
-                    />
-                  ))}
-                </div>
-              </section>
-            )
-          })}
+          {visible.length === 0 ? (
+            <p className="rounded-3xl border border-glass-border bg-canvas-elevated p-6 text-sm text-ink-muted text-center">
+              Nothing matches "{searchQuery}".
+            </p>
+          ) : (
+            <div className="lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto rounded-3xl">
+              <FeatureList
+                grouped={grouped}
+                categoryMetaById={categoryMetaById}
+                allFeatures={live}
+                values={values}
+                selectedKey={selected?.key ?? null}
+                savingKey={savingKey}
+                onSelect={setSelectedKey}
+                onToggle={requestToggle}
+              />
+            </div>
+          )}
         </div>
-      )}
 
-      <FeatureDetailSheet
-        feature={openFeature}
-        allFeatures={live}
-        values={values}
-        meta={openFeature ? categoryMetaById[openFeature.category] : undefined}
-        saving={Boolean(openFeature && savingKey === openFeature.key)}
-        onToggle={next => openFeature && requestToggle(openFeature, next)}
-        onChangeOptions={next => openFeature && handleChange(openFeature.key, next)}
-        onClose={() => setOpenKey(null)}
-      />
+        {/* SPEC — always open, never a modal. */}
+        {selected && (
+          <FeatureSpec
+            key={selected.key}
+            feature={selected}
+            allFeatures={live}
+            values={values}
+            meta={categoryMetaById[selected.category]}
+            saving={savingKey === selected.key}
+            onToggle={next => requestToggle(selected, next)}
+            onChangeOptions={next => handleChange(selected.key, next)}
+          />
+        )}
+      </div>
 
       <ConfirmTurnOff
         feature={pendingOff}
