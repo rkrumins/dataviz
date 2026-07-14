@@ -236,6 +236,32 @@ def test_sentinel_without_master_is_an_error(monkeypatch):
         resolve_redis_config(RedisRole.STREAMS)
 
 
+# ── is_configured must understand sentinel mode ─────────────────────
+#
+# Regression: consumers used ``source["host"] != "default"`` to decide "is this
+# role set up?". Sentinel mode has NO host — it's defined by master + nodes — so
+# a fully-configured sentinel role read as "not configured", which silently
+# disabled a sentinel cache, failed a sentinel streams deployment at startup, and
+# mislabelled it "Not configured" on the admin page. Found by the live mode-matrix.
+
+def test_is_configured_false_when_nothing_set(monkeypatch):
+    assert resolve_redis_config(RedisRole.CACHE).is_configured is False
+
+
+def test_is_configured_true_for_explicit_host(monkeypatch):
+    monkeypatch.setenv("REDIS_CACHE_HOST", "cache.internal")
+    assert resolve_redis_config(RedisRole.CACHE).is_configured is True
+
+
+def test_is_configured_true_for_sentinel_even_without_a_host(monkeypatch):
+    monkeypatch.setenv("REDIS_CACHE_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_CACHE_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_CACHE_SENTINEL_NODES", "s1:26379")
+    cfg = resolve_redis_config(RedisRole.CACHE)
+    assert cfg.source.get("host", "default") == "default"   # no host, as expected
+    assert cfg.is_configured is True                         # …but still configured
+
+
 def test_sentinel_fields_record_provenance(monkeypatch):
     """A later Admin page renders `source` per field, and other code decides
     "did the operator set this?" via `"<field>" not in cfg.source`. All four

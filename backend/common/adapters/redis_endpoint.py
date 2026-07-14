@@ -99,6 +99,21 @@ class RedisEndpointConfig:
     # field name -> where the value came from. Rendered by Admin > System > Redis.
     source: Dict[str, str] = field(default_factory=dict)
 
+    @property
+    def is_configured(self) -> bool:
+        """Did an operator actually point this role at an endpoint?
+
+        The naive test ``source["host"] != "default"`` is WRONG for sentinel mode:
+        a sentinel endpoint has no host at all — it is defined by ``sentinel_master``
+        + ``sentinel_nodes`` — so a fully-configured sentinel role would read as
+        "not configured", silently disabling a sentinel cache, failing a sentinel
+        streams deployment at startup, and mislabelling it on the admin page.
+        Consumers deciding "is this role set up?" MUST use this, not a host check.
+        """
+        if self.mode == "sentinel":
+            return bool(self.sentinel_master) and bool(self.sentinel_nodes)
+        return self.source.get("host", "default") != "default"
+
     def describe(self) -> str:
         """Redacted, safe to log. NEVER includes the password."""
         where = (

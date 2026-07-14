@@ -145,10 +145,10 @@ def _assert_redis_roles_configured() -> None:
             cfg = resolve_redis_config(role)
         except RedisConfigurationError as exc:
             raise RuntimeError(f"Redis {role.value} endpoint mis-configured: {exc}")
-        if role is RedisRole.STREAMS and cfg.source.get("host", "default") == "default":
+        if role is RedisRole.STREAMS and not cfg.is_configured:
             raise RuntimeError(
                 "Redis STREAMS endpoint is not configured. Set REDIS_STREAMS_HOST "
-                "(or the legacy REDIS_URL)."
+                "(or REDIS_STREAMS_SENTINEL_MASTER/_NODES, or the legacy REDIS_URL)."
             )
         logger.info("providers: redis %s", cfg.describe())
 

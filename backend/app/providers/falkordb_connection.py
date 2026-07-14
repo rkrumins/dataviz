@@ -712,8 +712,11 @@ def build_cache_client(
         credentials=credentials or {},
     )
     cfg = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
-    if cfg.source.get("host", "default") == "default":
+    if not cfg.is_configured:
         return None                      # nothing configured anywhere → cache off
+                                         # (is_configured understands sentinel mode,
+                                         #  which has no host — a host-only check
+                                         #  silently disabled a sentinel cache)
     return build_redis_client(cfg)
 
 

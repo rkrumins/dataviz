@@ -76,7 +76,7 @@ def build_role_view(role: RedisRole) -> Dict[str, Any]:
             "filesReadable": _files_readable(cfg),
         },
         "source": dict(cfg.source),
-        "configured": cfg.source.get("host", "default") != "default",
+        "configured": cfg.is_configured,
     }
 
 

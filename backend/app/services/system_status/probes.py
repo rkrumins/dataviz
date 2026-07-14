@@ -106,8 +106,9 @@ def _cache_redis():
             cfg = resolve_redis_config(RedisRole.CACHE)
         except RedisConfigurationError:
             return None
-        if cfg.source.get("host", "default") == "default":
+        if not cfg.is_configured:
             return None                      # cache not configured -> nothing to probe
+                                             # (is_configured handles sentinel mode)
         cfg = dataclasses.replace(
             cfg, socket_timeout=1.0, socket_connect_timeout=1.0, max_connections=2,
             # Pin OFF: build_redis_client applies the CACHE role's default of 30,
