@@ -163,15 +163,26 @@ describe('AdminFeatures — turning things off', () => {
 })
 
 describe('AdminFeatures — what the page says about itself', () => {
-    it('answers "what can my users not do?" before showing a single switch', () => {
+    it('names what your users cannot do, before showing a single switch', () => {
         render(<AdminFeatures />)
-        expect(screen.getByText(/Your users cannot do this right now/i)).toBeInTheDocument()
+        expect(screen.getByText(/Your users cannot:/i)).toBeInTheDocument()
         expect(screen.getByText(/1 of 2/)).toBeInTheDocument()
     })
 
-    it('an off feature carries its consequence on its face, unasked', () => {
+    it('the bar plots STATE, sized by how many features are in each — not one tick per feature', () => {
+        // The first version drew twelve identical segments, one per feature, which you could not
+        // identify without hovering. Here the bands ARE the states, and a state nobody is in gets
+        // no band and no legend entry — 2 features, 1 on and 1 off, is exactly two bands.
         render(<AdminFeatures />)
-        // signupEnabled is off, so its impact is visible on the tile — not hidden behind a click.
+        const bar = screen.getByRole('img', { name: /available/i })
+        expect(bar).toHaveAccessibleName('1 available, 1 turned off')
+        expect(bar.children).toHaveLength(2)
+    })
+
+    it('an off feature carries its consequence in the list, unasked', () => {
+        render(<AdminFeatures />)
+        // signupEnabled is off, so the row shows the CONSEQUENCE rather than the description —
+        // that's the sentence that matters while you're scanning for what your users have lost.
         expect(screen.getByText(/Strangers cannot create accounts/i)).toBeInTheDocument()
     })
 })

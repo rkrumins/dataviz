@@ -52,7 +52,7 @@ export function FeatureSpec({
     const selected = (Array.isArray(raw) ? raw : []) as string[]
 
     return (
-        <div className="rounded-3xl border border-glass-border bg-canvas-elevated overflow-hidden">
+        <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
             <header className="p-6 sm:p-7 border-b border-glass-border">
                 <div className="flex items-start gap-4">
                     <div className={cn('w-12 h-12 rounded-2xl border flex items-center justify-center shrink-0', style.iconBg)}>
@@ -77,7 +77,13 @@ export function FeatureSpec({
                         <Badge icon={ShieldAlert} tone="amber">Not enforced — the endpoint still answers</Badge>
                     )}
                     {feature.posture === 'security' && (
-                        <Badge icon={Lock} tone="rose">Fails closed if it can't be read</Badge>
+                        <Badge
+                            icon={Lock}
+                            tone="rose"
+                            title="If this setting can't be read, we assume the more restrictive answer rather than the permissive one."
+                        >
+                            Security setting
+                        </Badge>
                     )}
                 </div>
             </header>
@@ -169,13 +175,13 @@ export function FeatureSpec({
                 {/* THE POINT OF THE PANEL. Two products, side by side, the live one lit. */}
                 <section>
                     <SectionTitle>What changes</SectionTitle>
-                    <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    <div className="mt-3 grid gap-3 lg:grid-cols-2 items-start">
                         <Column
                             active={on}
                             heading="When it's on"
                             tone="emerald"
                             icon={Sparkles}
-                            lead={`Anyone with permission to use ${feature.name.toLowerCase()} can.`}
+                            lead="Available to everyone who has permission to use it."
                             items={feature.uiSurfaces ?? []}
                             itemsLabel="Your users get"
                         />
@@ -191,7 +197,7 @@ export function FeatureSpec({
                     </div>
                 </section>
 
-                <div className="grid gap-4 lg:grid-cols-2">
+                <div className="grid gap-4 lg:grid-cols-2 items-start">
                     {(feature.stillAllowed?.length ?? 0) > 0 && (
                         <section className="rounded-2xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4">
                             <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
@@ -256,10 +262,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 function Badge({
     icon: Icon,
     tone,
+    title,
     children,
 }: {
     icon: React.ElementType
     tone: 'emerald' | 'amber' | 'rose'
+    title?: string
     children: React.ReactNode
 }) {
     const cls = {
@@ -268,7 +276,14 @@ function Badge({
         rose: 'bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/25',
     }[tone]
     return (
-        <span className={cn('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border', cls)}>
+        <span
+            title={title}
+            className={cn(
+                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border',
+                title && 'cursor-help',
+                cls,
+            )}
+        >
             <Icon className="w-3 h-3" />
             {children}
         </span>

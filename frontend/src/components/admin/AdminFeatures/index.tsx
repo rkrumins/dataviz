@@ -19,8 +19,9 @@
  *                                                          explanation you have to go and ask for is
  *                                                          one most people never see.
  *
- * Above both, the posture strip: what your users cannot do right now, answered before you read a
- * single switch, because that is the question that brought you here.
+ * Above both, one line: how much of the product is live, and exactly which capabilities your users
+ * have lost. Answered before you read a single switch, because that is the question that brought
+ * you here.
  *
  * The layout it replaces spent a full screen of scrolling on twelve items — six category headings,
  * each followed by ONE card in a three-column grid, so most of the page was the empty space beside a
@@ -266,17 +267,17 @@ export function AdminFeatures() {
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 placeholder="Search features…"
-                className="w-full pl-10 pr-4 py-2.5 rounded-2xl border border-glass-border bg-canvas-elevated text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/30"
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-glass-border bg-canvas-elevated text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/30"
               />
             </div>
           )}
 
           {visible.length === 0 ? (
-            <p className="rounded-3xl border border-glass-border bg-canvas-elevated p-6 text-sm text-ink-muted text-center">
+            <p className="rounded-2xl border border-glass-border bg-canvas-elevated p-6 text-sm text-ink-muted text-center">
               Nothing matches "{searchQuery}".
             </p>
           ) : (
-            <div className="lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto rounded-3xl">
+            <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto">
               <FeatureList
                 grouped={grouped}
                 categoryMetaById={categoryMetaById}
