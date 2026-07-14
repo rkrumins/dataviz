@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────
 
-REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 # Access-token TTL drives how long a revocation entry needs to live —
 # we keep it for TTL + a buffer so a request that arrives at the very
 # end of the token's life still finds the entry. The default mirrors
@@ -86,21 +84,15 @@ class RedisBackend:
     re-raised as ``RevocationBackendError`` so the caller can decide on
     the fail-open / fail-closed policy.
     """
-    def __init__(self, url: str):
-        # Lazy import: redis is in requirements.txt but we do not want
-        # an import-time failure to break unrelated parts of the app
-        # if the dependency is missing in some environments (e.g.
-        # static analysis pre-install).
-        import redis.asyncio as redis_async  # noqa: WPS433
-        # Bounded timeouts so a slow/unreachable Redis fails fast → fail-open
-        # (see REVOCATION_SOCKET_TIMEOUT_S). Without these the client waits on
-        # the OS TCP timeout and hangs auth on every request.
-        self._client = redis_async.from_url(
-            url,
-            decode_responses=True,
-            socket_connect_timeout=REVOCATION_SOCKET_TIMEOUT_S,
-            socket_timeout=REVOCATION_SOCKET_TIMEOUT_S,
-        )
+    def __init__(self, client):
+        """Takes an already-built client from the central factory.
+
+        It used to build its own ``from_url(REDIS_URL)``, which ignored
+        REDIS_USERNAME / REDIS_PASSWORD / REDIS_TLS_* — so turning on AUTH
+        authenticated the bus and silently broke revocation, which runs on every
+        authenticated request. Never construct a Redis client here.
+        """
+        self._client = client
 
     async def exists(self, key: str) -> bool:
         try:
@@ -429,6 +421,25 @@ async def revoke_role_sessions(
 _INSTANCE: Optional[RevocationService] = None
 
 
+def build_revocation_backend() -> "RedisBackend":
+    """Revocation rides the STREAMS endpoint — the same coordination Redis as the
+    bus, with the same credentials and TLS, resolved centrally."""
+    import dataclasses
+
+    from backend.common.adapters.redis_endpoint import (
+        RedisRole, build_redis_client, resolve_redis_config,
+    )
+
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    # Revocation is on the hot auth path: keep its short fail-open budget.
+    cfg = dataclasses.replace(
+        cfg,
+        socket_timeout=REVOCATION_SOCKET_TIMEOUT_S,
+        socket_connect_timeout=REVOCATION_SOCKET_TIMEOUT_S,
+    )
+    return RedisBackend(build_redis_client(cfg))
+
+
 def get_revocation_service() -> RevocationService:
     """Return the process-singleton service.
 
@@ -439,7 +450,7 @@ def get_revocation_service() -> RevocationService:
     global _INSTANCE
     if _INSTANCE is None:
         try:
-            backend: RevocationBackend = RedisBackend(REDIS_URL)
+            backend: RevocationBackend = build_revocation_backend()
         except ImportError:
             logger.warning(
                 "redis library not available — using InMemoryBackend. "
@@ -467,7 +478,7 @@ __all__ = [
     "InMemoryBackend",
     "RevocationBackendError",
     "get_revocation_service",
+    "build_revocation_backend",
     "configure_revocation_service",
-    "REDIS_URL",
     "REVOCATION_TTL_SECONDS",
 ]
