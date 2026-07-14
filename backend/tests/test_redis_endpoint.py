@@ -29,7 +29,9 @@ for _role in ("STREAMS", "CACHE"):
         f"REDIS_{_role}_TLS_CA_CERTS", f"REDIS_{_role}_TLS_CERTFILE",
         f"REDIS_{_role}_TLS_KEYFILE", f"REDIS_{_role}_TLS_CERT_REQS",
         f"REDIS_{_role}_TLS_CHECK_HOSTNAME", f"REDIS_{_role}_SENTINEL_MASTER",
-        f"REDIS_{_role}_SENTINEL_NODES", f"REDIS_{_role}_CLUSTER_NODES",
+        f"REDIS_{_role}_SENTINEL_NODES", f"REDIS_{_role}_SENTINEL_USERNAME",
+        f"REDIS_{_role}_SENTINEL_PASSWORD", f"REDIS_{_role}_SENTINEL_PASSWORD_FILE",
+        f"REDIS_{_role}_SENTINEL_AUTH_ENABLED", f"REDIS_{_role}_CLUSTER_NODES",
         f"REDIS_{_role}_MAX_CONNECTIONS", f"REDIS_{_role}_SOCKET_TIMEOUT",
         f"REDIS_{_role}_SOCKET_CONNECT_TIMEOUT", f"REDIS_{_role}_HEALTH_CHECK_INTERVAL",
     ]
@@ -92,6 +94,16 @@ def test_missing_password_file_is_an_error(monkeypatch):
         resolve_redis_config(RedisRole.CACHE)
 
 
+def test_empty_password_file_is_an_error(monkeypatch, tmp_path):
+    """A zero-byte or whitespace-only secret file (mount race, bad rotation) must
+    be a hard error, exactly like a missing file — not a silent empty password."""
+    pw = tmp_path / "pw"
+    pw.write_text("   \n")
+    monkeypatch.setenv("REDIS_CACHE_PASSWORD_FILE", str(pw))
+    with pytest.raises(RedisConfigurationError, match="REDIS_CACHE_PASSWORD_FILE"):
+        resolve_redis_config(RedisRole.CACHE)
+
+
 # ── legacy back-compat, role-scoped ─────────────────────────────────
 
 def test_legacy_redis_url_maps_to_streams_only(monkeypatch):
@@ -126,6 +138,25 @@ def test_legacy_rediss_url_enables_tls(monkeypatch):
     assert c.tls.enabled is True
 
 
+def test_legacy_rediss_url_tls_provenance_uses_real_field_name(monkeypatch):
+    """_parse_url's internal key is "tls_enabled"; the real config field (the one
+    the Admin page renders source for) is "tls". A stray "tls_enabled" key with no
+    "tls" key means the Admin page can't explain why TLS is on."""
+    monkeypatch.setenv("CACHE_REDIS_URL", "rediss://cache-host:6379/0")
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert "tls_enabled" not in c.source
+    assert c.source["tls"] == "CACHE_REDIS_URL (legacy)"
+
+
+def test_legacy_bare_redis_password_is_labelled_legacy(monkeypatch):
+    """The STREAMS role's unprefixed REDIS_PASSWORD fallback must label its
+    provenance "(legacy)", like the sibling REDIS_USERNAME fallback already does."""
+    monkeypatch.setenv("REDIS_PASSWORD", "bare-pw")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.password == "bare-pw"
+    assert s.source["password"] == "REDIS_PASSWORD (legacy)"
+
+
 # ── cluster is rejected for BOTH roles ──────────────────────────────
 
 @pytest.mark.parametrize("role", [RedisRole.STREAMS, RedisRole.CACHE])
@@ -139,6 +170,51 @@ def test_legacy_redis_cluster_nodes_still_rejected(monkeypatch):
     monkeypatch.setenv("REDIS_CLUSTER_NODES", "n1:7000")
     with pytest.raises(RedisConfigurationError, match="cluster"):
         resolve_redis_config(RedisRole.STREAMS)
+
+
+def test_cache_cluster_rejection_cites_cache_reasons(monkeypatch):
+    """The CACHE rejection must cite CACHE-only reasons (SCAN/DEL, non-zero DB),
+    not the STREAMS-only XADD reason — and must still point at FalkorDB/sentinel."""
+    monkeypatch.setenv("REDIS_CACHE_MODE", "cluster")
+    with pytest.raises(RedisConfigurationError) as exc:
+        resolve_redis_config(RedisRole.CACHE)
+    msg = str(exc.value)
+    assert "SCAN" in msg
+    assert "non-zero DB index" in msg
+    assert "XADD" not in msg
+    assert "FalkorDB" in msg
+    assert "Sentinel" in msg
+
+
+def test_streams_cluster_rejection_cites_streams_reasons(monkeypatch):
+    """The STREAMS rejection must cite the job-broker XADD reason, not the
+    CACHE-only SCAN/DEL reason — and must still point at FalkorDB/sentinel."""
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "cluster")
+    with pytest.raises(RedisConfigurationError) as exc:
+        resolve_redis_config(RedisRole.STREAMS)
+    msg = str(exc.value)
+    assert "XADD" in msg
+    assert "SCAN" not in msg
+    assert "FalkorDB" in msg
+    assert "Sentinel" in msg
+
+
+# ── mode provenance ─────────────────────────────────────────────────
+
+def test_default_mode_has_default_provenance(monkeypatch):
+    """host/port/db/username already record "default" when they fall back;
+    mode must be consistent with them instead of having no source entry."""
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.mode == "standalone"
+    assert s.source["mode"] == "default"
+
+
+def test_explicit_mode_records_its_env_var(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.source["mode"] == "REDIS_STREAMS_MODE"
 
 
 # ── sentinel ────────────────────────────────────────────────────────
@@ -157,6 +233,30 @@ def test_sentinel_without_master_is_an_error(monkeypatch):
     monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
     with pytest.raises(RedisConfigurationError, match="sentinel"):
         resolve_redis_config(RedisRole.STREAMS)
+
+
+def test_sentinel_fields_record_provenance(monkeypatch):
+    """A later Admin page renders `source` per field, and other code decides
+    "did the operator set this?" via `"<field>" not in cfg.source`. All four
+    sentinel fields must be attributable, not just sentinel_password."""
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379,s2:26379")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_USERNAME", "sentinel-user")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_AUTH_ENABLED", "true")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.source["sentinel_master"] == "REDIS_STREAMS_SENTINEL_MASTER"
+    assert s.source["sentinel_nodes"] == "REDIS_STREAMS_SENTINEL_NODES"
+    assert s.source["sentinel_username"] == "REDIS_STREAMS_SENTINEL_USERNAME"
+    assert s.source["sentinel_auth_enabled"] == "REDIS_STREAMS_SENTINEL_AUTH_ENABLED"
+
+
+def test_sentinel_fields_unset_have_no_provenance(monkeypatch):
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert "sentinel_master" not in s.source
+    assert "sentinel_nodes" not in s.source
+    assert "sentinel_username" not in s.source
+    assert "sentinel_auth_enabled" not in s.source
 
 
 # ── per-provider cache override ─────────────────────────────────────
@@ -201,6 +301,43 @@ def test_provider_cluster_mode_is_rejected():
     )
     with pytest.raises(RedisConfigurationError, match="cluster"):
         resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+
+
+def test_provider_sentinel_fields_record_provenance():
+    """The provider-cache JSON path must attribute sentinel fields too, not just
+    the plain host/port/db/username/password/tls fields."""
+    override = ProviderCacheOverride(
+        provider_id="acme-prod",
+        connection={
+            "mode": "sentinel", "host": "acme-cache",
+            "sentinel": {
+                "masterName": "acme-master", "nodes": [{"host": "s1", "port": 26379}],
+                "authEnabled": True,
+            },
+        },
+        credentials={"cache_sentinel_username": "sentinel-user"},
+    )
+    c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    for key in ("sentinel_master", "sentinel_nodes", "sentinel_username",
+                "sentinel_auth_enabled"):
+        assert c.source[key] == "provider:acme-prod"
+
+
+def test_provider_pool_knob_provenance():
+    """build_bus_redis-style callers decide whether to apply their own defaults
+    by checking `"<field>" not in cfg.source`; the provider-cache path must
+    attribute the pool knobs too, not just host/port/db/username/password/tls."""
+    override = ProviderCacheOverride(
+        provider_id="acme-prod",
+        connection={"host": "acme-cache", "maxConnections": 40, "socketTimeout": 7},
+        credentials={"cache_password": "acme-pw"},
+    )
+    c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    assert c.max_connections == 40
+    assert c.socket_timeout == 7
+    for key in ("max_connections", "socket_timeout", "socket_connect_timeout",
+                "health_check_interval"):
+        assert c.source[key] == "provider:acme-prod"
 
 
 # ── describe() must never leak the password ─────────────────────────

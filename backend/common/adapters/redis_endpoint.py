@@ -135,16 +135,23 @@ def _parse_nodes(raw: Optional[str]) -> Tuple[Tuple[str, int], ...]:
 
 
 def _read_secret_file(path: str, var: str) -> str:
-    """Read a mounted secret. A missing file is a HARD error — silently falling
-    back to 'no password' is how an unauthenticated connect slips into prod."""
+    """Read a mounted secret. A missing OR empty file is a HARD error — silently
+    falling back to 'no password' is how an unauthenticated connect slips into
+    prod, whether the file is absent or just empty (mount race, bad rotation)."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            return fh.read().strip()
+            content = fh.read().strip()
     except OSError as exc:
         raise RedisConfigurationError(
             f"{var}={path!r} could not be read: {exc}. Refusing to connect without "
             f"the credential it names."
         ) from exc
+    if not content:
+        raise RedisConfigurationError(
+            f"{var}={path!r} is empty. Refusing to connect without the credential "
+            f"it names."
+        )
+    return content
 
 
 def _resolve_password(
@@ -226,13 +233,21 @@ def _reject_cluster(role: RedisRole, mode: str) -> None:
     if mode == "cluster" or (
         role is RedisRole.STREAMS and os.getenv("REDIS_CLUSTER_NODES")
     ) or os.getenv(f"REDIS_{role.value.upper()}_CLUSTER_NODES"):
+        if role is RedisRole.CACHE:
+            reason = (
+                "graph_cache does SCAN + multi-key DEL (cross-slot), and the cache "
+                "uses a non-zero DB index — Cluster is DB-0 only"
+            )
+        else:
+            reason = (
+                "the job broker pipelines XADD across two un-tagged keys "
+                "(cross-slot, no hash tag)"
+            )
         raise RedisConfigurationError(
             f"Redis cluster mode is not supported for the {role.value!r} endpoint. "
-            f"This is deliberate: graph_cache uses SCAN + multi-key DEL, the job "
-            f"broker pipelines XADD across two un-tagged keys, and the role uses a "
-            f"non-zero DB index — all incompatible with Cluster. Use a single node "
-            f"or Sentinel. (Redis Cluster IS supported for FalkorDB — a different "
-            f"role, see FALKORDB_DEPLOYMENT.md.)"
+            f"This is deliberate: {reason} — incompatible with Cluster. Use a "
+            f"single node or Sentinel. (Redis Cluster IS supported for FalkorDB — "
+            f"a different role, see FALKORDB_DEPLOYMENT.md.)"
         )
 
 
@@ -265,9 +280,9 @@ def resolve_redis_config(
     prefix = f"REDIS_{role.value.upper()}_"
     src: Dict[str, str] = {}
 
-    mode = (os.getenv(f"{prefix}MODE") or "standalone").strip().lower()
-    if os.getenv(f"{prefix}MODE"):
-        src["mode"] = f"{prefix}MODE"
+    mode_raw = os.getenv(f"{prefix}MODE")
+    mode = (mode_raw or "standalone").strip().lower()
+    src["mode"] = f"{prefix}MODE" if mode_raw else "default"
     _reject_cluster(role, mode)
 
     # Legacy URL supplies the BASE for this role only; role-prefixed vars win.
@@ -277,7 +292,9 @@ def resolve_redis_config(
     if legacy_url:
         base = _parse_url(legacy_url)
         for k in base:
-            src[k] = f"{legacy_var} (legacy)"
+            # _parse_url's internal key is "tls_enabled"; the real config field
+            # (and the one the Admin page renders source for) is "tls".
+            src[("tls" if k == "tls_enabled" else k)] = f"{legacy_var} (legacy)"
         logger.info(
             "redis_endpoint: %s resolved from legacy %s — migrate to %sHOST/_PORT/_DB "
             "+ %sPASSWORD(_FILE).", role.value, legacy_var, prefix, prefix,
@@ -313,7 +330,7 @@ def resolve_redis_config(
             legacy_pw = _resolve_password("REDIS_", "PASSWORD", src, "password")
             if legacy_pw:
                 password = legacy_pw
-                src["password"] = src.get("password", "REDIS_PASSWORD (legacy)")
+                src["password"] = f"{src['password']} (legacy)"
         if not tls.enabled and _as_bool(os.getenv("REDIS_TLS_ENABLED"), False):
             tls = TLSSettings.from_fields(
                 enabled=True,
@@ -326,12 +343,26 @@ def resolve_redis_config(
             src["tls"] = "REDIS_TLS_* (legacy)"
 
     sentinel_master = os.getenv(f"{prefix}SENTINEL_MASTER")
-    sentinel_nodes = _parse_nodes(os.getenv(f"{prefix}SENTINEL_NODES"))
+    if sentinel_master:
+        src["sentinel_master"] = f"{prefix}SENTINEL_MASTER"
+    sentinel_nodes_raw = os.getenv(f"{prefix}SENTINEL_NODES")
+    sentinel_nodes = _parse_nodes(sentinel_nodes_raw)
+    if sentinel_nodes_raw:
+        src["sentinel_nodes"] = f"{prefix}SENTINEL_NODES"
     if mode == "sentinel" and not (sentinel_master and sentinel_nodes):
         raise RedisConfigurationError(
             f"{role.value}: sentinel mode requires {prefix}SENTINEL_MASTER and "
             f"{prefix}SENTINEL_NODES."
         )
+
+    sentinel_username = os.getenv(f"{prefix}SENTINEL_USERNAME")
+    if sentinel_username:
+        src["sentinel_username"] = f"{prefix}SENTINEL_USERNAME"
+
+    sentinel_auth_enabled_raw = os.getenv(f"{prefix}SENTINEL_AUTH_ENABLED")
+    sentinel_auth_enabled = _as_bool(sentinel_auth_enabled_raw, False)
+    if sentinel_auth_enabled_raw is not None:
+        src["sentinel_auth_enabled"] = f"{prefix}SENTINEL_AUTH_ENABLED"
 
     # Pool knobs. Provenance MUST be recorded for these: build_bus_redis (Task 3)
     # decides whether to apply its caller-supplied defaults by asking whether the
@@ -348,11 +379,11 @@ def resolve_redis_config(
         role=role, mode=mode, host=host, port=port, db=db,
         username=username, password=password,
         sentinel_master=sentinel_master, sentinel_nodes=sentinel_nodes,
-        sentinel_username=os.getenv(f"{prefix}SENTINEL_USERNAME"),
+        sentinel_username=sentinel_username,
         sentinel_password=_resolve_password(
             prefix, "SENTINEL_PASSWORD", src, "sentinel_password",
         ),
-        sentinel_auth_enabled=_as_bool(os.getenv(f"{prefix}SENTINEL_AUTH_ENABLED"), False),
+        sentinel_auth_enabled=sentinel_auth_enabled,
         tls=tls,
         max_connections=_knob("MAX_CONNECTIONS", "max_connections", 20, int),
         socket_timeout=_knob("SOCKET_TIMEOUT", "socket_timeout", 10.0, float),
@@ -411,8 +442,13 @@ def _resolve_provider_cache(
         (n[0], int(n[1])) if isinstance(n, (list, tuple)) else (n["host"], int(n["port"]))
         for n in (sentinel.get("nodes") or [])
     )
-    src = {k: origin for k in
-           ("mode", "host", "port", "db", "username", "password", "tls")}
+    src = {k: origin for k in (
+        "mode", "host", "port", "db", "username", "password", "tls",
+        "sentinel_master", "sentinel_nodes", "sentinel_username",
+        "sentinel_password", "sentinel_auth_enabled",
+        "max_connections", "socket_timeout", "socket_connect_timeout",
+        "health_check_interval",
+    )}
     return RedisEndpointConfig(
         role=RedisRole.CACHE, mode=mode,
         host=conn.get("host") or "localhost",
