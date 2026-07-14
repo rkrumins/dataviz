@@ -91,17 +91,27 @@ def _http() -> httpx.AsyncClient:
 
 
 def _cache_redis():
+    """Probe client for the CACHE endpoint — resolved centrally so it carries the
+    same auth + TLS as the real cache client. A probe that cannot authenticate
+    reports a healthy cache as DOWN."""
     global _cache_redis_client
     if _cache_redis_client is None:
-        import redis.asyncio as aioredis
+        import dataclasses
 
-        url = os.getenv("CACHE_REDIS_URL")
-        if not url:
-            return None
-        _cache_redis_client = aioredis.from_url(
-            url, decode_responses=True,
-            socket_connect_timeout=1, socket_timeout=1,
+        from backend.common.adapters.redis_endpoint import (
+            RedisConfigurationError, RedisRole, build_redis_client,
+            resolve_redis_config,
         )
+        try:
+            cfg = resolve_redis_config(RedisRole.CACHE)
+        except RedisConfigurationError:
+            return None
+        if cfg.source.get("host", "default") == "default":
+            return None                      # cache not configured -> nothing to probe
+        cfg = dataclasses.replace(
+            cfg, socket_timeout=1.0, socket_connect_timeout=1.0, max_connections=2,
+        )
+        _cache_redis_client = build_redis_client(cfg)
     return _cache_redis_client
 
 
@@ -415,14 +425,35 @@ async def probe_cache_redis() -> dict:
     return result
 
 
-async def _falkor_node_probe(host: str, port: int, label: str) -> dict:
-    """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
-    short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+def _build_falkor_probe_client(
+    host: str, port: int, *, username=None, password=None, tls=None,
+):
+    """Short-lived probe client for ONE FalkorDB node, carrying the graph
+    connection's auth + TLS. It used to be a bare Redis(host, port), which cannot
+    talk to an authenticated instance at all."""
     import redis.asyncio as aioredis
 
-    client = aioredis.Redis(
+    from backend.common.adapters.redis_tls import tls_client_kwargs
+
+    kw = dict(
         host=host, port=port, decode_responses=True,
         socket_connect_timeout=1, socket_timeout=1.5,
+        **tls_client_kwargs(tls),
+    )
+    if username:
+        kw["username"] = username
+    if password:
+        kw["password"] = password
+    return aioredis.Redis(**kw)
+
+
+async def _falkor_node_probe(
+    host: str, port: int, label: str, *, username=None, password=None, tls=None,
+) -> dict:
+    """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
+    short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+    client = _build_falkor_probe_client(
+        host, port, username=username, password=password, tls=tls,
     )
     try:
         result = await _redis_probe("falkordbNode", label, client, _BUDGET_FALKOR)
@@ -475,13 +506,19 @@ async def probe_falkordb() -> dict:
         except Exception as exc:
             return _svc("falkordb", "FalkorDB · Sentinel", "down",
                         error=_err(exc), detail={"mode": "sentinel"})
-        result = await _falkor_node_probe(host, port, "FalkorDB · Sentinel")
+        result = await _falkor_node_probe(
+            host, port, "FalkorDB · Sentinel",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        )
         result["detail"]["mode"] = "sentinel"
         result["detail"]["master"] = f"{host}:{port}"
         return result
 
     if cfg.mode != "cluster":
-        return await _falkor_node_probe(cfg.host, cfg.port, "FalkorDB")
+        return await _falkor_node_probe(
+            cfg.host, cfg.port, "FalkorDB",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        )
 
     try:
         async with asyncio.timeout(_BUDGET_FALKOR):
@@ -492,7 +529,10 @@ async def probe_falkordb() -> dict:
                     detail={"mode": "cluster"})
 
     results = await asyncio.gather(
-        *(_falkor_node_probe(h, p, f"shard {h}:{p}") for h, p in nodes),
+        *(_falkor_node_probe(
+            h, p, f"shard {h}:{p}",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        ) for h, p in nodes),
         return_exceptions=True,
     )
     shards = [r for r in results if isinstance(r, dict)]
