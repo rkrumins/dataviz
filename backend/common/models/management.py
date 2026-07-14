@@ -39,6 +39,18 @@ class ConnectionCredentials(BaseModel):
     # embed a password — unlike the non-secret topology config which rides
     # extra_config. Overrides the process-wide CACHE_REDIS_URL env.
     cache_redis_url: Optional[str] = None
+    # ── Dedicated CACHE endpoint credentials (Fernet-encrypted, never returned).
+    # The non-secret half (host/port/db/tls paths) rides extra_config.cacheConnection.
+    cache_username: Optional[str] = None
+    cache_password: Optional[str] = None
+    cache_sentinel_username: Optional[str] = None
+    cache_sentinel_password: Optional[str] = None
+    # ── FalkorDB SENTINEL daemon credentials. These used to live in
+    # extra_config.falkordbConnection.sentinel — an UNENCRYPTED column that
+    # ProviderResponse returns to clients. Moved here; the old location is still
+    # read for one release (see falkordb_connection.load_connection_config).
+    sentinel_username: Optional[str] = None
+    sentinel_password: Optional[str] = None
 
     class Config:
         populate_by_name = True
@@ -259,6 +271,60 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
                 raise ValueError(f"falkordbConnection.tls.{path_key} must be a string path.")
 
 
+_SECRET_HINTS = ("password", "passwd", "secret", "token", "credential")
+
+
+def _validate_cache_connection(extra: Optional[Dict[str, Any]]) -> None:
+    """Validate extra_config.cacheConnection.
+
+    extra_config is a PLAINTEXT column AND is returned by ProviderResponse, so a
+    secret in here is stored in the clear and echoed back. Refuse them outright
+    rather than trusting a redaction pass to catch every future key.
+    """
+    if not extra:
+        return
+    conn = extra.get("cacheConnection")
+    if conn is None:
+        return
+    if not isinstance(conn, dict):
+        raise ValueError("cacheConnection must be an object")
+
+    def _scan(node: Any, path: str = "") -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if any(h in k.lower() for h in _SECRET_HINTS):
+                    raise ValueError(
+                        f"cacheConnection.{path}{k} looks like a secret. extra_config "
+                        f"is stored unencrypted and returned by the API — put it in "
+                        f"credentials (cache_password / cache_sentinel_password) "
+                        f"instead."
+                    )
+                _scan(v, f"{path}{k}.")
+        elif isinstance(node, list):
+            for item in node:
+                _scan(item, path)
+
+    _scan(conn)
+
+    mode = (conn.get("mode") or "standalone").strip().lower()
+    if mode == "cluster":
+        raise ValueError(
+            "cacheConnection.mode 'cluster' is not supported. The cache uses SCAN + "
+            "multi-key DEL and a non-zero DB index, neither of which works on a "
+            "Redis Cluster. Use 'standalone' or 'sentinel'. (Cluster IS supported "
+            "for the FalkorDB graph — see falkordbConnection.)"
+        )
+    if mode not in ("standalone", "sentinel"):
+        raise ValueError(f"cacheConnection.mode must be standalone|sentinel, got {mode!r}")
+    if mode == "sentinel":
+        s = conn.get("sentinel") or {}
+        if not s.get("masterName") or not s.get("nodes"):
+            raise ValueError(
+                "cacheConnection sentinel mode requires sentinel.masterName and "
+                "sentinel.nodes"
+            )
+
+
 class ProviderCreateRequest(BaseModel):
     name: str
     provider_type: ProviderType = Field(alias="providerType")
@@ -275,6 +341,7 @@ class ProviderCreateRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_falkordb_connection_cfg(self) -> "ProviderCreateRequest":
         _validate_falkordb_connection(self.extra_config)
+        _validate_cache_connection(self.extra_config)
         return self
 
     @model_validator(mode="after")
@@ -332,6 +399,7 @@ class ProviderUpdateRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_falkordb_connection_cfg(self) -> "ProviderUpdateRequest":
         _validate_falkordb_connection(self.extra_config)
+        _validate_cache_connection(self.extra_config)
         return self
 
 
