@@ -6,10 +6,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import FeatureFlagsORM
+from ..models import FeatureFlagChangeORM, FeatureFlagsORM
 from .feature_registry_repo import get_all_definitions, get_definitions_map
 
 
@@ -145,3 +145,95 @@ async def remove_keys_from_config(session: AsyncSession, keys: set[str]) -> tupl
     row.version = getattr(row, "version", 0) + 1
     await session.flush()
     return (now, row.version)
+
+
+# --------------------------------------------------------------------------- #
+# feature_flag_changes — who turned it off, and when
+#
+# The config row carries a value and a version. It has never carried an ACTOR, so the page could
+# say a flag was off and never who did it, when, or what it was before. On a surface where any
+# admin can silently take a capability away from every user, "someone, at some point" is not an
+# answer to the only question anyone asks when something stops working.
+# --------------------------------------------------------------------------- #
+
+
+def _row_to_change(row: FeatureFlagChangeORM) -> dict[str, Any]:
+    def _load(raw: str | None) -> Any:
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+
+    return {
+        "id": row.id,
+        "key": row.feature_key,
+        "from": _load(row.old_value),
+        "to": _load(row.new_value),
+        "actorId": row.actor_id,
+        # Falls back rather than showing a blank line. An unattributed change is still a change,
+        # and "we don't know who" is information — it is not the same as "nothing happened".
+        "actorName": row.actor_name or "Unknown",
+        "at": row.created_at,
+    }
+
+
+async def record_changes(
+    session: AsyncSession,
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    actor_id: str | None,
+    actor_name: str | None,
+) -> int:
+    """Write one row per flag whose value actually MOVED. Returns how many were written.
+
+    Diffed rather than logged-on-write because the PATCH payload is a full merged config: every
+    save would otherwise record twelve "changes", eleven of which changed nothing, and a history
+    where every entry is noise is a history nobody reads.
+    """
+    changed = [k for k, v in after.items() if before.get(k) != v]
+    for key in changed:
+        session.add(
+            FeatureFlagChangeORM(
+                feature_key=key,
+                old_value=json.dumps(before[key]) if key in before else None,
+                new_value=json.dumps(after[key]),
+                actor_id=actor_id,
+                actor_name=actor_name,
+            )
+        )
+    if changed:
+        await session.flush()
+    return len(changed)
+
+
+async def get_history(
+    session: AsyncSession, feature_key: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Everything that has happened to one flag, newest first."""
+    r = await session.execute(
+        select(FeatureFlagChangeORM)
+        .where(FeatureFlagChangeORM.feature_key == feature_key)
+        .order_by(desc(FeatureFlagChangeORM.created_at), desc(FeatureFlagChangeORM.id))
+        .limit(limit)
+    )
+    return [_row_to_change(row) for row in r.scalars()]
+
+
+async def get_last_changes(session: AsyncSession) -> dict[str, dict[str, Any]]:
+    """The most recent change per flag — what the page shows beside each switch.
+
+    One query for the whole page rather than one per feature: twelve round-trips to render a line
+    of text each is how a settings page ends up feeling slow for no reason a user could name.
+    """
+    r = await session.execute(
+        select(FeatureFlagChangeORM).order_by(
+            desc(FeatureFlagChangeORM.created_at), desc(FeatureFlagChangeORM.id)
+        )
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in r.scalars():
+        latest.setdefault(row.feature_key, _row_to_change(row))
+    return latest

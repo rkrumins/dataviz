@@ -31,6 +31,19 @@ beforeAll(() => {
 
 const handleChange = vi.fn()
 
+/** Mutable so a test can put the page into "just saved" and reach for Undo. */
+const hookState = { toastVisible: false, savingKey: null as string | null }
+
+/** The impact probe is a network call; each test says what it should answer. */
+const impact = vi.fn()
+vi.mock('@/services/featuresService', async importOriginal => {
+    const actual = await importOriginal<typeof import('@/services/featuresService')>()
+    return {
+        ...actual,
+        featuresService: { ...actual.featuresService, impact: (k: string) => impact(k) },
+    }
+})
+
 const TRACE: FeatureDefinition = {
     key: 'traceEnabled',
     name: 'Lineage trace',
@@ -77,8 +90,8 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
         error: null,
         load: vi.fn(),
         handleChange,
-        savingKey: null,
-        toastVisible: false,
+        savingKey: hookState.savingKey,
+        toastVisible: hookState.toastVisible,
         setToastVisible: vi.fn(),
         errorToastVisible: false,
         setErrorToastVisible: vi.fn(),
@@ -97,7 +110,12 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
     }),
 }))
 
-beforeEach(() => handleChange.mockClear())
+beforeEach(() => {
+    handleChange.mockClear()
+    hookState.toastVisible = false
+    impact.mockReset()
+    impact.mockResolvedValue({ known: false, facts: [] })
+})
 
 /** The selected feature has a switch in the index AND in the spec pane. Both are real ways to take
  *  a capability away from every user, so both have to ask — a confirmation on one route only is a
@@ -184,5 +202,82 @@ describe('AdminFeatures — what the page says about itself', () => {
         // signupEnabled is off, so the row shows the CONSEQUENCE rather than the description —
         // that's the sentence that matters while you're scanning for what your users have lost.
         expect(screen.getByText(/Strangers cannot create accounts/i)).toBeInTheDocument()
+    })
+})
+
+// ── The three things the dialog now says that nothing else on the page would ──────
+
+describe('ConfirmTurnOff — the facts that decide the question', () => {
+    it('COUNTS what it would touch in this estate, not just what the feature does', async () => {
+        // The prose says "views become read-only" on an estate of four views and one of four
+        // thousand. The number is the thing that actually decides it.
+        impact.mockResolvedValue({
+            known: true,
+            facts: [
+                {
+                    count: 142,
+                    label: 'views',
+                    consequence: 'Become read-only.',
+                    tone: 'neutral',
+                    detail: ['120 × graph', '22 × hierarchy'],
+                },
+            ],
+        })
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+        await user.click(switchesFor(/Turn Lineage trace off/i)[0])
+
+        const dialog = await screen.findByRole('dialog')
+        expect(await within(dialog).findByText('142')).toBeInTheDocument()
+        expect(within(dialog).getByText(/In your estate, right now/i)).toBeInTheDocument()
+        expect(within(dialog).getByText(/120 × graph/)).toBeInTheDocument()
+    })
+
+    it('says WE DID NOT MEASURE rather than showing an empty space', async () => {
+        // The sharpest rule in the design. An empty space on a confirmation screen is read as
+        // reassurance, and an unmeasured flag has not earned it: "we didn't look" and "we looked
+        // and found nothing" are different answers, and only one of them is comforting.
+        impact.mockResolvedValue({ known: false, facts: [] })
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+        await user.click(switchesFor(/Turn Lineage trace off/i)[0])
+
+        const dialog = await screen.findByRole('dialog')
+        expect(await within(dialog).findByText(/can't measure this one/i)).toBeInTheDocument()
+        expect(
+            within(dialog).getByText(/not as proof that nothing is affected/i),
+        ).toBeInTheDocument()
+    })
+
+    it('an empty estate is a REASSURANCE, and reads differently from an unmeasured one', async () => {
+        impact.mockResolvedValue({ known: true, facts: [] })
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+        await user.click(switchesFor(/Turn Lineage trace off/i)[0])
+
+        const dialog = await screen.findByRole('dialog')
+        expect(await within(dialog).findByText(/Nothing in your estate uses this yet/i)).toBeInTheDocument()
+        expect(within(dialog).queryByText(/can't measure/i)).not.toBeInTheDocument()
+    })
+})
+
+describe('Undo', () => {
+    it('offers to take the last change back, and puts it back exactly as it was', async () => {
+        const user = userEvent.setup()
+        const { rerender } = render(<AdminFeatures />)
+
+        // Turn Self-registration ON (instant — no confirmation for giving a capability back).
+        await user.click(switchesFor(/Turn Self-registration on/i)[0])
+        expect(handleChange).toHaveBeenCalledWith('signupEnabled', true)
+
+        // The hook reports "saved", so the toast appears — carrying the escape hatch.
+        handleChange.mockClear()
+        hookState.toastVisible = true
+        rerender(<AdminFeatures />)
+
+        await user.click(screen.getByRole('button', { name: /Undo/i }))
+
+        // Back to FALSE — its value before the change, not its shipped default by luck.
+        expect(handleChange).toHaveBeenCalledWith('signupEnabled', false)
     })
 })

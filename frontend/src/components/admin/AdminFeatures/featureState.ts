@@ -52,6 +52,29 @@ export function stateOf(
     return 'on'
 }
 
+/**
+ * Features that would be left doing NOTHING if `feature` were turned off — because they depend on
+ * it, and are currently on.
+ *
+ * This is a cascade, and until now it was silent. Turn off "Edit semantic layers" and "Import
+ * layers" keeps saying ON while gating nothing at all (importing IS editing, so the server refuses
+ * it either way). The only clue was a grey dot you had to notice, in a list, later. The dependency
+ * graph was in the registry the whole time; nobody was asked to look at it at the moment it
+ * mattered.
+ */
+export function dependents(
+    feature: FeatureDefinition,
+    all: FeatureDefinition[],
+    values: Record<string, unknown>,
+): FeatureDefinition[] {
+    return all.filter(
+        f =>
+            f.key !== feature.key &&
+            (f.dependsOn ?? []).includes(feature.key) &&
+            isOn(f, values),
+    )
+}
+
 /** For a list flag: "3 of 4 layouts". For a switch: null. */
 export function selectionLabel(
     feature: FeatureDefinition,

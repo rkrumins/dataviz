@@ -22,9 +22,9 @@ The rule is now explicit, per column:
     about the source tree, and the database's opinion of it is not interesting.
   * structure        — CODE-OWNED (type, options, category). An admin editing these could only
     break the contract between the registry and the gates.
-  * prose            — ADMIN-OWNED, seed-provided. Backfilled when NULL/empty (so new copy, and
-    newly-added columns, reach existing rows) but NEVER clobbered: an admin may have reworded
-    it, and that edit is theirs to keep.
+  * prose            — CODE-OWNED too. It ships with the code and the database serves it; see
+    the note on _CODE_OWNED. Nothing in the product can edit it, so freezing it at the first
+    deploy would only guarantee it goes stale.
   * ``feature_flags.config`` — ADMIN-OWNED. Untouched after the first seed. These are settings.
 """
 import json
@@ -61,11 +61,22 @@ __all__ = [
     "seed_feature_registry_meta",
 ]
 
-#: Prose an admin may have reworded. Seeded once, backfilled if empty, never overwritten.
-_ADMIN_OWNED_PROSE = ("name", "description", "admin_hint", "impact_when_off", "help_url")
-
-#: Structure the code owns outright.
-_CODE_OWNED_STRUCTURE = ("category_id", "type", "options", "user_overridable", "sort_order")
+#: Everything the code owns — reconciled on every startup.
+#:
+#: THE PROSE IS IN HERE, AND THAT IS A DECISION. The first cut treated names/descriptions as
+#: admin-owned and only backfilled them when blank, so an admin's rewording could never be
+#: clobbered by a deploy. It turns out nothing can reword them: `PATCH /features/definitions/{key}`
+#: exists, but no UI calls it and nothing in the product ever has. So the rule was protecting a
+#: capability nobody has, at the price of freezing the copy at whatever the FIRST deploy wrote —
+#: which is the same write-once trap that let `implemented` stay wrong for months.
+#:
+#: The copy ships with the code, and the database serves it. If the definition-CRUD API ever grows
+#: a UI, this needs provenance (a `content_edited_at`, set on PATCH and respected here) — until
+#: then, tracking provenance for an editor that does not exist is machinery for its own sake.
+_CODE_OWNED = (
+    "name", "description", "admin_hint", "impact_when_off", "help_url",
+    "category_id", "type", "options", "user_overridable", "sort_order",
+)
 
 
 def _row_values(definition: dict[str, Any]) -> dict[str, Any]:
@@ -143,20 +154,12 @@ async def seed_feature_registry(session: AsyncSession) -> None:
 
         changed = False
 
-        # Code-owned: always reconciled.
         if bool(row.implemented) != values["implemented"]:
             row.implemented = values["implemented"]
             changed = True
-        for column in _CODE_OWNED_STRUCTURE:
-            if getattr(row, column) != values[column]:
-                setattr(row, column, values[column])
-                changed = True
-
-        # Admin-owned prose: backfill only. A blank column means nobody has said anything yet —
-        # which includes the case of a column that did not exist until this deploy.
-        for column in _ADMIN_OWNED_PROSE:
-            if not (getattr(row, column, None) or "").strip() and values.get(column):
-                setattr(row, column, values[column])
+        for column in _CODE_OWNED:
+            if getattr(row, column, None) != values.get(column):
+                setattr(row, column, values.get(column))
                 changed = True
 
         if changed:

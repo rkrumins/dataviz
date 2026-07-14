@@ -20,9 +20,11 @@ from backend.app.config.features import (
     ValidationError,
     validate_and_merge_values,
 )
+from backend.app.auth.dependencies import get_current_user
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import feature_flags_repo, feature_registry_repo
 from backend.app.db.repositories.feature_flags_repo import ConcurrencyConflictError
+from backend.app.services import feature_impact
 from backend.app.services.feature_flags import feature_flags as _flag_service
 
 router = APIRouter()
@@ -87,6 +89,10 @@ async def get_features(
         "updatedAt": updated_at,
         "version": version,
         "experimentalNotice": _build_experimental_notice(meta),
+        # "Turned off by Rinalds, 2 days ago" — next to the switch, not buried in an audit page.
+        # One query for the whole page: twelve round-trips to render a line of text each is how a
+        # settings screen ends up feeling slow for no reason anyone can name.
+        "lastChanges": await feature_flags_repo.get_last_changes(session),
     }
 
 
@@ -146,6 +152,7 @@ async def patch_features(
     request: Request,
     payload: dict = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_current_user),
 ):
     """
     Update feature flags and the experimental-notice copy.
@@ -214,6 +221,9 @@ async def patch_features(
                 "field": "version",
             },
         )
+    # What the flags were BEFORE this save — the other half of "who turned it off".
+    before, _, _ = await feature_flags_repo.get_feature_flags(session, include_deprecated=True)
+
     try:
         updated_at, new_version = await feature_flags_repo.upsert_feature_flags(
             session, merged, version_from_client
@@ -227,6 +237,20 @@ async def patch_features(
                 "field": "version",
             },
         )
+
+    # Who did it, and what moved. Only keys that actually CHANGED are recorded: the payload is a
+    # full merged config, so logging it wholesale would write twelve rows per save, eleven of them
+    # saying nothing happened — and a history where most entries are noise is one nobody reads.
+    actor_name = " ".join(
+        p for p in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if p
+    ) or getattr(user, "email", None)
+    await feature_flags_repo.record_changes(
+        session,
+        before=before,
+        after=merged,
+        actor_id=getattr(user, "id", None),
+        actor_name=actor_name,
+    )
 
     # Bust cached flag values so subsequent reads see the new state immediately
     _flag_service.invalidate()
@@ -257,6 +281,9 @@ async def patch_features(
         "updatedAt": updated_at,
         "version": new_version,
         "experimentalNotice": _build_experimental_notice(meta),
+        # Fresh, so the attribution line updates in place instead of showing the previous editor
+        # until someone reloads.
+        "lastChanges": await feature_flags_repo.get_last_changes(session),
     }
 
 
@@ -409,3 +436,45 @@ async def deprecate_definition(
     await feature_flags_repo.remove_keys_from_config(session, {key})
     _flag_service.invalidate()
     return await _full_response(session)
+
+
+# --------------------------------------------------------------------------- #
+# Per-flag history and blast radius
+#
+# Declared after the /definitions/* routes on purpose: these take a `{key}` in the FIRST segment,
+# and FastAPI matches in declaration order, so a wildcard registered earlier would swallow
+# "/definitions/...". Route-order collisions have shipped in this codebase before.
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/{key}/history")
+async def get_feature_history(
+    key: str,
+    limit: int = 20,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Everything that has happened to one flag, newest first.
+
+    Not gated on the key existing in the registry: a flag that was deprecated or renamed still has
+    a past, and "this switch has no history" would be a lie about a switch that had plenty.
+    """
+    return {"key": key, "history": await feature_flags_repo.get_history(session, key, limit=limit)}
+
+
+@router.get("/{key}/impact")
+async def get_feature_impact(
+    key: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What turning this flag off would touch, COUNTED against this estate.
+
+    The confirmation dialog already says what a feature does when it's off. That sentence is true
+    and it comes from a config file — it reads the same on a deployment with four views and one
+    with four thousand. This is the other half: the fact that actually decides the question.
+
+    `known: false` means WE DO NOT KNOW — either the probe failed, or this flag has no honest count
+    behind it (see feature_impact.py: `traceEnabled` has no usage telemetry, so there is no
+    truthful answer to "how many people would lose trace", so we invent nothing). It does NOT mean
+    "nothing would be affected", and the UI must not render it as reassurance.
+    """
+    return await feature_impact.probe(session, key)

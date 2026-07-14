@@ -78,6 +78,15 @@ export function AdminFeatures() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   /** The feature we are about to turn OFF, pending confirmation. */
   const [pendingOff, setPendingOff] = useState<FeatureDefinition | null>(null)
+  /**
+   * The last change, kept so it can be taken back.
+   *
+   * What stops people using a page like this isn't difficulty, it's fear: every switch changes what
+   * EVERYBODY can do, and a mistake is visible to your users long before it's visible to you. An
+   * Undo sitting in the toast is worth more reassurance than any amount of confirmation copy,
+   * because it makes the click cheap rather than merely well-explained.
+   */
+  const [undo, setUndo] = useState<{ key: string; name: string; to: unknown; from: unknown } | null>(null)
 
   const schema = data?.schema ?? featuresService.getSchema()
   const categories: FeatureCategory[] = data?.categories ?? featuresService.getCategories()
@@ -134,18 +143,35 @@ export function AdminFeatures() {
    * Not friction for its own sake: this is the only moment an admin is guaranteed to be looking at
    * the consequence of what they are about to do to every user at once.
    */
+  const applyChange = (feature: FeatureDefinition, next: unknown) => {
+    setUndo({
+      key: feature.key,
+      name: feature.name,
+      to: next,
+      from: values[feature.key] ?? feature.default,
+    })
+    return handleChange(feature.key, next)
+  }
+
   const requestToggle = (feature: FeatureDefinition, next: boolean) => {
     if (!next && isOn(feature, values)) {
       setPendingOff(feature)
       return
     }
-    handleChange(feature.key, next)
+    void applyChange(feature, next)
   }
 
   const confirmTurnOff = async () => {
     if (!pendingOff) return
-    await handleChange(pendingOff.key, false)
+    await applyChange(pendingOff, false)
     setPendingOff(null)
+  }
+
+  /** Put it back exactly as it was. Not a fresh decision — a reversal, so it asks nothing. */
+  const undoLastChange = () => {
+    if (!undo) return
+    handleChange(undo.key, undo.from)
+    setUndo(null)
   }
 
   return (
@@ -301,14 +327,17 @@ export function AdminFeatures() {
             values={values}
             meta={categoryMetaById[selected.category]}
             saving={savingKey === selected.key}
+            lastChange={data?.lastChanges?.[selected.key]}
             onToggle={next => requestToggle(selected, next)}
-            onChangeOptions={next => handleChange(selected.key, next)}
+            onChangeOptions={next => void applyChange(selected, next)}
           />
         )}
       </div>
 
       <ConfirmTurnOff
         feature={pendingOff}
+        allFeatures={live}
+        values={values}
         onCancel={() => setPendingOff(null)}
         onConfirm={confirmTurnOff}
       />
@@ -323,7 +352,15 @@ export function AdminFeatures() {
       />
       {resetConfirmOpen && <EffectFocusCancel cancelRef={cancelButtonRef} />}
 
-      <Toast message="Saved" visible={toastVisible} onDismiss={() => setToastVisible(false)} />
+      <Toast
+        message={undo ? `${undo.name} — ${undo.to === false ? 'turned off' : 'updated'}` : 'Saved'}
+        visible={toastVisible}
+        onDismiss={() => {
+          setToastVisible(false)
+          setUndo(null)
+        }}
+        action={undo ? { label: 'Undo', onClick: undoLastChange } : undefined}
+      />
       <Toast
         message={errorToastMessage}
         visible={errorToastVisible}

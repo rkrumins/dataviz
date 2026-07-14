@@ -258,6 +258,42 @@ class FeatureRegistryMetaORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# feature_flag_changes  (who turned it off, and when)                #
+# ------------------------------------------------------------------ #
+
+class FeatureFlagChangeORM(Base):
+    """Every change to a feature flag, and who made it.
+
+    The Features page could tell you a flag was off. It could not tell you WHO turned it off, WHEN,
+    or what it was before — the config row carries a value and a version and nothing else. On a
+    surface where several admins can each silently remove a capability from every user of the
+    deployment, "someone did this at some point" is not an answer to the only question anyone asks
+    when a user reports that something has stopped working.
+
+    ``actor_name`` is DENORMALISED on purpose. A foreign key to ``users`` would either forbid
+    deleting a user who once flipped a switch, or take the history with them when they left — and
+    an audit trail that disappears when the person does is not an audit trail. The name is a
+    snapshot of who they were at the moment they acted, which is exactly what history means.
+    """
+    __tablename__ = "feature_flag_changes"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ffc_{uuid.uuid4().hex[:12]}")
+    feature_key = Column(Text, nullable=False)
+    old_value = Column(Text, nullable=True)   # JSON; null when the key had no stored value yet
+    new_value = Column(Text, nullable=False)  # JSON
+    actor_id = Column(Text, nullable=True)    # logical reference — no FK, see the docstring
+    actor_name = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # The two reads this table exists for: "what happened to THIS flag" (newest first), and
+        # "what happened recently" across all of them.
+        Index("idx_ffc_key_created", "feature_key", "created_at"),
+        Index("idx_ffc_created", "created_at"),
+    )
+
+
+# ------------------------------------------------------------------ #
 # feature_flags  (single-row config: global feature flag values)     #
 # ------------------------------------------------------------------ #
 

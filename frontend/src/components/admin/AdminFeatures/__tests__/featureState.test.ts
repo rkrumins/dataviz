@@ -7,7 +7,7 @@
  * so this is not a theoretical state, it is one click away from the default.
  */
 import { describe, expect, it } from 'vitest'
-import { blockedBy, isOn, selectionLabel, stateOf, valueOf } from '../featureState'
+import { blockedBy, dependents, isOn, selectionLabel, stateOf, valueOf } from '../featureState'
 import type { FeatureDefinition } from '@/services/featuresService'
 
 function flag(over: Partial<FeatureDefinition> & { key: string }): FeatureDefinition {
@@ -89,5 +89,25 @@ describe('selectionLabel', () => {
 
     it('is null for a switch', () => {
         expect(selectionLabel(EDIT, {})).toBeNull()
+    })
+})
+
+describe('dependents — the cascade nothing on the page used to warn about', () => {
+    it('names the features that would be left doing nothing', () => {
+        // Turn off "Edit semantic layers" and "Import layers" keeps saying ON while gating nothing:
+        // importing IS editing, so the server refuses it either way. The dependency graph was in the
+        // registry the whole time; nobody was asked to look at it when it mattered.
+        const values = { semanticLayerEditMode: true, semanticLayerImportEnabled: true }
+        expect(dependents(EDIT, ALL, values).map(f => f.name)).toEqual(['Import layers'])
+    })
+
+    it('ignores a dependent that is already off — it has nothing left to lose', () => {
+        const values = { semanticLayerEditMode: true, semanticLayerImportEnabled: false }
+        expect(dependents(EDIT, ALL, values)).toEqual([])
+    })
+
+    it('is not self-referential, and finds nothing for a feature nobody depends on', () => {
+        expect(dependents(IMPORT, ALL, {})).toEqual([])
+        expect(dependents(MODES, ALL, {})).toEqual([])
     })
 })

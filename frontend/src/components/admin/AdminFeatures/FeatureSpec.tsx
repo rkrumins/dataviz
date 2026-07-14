@@ -24,7 +24,8 @@ import {
 import { cn } from '@/lib/utils'
 import { resolveCategoryStyle } from './constants'
 import { ToggleSwitch } from './ToggleSwitch'
-import type { FeatureCategory, FeatureDefinition } from '@/services/featuresService'
+import { timeAgo } from '@/lib/timeAgo'
+import type { FeatureCategory, FeatureChange, FeatureDefinition } from '@/services/featuresService'
 import { blockedBy, isOn, stateOf, valueOf } from './featureState'
 
 export function FeatureSpec({
@@ -33,6 +34,7 @@ export function FeatureSpec({
     values,
     meta,
     saving,
+    lastChange,
     onToggle,
     onChangeOptions,
 }: {
@@ -41,6 +43,8 @@ export function FeatureSpec({
     values: Record<string, unknown>
     meta: FeatureCategory | undefined
     saving: boolean
+    /** Who last touched this switch, and when. Undefined = nobody ever has. */
+    lastChange: FeatureChange | undefined
     onToggle: (next: boolean) => void
     onChangeOptions: (next: string[]) => void
 }) {
@@ -117,6 +121,25 @@ export function FeatureSpec({
                             aria-label={`Turn ${feature.name} ${on ? 'off' : 'on'}`}
                         />
                     )}
+
+                    {/* WHO DID THIS, AND WHEN. The page could always tell you a flag was off; it
+                        could never tell you who turned it off — which is the first question anyone
+                        asks when a user reports something has stopped working. It belongs HERE,
+                        against the switch, not buried in an audit page nobody opens. */}
+                    <p className="w-full text-[11px] text-ink-muted border-t border-glass-border/60 pt-3">
+                        {lastChange ? (
+                            <>
+                                Turned {lastChange.to === false ? 'off' : 'on'} by{' '}
+                                <span className="font-medium text-ink-secondary">{lastChange.actorName}</span>
+                                {' · '}
+                                <time dateTime={lastChange.at} title={new Date(lastChange.at).toLocaleString()}>
+                                    {timeAgo(lastChange.at)}
+                                </time>
+                            </>
+                        ) : (
+                            <>Never changed — this is the shipped default.</>
+                        )}
+                    </p>
                 </div>
 
                 {state === 'inert' && (
