@@ -105,7 +105,7 @@ async def get_redis_config(session: AsyncSession = Depends(get_db_session)) -> d
 
     return {
         "roles": roles,
-        "legacy": {
+        "deprecations": {
             "REDIS_URL": bool(os.getenv("REDIS_URL")),
             "CACHE_REDIS_URL": bool(os.getenv("CACHE_REDIS_URL")),
             "providersOnLegacyCacheUrl": len(legacy_providers),
