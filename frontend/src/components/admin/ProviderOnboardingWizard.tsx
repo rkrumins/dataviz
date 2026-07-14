@@ -1404,6 +1404,161 @@ export function ProviderOnboardingWizard({
                     </>
                   )}
 
+                  {/* Provider cache lives in its own full-width section below the two
+                      columns (see "Provider cache") so this column stays focused on the
+                      graph connection + topology. */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-ink">
+                        Socket timeout (s)
+                      </label>
+                      <input
+                        type="number"
+                        value={formData.falkordbConnection?.socketTimeout ?? ''}
+                        onChange={(event) =>
+                          updateFalkorConn({ socketTimeout: event.target.value })
+                        }
+                        placeholder="10"
+                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-ink">
+                        Graph pool size
+                      </label>
+                      <input
+                        type="number"
+                        value={formData.falkordbConnection?.graphPoolSize ?? ''}
+                        onChange={(event) =>
+                          updateFalkorConn({ graphPoolSize: event.target.value })
+                        }
+                        placeholder="24"
+                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="space-y-4 rounded-2xl border border-glass-border bg-gradient-to-br from-slate-50 to-white p-5 dark:from-slate-800 dark:to-slate-900">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
+              <Shield className="h-5 w-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-ink">Connection guidance</h4>
+              <p className="text-xs text-ink-muted">These details are stored as infrastructure settings only.</p>
+            </div>
+          </div>
+
+          <ul className="space-y-3 text-sm text-ink-muted">
+            <li className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
+              Use a clear provider name so it’s easy to identify later in data source onboarding.
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
+              Credentials are optional unless your provider requires authentication.
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
+              After saving, {appName} will test the connection before you move on to data sources.
+            </li>
+          </ul>
+
+          <label className="flex items-center justify-between rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
+            <div>
+              <p className="text-sm font-medium text-ink">Use TLS</p>
+              <p className="text-xs text-ink-muted">Enable secure transport when your provider expects it.</p>
+            </div>
+            <input
+              type="checkbox"
+              checked={formData.tlsEnabled}
+              onChange={(event) => updateFormData({ tlsEnabled: event.target.checked })}
+              className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+            />
+          </label>
+
+          {formData.providerType === 'falkordb' && formData.tlsEnabled && (
+            <div className="mt-3 space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
+              <p className="text-xs font-medium text-ink">TLS / mutual TLS</p>
+              <p className="text-[11px] leading-tight text-ink-muted">
+                Paths to PEM files mounted into the services. Leave the CA blank to use the
+                system trust store; set client cert + key for mutual TLS.
+              </p>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-ink">
+                  CA certificate path <span className="text-ink-muted">(optional)</span>
+                </label>
+                <input
+                  value={formData.falkordbConnection?.tlsCaCertPath ?? ''}
+                  onChange={(event) => updateFalkorConn({ tlsCaCertPath: event.target.value })}
+                  placeholder="/certs/ca.crt"
+                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                    Client cert path <span className="text-ink-muted">(mTLS)</span>
+                  </label>
+                  <input
+                    value={formData.falkordbConnection?.tlsCertPath ?? ''}
+                    onChange={(event) => updateFalkorConn({ tlsCertPath: event.target.value })}
+                    placeholder="/certs/client.crt"
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                    Client key path <span className="text-ink-muted">(mTLS)</span>
+                  </label>
+                  <input
+                    value={formData.falkordbConnection?.tlsKeyPath ?? ''}
+                    onChange={(event) => updateFalkorConn({ tlsKeyPath: event.target.value })}
+                    placeholder="/certs/client.key"
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">Verify mode</label>
+                  <select
+                    value={formData.falkordbConnection?.tlsVerifyMode ?? 'required'}
+                    onChange={(event) =>
+                      updateFalkorConn({
+                        tlsVerifyMode: event.target.value as FalkorDBConnectionState['tlsVerifyMode'],
+                      })
+                    }
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  >
+                    <option value="required">Required (verify server)</option>
+                    <option value="optional">Optional</option>
+                    <option value="none">None (self-signed)</option>
+                  </select>
+                </div>
+                <label className="flex items-end gap-2 pb-2 text-xs text-ink">
+                  <input
+                    type="checkbox"
+                    checked={formData.falkordbConnection?.tlsCheckHostname ?? true}
+                    onChange={(event) =>
+                      updateFalkorConn({ tlsCheckHostname: event.target.checked })
+                    }
+                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                  />
+                  Check hostname
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {formData.providerType === 'falkordb' && (
                   <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
                     {/* What the cache is for + the best-effort promise */}
                     <div className="flex items-start gap-2.5">
@@ -1653,157 +1808,7 @@ export function ProviderOnboardingWizard({
                       )
                     )}
                   </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1.5 block text-xs font-medium text-ink">
-                        Socket timeout (s)
-                      </label>
-                      <input
-                        type="number"
-                        value={formData.falkordbConnection?.socketTimeout ?? ''}
-                        onChange={(event) =>
-                          updateFalkorConn({ socketTimeout: event.target.value })
-                        }
-                        placeholder="10"
-                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-xs font-medium text-ink">
-                        Graph pool size
-                      </label>
-                      <input
-                        type="number"
-                        value={formData.falkordbConnection?.graphPoolSize ?? ''}
-                        onChange={(event) =>
-                          updateFalkorConn({ graphPoolSize: event.target.value })
-                        }
-                        placeholder="24"
-                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="space-y-4 rounded-2xl border border-glass-border bg-gradient-to-br from-slate-50 to-white p-5 dark:from-slate-800 dark:to-slate-900">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
-              <Shield className="h-5 w-5" />
-            </div>
-            <div>
-              <h4 className="text-sm font-semibold text-ink">Connection guidance</h4>
-              <p className="text-xs text-ink-muted">These details are stored as infrastructure settings only.</p>
-            </div>
-          </div>
-
-          <ul className="space-y-3 text-sm text-ink-muted">
-            <li className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
-              Use a clear provider name so it’s easy to identify later in data source onboarding.
-            </li>
-            <li className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
-              Credentials are optional unless your provider requires authentication.
-            </li>
-            <li className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
-              After saving, {appName} will test the connection before you move on to data sources.
-            </li>
-          </ul>
-
-          <label className="flex items-center justify-between rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
-            <div>
-              <p className="text-sm font-medium text-ink">Use TLS</p>
-              <p className="text-xs text-ink-muted">Enable secure transport when your provider expects it.</p>
-            </div>
-            <input
-              type="checkbox"
-              checked={formData.tlsEnabled}
-              onChange={(event) => updateFormData({ tlsEnabled: event.target.checked })}
-              className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
-            />
-          </label>
-
-          {formData.providerType === 'falkordb' && formData.tlsEnabled && (
-            <div className="mt-3 space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
-              <p className="text-xs font-medium text-ink">TLS / mutual TLS</p>
-              <p className="text-[11px] leading-tight text-ink-muted">
-                Paths to PEM files mounted into the services. Leave the CA blank to use the
-                system trust store; set client cert + key for mutual TLS.
-              </p>
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-ink">
-                  CA certificate path <span className="text-ink-muted">(optional)</span>
-                </label>
-                <input
-                  value={formData.falkordbConnection?.tlsCaCertPath ?? ''}
-                  onChange={(event) => updateFalkorConn({ tlsCaCertPath: event.target.value })}
-                  placeholder="/certs/ca.crt"
-                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-ink">
-                    Client cert path <span className="text-ink-muted">(mTLS)</span>
-                  </label>
-                  <input
-                    value={formData.falkordbConnection?.tlsCertPath ?? ''}
-                    onChange={(event) => updateFalkorConn({ tlsCertPath: event.target.value })}
-                    placeholder="/certs/client.crt"
-                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-ink">
-                    Client key path <span className="text-ink-muted">(mTLS)</span>
-                  </label>
-                  <input
-                    value={formData.falkordbConnection?.tlsKeyPath ?? ''}
-                    onChange={(event) => updateFalkorConn({ tlsKeyPath: event.target.value })}
-                    placeholder="/certs/client.key"
-                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-ink">Verify mode</label>
-                  <select
-                    value={formData.falkordbConnection?.tlsVerifyMode ?? 'required'}
-                    onChange={(event) =>
-                      updateFalkorConn({
-                        tlsVerifyMode: event.target.value as FalkorDBConnectionState['tlsVerifyMode'],
-                      })
-                    }
-                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  >
-                    <option value="required">Required (verify server)</option>
-                    <option value="optional">Optional</option>
-                    <option value="none">None (self-signed)</option>
-                  </select>
-                </div>
-                <label className="flex items-end gap-2 pb-2 text-xs text-ink">
-                  <input
-                    type="checkbox"
-                    checked={formData.falkordbConnection?.tlsCheckHostname ?? true}
-                    onChange={(event) =>
-                      updateFalkorConn({ tlsCheckHostname: event.target.checked })
-                    }
-                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
-                  />
-                  Check hostname
-                </label>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+      )}
     </div>
   )
 
