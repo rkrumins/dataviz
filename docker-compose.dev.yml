@@ -134,6 +134,9 @@ services:
     volumes:
       - ./frontend:/app
       - ./docs:/docs:ro
+      # Docs site also renders the repo-root changelog (@root alias) —
+      # needs its own mount since only ./docs is otherwise visible.
+      - ./CHANGELOG.md:/CHANGELOG.md:ro
       # Anonymous volume shadows host's node_modules (if any) so the
       # container's Linux-built modules win over whatever npm install
       # placed on macOS.
