@@ -170,6 +170,9 @@ async def has_workspaces(session: AsyncSession, provider_id: str) -> bool:
         select(WorkspaceDataSourceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        # Tombstones must not count as subscribers, or a deleted data source
+        # would block this provider from ever being deleted.
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
@@ -191,6 +194,7 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
         .join(WorkspaceDataSourceORM, WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     workspaces = [{"id": r[0], "name": r[1], "type": "workspace"} for r in ws_result.all()]
     
@@ -200,6 +204,7 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
         .join(WorkspaceDataSourceORM, ContextModelORM.data_source_id == WorkspaceDataSourceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
     

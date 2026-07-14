@@ -19,6 +19,7 @@ import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import {
     useDataSourceDeletion, impactSections, deleteCaveat,
 } from '@/components/admin/workspace/useDataSourceDeletion'
+import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
 import { usePermission, usePermissionClaims } from '@/store/auth'
@@ -176,7 +177,9 @@ export function WorkspaceDetailPage() {
         reload()
     }
 
-    const deletion = useDataSourceDeletion(wsId, reload)
+    // Any delete or restore must refresh BOTH the live grid and the trash below it.
+    const [trashKey, setTrashKey] = useState(0)
+    const deletion = useDataSourceDeletion(wsId, () => { reload(); setTrashKey(k => k + 1) })
 
     /**
      * Persist the Aggregation tab as a single transaction. Only fields that
@@ -461,6 +464,18 @@ export function WorkspaceDetailPage() {
                             </div>
                         </>
                     )}
+
+                    {/* The trash. Renders nothing when it's empty — it appears only when there
+                        is actually something to undo, and vanishes again once there isn't. */}
+                    {wsId && (
+                        <DeletedDataSources
+                            wsId={wsId}
+                            canManage={canManageDataSources}
+                            refreshKey={trashKey}
+                            onRestore={deletion.restore}
+                            onDeletePermanently={deletion.openPermanent}
+                        />
+                    )}
                 </>
             )}
 
@@ -545,21 +560,22 @@ export function WorkspaceDetailPage() {
                 ontologies={ontologies}
             />
 
-            {/* Removing a data source also destroys its version history — the commits, the
-                colleagues' unpublished drafts, the hand-curated entities. The old dialog listed
-                only the views that would break, had no type-to-confirm, and showed a GREEN "Safe
-                to decouple" panel whenever the impact probe failed. */}
+            {/* One dialog, two registers. Removing is disruptive but REVERSIBLE, so it shows the
+                full blast radius and then asks for nothing but a click — and the toast carries an
+                Undo. Deleting permanently is not reversible, so it keeps the type-to-confirm and
+                the copy stops hedging. Friction proportional to consequence. */}
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title="Remove data source"
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
                 subtitle={deletion.target?.label}
-                confirmPhrase={deletion.target?.label ?? ''}
-                confirmLabel="Remove data source"
-                sections={impactSections(deletion.target?.impact ?? null)}
+                confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                sections={impactSections(deletion.target?.impact ?? null,
+                                         deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}
                 impactUnknown={deletion.target?.unknown}
                 safeMessage="Nothing depends on this data source, and it has no version history."
-                caveat={deleteCaveat(deletion.target?.impact ?? null)}
+                caveat={deleteCaveat(deletion.target?.impact ?? null, deletion.target?.permanent)}
                 onClose={deletion.close}
                 onConfirm={deletion.confirm}
             />

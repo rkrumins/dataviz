@@ -10,6 +10,7 @@ have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -49,11 +50,14 @@ from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
+    DeletedDataSource,
     WorkspaceDataSourceImpactResponse,
     WorkspaceImpactResponse,
     DataSourceMoveRequest,
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe
+
+from backend.app.services.versioning import config as gv_config
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +347,67 @@ async def list_data_sources(
     return await data_source_repo.list_data_sources(session, workspace_id)
 
 
+# Declared here, beside the list route and BEFORE every "/{ds_id}" route, so that a later
+# `GET /{workspace_id}/data-sources/{ds_id}` can never capture "deleted" as an id.
+@router.get("/{workspace_id}/data-sources/deleted", response_model=List[DeletedDataSource])
+async def list_deleted_data_sources(
+    workspace_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The trash: data sources that can still be brought back.
+
+    `restorable` is the only field the UI must obey. It is False once a purge has been queued —
+    at which point the source is being dismantled and there is nothing left to restore — and the
+    row is shown as "Being deleted" rather than offering a button that would 409.
+    """
+    from backend.app.services.versioning import purge_worker
+
+    rows = await data_source_repo.list_deleted_data_sources(session, workspace_id)
+    if not rows:
+        return []
+
+    users = await _display_names(session, [r.deleted_by for r in rows if r.deleted_by])
+    grace = gv_config.PURGE_GRACE_DAYS
+    now = datetime.now(timezone.utc)
+
+    out: List[DeletedDataSource] = []
+    for r in rows:
+        try:
+            purging = await purge_worker.purge_pending_for_data_source(data_source_id=r.id)
+        except Exception:                                    # pragma: no cover - best effort
+            logger.exception("could not read purge state for %s", r.id)
+            purging = False
+        try:
+            deleted = datetime.fromisoformat(r.deleted_at)
+            days_left = max(0, grace - (now - deleted).days)
+        except Exception:
+            days_left = grace
+        out.append(DeletedDataSource(
+            id=r.id,
+            label=r.label or r.graph_name or r.id,
+            deletedAt=r.deleted_at,
+            deletedBy=users.get(r.deleted_by or "", "a former member" if r.deleted_by else "someone"),
+            daysLeft=days_left,
+            restoreWindowDays=grace,
+            purging=purging,
+            restorable=not purging,
+        ))
+    return out
+
+
+async def _display_names(session: AsyncSession, ids: List[str]) -> dict:
+    """usr_cd8b62ea79b6 -> "Priya Raman". Nobody should be shown a user id."""
+    if not ids:
+        return {}
+    from backend.app.db.models import UserORM
+    rows = (await session.execute(
+        select(UserORM.id, UserORM.first_name, UserORM.last_name, UserORM.email)
+        .where(UserORM.id.in_(list(set(ids)))))).all()
+    return {uid: (" ".join(p for p in (first, last) if p).strip() or email)
+            for uid, first, last, email in rows}
+
+
 @router.post("/{workspace_id}/data-sources", response_model=DataSourceResponse, status_code=201)
 async def add_data_source(
     workspace_id: str = Path(...),
@@ -371,7 +436,12 @@ async def add_data_source(
                 WorkspaceDataSourceORM,
                 WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
             )
-            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
+            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id,
+                   # Only a LIVE data source can own a catalog item. Without this, deleting a
+                   # data source would make its catalog item un-re-addable for the whole grace
+                   # period — the undo window would silently be a lockout window, and the 409
+                   # would name a workspace binding the user can no longer see.
+                   WorkspaceDataSourceORM.deleted_at.is_(None))
         )).first()
         if owner:
             detail = (
@@ -497,25 +567,50 @@ async def update_data_source(
     return ds
 
 
+async def _evict(ds, workspace_id: str, session: AsyncSession) -> None:
+    """Drop the cached provider for ONE data source.
+
+    Deliberately not `evict_workspace`: that resolves its key set through `list_data_sources`,
+    which now filters out soft-deleted rows — so calling it after a delete would quietly fail to
+    evict the one row that actually needs evicting. Until now only statement order (evict, THEN
+    delete) kept that from being a bug, and nothing said so. We hold the row; use it.
+    """
+    try:
+        await provider_registry.evict_data_source(ds.provider_id, ds.graph_name or "")
+    except Exception:                                        # pragma: no cover - cache only
+        logger.exception("could not evict cached provider for %s", ds.id)
+    # The resolved-ontology cache is scoped by (workspace_id, data_source_id) and will otherwise
+    # keep serving this source's ontology to pods that never noticed it went away.
+    try:
+        from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+        await bump_ontology_generation(session, workspace_id, ds.id)
+    except Exception:                                        # pragma: no cover - cache only
+        logger.debug("resolved-ontology cache bump skipped for %s", ds.id, exc_info=True)
+
+
 @router.delete("/{workspace_id}/data-sources/{ds_id}", status_code=204)
 async def remove_data_source(
     workspace_id: str = Path(...),
+    permanent: bool = Query(False, description="Skip the trash and destroy it now."),
     ds_id: str = Path(...),
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a data source, and reclaim the versioned graph it owns.
+    """Move a data source to the trash — or, with ``?permanent=true``, destroy it now.
 
-    Deleting the row alone is what orphaned 2,296 of this database's 2,321 versioned graphs: the
-    data source vanished and its commits, drafts and version rows stayed behind forever, reachable
-    by nothing. So the delete now also SOFT-DELETES the graph — which hides it from every read
-    immediately — and enqueues a windowed purge to reclaim the rows on the versioning worker.
-    Millions of rows are not something an HTTP request should try to delete inline.
+    THE DEFAULT IS REVERSIBLE. Nothing is deleted: the data-source row and its graph are
+    tombstoned, which hides them from every read immediately, and that is all. No purge is
+    queued. For `PURGE_GRACE_DAYS` the user can put it all back with one click, and only then
+    does the reaper turn the tombstone into a real deletion.
 
-    The purge is enqueued FIRST, and deliberately so. If the data-source delete then fails, we are
-    left with a queued purge for a soft-deleted graph, which is recoverable and visible. The other
-    order risks the inverse — the data source gone and nothing queued — which is exactly the
-    silent leak we are fixing.
+    This works because of a detail that would otherwise be a footgun: every child of a data
+    source is `ON DELETE SET NULL` (`views.data_source_id` and friends). A hard DELETE does not
+    just break those links, it ERASES them — after it, nothing remembers which views belonged to
+    this source, and no amount of resurrecting the row brings them back. A soft delete issues no
+    DELETE, so the links survive untouched and restore is free.
+
+    ``?permanent=true`` is the honest escape hatch: it queues the purge immediately (millions of
+    version rows are not something an HTTP request deletes inline) and removes the row.
     """
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
@@ -525,21 +620,74 @@ async def remove_data_source(
     if count <= 1:
         raise HTTPException(status_code=409, detail="Cannot delete the last data source in a workspace")
 
-    try:
-        from backend.app.services.versioning.purge_worker import purge_graph_for_data_source
-        jobs = await purge_graph_for_data_source(
-            data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
-        if jobs:
-            logger.info("data source %s deleted by %s; purge queued: %s", ds_id, _user.id, jobs)
-    except Exception:
-        # Graphver being unreachable must not strand the user with an undeletable data source.
-        # The graph stays queryable-but-orphaned, which is the status quo we are improving on —
-        # not a regression — and the loud log is what gets it swept up later.
-        logger.exception("could not queue purge for data source %s — graph rows will be orphaned",
-                         ds_id)
+    from backend.app.services.versioning import purge_worker
 
-    await provider_registry.evict_workspace(workspace_id, session)
-    await data_source_repo.delete_data_source(session, ds_id)
+    if permanent:
+        try:
+            jobs = await purge_worker.purge_graph_for_data_source(
+                data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
+            logger.info("data source %s PERMANENTLY deleted by %s; purge queued: %s",
+                        ds_id, _user.id, jobs)
+        except Exception:
+            # Refuse rather than orphan. A permanent delete whose purge never got queued is
+            # exactly the leak that put 2,296 unreachable graphs in this database.
+            logger.exception("could not queue purge for %s", ds_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The version store is unavailable, so this cannot be permanently deleted "
+                       "right now. Try again shortly.")
+        await _evict(ds, workspace_id, session)
+        await data_source_repo.delete_data_source(session, ds_id)
+        return
+
+    # ── the reversible path ──
+    # The graph is tombstoned FIRST. If it fails we have changed nothing and can say so; the
+    # other order would leave the data source in the trash with its graph still live and
+    # resolvable, which is the one inconsistent state worth avoiding.
+    try:
+        await purge_worker.tombstone_graphs_for_data_source(
+            data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
+    except Exception:
+        logger.exception("could not tombstone graphs for %s", ds_id)
+        raise HTTPException(
+            status_code=503,
+            detail="The version store is unavailable, so this can't be removed right now. "
+                   "Nothing has been changed. Try again shortly.")
+
+    await _evict(ds, workspace_id, session)
+    await data_source_repo.soft_delete_data_source(session, ds_id, actor=_user.id)
+    logger.info("data source %s moved to trash by %s (restorable for %s days)",
+                ds_id, _user.id, gv_config.PURGE_GRACE_DAYS)
+
+
+@router.post("/{workspace_id}/data-sources/{ds_id}/restore", response_model=DataSourceResponse)
+async def restore_data_source(
+    workspace_id: str = Path(...),
+    ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Undo a delete. The views, models and version history all come back with it."""
+    from backend.app.services.versioning import purge_worker
+
+    # The graph goes first, because it is the one that can REFUSE: once a purge has been queued
+    # there is nothing left to restore, and we must not hand back a data source pointing at a
+    # graph that is being dismantled.
+    if not await purge_worker.restore_graphs_for_data_source(
+            data_source_id=ds_id, workspace_id=workspace_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This data source is being permanently deleted and can no longer be restored.")
+
+    restored = await data_source_repo.restore_data_source(session, ds_id)
+    if restored is None:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' is not in the trash")
+
+    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    if ds is not None:
+        await _evict(ds, workspace_id, session)   # re-resolve it fresh, not from a stale cache
+    logger.info("data source %s restored by %s", ds_id, _user.id)
+    return restored
 
 @router.post(
     "/{workspace_id}/data-sources/{ds_id}/move",
@@ -618,6 +766,9 @@ async def move_data_source(
                 WorkspaceDataSourceORM.workspace_id == target_id,
                 WorkspaceDataSourceORM.provider_id == ds.provider_id,
                 WorkspaceDataSourceORM.graph_name == ds.graph_name,
+                # A tombstone in the target workspace must not raise a 409 naming a data source
+                # the user cannot see and cannot get rid of. (uq_ds_ws_prov_graph_live agrees.)
+                WorkspaceDataSourceORM.deleted_at.is_(None),
             )
         )).first()
         if clash:

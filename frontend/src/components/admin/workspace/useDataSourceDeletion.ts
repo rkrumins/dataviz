@@ -1,54 +1,55 @@
 /**
- * The data-source deletion flow — the versioned blast radius, and the thing that is safe.
+ * The data-source deletion flow — reversible by default, irreversible only when asked.
  *
- * The old dialog listed the semantic views that would break, and stopped there. Everything the
- * version store held went unmentioned: the commits, the colleagues' unpublished drafts, the
- * entities somebody had hand-curated. On a real data source here that is 71 commits, 36 open
- * drafts and 181 curated entities — none of which the user was told about before clicking
- * "Confirm Removal", and none of which come back.
+ * Two things are true at once and the UI has to hold both:
  *
- * Two rules, and the second is the one that makes the first work:
+ *   1. DELETING IS DISRUPTIVE NOW. The views stop working, the drafts go out of reach, the
+ *      version history disappears from the product. That happens the moment you click, so the
+ *      dialog still shows the whole blast radius — 71 revisions, 36 unpublished drafts, 181
+ *      hand-curated entities. You should know what you are about to break.
  *
- *   1. NAME THE IRREPLACEABLE THING. Views can be rebuilt. Version rows can be re-imported.
- *      Somebody's half-finished draft cannot, and neither can the afternoon they spent curating
- *      entity names. Those go first in the list, because they are what a person would actually
- *      want to be stopped for.
+ *   2. DELETING IS NOT DESTRUCTIVE. Nothing is erased. The row is tombstoned, the graph is
+ *      tombstoned, and for 30 days one click puts all of it back — including the views, which
+ *      keep their link because no DB-level DELETE ever fires to SET NULL it away.
  *
- *   2. SAY WHAT IS SAFE. A data source is usually pinned to the customer's OWN FalkorDB graph —
- *      `nexus_lineage` — which we did not create and will not delete. If we only ever list
- *      horrors, people learn to click through the dialog, and then it has taught them to ignore
- *      the one that mattered. So the caveat says, in plain words, that their graph data is
- *      staying exactly where it is.
+ * So the friction is proportional to the consequence, which is the whole point:
+ *
+ *   - REMOVE (reversible): full impact, NO type-to-confirm, and an Undo in the toast. Making
+ *     someone type a name to confirm something they can undo with one click is theatre, and
+ *     theatre is what teaches people to stop reading confirmation dialogs.
+ *   - DELETE PERMANENTLY (irreversible): type-to-confirm, and the copy stops hedging.
  */
 import { useCallback, useState } from 'react'
 import {
     workspaceService,
     type WorkspaceDataSourceImpactResponse,
 } from '@/services/workspaceService'
+import { useToast } from '@/components/ui/toast'
 import type { ImpactSection } from '@/components/ui/DangerConfirmDialog'
 
 export function impactSections(
     impact: WorkspaceDataSourceImpactResponse | null,
+    permanent = false,
 ): ImpactSection[] {
     if (!impact) return []
     const v = impact.versioning
-    const sections: ImpactSection[] = [
-        {
-            label: impact.views.length === 1 ? 'View' : 'Views',
-            consequence: 'stop working — they read from this source',
-            count: impact.views.length,
-            items: impact.views,
-        },
-    ]
-    if (!v?.versioned) return sections
+    const views: ImpactSection = {
+        label: impact.views.length === 1 ? 'View' : 'Views',
+        consequence: 'stop working — they read from this source',
+        count: impact.views.length,
+        items: impact.views,
+    }
+    if (!v?.versioned) return [views]
 
     return [
-        // Drafts first, deliberately. It is the only line on this list that belongs to somebody
-        // who is not in the room, and the owner — not the name — is what says so: drafts are
-        // almost all called "Untitled draft".
+        // Drafts first: the only line on this list belonging to someone who is not in the room.
+        // And identified by OWNER — they are almost all called "Untitled draft", so the name
+        // identifies nobody. The count is a statistic; "Priya's draft" is a reason to go and ask.
         {
             label: v.openDrafts.length === 1 ? 'Unpublished draft' : 'Unpublished drafts',
-            consequence: 'deleted — this is work nobody has published yet',
+            consequence: permanent
+                ? 'deleted — this is work nobody has published yet'
+                : 'become unreachable until you restore',
             count: v.openDrafts.length,
             items: v.openDrafts.map(d => ({
                 id: d.id,
@@ -57,41 +58,58 @@ export function impactSections(
         },
         {
             label: v.curatedEntities === 1 ? 'Hand-curated entity' : 'Hand-curated entities',
-            consequence: 'lose their edits — re-importing the source will not bring them back',
+            consequence: permanent
+                ? 'lose their edits — re-importing the source will not bring them back'
+                : 'go with it, edits and all',
             count: v.curatedEntities,
         },
         {
             label: v.openReviews === 1 ? 'Open review' : 'Open reviews',
-            consequence: 'closed without merging',
+            consequence: permanent ? 'closed without merging' : 'put on hold',
             count: v.openReviews,
         },
         {
             label: v.commits === 1 ? 'Revision' : 'Revisions',
-            consequence: 'erased — the full history of who changed what, and when',
+            consequence: permanent
+                ? 'erased — the full history of who changed what, and when'
+                : 'hidden along with the source',
             count: v.commits,
         },
-        ...sections,
+        views,
     ]
 }
 
 /**
- * What the delete does NOT do. This is not filler — it is the reason the rest of the dialog gets
- * read. `falkorGraphOwned` is a recorded fact (we own a graph iff we generated its name), never a
- * guess, so we can say this without hedging.
+ * What the action does NOT do — and, for the reversible one, that it can be taken back.
+ *
+ * `falkorGraphOwned` is a recorded fact (we own a graph if and only if we generated its name),
+ * never a guess, so this can be said without hedging.
  */
-export function deleteCaveat(impact: WorkspaceDataSourceImpactResponse | null): string | undefined {
+export function deleteCaveat(
+    impact: WorkspaceDataSourceImpactResponse | null,
+    permanent = false,
+): string | undefined {
     const v = impact?.versioning
+    const days = impact?.restoreWindowDays ?? 30
+
+    if (!permanent) {
+        // The single most important sentence in the dialog. It is what makes the list above
+        // something to read rather than something to click past.
+        return `Nothing is deleted today. You can restore this — and everything above — from `
+            + `Recently deleted for ${days} days.`
+    }
     if (!v?.versioned) {
-        return 'The graph data itself stays in its provider — removing a data source does not delete it.'
+        return 'This cannot be undone. The graph data itself stays in its provider — deleting a '
+            + 'data source does not delete it.'
     }
     if (!v.falkorGraphOwned && v.falkorGraphName) {
-        return `Your graph data is safe: “${v.falkorGraphName}” belongs to your provider, `
-            + 'not to us, and nothing in it will be touched. What is deleted is the version '
-            + 'history we kept on top of it.'
+        return `This cannot be undone. Your graph data is safe: “${v.falkorGraphName}” belongs to `
+            + 'your provider, not to us, and nothing in it will be touched. What is destroyed is '
+            + 'the version history we kept on top of it.'
     }
-    // We minted this graph, so the purge really will drop it. Say so, rather than reassuring.
-    return 'This also deletes the graph we generated for this source. The version history and '
-        + 'the graph both go.'
+    // We minted this graph, so the purge really will drop it. Warn; do not reassure.
+    return 'This cannot be undone, and it also deletes the graph we generated for this source. '
+        + 'The version history and the graph both go.'
 }
 
 export interface DeletionTarget {
@@ -101,32 +119,63 @@ export interface DeletionTarget {
     loading: boolean
     /** The probe REJECTED. Distinct from "the impact came back empty" — never conflate them. */
     unknown: boolean
+    /** Skipping the trash. Irreversible. */
+    permanent: boolean
 }
 
-export function useDataSourceDeletion(wsId: string | undefined, onDeleted: () => void) {
+export function useDataSourceDeletion(wsId: string | undefined, onChanged: () => void) {
     const [target, setTarget] = useState<DeletionTarget | null>(null)
+    const { showToast } = useToast()
 
-    const open = useCallback(async (id: string, label: string) => {
+    const restore = useCallback(async (id: string, label: string) => {
         if (!wsId) return
-        setTarget({ id, label, impact: null, loading: true, unknown: false })
+        try {
+            await workspaceService.restoreDataSource(wsId, id)
+            showToast('success', `${label} restored`)
+            onChanged()
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : `Could not restore ${label}`)
+        }
+    }, [wsId, onChanged, showToast])
+
+    const openFor = useCallback(async (id: string, label: string, permanent: boolean) => {
+        if (!wsId) return
+        setTarget({ id, label, impact: null, loading: true, unknown: false, permanent })
         try {
             const impact = await workspaceService.getDataSourceImpact(wsId, id)
-            setTarget({ id, label, impact, loading: false, unknown: false })
+            setTarget({ id, label, impact, loading: false, unknown: false, permanent })
         } catch {
-            // A failed probe must never render as "safe to delete". We know less than we did a
-            // moment ago; the dialog is told exactly that.
-            setTarget({ id, label, impact: null, loading: false, unknown: true })
+            // A failed probe must never render as "safe to delete". We know LESS than we did a
+            // moment ago; the dialog is told exactly that, and says so in amber.
+            setTarget({ id, label, impact: null, loading: false, unknown: true, permanent })
         }
     }, [wsId])
+
+    const open = useCallback(
+        (id: string, label: string) => openFor(id, label, false), [openFor])
+    const openPermanent = useCallback(
+        (id: string, label: string) => openFor(id, label, true), [openFor])
 
     const close = useCallback(() => setTarget(null), [])
 
     const confirm = useCallback(async () => {
         if (!wsId || !target) return
-        await workspaceService.removeDataSource(wsId, target.id)
+        const { id, label, permanent } = target
+        await workspaceService.removeDataSource(wsId, id, permanent)
         setTarget(null)
-        onDeleted()
-    }, [wsId, target, onDeleted])
+        onChanged()
 
-    return { target, open, close, confirm }
+        if (permanent) {
+            showToast('success', `${label} deleted permanently`)
+            return
+        }
+        // THE UNDO. Most undos happen within seconds of the mistake, long before anyone thinks
+        // to go looking for a trash can — so the trash comes to them.
+        showToast('success', `${label} removed`, {
+            label: 'Undo',
+            onClick: () => { void restore(id, label) },
+        })
+    }, [wsId, target, onChanged, showToast, restore])
+
+    return { target, open, openPermanent, close, confirm, restore }
 }

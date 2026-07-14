@@ -1064,6 +1064,10 @@ async def _taken_graph_names(
         select(WorkspaceDataSourceORM.graph_name, WorkspaceDataSourceORM.dedicated_graph_name)
         .where(
             WorkspaceDataSourceORM.provider_id == provider_id,
+            # A tombstone must not reserve its graph name forever. The live
+            # GRAPH.LIST pass below still guards the destructive case: while the
+            # deleted source's key physically exists, the name stays taken.
+            WorkspaceDataSourceORM.deleted_at.is_(None),
             or_(WorkspaceDataSourceORM.graph_name.ilike(like),
                 WorkspaceDataSourceORM.dedicated_graph_name.ilike(like)),
         ))).all()
@@ -1143,6 +1147,7 @@ async def _graph_name_availability(
     ds_taken = (await session.execute(
         select(WorkspaceDataSourceORM.id).where(
             WorkspaceDataSourceORM.provider_id == provider_id,
+            WorkspaceDataSourceORM.deleted_at.is_(None),
             or_(WorkspaceDataSourceORM.graph_name == normalized,
                 WorkspaceDataSourceORM.dedicated_graph_name == normalized),
         ).limit(1))).scalar_one_or_none()

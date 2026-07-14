@@ -701,7 +701,7 @@ class AggregationWorker:
             from backend.app.db.models import WorkspaceDataSourceORM
 
             ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-            if ds is None:
+            if ds is None or ds.deleted_at is not None:
                 return
             for key, value in fields.items():
                 if value is not None and hasattr(ds, key):

@@ -134,6 +134,9 @@ class SQLAlchemyOntologyRepository:
                 WorkspaceDataSourceORM.ontology_id == OntologyORM.id,
             )
             .where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+            # Without this, a deleted PRIMARY data source still sorts first in the
+            # fallback below and serves its ontology to the whole workspace.
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
         if data_source_id:
             q = q.where(WorkspaceDataSourceORM.id == data_source_id)

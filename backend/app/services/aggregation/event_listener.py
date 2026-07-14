@@ -242,8 +242,10 @@ class AggregationEventListener:
             async with self._session_factory() as session:
                 from backend.app.db.models import WorkspaceDataSourceORM
                 ds = await session.get(WorkspaceDataSourceORM, data_source_id)
-                if ds is None:
-                    logger.debug("Data source %s not found — skipping sync", data_source_id)
+                if ds is None or ds.deleted_at is not None:
+                    logger.debug(
+                        "Data source %s not found or deleted — skipping sync", data_source_id
+                    )
                     return
 
                 for field, value in fields.items():

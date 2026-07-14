@@ -1036,10 +1036,30 @@ class VersioningImpact(BaseModel):
         populate_by_name = True
 
 
+class DeletedDataSource(BaseModel):
+    """A data source in the trash, and whether it can still be brought back."""
+
+    id: str
+    label: str
+    deletedAt: Optional[str] = None
+    deletedBy: str = "someone"
+    daysLeft: int = 0
+    restoreWindowDays: int = 30
+    # A purge has been queued: it is being dismantled and there is nothing left to restore.
+    purging: bool = False
+    restorable: bool = True
+
+    class Config:
+        populate_by_name = True
+
+
 class WorkspaceDataSourceImpactResponse(BaseModel):
     """Blast-radius report when removing a Data Source from a Workspace."""
     views: List[ImpactedEntity] = []
     versioning: Optional[VersioningImpact] = None
+    # How long the delete can be undone for. The dialog's whole register depends on this: a
+    # reversible action does not deserve the same friction as an irreversible one.
+    restoreWindowDays: int = 30
 
 
 class DataSourceMoveRequest(BaseModel):

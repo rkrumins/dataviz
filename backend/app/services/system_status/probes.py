@@ -700,6 +700,7 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
                     .outerjoin(ProviderORM,
                                ProviderORM.id == WorkspaceDataSourceORM.provider_id)
                     .where(WorkspaceDataSourceORM.id.in_(ids))
+                    .where(WorkspaceDataSourceORM.deleted_at.is_(None))
                 )).all()
         for r in rows:
             out[r.id] = {
@@ -715,12 +716,13 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
 
 
 async def _present_data_source_ids() -> list[str]:
-    """The ids of data sources that currently EXIST in the management DB.
+    """The ids of data sources that are LIVE in the management DB.
 
     Versioned-graph metrics are scoped to these so the numbers reflect live
     entities — the graphver store has no GC, so graphs for deleted sources
     (and dev/test seed graphs) accumulate and would otherwise dominate every
-    count and the projection list.
+    count and the projection list. A soft-deleted source is exactly such an
+    orphaned graph, so tombstones are excluded.
     """
     from sqlalchemy import select
 
@@ -730,7 +732,8 @@ async def _present_data_source_ids() -> list[str]:
     async with asyncio.timeout(_BUDGET_DB):
         async with get_session_factory(PoolRole.READONLY)() as s:
             return list((await s.execute(
-                select(WorkspaceDataSourceORM.id))).scalars().all())
+                select(WorkspaceDataSourceORM.id)
+                .where(WorkspaceDataSourceORM.deleted_at.is_(None)))).scalars().all())
 
 
 # ── Data-plane sections ──────────────────────────────────────────────
@@ -1145,6 +1148,7 @@ async def probe_stats_polling() -> Optional[dict]:
             WorkspaceDataSourceORM.id == DataSourcePollingConfigORM.data_source_id,
             isouter=True,
         )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     try:
         async with asyncio.timeout(_BUDGET_DB):
@@ -1239,7 +1243,8 @@ async def probe_overview(app_state) -> Optional[dict]:
                 out["workspaces"] = (await s.execute(
                     select(func.count()).select_from(WorkspaceORM))).scalar()
                 present_ids = list((await s.execute(
-                    select(WorkspaceDataSourceORM.id))).scalars().all())
+                    select(WorkspaceDataSourceORM.id)
+                    .where(WorkspaceDataSourceORM.deleted_at.is_(None)))).scalars().all())
                 out["dataSources"] = len(present_ids)
                 total_p, active_p = (await s.execute(select(
                     func.count(),

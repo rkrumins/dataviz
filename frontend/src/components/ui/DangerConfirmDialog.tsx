@@ -245,32 +245,39 @@ export function DangerConfirmDialog({
                             </p>
                         )}
 
-                        <div>
-                            <label className="block text-xs font-medium text-ink-muted mb-1.5">
-                                Type <span className="font-bold text-ink">{confirmPhrase}</span> to confirm
-                            </label>
-                            <input
-                                autoFocus
-                                value={confirmText}
-                                onChange={e => setConfirmText(e.target.value)}
-                                onKeyDown={e => { if (e.key === 'Enter' && canConfirm) handleConfirm() }}
-                                placeholder={confirmPhrase}
-                                disabled={busy}
-                                className={cn(
-                                    'w-full px-3.5 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border text-sm text-ink',
-                                    'placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-colors',
-                                    typedCorrectly
-                                        ? 'border-red-500/50 focus:ring-red-500/40'
-                                        : 'border-glass-border focus:ring-red-500/20',
-                                )}
-                            />
-                            <div className="mt-1.5 h-0.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
-                                <div
-                                    className="h-full bg-gradient-to-r from-red-500 to-rose-500 transition-[width] duration-150"
-                                    style={{ width: `${progress * 100}%` }}
+                        {/* An EMPTY confirmPhrase means the action is reversible, so it asks for
+                            no ceremony. Friction should be proportional to consequence: making
+                            someone type a name to confirm something they can undo with one click
+                            is theatre, and theatre is what teaches people to stop reading these.
+                            (`typedCorrectly` is already true for '', so the button just works.) */}
+                        {confirmPhrase && (
+                            <div>
+                                <label className="block text-xs font-medium text-ink-muted mb-1.5">
+                                    Type <span className="font-bold text-ink">{confirmPhrase}</span> to confirm
+                                </label>
+                                <input
+                                    autoFocus
+                                    value={confirmText}
+                                    onChange={e => setConfirmText(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter' && canConfirm) handleConfirm() }}
+                                    placeholder={confirmPhrase}
+                                    disabled={busy}
+                                    className={cn(
+                                        'w-full px-3.5 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border text-sm text-ink',
+                                        'placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-colors',
+                                        typedCorrectly
+                                            ? 'border-red-500/50 focus:ring-red-500/40'
+                                            : 'border-glass-border focus:ring-red-500/20',
+                                    )}
                                 />
+                                <div className="mt-1.5 h-0.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+                                    <div
+                                        className="h-full bg-gradient-to-r from-red-500 to-rose-500 transition-[width] duration-150"
+                                        style={{ width: `${progress * 100}%` }}
+                                    />
+                                </div>
                             </div>
-                        </div>
+                        )}
 
                         {error && (
                             <p className="text-xs text-red-500 flex items-center gap-1.5">

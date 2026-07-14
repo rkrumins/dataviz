@@ -57,12 +57,23 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
 # CRUD                                                                 #
 # ------------------------------------------------------------------ #
 
+def _live():
+    """THE liveness predicate. A soft-deleted data source is in the trash: it must never be
+    listed, counted, resolved or polled.
+
+    Deliberately NOT `is_active`. That flag is user-settable ("pause this source") and means
+    something else entirely; making liveness depend on two columns staying in sync is how a
+    tombstone eventually leaks back into a list. One predicate, one meaning.
+    """
+    return WorkspaceDataSourceORM.deleted_at.is_(None)
+
+
 async def list_data_sources(
     session: AsyncSession, workspace_id: str
 ) -> List[DataSourceResponse]:
     result = await session.execute(
         select(WorkspaceDataSourceORM)
-        .where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+        .where(WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
         .order_by(WorkspaceDataSourceORM.created_at)
     )
     return [_to_response(r) for r in result.scalars().all()]
@@ -77,7 +88,7 @@ async def list_data_sources_for_workspaces(
         return []
     result = await session.execute(
         select(WorkspaceDataSourceORM)
-        .where(WorkspaceDataSourceORM.workspace_id.in_(workspace_ids))
+        .where(WorkspaceDataSourceORM.workspace_id.in_(workspace_ids), _live())
         .order_by(WorkspaceDataSourceORM.created_at)
     )
     return list(result.scalars().all())
@@ -88,22 +99,27 @@ async def get_data_source(
 ) -> Optional[DataSourceResponse]:
     result = await session.execute(
         select(WorkspaceDataSourceORM)
-        .where(WorkspaceDataSourceORM.id == ds_id)
+        .where(WorkspaceDataSourceORM.id == ds_id, _live())
     )
     row = result.scalar_one_or_none()
     return _to_response(row) if row else None
 
 
 async def get_data_source_orm(
-    session: AsyncSession, ds_id: str
+    session: AsyncSession, ds_id: str, *, include_deleted: bool = False
 ) -> Optional[WorkspaceDataSourceORM]:
-    """Return the raw ORM row (used by ProviderRegistry)."""
-    result = await session.execute(
-        select(WorkspaceDataSourceORM)
-        .options(selectinload(WorkspaceDataSourceORM.catalog_item))
-        .where(WorkspaceDataSourceORM.id == ds_id)
-    )
-    return result.scalar_one_or_none()
+    """Return the raw ORM row (used by ProviderRegistry).
+
+    `include_deleted` exists for the two callers that legitimately need a tombstone — restore,
+    and the trash listing. Everything else gets None for a deleted source, which is what every
+    caller's "not found" branch already handles correctly.
+    """
+    stmt = (select(WorkspaceDataSourceORM)
+            .options(selectinload(WorkspaceDataSourceORM.catalog_item))
+            .where(WorkspaceDataSourceORM.id == ds_id))
+    if not include_deleted:
+        stmt = stmt.where(_live())
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_primary_data_source(
@@ -117,6 +133,7 @@ async def get_primary_data_source(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_primary == True,  # noqa: E712
             WorkspaceDataSourceORM.is_active == True,
+            _live(),          # a deleted primary must not keep serving the whole workspace
         )
     )
     row = result.scalar_one_or_none()
@@ -129,6 +146,7 @@ async def get_primary_data_source(
         .where(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_active == True,  # noqa: E712
+            _live(),
         ).order_by(WorkspaceDataSourceORM.created_at)
         .limit(1)
     )
@@ -148,10 +166,13 @@ async def create_data_source(
         if not cat:
             raise ValueError(f"Catalog Item '{req.catalog_item_id}' not found")
 
-        # 1:1 constraint: a catalog item can only belong to one workspace
+        # 1:1 constraint: a catalog item can only belong to one LIVE workspace. Without the
+        # liveness filter, deleting a data source would make its catalog item un-re-addable for
+        # the whole grace period — the undo window would quietly be a lockout window. (The DB
+        # agrees: uq_ds_catalog_item_live is a partial unique index on the same predicate.)
         existing = await session.execute(
             select(WorkspaceDataSourceORM.workspace_id)
-            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
+            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id, _live())
             .limit(1)
         )
         bound = existing.scalar_one_or_none()
@@ -217,9 +238,60 @@ async def update_data_source(
     return _to_response(row)
 
 
+async def soft_delete_data_source(
+    session: AsyncSession, ds_id: str, actor: Optional[str] = None
+) -> bool:
+    """Move a data source to the trash. Reversible; nothing is destroyed.
+
+    This is what makes restore possible AT ALL, and the reason is worth stating: every child of
+    a data source is wired `ON DELETE SET NULL` (`views.data_source_id`, `context_models`,
+    `assignment_rule_sets`). A hard DELETE does not merely break those links — IT ERASES THEM.
+    Afterwards no row anywhere remembers which views belonged to the source, so resurrecting the
+    data-source row would resurrect an island. Because a soft delete issues no DB-level DELETE,
+    SET NULL never fires, every child keeps pointing at the tombstone, and restore is one UPDATE.
+    """
+    row = await get_data_source_orm(session, ds_id)          # live rows only: re-delete is a no-op
+    if row is None:
+        return False
+    row.deleted_at = datetime.now(timezone.utc).isoformat()
+    row.deleted_by = actor
+    await session.flush()
+    return True
+
+
+async def restore_data_source(
+    session: AsyncSession, ds_id: str
+) -> Optional[DataSourceResponse]:
+    """Bring a data source back from the trash. Its views, models and stats come with it."""
+    row = await get_data_source_orm(session, ds_id, include_deleted=True)
+    if row is None or row.deleted_at is None:
+        return None
+    row.deleted_at = None
+    row.deleted_by = None
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
+    return _to_response(row)
+
+
+async def list_deleted_data_sources(
+    session: AsyncSession, workspace_id: str
+) -> List[WorkspaceDataSourceORM]:
+    """The trash, newest first."""
+    result = await session.execute(
+        select(WorkspaceDataSourceORM)
+        .where(WorkspaceDataSourceORM.workspace_id == workspace_id,
+               WorkspaceDataSourceORM.deleted_at.isnot(None))
+        .order_by(WorkspaceDataSourceORM.deleted_at.desc())
+    )
+    return list(result.scalars().all())
+
+
 async def delete_data_source(
     session: AsyncSession, ds_id: str
 ) -> bool:
+    """HARD delete. Only two callers may use this, and both mean it: the "delete permanently"
+    path, and the reaper once the grace period has run out. Everything a user does goes through
+    `soft_delete_data_source`."""
     result = await session.execute(
         delete(WorkspaceDataSourceORM)
         .where(WorkspaceDataSourceORM.id == ds_id)
@@ -230,12 +302,18 @@ async def delete_data_source(
 async def count_data_sources(
     session: AsyncSession, workspace_id: str
 ) -> int:
-    """Count active data sources for a workspace (used to prevent deleting the last one)."""
+    """Count live data sources for a workspace (used to prevent deleting the last one).
+
+    The `deleted_at` filter is NOT optional here, and it is not redundant with `is_active`: a
+    workspace holding one live source and one tombstone would otherwise count 2, and cheerfully
+    let the user delete the last source they actually have.
+    """
     from sqlalchemy import func
     result = await session.execute(
         select(func.count()).where(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_active == True,  # noqa: E712
+            _live(),
         )
     )
     return result.scalar() or 0
@@ -284,9 +362,11 @@ async def get_data_source_impact(session: AsyncSession, ds_id: str):
     except Exception:                                    # pragma: no cover - best effort
         logger.exception("versioning impact unavailable for ds=%s", ds_id)
 
+    from backend.app.services.versioning import config as gv_config
     return WorkspaceDataSourceImpactResponse(
         views=[ImpactedEntity(**v) for v in views],
         versioning=versioning,
+        restoreWindowDays=gv_config.PURGE_GRACE_DAYS,
     )
 
 
@@ -333,6 +413,7 @@ async def set_primary(
         .where(
             WorkspaceDataSourceORM.id == ds_id,
             WorkspaceDataSourceORM.workspace_id == workspace_id,
+            _live(),                # never promote something that is in the trash
         )
         .values(
             is_primary=True,

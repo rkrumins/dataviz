@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import relationship
 
@@ -225,9 +226,17 @@ class FeatureDefinitionORM(Base):
     options = Column(Text, nullable=True)  # JSON: [{"id","label"},...] for string[]
     help_url = Column(Text, nullable=True)
     admin_hint = Column(Text, nullable=True)
+    # "What happens if I turn this off?" — the one question an admin must be able to answer
+    # BEFORE flipping a switch that affects everybody. Seeded from app/config/features_seed.py
+    # and editable from the admin UI, like the other prose columns.
+    impact_when_off = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     deprecated = Column(Boolean, nullable=False, default=False)
-    implemented = Column(Boolean, nullable=False, default=False)  # when True, feature is "wired" (no preview badge)
+    # DERIVED FROM CODE — reconciled from app/config/feature_wiring.py on every startup, and NOT
+    # editable over the API. It records whether the flag is actually wired (a server gate and/or
+    # a UI surface); an admin ticking a box cannot make a gate exist, and while they could, this
+    # column claimed four features were in a state they were not.
+    implemented = Column(Boolean, nullable=False, default=False)
 
 
 # ------------------------------------------------------------------ #
@@ -562,8 +571,29 @@ class WorkspaceDataSourceORM(Base):
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
-        UniqueConstraint("catalog_item_id", name="uq_ds_catalog_item"),
+        # Uniqueness is scoped to LIVE rows. A soft-deleted data source still occupies every
+        # unique constraint it was in, and uq_ds_catalog_item is GLOBAL — so a plain constraint
+        # would mean deleting a data source locks its catalog item out of every workspace for the
+        # whole 30-day grace period. The undo window would silently be a lockout window.
+        # (Partial unique indexes permit many NULLs, exactly as the constraints did.)
+        # See alembic 20260714_1200_ds_soft_delete.
+        #
+        # `sqlite_where` as well as `postgresql_where`, and that is not belt-and-braces: the
+        # dialect kwargs are dialect-SPECIFIC, so a bare `postgresql_where` is SILENTLY DROPPED
+        # on SQLite — which is what the repo tests run on. The index would come out as a plain
+        # UNIQUE, the tombstone would squat on it again, and the lockout bug would be live in
+        # exactly the place we test for it. Both dialects support partial indexes; say so twice.
+        Index("uq_ds_ws_prov_graph_live", "workspace_id", "provider_id", "graph_name",
+              unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+        Index("uq_ds_catalog_item_live", "catalog_item_id",
+              unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+        Index("idx_ds_ws_live", "workspace_id",
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
         Index("idx_ds_catalog_item", "catalog_item_id"),

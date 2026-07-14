@@ -31,7 +31,7 @@ from .projection import FalkorProjector
 
 if TYPE_CHECKING:
     from .bootstrap_worker import BootstrapRunner
-    from .purge_worker import PurgeRunner
+    from .purge_worker import PurgeRunner, Reaper
     from .service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ class ProjectionWorker:
         evict_secs: Optional[int] = None,
         bootstrap: Optional["BootstrapRunner"] = None,
         purge: Optional["PurgeRunner"] = None,
+        reaper: Optional["Reaper"] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -64,6 +65,7 @@ class ProjectionWorker:
         self._cache = CacheManager(projector) if evict_budget is not None else None
         self._bootstrap = bootstrap              # enables the "enable version control" ingest loop
         self._purge = purge                      # enables reclaiming deleted graphs
+        self._reaper = reaper                    # enables expiring the undo window
 
     def stop(self) -> None:
         self._stop.set()
@@ -127,6 +129,8 @@ class ProjectionWorker:
             loops.append(self._ingest_loop())
         if self._purge is not None:
             loops.append(self._purge_loop())
+        if self._reaper is not None:
+            loops.append(self._reap_loop())
         await asyncio.gather(*loops)
 
     async def _ingest_loop(self) -> None:
@@ -161,6 +165,23 @@ class ProjectionWorker:
                 logger.exception("purge loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.INGEST_POLL_SECS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _reap_loop(self) -> None:
+        """Expire the undo window. The ONLY thing that ever turns a soft delete into a real one.
+
+        Every other path leaves a deleted data source fully restorable; this asks, on a slow
+        timer, which tombstones are older than the grace period and queues their purge. If this
+        loop never runs, nothing is destroyed — which is the correct failure mode for the loop
+        whose job is destruction."""
+        while not self._stop.is_set():
+            try:
+                await self._reaper.run_once()
+            except Exception:
+                logger.exception("reaper error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.REAP_POLL_SECS)
             except asyncio.TimeoutError:
                 pass
 

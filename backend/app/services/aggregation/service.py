@@ -1003,6 +1003,8 @@ class AggregationService:
         # would silently swallow the request anyway.
         from backend.app.db.models import WorkspaceDataSourceORM
         ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+        if ds_orm is not None and ds_orm.deleted_at is not None:
+            ds_orm = None  # a tombstone is not a source of truth — take the missing-row paths
         if not state.workspace_id:
             canonical_ws = ds_orm.workspace_id if ds_orm else None
             if not canonical_ws:
@@ -1273,6 +1275,8 @@ class AggregationService:
         )
 
         ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        if ds is None or ds.deleted_at is not None:
+            raise NotFoundError(f"Data source {ds_id} not found")
         ontology_orm = await session.get(OntologyORM, ds.ontology_id)
         entity_defs = parse_entity_definitions(
             json.loads(ontology_orm.entity_type_definitions or "{}")
@@ -1332,7 +1336,7 @@ class AggregationService:
         except ImportError:
             return False
         ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if ds is None or not ds.ontology_id:
+        if ds is None or ds.deleted_at is not None or not ds.ontology_id:
             return False
         # If the assigned ontology changed entirely, the prior fingerprint
         # belongs to a different ontology — never safe to replay.

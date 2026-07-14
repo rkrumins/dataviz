@@ -178,6 +178,7 @@ async def get_catalog_item_impact(session: AsyncSession, item_id: str):
         select(WorkspaceORM.id, WorkspaceORM.name).distinct()
         .join(WorkspaceDataSourceORM, WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id)
         .where(WorkspaceDataSourceORM.catalog_item_id == item_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     workspaces = [{"id": r[0], "name": r[1], "type": "workspace"} for r in ws_result.all()]
     
@@ -185,6 +186,7 @@ async def get_catalog_item_impact(session: AsyncSession, item_id: str):
         select(ContextModelORM.id, ContextModelORM.name).distinct()
         .join(WorkspaceDataSourceORM, ContextModelORM.data_source_id == WorkspaceDataSourceORM.id)
         .where(WorkspaceDataSourceORM.catalog_item_id == item_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
     
