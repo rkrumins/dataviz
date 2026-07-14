@@ -26,6 +26,7 @@ import {
 import type { ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
+import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
@@ -36,7 +37,7 @@ interface LayerColumnProps {
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   selectedNodeId: string | null
   expandedNodes: Set<string>
-  searchResults: string[]
+  searchResults: ReadonlySet<string>
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
@@ -360,6 +361,13 @@ export const LayerColumn = React.memo(function LayerColumn({
       1 + n.children.reduce((acc, c) => acc + count(c), 0)
     return nodes.reduce((acc, n) => acc + count(n), 0)
   }, [nodes])
+
+  // Fetch the next page of a parent's children. Stable identity — the row that
+  // calls this used to be an IntersectionObserver sentinel whose one-shot latch
+  // was reset every time this callback's identity churned.
+  const handleLoadMore = useCallback((nodeId: string) => {
+    onLoadMore?.(nodeId)
+  }, [onLoadMore])
 
   // Handle focus (zoom into subtree)
   const handleFocus = useCallback((node: HierarchyNode | null) => {
@@ -1265,14 +1273,13 @@ export const LayerColumn = React.memo(function LayerColumn({
                       ref={virtualizer.measureElement}
                       style={virtualStyle}
                     >
-                      <AutoLoadSentinel
-                        nodeId={item.node.id}
+                      <LoadMoreItem
+                        parentId={item.node.id}
                         depth={item.depth}
                         parentIsLast={item.parentIsLast}
-                        remainingCount={item.loadMoreCount!}
-                        onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
+                        count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        layerColor={layer.color ?? '#6b7280'}
+                        onLoadMore={() => handleLoadMore(item.node.id)}
                       />
                     </div>
                   )
@@ -1299,7 +1306,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isSelected={selectedNodeId === node.id}
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
-                        isSearchResult={searchResults.includes(node.id)}
+                        isSearchResult={searchResults.has(node.id)}
                         isHighlighted={traceContextSet.has(node.id)}
                         isFocusNode={traceFocusId === node.id}
                         isTracing={isTracing}
@@ -1496,85 +1503,6 @@ function LayerHeaderTitle({
           )}
         </>,
         document.body,
-      )}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AutoLoadSentinel — replaces the click-based LoadMoreItem (Phase 3.4)
-// Invisible div that triggers onLoadMore automatically when scrolled into view.
-// Falls back to a subtle "Load N more" button when the observer isn't firing
-// (e.g., very tall columns where the sentinel is already in view on expand).
-// ─────────────────────────────────────────────────────────────────────────────
-
-function AutoLoadSentinel({
-  nodeId,
-  depth,
-  parentIsLast: _parentIsLast,
-  remainingCount,
-  onLoadMore,
-  isLoading,
-  layerColor,
-}: {
-  nodeId: string
-  depth: number
-  parentIsLast: boolean[]
-  remainingCount: number
-  onLoadMore: () => void
-  isLoading: boolean
-  layerColor: string
-}) {
-  const sentinelRef = useRef<HTMLDivElement>(null)
-  const firedRef = useRef(false)
-
-  useEffect(() => {
-    const el = sentinelRef.current
-    if (!el) return
-    firedRef.current = false
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting && !firedRef.current && !isLoading) {
-          firedRef.current = true
-          onLoadMore()
-        }
-      },
-      { rootMargin: '120px', threshold: 0 }
-    )
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [nodeId, onLoadMore, isLoading])
-
-  const indentWidth = depth * 16
-
-  return (
-    <div
-      ref={sentinelRef}
-      className="flex items-center gap-2 mx-1 px-3 py-2"
-      style={{ paddingLeft: 12 + indentWidth }}
-    >
-      {isLoading ? (
-        // Loading indicator — matches skeleton colour palette
-        <div className="flex items-center gap-2 w-full">
-          <LucideIcons.Loader2
-            className="w-3.5 h-3.5 animate-spin flex-shrink-0"
-            style={{ color: layerColor }}
-          />
-          <div
-            className="h-2 rounded animate-pulse flex-1 max-w-[120px]"
-            style={{ backgroundColor: `${layerColor}18` }}
-          />
-        </div>
-      ) : (
-        // Subtle "load more" pill — visible if user reaches it before observer fires
-        <button
-          onClick={onLoadMore}
-          className="flex items-center gap-1.5 text-[11px] text-ink-muted/50 hover:text-ink-muted transition-colors group"
-        >
-          <LucideIcons.ChevronsDown className="w-3 h-3 group-hover:translate-y-0.5 transition-transform" />
-          {remainingCount} more
-        </button>
       )}
     </div>
   )

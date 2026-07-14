@@ -37,13 +37,27 @@ who needs attention.
 
 ## Roles
 
-A **role** is a named bundle of permissions. The built-in global roles:
+A **role** is a named bundle of permissions, at one of two tiers: **global**
+(applies across the whole platform) or **workspace** (applies only inside one
+workspace).
+
+**Global roles**
 
 | Role | Can broadly… |
 | --- | --- |
-| **Admin** | Everything: providers, ontologies, workspaces, users, features, announcements, permissions |
-| **User** | Create and edit workspaces and Views; explore data they have access to |
-| **Viewer** | Read-only — open workspaces and Views they're given |
+| **Super Admin** | Everything, platform-wide: providers, ontologies, workspaces, users, features, announcements, permissions. Reserved for platform owners — bind sparingly. |
+| **Org Admin** | Create and manage workspaces, groups, and users, without Super Admin's full reach. |
+| **Org Auditor** | Read-only across every workspace, plus the audit log and who-has-access-to-what — built for compliance review, not day-to-day work. |
+| **User** | The default tier for anyone with no explicit global role. No platform-wide access on its own — what they can do comes entirely from their workspace bindings below. |
+
+**Workspace roles** (bound separately in each workspace)
+
+| Role | Can broadly… |
+| --- | --- |
+| **Workspace Admin** | Everything inside that workspace — members, settings, data sources, Views. |
+| **Workspace Data Engineer** | Owns data sources, Views, and ontology assignment in the workspace, without managing members or settings. |
+| **Workspace Member** | Create and edit Views; manage data sources. |
+| **Workspace Viewer** | Read-only — open the workspace and the Views they're given. |
 
 Pick the **least powerful role** that lets someone do their job. You can always
 elevate later.

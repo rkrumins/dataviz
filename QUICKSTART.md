@@ -10,7 +10,7 @@ Get the full Synodic platform running locally with pre-loaded sample data. No ex
 |--------------------------|---------|
 | Docker                   | 24+     |
 | Docker Compose (v2)      | 2.20+   |
-| Free ports               | 3000, 3080, 6379, 8000, 8001 |
+| Free ports               | 3000, 3080, 6379, 8000 |
 
 Verify:
 
@@ -43,7 +43,6 @@ Wait until all four services report healthy (roughly 30–60 seconds). You will 
 ```
 synodic-falkordb-1       | Ready to accept connections
 synodic-viz-service-1    | [INFO] Application startup complete.
-synodic-graph-service-1  | [INFO] Application startup complete.
 synodic-frontend-1       | start worker process
 ```
 
@@ -53,17 +52,15 @@ synodic-frontend-1       | start worker process
 |------------------|------------------------------------------------------|---------------------------|
 | Frontend (UI)    | [http://localhost:3080](http://localhost:3080)        | Main application          |
 | Viz API Docs     | [http://localhost:3080/viz-docs](http://localhost:3080/viz-docs) | Swagger UI via nginx proxy |
-| Graph API Docs   | [http://localhost:3080/graph-docs](http://localhost:3080/graph-docs) | Swagger UI via nginx proxy |
 | Viz API (direct) | [http://localhost:8000/docs](http://localhost:8000/docs) | Bypasses nginx            |
-| Graph API (direct)| [http://localhost:8001/docs](http://localhost:8001/docs) | Bypasses nginx           |
 | FalkorDB Browser | [http://localhost:3000](http://localhost:3000)        | Graph database UI         |
 
 ### 4. Log in
 
-| Field    | Value                  |
-|----------|------------------------|
-| Email    | `admin@synodic.local`  |
-| Password | `admin123`             |
+| Field    | Value                       |
+|----------|-----------------------------|
+| Email    | `admin@nexuslineage.local`  |
+| Password | `admin123`                  |
 
 ### 5. What's included
 
@@ -153,13 +150,14 @@ docker compose up -d falkordb
 # Configure the management DB URL for the local processes
 export MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic'
 
-# Run viz-service locally (init_db calls `alembic upgrade head` on startup)
+# Apply migrations first — init_db() only verifies the schema is at head,
+# it never runs the upgrade itself
 cd backend
 pip install -r requirements.txt
-uvicorn backend.app.main:app --reload --port 8000
+python -m backend.scripts.upgrade upgrade
 
-# Run graph-service locally (separate terminal)
-uvicorn backend.graph.main:app --reload --port 8001
+# Run viz-service locally
+uvicorn backend.app.main:app --reload --port 8000
 
 # Run frontend locally (separate terminal)
 cd frontend
@@ -167,11 +165,11 @@ npm install
 npm run dev    # Vite dev server on http://localhost:5173
 ```
 
-> **Postgres-only.** Synodic dropped SQLite as of the schema-optimization branch. The management DB is Postgres v16+ in every environment — dev, CI, prod. Trying to start with a non-Postgres `MANAGEMENT_DB_URL` fails fast with a clear error.
+> **Postgres-only.** There is no SQLite fallback. The management DB is Postgres v16+ in every environment — dev, CI, prod. Any `MANAGEMENT_DB_URL` that isn't a `postgresql+asyncpg://` URL is rejected immediately at startup.
 
 ### 6. Schema migrations (Alembic)
 
-Synodic uses Alembic to own all schema lifecycle. The application's `init_db()` invokes `alembic upgrade head` automatically on startup, so a regular `uvicorn` boot is enough to migrate the dev DB. For manual control:
+Synodic uses Alembic to own all schema lifecycle, but the application itself never runs migrations — `init_db()` only *verifies* the schema is at the expected head and fails loudly (or serves in degraded mode) if it isn't. Migrations are applied by a dedicated `synodic-upgrade` step: a Helm pre-install/pre-upgrade hook Job in Kubernetes, a one-shot `upgrade` service in Docker Compose, or manually via `python -m backend.scripts.upgrade upgrade` for a local `uvicorn` boot. For manual control over individual migrations:
 
 ```bash
 cd backend
@@ -237,29 +235,30 @@ docker compose down -v
 │  Frontend (Nginx + React SPA)        :3080          │
 │  ┌──────────────────────────────────────────────┐   │
 │  │  /api/*    → viz-service:8000                │   │
-│  │  /graph/*  → graph-service:8001              │   │
 │  │  /viz-docs → viz-service:8000/docs           │   │
-│  │  /graph-docs → graph-service:8001/docs       │   │
 │  │  /*        → React SPA (client-side routing) │   │
 │  └──────────────────────────────────────────────┘   │
-└────────────────┬────────────────┬────────────────────┘
-                 │                │
-     ┌───────────▼──┐    ┌───────▼─────────┐
-     │ Viz Service   │    │ Graph Service   │
-     │ :8000         │    │ :8001           │
-     │               │    │                 │
-     │ Auth, CRUD,   │    │ Stateless       │
-     │ Workspaces,   │    │ provider        │
-     │ Ontology,     │    │ discovery &     │
-     │ Graph queries │    │ connectivity    │
-     └──┬─────────┬──┘    └───────┬─────────┘
-        │         │               │
-  ┌─────▼───┐ ┌───▼───────────────▼──┐
-  │ SQLite / │ │    FalkorDB          │
-  │ Postgres │ │    :6379 (Redis)     │
-  │ Mgmt DB  │ │    :3000 (Browser)   │
-  └──────────┘ └──────────────────────┘
+└────────────────────────┬───────────────────────────┘
+                         │
+              ┌───────────▼──────────┐
+              │ Visualization Service │
+              │ :8000                 │
+              │                       │
+              │ Auth, workspaces,     │
+              │ ontology, graph       │
+              │ queries, provider     │
+              │ connectivity          │
+              └──┬─────────────┬──────┘
+                 │             │
+           ┌─────▼───┐   ┌─────▼────────────────┐
+           │ Postgres │   │    FalkorDB          │
+           │ Mgmt DB  │   │    :6379 (Redis)     │
+           │ :5432    │   │    :3000 (Browser)   │
+           └──────────┘   └──────────────────────┘
 ```
+
+Provider connectivity (Neo4j, DataHub, Spanner adapters) runs in-process
+inside the Visualization Service — there's no separate graph service.
 
 ---
 
@@ -270,10 +269,9 @@ docker compose down -v
 | 3000 | FalkorDB Browser UI    | HTTP     |
 | 3080 | Frontend (Nginx)       | HTTP     |
 | 5173 | Vite dev server (local)| HTTP     |
-| 5432 | PostgreSQL (full mode) | TCP      |
+| 5432 | PostgreSQL            | TCP      |
 | 6379 | FalkorDB (Redis)       | TCP      |
-| 8000 | Viz Service API        | HTTP     |
-| 8001 | Graph Service API      | HTTP     |
+| 8000 | Visualization Service API | HTTP |
 
 ---
 

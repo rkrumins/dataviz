@@ -192,7 +192,7 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MANAGEMENT_DB_URL` | `sqlite+aiosqlite:///nexus_core.db` | SQLAlchemy async connection string. `dev.sh` provisions a dockerized PostgreSQL and sets this for you; SQLite is only a fallback for ad hoc manual runs. |
+| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:synodic@localhost:5432/synodic` | SQLAlchemy async connection string. `dev.sh` provisions a dockerized PostgreSQL and sets this for you. There is no SQLite fallback — any non-`postgresql+asyncpg://` value is rejected at startup. |
 | `DB_ECHO` | `false` | Log all SQL statements |
 
 ### Authentication
@@ -220,7 +220,7 @@ Before deploying to production, ensure these **mandatory** settings are configur
 
 | Requirement | Why | How |
 |-------------|-----|-----|
-| **PostgreSQL database** | SQLite cannot handle concurrent writes or multi-worker deployments | Set `MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic` |
+| **A real `MANAGEMENT_DB_URL`** | The dev fallback points at `docker-compose.dev.yml`'s local Postgres — fine for dev, not for production | Set `MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic` to your production database |
 | **Credential encryption key** | Without it, provider credentials (passwords, API tokens) are stored in **plaintext** | Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` → set as `CREDENTIAL_ENCRYPTION_KEY` |
 | **Change admin password** | Default bootstrap password is `changeme` / `admin123` | Set `ADMIN_PASSWORD` env var to a strong password, or change via the admin UI after first login |
 | **Specific CORS origins** | The dev default only allows `http://localhost:5173`; a production deployment must allow-list its real frontend domain(s), not `*` | Set `CORS_ALLOWED_ORIGINS` to your actual frontend domain(s) |

@@ -17,8 +17,39 @@ continuously tracks **provider health**:
 - Investigate promptly when a provider degrades; downstream users will see
   empty or outdated graphs.
 
+**Not every unhealthy provider is a hard outage.** When a provider drops offline
+but Synodic still holds recent data for it, the status shows a **"Cached ·
+updated X ago"** chip rather than an error. That means users can keep working
+with slightly-stale-but-real data — nothing is broken. Synodic keeps re-checking
+the provider (roughly every 30 seconds) and the chip clears itself automatically
+once the connection is back. Only step in if the "updated" time keeps climbing,
+which signals the provider has been down long enough to look at.
+
 > 💡 Make provider health a quick part of your routine. A red provider is the
 > root cause behind most "the graph looks wrong" reports.
+
+---
+
+## The infrastructure status dashboard
+
+Provider connection status tells you about one source at a time. For a **single
+fan-in view of overall platform health**, open **Admin → Infrastructure**. It
+gathers onto one screen:
+
+- **Graph providers** — the health of the systems storing your lineage graphs.
+- **Projection & aggregation** — whether the background processing that builds
+  and rolls up graph data is keeping up.
+- **Background jobs & bootstrap** — the state of longer-running setup and
+  processing tasks.
+- **Event streams & diagnostics** — whether the internal pipelines that move
+  data between components are flowing.
+
+Check it **during an incident** — when users report widespread slowness or
+missing data, this screen usually points at the cause faster than inspecting
+providers one by one. It's also worth a **proactive glance** after a deployment,
+a provider migration, or a large data load.
+
+![The Global Overview screen: cross-workspace node/edge counts, data sources, and per-workspace scale](/docs-assets/guide/admin-infrastructure-hero.png)
 
 ---
 

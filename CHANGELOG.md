@@ -109,7 +109,7 @@ worker (`python -m backend.app.services.versioning`, or `GRAPHVER_PROJECTION_INP
 Without it, jobs sit in `pending` forever.
 
 **New tuning knobs** — all optional, all sized for a 10M-entity graph. Full table with defaults and
-rationale in [`docs/VERSIONING_E2E.md`](docs/VERSIONING_E2E.md#tuning-all-optional-defaults-are-sized-for-a-10m-entity-graph):
+rationale in [`docs/VERSIONING_E2E.md`](/docs/versioning-e2e#tuning-all-optional-defaults-are-sized-for-a-10m-entity-graph):
 
 `GRAPHVER_BOOTSTRAP_SCAN_WIDTH`, `_SCAN_MIN_WIDTH`, `_EDGE_TARGET`, `_WINDOW`, `_SAMPLE_K`,
 `_MERKLE_MAX`, `_RETRY_BUDGET_SECS`, `_RETRY_MAX_DELAY_SECS`, `GRAPHVER_INGEST_POLL_SECS`,
@@ -129,7 +129,7 @@ graph_too_large_to_sync`, quoting the item count and the memory it would need. R
 OOM on every axis — an OOM kills unrelated requests and explains nothing.
 
 The design that removes the guard entirely is written out in
-[`docs/versioning/11-resync-at-any-scale.md`](docs/versioning/11-resync-at-any-scale.md).
+[`docs/versioning/11-resync-at-any-scale.md`](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/11-resync-at-any-scale.md).
 
 **Enabling version control is FalkorDB-only.** Other providers are refused with a clear `422`.
 

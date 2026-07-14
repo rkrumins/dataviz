@@ -8,6 +8,8 @@ filtering freely. Unlike opening a saved View, here *you* drive.
 > **Explorer** is a blank-canvas investigation. Start in a View to learn the
 > landscape; come to the Explorer to answer a new question.
 
+![Clicking a node on the open canvas to inspect its connections](/docs-assets/guide/exploring-graph-hero.png)
+
 ---
 
 ## Finding a starting point

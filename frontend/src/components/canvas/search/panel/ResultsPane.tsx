@@ -239,11 +239,49 @@ function ResultsContent({
     const hasPaths = paths !== null
     const isEmpty = !hasAggregates && !hasHits && !hasPaths
 
+    // Headline numbers. ``candidateCount`` is the backend's count over the FULL
+    // candidate set, so it is the honest total even when the hit list below is
+    // only the first page. Bucket counts are computed server-side over that same
+    // full set, so per-group numbers stay exact regardless of paging.
+    const candidateCount = result.candidateCount ?? null
+    const totalMatches = candidateCount ?? hits.length
+    // The hit list is a page; the counts are not. Say so, rather than letting
+    // the user read "1,000 matches" and assume that's all there is.
+    const hitsArePartial = candidateCount !== null && hits.length < candidateCount
+
     return (
         <div className="flex flex-col">
             {isEmpty && (
                 <div className="flex flex-col gap-3 p-4">
                     <ZeroResultsDiagnostic result={result} query={view.query} />
+                </div>
+            )}
+
+            {!isEmpty && !hasPaths && (
+                <div className="px-4 pt-4 pb-1">
+                    {/* "N matches · M groups", not "N matches IN M groups": buckets group
+                        by immediate parent, so a root-level match belongs to no group and
+                        the bucket counts need not sum to the total. The dot states two
+                        facts; "in" would claim a partition that isn't one. */}
+                    <p className="text-[13px] font-medium text-ink/90">
+                        {totalMatches.toLocaleString()}
+                        {result.truncated ? '+' : ''}
+                        {totalMatches === 1 ? ' match' : ' matches'}
+                        {hasAggregates && (
+                            <span className="text-ink-muted font-normal">
+                                {' · '}
+                                {allBuckets.length.toLocaleString()}
+                                {allBuckets.length === 1 ? ' group' : ' groups'}
+                            </span>
+                        )}
+                    </p>
+                    {(hitsArePartial || result.truncated) && (
+                        <p className="mt-1 text-[11px] leading-relaxed text-ink-muted/70">
+                            Group counts are exact. The list below shows the first{' '}
+                            {hits.length.toLocaleString()} — drill into a group or refine
+                            the query to narrow it down.
+                        </p>
+                    )}
                 </div>
             )}
 

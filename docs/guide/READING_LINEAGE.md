@@ -4,6 +4,8 @@
 read it fluently — what the shapes, colours, and lines mean, and how to change
 the level of detail until the picture answers your question.
 
+![A real lineage picture: domains and datasets grouped into Raw, Curated, and Aggregated layers](/docs-assets/guide/reading-lineage-hero.png)
+
 ---
 
 ## Anatomy of the picture

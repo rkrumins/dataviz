@@ -37,8 +37,10 @@ datasets** that admins curate.
 ### Workspace
 A **Workspace** is a *team or project context*. It's the unit of isolation: the
 people, data sources, and views inside one workspace are kept separate from
-others. You switch workspaces from the sidebar; doing so changes everything you
-see on the canvas.
+others. Open **Workspaces** from the sidebar to see the ones you have access to,
+then enter the one you want to work in — each screen shows you which workspace
+you're in, there's no separate global switcher to keep in sync. Entering a
+workspace changes everything you see on the canvas.
 
 ### Data Source
 Inside a workspace, a **Data Source** binds a Catalog Item (the graph) to an

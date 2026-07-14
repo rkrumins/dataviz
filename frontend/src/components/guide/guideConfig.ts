@@ -13,6 +13,10 @@ import {
   Network,
   PlugZap,
   Users,
+  History,
+  GitPullRequest,
+  ArrowLeftRight,
+  Boxes,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -128,6 +132,22 @@ export const guidePersonas: GuidePersona[] = [
       glow: 'shadow-emerald-500/20',
     },
   },
+  {
+    id: 'versioning',
+    label: 'Versioning & Change Control',
+    icon: History,
+    tagline: 'Draft, review, and roll back safely',
+    intro:
+      'Every change to a graph goes through a draft and a review before it publishes — with a full history you can always undo or roll back. Spans Builders (making changes) and Administrators (reviewing them).',
+    startSlug: 'versioning-change-control',
+    accent: {
+      gradient: 'from-amber-500 to-orange-600',
+      text: 'text-amber-600 dark:text-amber-400',
+      soft: 'bg-amber-500/10',
+      border: 'border-amber-500/20',
+      glow: 'shadow-amber-500/20',
+    },
+  },
 ]
 
 // ── Sections ───────────────────────────────────────────────────────
@@ -136,6 +156,7 @@ export const guideSections: GuideSection[] = [
   { id: 'start-here', label: 'Start Here', icon: Rocket },
   { id: 'viewer', label: 'For Viewers', icon: Compass, persona: 'viewer' },
   { id: 'builder', label: 'For Builders', icon: Hammer, persona: 'builder' },
+  { id: 'versioning', label: 'Versioning & Change Control', icon: History, persona: 'versioning' },
   { id: 'admin', label: 'For Administrators', icon: ShieldCheck, persona: 'admin' },
   { id: 'reference', label: 'Reference', icon: BookMarked },
 ]
@@ -229,6 +250,26 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/SEMANTIC_LAYER.md?raw'),
   },
 
+  // Versioning & Change Control
+  {
+    slug: 'versioning-change-control',
+    section: 'versioning',
+    persona: 'versioning',
+    title: 'Versioning & Change Control',
+    description: 'Drafts, review and merge, and undo vs. restore',
+    readingTime: '9 min',
+    importFn: () => import('@docs/guide/VERSIONING_CHANGE_CONTROL.md?raw'),
+  },
+  {
+    slug: 'import-export',
+    section: 'versioning',
+    persona: 'versioning',
+    title: 'Import & Export',
+    description: 'Bulk-load or back up data through the same review flow',
+    readingTime: '6 min',
+    importFn: () => import('@docs/guide/IMPORT_EXPORT.md?raw'),
+  },
+
   // For Administrators
   {
     slug: 'admin-setup',
@@ -238,6 +279,15 @@ export const guideEntries: GuideEntry[] = [
     description: 'From a fresh platform to a workspace your team can use',
     readingTime: '8 min',
     importFn: () => import('@docs/guide/ADMIN_SETUP.md?raw'),
+  },
+  {
+    slug: 'workspace-admin',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Workspace Admin',
+    description: 'Day-2 workspace ops: wizards, moves, Views, and ontology health',
+    readingTime: '8 min',
+    importFn: () => import('@docs/guide/WORKSPACE_ADMIN.md?raw'),
   },
   {
     slug: 'users-access',
@@ -360,6 +410,38 @@ export const keyJourneys: KeyJourney[] = [
     icon: Settings2,
     time: '6 min',
   },
+  {
+    title: 'Undo or roll back a change',
+    outcome: 'Know exactly when to reverse one edit vs. reset to a point in time',
+    slug: 'versioning-change-control',
+    persona: 'versioning',
+    icon: History,
+    time: '9 min',
+  },
+  {
+    title: 'Review and merge a draft',
+    outcome: 'Approve, request changes, or resolve a conflicting edit',
+    slug: 'versioning-change-control',
+    persona: 'versioning',
+    icon: GitPullRequest,
+    time: '9 min',
+  },
+  {
+    title: 'Bulk-import or export data',
+    outcome: 'Load a spreadsheet of changes or take a full, re-importable backup',
+    slug: 'import-export',
+    persona: 'versioning',
+    icon: ArrowLeftRight,
+    time: '6 min',
+  },
+  {
+    title: 'Move a data source between workspaces',
+    outcome: 'Reassign it safely — only possible when nothing is built on it yet',
+    slug: 'workspace-admin',
+    persona: 'admin',
+    icon: Boxes,
+    time: '8 min',
+  },
 ]
 
 // ── Quick-start preview steps (hub strip) ──────────────────────────
@@ -418,13 +500,25 @@ export const guideFaqs: GuideFAQ[] = [
     category: 'Access',
     question: 'Why can’t I see a View someone shared?',
     answer:
-      'Either its **visibility** is too narrow or you’re in the wrong **workspace**. Ask the owner to widen visibility or share it explicitly, and check your workspace switcher. See [Browsing Views](/guide/browsing-views).',
+      'Either its **visibility** is too narrow or you’re in the wrong **workspace**. Ask the owner to widen visibility or share it explicitly, and confirm you’ve opened the right workspace from the sidebar. See [Browsing Views](/guide/browsing-views).',
   },
   {
     category: 'Access',
     question: 'How do I find out what I’m allowed to do?',
     answer:
       'Open your **My Access** page — it lists your roles, scopes, and permissions in plain language. See [Users & Access](/guide/users-access).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'I published a mistake — how do I fix it?',
+    answer:
+      '**Undo this change** if you know exactly which edit was wrong and want to keep everything since — **Restore to this point** if you need to reset the whole graph to a known-good moment. Both add a new entry to history rather than erasing anything. See [Versioning & Change Control](/guide/versioning-change-control).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'Can I bulk-load data from a spreadsheet?',
+    answer:
+      'Yes — **Import** (in the header menu, while editing) stages a spreadsheet\'s worth of changes on a draft for you to review before anything publishes. See [Import & Export](/guide/import-export).',
   },
 ]
 
