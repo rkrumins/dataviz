@@ -17,6 +17,7 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
@@ -170,6 +171,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   }, [trace])
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
+  // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
+  // routes are hidden rather than left to fail.
+  const editModeEnabled = useFeature('editModeEnabled')
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
@@ -500,7 +505,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                       data: flatNodes.find(n => n.id === nodeId)?.data || {}
                     })
                   }}
-                  onDoubleClick={(nodeId, e) => {
+                  onDoubleClick={!editModeEnabled ? undefined : (nodeId, e) => {
                     const node = flatNodes.find(n => n.id === nodeId)
                     const element = document.getElementById(`hierarchy-node-${nodeId}`)
                     if (element && node) {
@@ -620,22 +625,22 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
         onEditNode={interactions.editNode}
-        onDuplicateNode={interactions.duplicateNode}
-        onDeleteNode={interactions.deleteNode}
-        onCreateChild={interactions.createChild}
-        onLinkNode={(id) => {
+        onDuplicateNode={editModeEnabled ? interactions.duplicateNode : undefined}
+        onDeleteNode={editModeEnabled ? interactions.deleteNode : undefined}
+        onCreateChild={editModeEnabled ? interactions.createChild : undefined}
+        onLinkNode={editModeEnabled ? (id) => {
           const node = flatNodes.find(n => n.id === id)
           useCreateLinkStore.getState().open({
             sourceUrn: node?.urn || id,
             anchor: interactions.state.contextMenu.position,
           })
-        }}
+        } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
-        onDeleteEdge={interactions.deleteEdge}
-        onReverseEdge={interactions.reverseEdge}
-        onCreateNode={() => useHierarchyBuilderStore.getState().open()}
+        onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
+        onReverseEdge={editModeEnabled ? interactions.reverseEdge : undefined}
+        onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
       />
 
@@ -652,10 +657,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(typeId) => {
+        onCreateEntity={editModeEnabled ? (typeId) => {
           interactions.closeCommandPalette()
           useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
-        }}
+        } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
 

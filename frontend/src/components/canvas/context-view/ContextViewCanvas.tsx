@@ -32,6 +32,7 @@ import { useCanvasStore, useCanvasVersion, type LineageEdge } from '@/store/canv
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
+import { useFeature } from '@/store/features'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { usePermission, useAuthStore } from '@/store/auth'
@@ -534,6 +535,12 @@ export function ContextViewCanvas({
   // global store — without this, a view switch could keep reading the prior view's gate).
   const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId, activeView?.id ?? null)
   const isDraft = !!effectiveBranchId
+  // editModeEnabled IS that separate flag: an independent admin switch that also 403s every
+  // graph mutation route server-side (nodes/create, edges, /changes — graph.py's require_edit_mode),
+  // so node/edge mutation affordances need isDraft AND this, even though layer/view-config actions
+  // (which never touch those routes) still only need isDraft.
+  const editModeEnabled = useFeature('editModeEnabled')
+  const canEditGraph = isDraft && editModeEnabled
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
@@ -1014,7 +1021,17 @@ export function ContextViewCanvas({
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
     // UX-first: Double-click = inline edit (modern approach)
     // Use Shift+Double-click for trace (power user feature)
+    //
     if (event && !event.shiftKey) {
+      // The rename this opens stages `rename_entity` → POST /graph/changes, which the server
+      // refuses when editing is off. Don't start an edit that cannot be saved: the user would
+      // type a new name, press enter, and get a 403 they cannot attribute to a setting.
+      //
+      // Returning here rather than falling through matters. The fall-through leads to TRACE, so
+      // without it a plain double-click would silently become a trace gesture the moment an admin
+      // turned editing off — repurposing an input nobody asked us to repurpose.
+      if (!canEditGraph) return
+
       // Find the node element to get its position
       const element = document.getElementById(`layer-node-${nodeId}`)
       if (element) {
@@ -1031,7 +1048,7 @@ export function ContextViewCanvas({
 
     // TRACE MODE: Toggle trace using unified trace hook + smart level
     toggleTraceRef.current(nodeId)
-  }, [nodes, interactions])
+  }, [nodes, interactions, canEditGraph])
 
 
   // Lineage flow toggle
@@ -2962,14 +2979,14 @@ export function ContextViewCanvas({
                 onDoubleClick={handleDoubleClick}
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
-                onAddChild={isDraft ? handleAddChildEntity : undefined}
-                onAddToLayer={isDraft ? (layerId) => {
+                onAddChild={canEditGraph ? handleAddChildEntity : undefined}
+                onAddToLayer={canEditGraph ? (layerId) => {
                   useHierarchyBuilderStore.getState().open({ layerId })
                 } : undefined}
-                onBuildToLayer={isDraft ? (layerId) => {
+                onBuildToLayer={canEditGraph ? (layerId) => {
                   useHierarchyBuilderStore.getState().openBuild({ layerId })
                 } : undefined}
-                onBeginConnect={isDraft ? edgeConnect.beginDrag : undefined}
+                onBeginConnect={canEditGraph ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
                   type: 'canvas',
                   position: { x: e.clientX, y: e.clientY },
@@ -3110,12 +3127,12 @@ export function ContextViewCanvas({
         position={interactions.state.contextMenu.position}
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
-        onEditNode={isDraft ? interactions.editNode : undefined}
-        onDuplicateNode={isDraft ? interactions.duplicateNode : undefined}
-        onDeleteNode={isDraft ? interactions.deleteNode : undefined}
-        onCreateChild={isDraft ? interactions.createChild : undefined}
-        onConnect={isDraft ? (id) => edgeConnect.armConnect(id) : undefined}
-        onLinkNode={isDraft ? (id) => {
+        onEditNode={canEditGraph ? interactions.editNode : undefined}
+        onDuplicateNode={canEditGraph ? interactions.duplicateNode : undefined}
+        onDeleteNode={canEditGraph ? interactions.deleteNode : undefined}
+        onCreateChild={canEditGraph ? interactions.createChild : undefined}
+        onConnect={canEditGraph ? (id) => edgeConnect.armConnect(id) : undefined}
+        onLinkNode={canEditGraph ? (id) => {
           const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
           useCreateLinkStore.getState().open({
             sourceUrn: (node?.data?.urn as string) || id,
@@ -3124,10 +3141,10 @@ export function ContextViewCanvas({
         } : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
-        onEditEdge={isDraft ? interactions.editEdge : undefined}
-        onDeleteEdge={isDraft ? interactions.deleteEdge : undefined}
-        onReverseEdge={isDraft ? interactions.reverseEdge : undefined}
-        onCreateNode={isDraft ? (_pos, layerId) => {
+        onEditEdge={canEditGraph ? interactions.editEdge : undefined}
+        onDeleteEdge={canEditGraph ? interactions.deleteEdge : undefined}
+        onReverseEdge={canEditGraph ? interactions.reverseEdge : undefined}
+        onCreateNode={canEditGraph ? (_pos, layerId) => {
           // Right-clicked an empty layer column → scope the new node to that
           // layer so it lands there (and is assigned on stage, see onEntityStaged).
           useHierarchyBuilderStore.getState().open({ layerId })
@@ -3153,7 +3170,7 @@ export function ContextViewCanvas({
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={isDraft ? (typeId) => {
+        onCreateEntity={canEditGraph ? (typeId) => {
           interactions.closeCommandPalette()
           useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
         } : undefined}

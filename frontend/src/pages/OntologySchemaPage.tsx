@@ -11,6 +11,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
 import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Activity, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
 import {
@@ -25,7 +26,6 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
 
-import { useAnyWorkspacePermission, usePermission } from '@/store/auth'
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
@@ -107,16 +107,13 @@ export function OntologySchemaPage() {
   const activeTab = (LEGACY_TAB_MAP[rawTab] || rawTab) as OntologyTab
   const dashboardMode = searchParams.get('view') === 'dashboard'
 
-  // Phase 18: readers see ontologies but can't edit. ``canManage`` is
-  // the lever for hiding Create / Edit / Delete / Publish / Import /
-  // Clone affordances. workspace:ontology:manage is implied by
-  // workspace:admin and the platform globals.
+  // Who may do what here — RBAC *and* the admin's feature toggles, resolved together.
   //
-  // Rules of Hooks: call both probes unconditionally and OR the
-  // booleans — never short-circuit a hook call with ``||``.
-  const isPlatformAdmin = usePermission('system:admin')
-  const hasOntologyManage = useAnyWorkspacePermission('workspace:ontology:manage')
-  const canManage = isPlatformAdmin || hasOntologyManage
+  // Phase 18 gave readers a read-only page via ``workspace:ontology:manage``. That is still the
+  // permission half. The other half is Admin → Features, whose six semantic-layer switches were
+  // enforced nowhere: an admin could turn Import off and watch people go on importing. The server
+  // refuses those calls now, and this hook keeps the UI from offering a button that will 403.
+  const access = useSemanticLayerAccess()
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -1150,7 +1147,7 @@ export function OntologySchemaPage() {
             workspaces={workspaces}
             isLoading={isLoadingOntologies}
             isSuggesting={isSuggesting}
-            canManage={canManage}
+            canManage={access.canEdit}
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
             dashboardMode={dashboardMode}
@@ -1172,7 +1169,8 @@ export function OntologySchemaPage() {
                 onUnassign={requestUnassign}
                 onSuggest={handleSuggestForDataSource}
                 onCreateDraft={() => setShowCreateDialog(true)}
-                onSuggestFromGraph={handleSuggestOntology}
+                onSuggestFromGraph={access.canSuggest ? handleSuggestOntology : undefined}
+                canSuggest={access.canSuggest}
                 isAssigning={isAssigning}
               />
             </div>
@@ -1204,7 +1202,7 @@ export function OntologySchemaPage() {
               <OntologyDetailHeader
                 ontology={selectedOntology}
                 isImmutable={isImmutable}
-                canManage={canManage}
+                access={access}
                 hasPendingChanges={hasPendingChanges}
                 isSaving={isSaving}
                 workspaces={workspaces}
@@ -1233,7 +1231,7 @@ export function OntologySchemaPage() {
               {/* Tabs — underline style (AdminRegistry pattern) */}
               <div className="border-b border-glass-border shrink-0">
                 <PageContainer gutter="shell" className="flex items-center gap-1">
-                {TAB_DEFS.map(t => {
+                {TAB_DEFS.filter(t => t.id !== 'history' || access.canSeeHistory).map(t => {
                   const Icon = t.icon
                   const isActive = activeTab === t.id
                   const count = t.id === 'schema' ? entityTypes.length + relTypes.length
@@ -1388,7 +1386,7 @@ export function OntologySchemaPage() {
                         <UsagePanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
                       )}
 
-                      {activeTab === 'history' && (
+                      {activeTab === 'history' && access.canSeeHistory && (
                         <VersionHistoryPanel ontology={selectedOntology} />
                       )}
 

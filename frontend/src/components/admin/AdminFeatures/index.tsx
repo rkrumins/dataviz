@@ -7,6 +7,7 @@ import { ToggleLeft, HelpCircle, BookOpen, RotateCcw, AlertCircle, Search, Spark
 import { featuresService, type FeatureDefinition, type FeatureCategory } from '@/services/featuresService'
 import { useAdminFeatures, SEARCH_MIN_FEATURES } from '@/hooks/useAdminFeatures'
 import { FeatureCard } from './FeatureCard'
+import { FeatureSummary } from './FeatureSummary'
 import { Toast } from './Toast'
 import { SkeletonCards } from './SkeletonCards'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
@@ -277,7 +278,8 @@ export function AdminFeatures() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-ink">Features</h1>
             <p className="text-sm text-ink-muted mt-1">
-              Control product behaviour: editing, view types, signup, and lineage trace.
+              Everything your users can and cannot do, in one place. Each switch takes effect
+              immediately, for everybody.
             </p>
             {lastSavedAt && (
               <p className="text-xs text-ink-muted mt-1.5" aria-live="polite">
@@ -316,6 +318,8 @@ export function AdminFeatures() {
           </button>
         </div>
       </div>
+
+      <FeatureSummary features={schema} values={values} />
 
       {showSearch && (
         <div className="mb-6">
@@ -368,7 +372,7 @@ export function AdminFeatures() {
           No features match "{searchQuery}". Try a different search.
         </p>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6">
           {categoryIds.map((categoryId, index) => {
             const features = byCategory[categoryId]
             if (!features?.length) return null
@@ -378,6 +382,7 @@ export function AdminFeatures() {
                 categoryId={categoryId}
                 meta={categoryMetaById[categoryId]}
                 features={features}
+                allFeatures={schema}
                 values={values}
                 onChange={handleChange}
                 savingKey={savingKey}

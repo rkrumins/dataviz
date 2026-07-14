@@ -14,9 +14,38 @@
 import { create } from 'zustand'
 import { fetchPublicFeatureValues } from '@/services/featuresService'
 
-/** Seeds — mirror the backend registry defaults for the flags the app consumes. */
+/**
+ * Seeds — mirror the backend registry defaults (`app/config/features_seed.py`) for EVERY flag
+ * the app consumes.
+ *
+ * This list is load-bearing, not documentation. `coerce()` falls back to the seed when a key is
+ * absent, and an absent key with no seed reads as FALSE — so a flag missing from here is a
+ * feature that VANISHES whenever the values fetch fails. Only `versioningEnabled` was ever
+ * seeded, which meant the store's fail-open promise held for exactly one flag: a network blip
+ * would have hidden lineage tracing and made the product look broken, in the name of a setting
+ * nobody had changed.
+ *
+ * Fail-open is the whole point. Enforcement lives on the server (a 403 from the feature gate);
+ * the client only decides what to OFFER. If we cannot reach the server to ask, the right answer
+ * is to keep showing the product, not to guess it away.
+ *
+ * `semanticLayerNonAdminEditing` is the exception, and deliberately: it WIDENS who may write, so
+ * an unreadable value must resolve to the narrower world — the same fail-closed posture the
+ * server takes. Hiding an edit button we're unsure about costs a click; showing one that 403s
+ * costs trust.
+ */
 export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
+    editModeEnabled: true,
+    traceEnabled: true,
+    allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+    semanticLayerEditMode: true,
+    semanticLayerImportEnabled: true,
+    semanticLayerExportEnabled: true,
+    semanticLayerAutoSuggest: true,
+    semanticLayerVersionHistory: true,
+    semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
+    signupEnabled: false,                 // fail CLOSED — this one is a door
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the
@@ -85,6 +114,24 @@ export function useFeature(key: string): boolean {
 /** Imperative flag read for non-React code (stores, guards, handlers). */
 export function featureEnabled(key: string): boolean {
     return coerce(useFeaturesStore.getState().values, key)
+}
+
+/**
+ * Read a LIST flag (`allowedViewModes`) — the set of things an admin permits.
+ *
+ * `useFeature` coerces to a boolean, which for a list is meaningless: a non-empty array is
+ * truthy, so it would answer "yes, view modes are on" and tell you nothing about WHICH.
+ *
+ * Returns `null` when the flag isn't a usable list — the value hasn't arrived, the fetch failed,
+ * or the key is unknown. `null` means NO RESTRICTION, not "nothing allowed": the server is the
+ * enforcement, and a client that guessed "nothing" on a slow network would blank out the layout
+ * picker for a setting nobody had touched.
+ */
+export function useFeatureList(key: string): string[] | null {
+    return useFeaturesStore(s => {
+        const value = s.values[key] ?? DEFAULT_FEATURES[key]
+        return Array.isArray(value) && value.length > 0 ? (value as string[]) : null
+    })
 }
 
 /** How often a VISIBLE tab re-checks the served flags. The server caches these for 30s, and the

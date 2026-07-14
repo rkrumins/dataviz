@@ -5,6 +5,7 @@
  * a network blip must never hide product areas), and unknown keys coerce
  * predictably.
  */
+import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/featuresService', () => ({
@@ -15,6 +16,7 @@ import { fetchPublicFeatureValues } from '@/services/featuresService'
 import {
   DEFAULT_FEATURES,
   featureEnabled,
+  useFeatureList,
   startFeaturesSync,
   useFeaturesStore,
 } from '@/store/features'
@@ -129,3 +131,76 @@ describe('features store', () => {
   })
 })
 
+// ── The seeds decide what happens when the server is unreachable ──────────────
+//
+// `coerce()` falls back to DEFAULT_FEATURES when a key is absent, and an absent key with NO seed
+// reads as FALSE. So a flag missing from the seeds is a feature that VANISHES on a failed fetch.
+// Only `versioningEnabled` was ever seeded, which meant the store's fail-open promise held for
+// exactly one flag: a network blip would have hidden lineage tracing and the semantic-layer
+// editor, making the product look broken in the name of a setting nobody had changed.
+
+describe('fail-open seeds', () => {
+  const CAPABILITIES = [
+    'versioningEnabled',
+    'editModeEnabled',
+    'traceEnabled',
+    'semanticLayerEditMode',
+    'semanticLayerImportEnabled',
+    'semanticLayerExportEnabled',
+    'semanticLayerAutoSuggest',
+    'semanticLayerVersionHistory',
+  ]
+
+  it('keeps every capability available when the flag fetch fails', async () => {
+    vi.mocked(fetchPublicFeatureValues).mockResolvedValue(null)
+    await useFeaturesStore.getState().loadFeatures()
+
+    for (const key of CAPABILITIES) {
+      expect(featureEnabled(key), `${key} disappeared when the server was unreachable`).toBe(true)
+    }
+  })
+
+  it('fails CLOSED for the two flags that widen access', async () => {
+    vi.mocked(fetchPublicFeatureValues).mockResolvedValue(null)
+    await useFeaturesStore.getState().loadFeatures()
+
+    // signupEnabled is a door: if we cannot tell whether the admin left it open, it stays shut.
+    expect(featureEnabled('signupEnabled')).toBe(false)
+    // Same logic — this one decides whether a NON-admin may write to a semantic layer.
+    expect(featureEnabled('semanticLayerNonAdminEditing')).toBe(false)
+  })
+
+  it('seeds allowedViewModes as a list, not a boolean', () => {
+    // It is a set of layouts, and a `useFeature()` boolean read of it would be meaningless.
+    expect(DEFAULT_FEATURES.allowedViewModes).toEqual(
+      ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+    )
+  })
+})
+
+// ── List flags are a SET, not a switch ───────────────────────────────────────
+
+describe('useFeatureList', () => {
+  const read = () => renderHook(() => useFeatureList('allowedViewModes')).result.current
+
+  it('returns null (= no restriction) when the value is unusable', () => {
+    // null must NOT be read as "nothing allowed". The server is the enforcement; a client that
+    // guessed "nothing" on a slow network would blank out the layout picker over a setting
+    // nobody had touched.
+    useFeaturesStore.setState({ values: { allowedViewModes: [] } })
+    expect(read()).toBeNull()
+
+    useFeaturesStore.setState({ values: { allowedViewModes: 'graph' } })
+    expect(read()).toBeNull()
+  })
+
+  it('falls back to the seed when the admin has never saved', () => {
+    useFeaturesStore.setState({ values: {} })
+    expect(read()).toEqual(['graph', 'hierarchy', 'reference', 'layered-lineage'])
+  })
+
+  it("returns the admin's selection when there is one", () => {
+    useFeaturesStore.setState({ values: { allowedViewModes: ['graph'] } })
+    expect(read()).toEqual(['graph'])
+  })
+})

@@ -143,6 +143,9 @@ export function EntityDrawer({
   // surfaces: when the admin turns version control off, the queries stop and the
   // History section disappears (undefined ids disable the hooks).
   const versioningEnabled = useFeature('versioningEnabled')
+  // Independent switch: OFF means every canvas is view-only even with versioning on
+  // (POST /nodes/create, /edges, PATCH/DELETE /edges, /changes all 403 server-side).
+  const editModeEnabled = useFeature('editModeEnabled')
   const entityHistory = useEntityHistory(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
@@ -599,7 +602,7 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {!isGhost && (
+            {!isGhost && versioningEnabled && editModeEnabled && (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -686,6 +689,7 @@ export function EntityDrawer({
               rawJson={rawJson}
               jsonError={jsonError}
               onChange={handleRawJsonChange}
+              canEdit={!isGhost && versioningEnabled && editModeEnabled}
             />
           )}
         </div>
@@ -1533,9 +1537,10 @@ interface JsonModeContentProps {
   rawJson: string
   jsonError: string | null
   onChange: (value: string) => void
+  canEdit: boolean
 }
 
-function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps) {
+function JsonModeContent({ rawJson, jsonError, onChange, canEdit }: JsonModeContentProps) {
   return (
     <div className="p-5">
       <div className="flex items-center justify-between mb-3">
@@ -1555,6 +1560,7 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
       <textarea
         value={rawJson}
         onChange={(e) => onChange(e.target.value)}
+        readOnly={!canEdit}
         className={cn(
           "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar",
           jsonError

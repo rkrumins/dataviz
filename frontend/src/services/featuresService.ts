@@ -61,8 +61,35 @@ export interface FeatureDefinition {
   adminHint?: string
   sortOrder?: number
   deprecated?: boolean
-  /** When false, show "preview / not yet wired" badge for this feature. Managed in DB per feature. */
+
+  // ── The prose the DB owns ────────────────────────────────────────────────
+  /**
+   * "What happens if I turn this off?" — the one question that decides whether an admin flips a
+   * switch that affects everybody, and the one this page never answered.
+   */
+  impactWhenOff?: string
+
+  // ── The facts the CODE owns (backend/app/config/feature_wiring.py) ───────
+  //
+  // These are served, not stored. `implemented` used to be a column an admin could tick — a claim
+  // about the source tree owned by someone who cannot change the source tree — and it was wrong
+  // about four flags on the day it was written. It is now derived from the gates that actually
+  // exist, and a CI guard fails the build if any of it drifts from the code.
+
+  /** Does this flag change anything at all? A false here means the toggle is decoration. */
   implemented?: boolean
+  /** Does the SERVER refuse when this is off? A flag that only hides a button is not enforcement. */
+  enforcedServerSide?: boolean
+  /** How it behaves when it can't be read: capability → fail open, security → fail closed. */
+  posture?: 'capability' | 'security'
+  /** Concretely, which endpoints refuse. */
+  serverGates?: string[]
+  /** Concretely, which parts of the UI disappear. */
+  uiSurfaces?: string[]
+  /** What keeps working when it's off — turning a feature off is never destructive. */
+  stillAllowed?: string[]
+  /** Flags that must be on for this one to mean anything. */
+  dependsOn?: string[]
 }
 
 export interface FeatureCategory {

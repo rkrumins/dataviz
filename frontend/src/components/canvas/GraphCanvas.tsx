@@ -99,6 +99,7 @@ import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType }
 import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
+import { useFeature } from '@/store/features'
 
 // Types
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -1226,6 +1227,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [trace])
 
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
+  // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
+  // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
+  // routes are hidden rather than left to fail.
+  const editModeEnabled = useFeature('editModeEnabled')
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
@@ -1606,22 +1611,22 @@ export function GraphCanvas({ className }: { className?: string }) {
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
         onEditNode={interactions.editNode}
-        onDuplicateNode={interactions.duplicateNode}
-        onDeleteNode={interactions.deleteNode}
-        onCreateChild={interactions.createChild}
-        onLinkNode={(id) => {
+        onDuplicateNode={editModeEnabled ? interactions.duplicateNode : undefined}
+        onDeleteNode={editModeEnabled ? interactions.deleteNode : undefined}
+        onCreateChild={editModeEnabled ? interactions.createChild : undefined}
+        onLinkNode={editModeEnabled ? (id) => {
           const node = rawNodes.find(n => n.id === id)
           useCreateLinkStore.getState().open({
             sourceUrn: (node?.data?.urn as string) || id,
             anchor: interactions.state.contextMenu.position,
           })
-        }}
+        } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
-        onDeleteEdge={interactions.deleteEdge}
-        onReverseEdge={interactions.reverseEdge}
-        onCreateNode={() => useHierarchyBuilderStore.getState().open()}
+        onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
+        onReverseEdge={editModeEnabled ? interactions.reverseEdge : undefined}
+        onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
       />
       <InlineNodeEditor
@@ -1634,10 +1639,10 @@ export function GraphCanvas({ className }: { className?: string }) {
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(typeId) => {
+        onCreateEntity={editModeEnabled ? (typeId) => {
           interactions.closeCommandPalette()
           useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
-        }}
+        } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
 

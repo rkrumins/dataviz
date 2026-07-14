@@ -31,6 +31,8 @@ import { OntologyStatusBadge } from './OntologyStatusBadge'
 import { useOntologyVersions } from '../hooks/useOntologies'
 import { PageContainer } from '@/components/layout/PageContainer'
 
+import type { SemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+
 interface OntologyDetailHeaderProps {
   ontology: OntologyDefinitionResponse
   isImmutable: boolean
@@ -38,7 +40,9 @@ interface OntologyDetailHeaderProps {
    *  write-action affordance — Edit / Delete / Publish / Import /
    *  Clone / New Version. Read actions (Export, Find data sources,
    *  Assignments) remain available. */
-  canManage: boolean
+  /** What this deployment + this user actually allow. Mirrors the server's gate stack —
+   *  see features/ontology/lib/useSemanticLayerAccess.ts. */
+  access: SemanticLayerAccess
   hasPendingChanges: boolean
   isSaving: boolean
   workspaces: WorkspaceResponse[]
@@ -63,7 +67,7 @@ interface OntologyDetailHeaderProps {
 export function OntologyDetailHeader({
   ontology,
   isImmutable,
-  canManage,
+  access,
   hasPendingChanges,
   isSaving,
   workspaces,
@@ -286,7 +290,7 @@ export function OntologyDetailHeader({
                 sideOffset={6}
                 align="end"
               >
-                {canManage && !ontology.isSystem && (
+                {access.canEdit && !ontology.isSystem && (
                   <DropdownMenu.Item
                     onClick={onEditDetails}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
@@ -303,7 +307,7 @@ export function OntologyDetailHeader({
                   Validate
                 </DropdownMenu.Item>
                 {/* Clone creates a new draft ontology — manage-only. */}
-                {canManage && (
+                {access.canPublish && (
                   <DropdownMenu.Item
                     onClick={onClone}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
@@ -322,14 +326,16 @@ export function OntologyDetailHeader({
                   </DropdownMenu.Item>
                 )}
                 <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
+                {access.canExport && (
                 <DropdownMenu.Item
-                  onClick={onExport}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export JSON
-                </DropdownMenu.Item>
-                {canManage && (
+                    onClick={onExport}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Export JSON
+                  </DropdownMenu.Item>
+                )}
+                {access.canImport && (
                   <DropdownMenu.Item
                     onClick={onImport}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
@@ -338,7 +344,7 @@ export function OntologyDetailHeader({
                     Import JSON
                   </DropdownMenu.Item>
                 )}
-                {canManage && !ontology.isSystem && !ontology.isPublished && (
+                {access.canEdit && !ontology.isSystem && !ontology.isPublished && (
                   <>
                     <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
                     <DropdownMenu.Item
@@ -355,7 +361,7 @@ export function OntologyDetailHeader({
           </DropdownMenu.Root>
 
           {/* Contextual actions based on state — manage-only. */}
-          {canManage && hasPendingChanges && (
+          {access.canEdit && hasPendingChanges && (
             <>
               <button
                 onClick={onDiscard}
@@ -399,7 +405,7 @@ export function OntologyDetailHeader({
           )}
 
           {/* Publish — shown for drafts, manage-only. */}
-          {canManage && !isImmutable && (
+          {access.canPublish && !isImmutable && (
             <button
               onClick={onPublish}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
@@ -410,7 +416,7 @@ export function OntologyDetailHeader({
           )}
 
           {/* New Version — manage-only. */}
-          {canManage && isImmutable && !ontology.deletedAt && (
+          {access.canEdit && isImmutable && !ontology.deletedAt && (
             <button
               onClick={onCreateNewVersion}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
