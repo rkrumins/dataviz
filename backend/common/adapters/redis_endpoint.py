@@ -517,10 +517,14 @@ def build_redis_client(
     import redis.asyncio as aioredis
     from backend.common.adapters.redis_tls import tls_client_kwargs
 
-    if cfg.mode == "cluster":
+    if cfg.mode.strip().lower() == "cluster":
         _reject_cluster(cfg.role, "cluster")
 
     common: Dict[str, Any] = {
+        # Must live here (not sentinel_kwargs): sentinel daemons have no DBs, but
+        # the master/replica data connection does — `common` is what reaches both
+        # the standalone client and Sentinel's connection_kwargs/master_for.
+        "db": cfg.db,
         "decode_responses": decode_responses,
         "socket_timeout": cfg.socket_timeout,
         "socket_connect_timeout": cfg.socket_connect_timeout,
@@ -562,6 +566,6 @@ def build_redis_client(
         logger.info("redis_endpoint: %s", cfg.describe())
         return client
 
-    client = aioredis.Redis(host=cfg.host, port=cfg.port, db=cfg.db, **common)
+    client = aioredis.Redis(host=cfg.host, port=cfg.port, **common)
     logger.info("redis_endpoint: %s", cfg.describe())
     return client

@@ -74,9 +74,72 @@ def test_sentinel_uses_master_for_with_auth_and_tls(monkeypatch):
     )
     assert build_redis_client(cfg) == "MASTER"
     assert captured["master"] == "mymaster"
+    # Constructor (connection_kwargs) — these seed Sentinel.connection_kwargs.
     assert captured["kw"]["password"] == "pw"
     assert captured["kw"]["ssl"] is True
     assert captured["kw"]["ssl_ca_certs"] == "/certs/streams/ca.crt"
+    # master_for — this is what actually reaches the master data connection;
+    # a regression that broke only this call must fail here too.
+    assert captured["master_kw"]["password"] == "pw"
+    assert captured["master_kw"]["ssl"] is True
+    assert captured["master_kw"]["ssl_ca_certs"] == "/certs/streams/ca.crt"
+
+
+def test_sentinel_delivers_nonzero_db_to_master_not_to_sentinel_daemons(monkeypatch):
+    """Critical fix: the sentinel branch used to build `common` without `db`, so
+    a non-zero db silently fell back to redis-py's default of 0. `db` must reach
+    the master/replica connection but must NEVER reach sentinel_kwargs — sentinel
+    daemons have no databases."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["sentinel_kwargs"] = sentinel_kwargs
+            captured["kw"] = kw
+
+        def master_for(self, name, **kw):
+            captured["master_kw"] = kw
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.CACHE, mode="sentinel", db=1,
+        sentinel_master="mymaster", sentinel_nodes=(("s1", 26379),),
+    )
+    assert build_redis_client(cfg) == "MASTER"
+    assert captured["kw"]["db"] == 1
+    assert captured["master_kw"]["db"] == 1
+    assert "db" not in captured["sentinel_kwargs"]
+
+
+def test_sentinel_auth_enabled_forwards_data_plane_credentials_to_sentinel_daemons(
+    monkeypatch,
+):
+    """sentinel_auth_enabled=True is the explicit opt-in to reuse the data-plane
+    username/password for the sentinel daemons themselves (as opposed to
+    dedicated sentinel_username/sentinel_password)."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["sentinel_kwargs"] = sentinel_kwargs or {}
+
+        def master_for(self, name, **kw):
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    build_redis_client(RedisEndpointConfig(
+        role=RedisRole.STREAMS, mode="sentinel", sentinel_master="m",
+        sentinel_nodes=(("s1", 26379),),
+        username="data-plane-user", password="data-plane-pw",
+        sentinel_auth_enabled=True,
+    ))
+    assert captured["sentinel_kwargs"]["username"] == "data-plane-user"
+    assert captured["sentinel_kwargs"]["password"] == "data-plane-pw"
 
 
 def test_sentinel_daemons_get_no_auth_by_default(monkeypatch):
@@ -106,3 +169,14 @@ def test_cluster_mode_config_is_refused_by_the_factory():
     cfg = RedisEndpointConfig(role=RedisRole.CACHE, mode="cluster", host="h")
     with pytest.raises(RedisConfigurationError, match="cluster"):
         build_redis_client(cfg)
+
+
+def test_cluster_mode_is_refused_regardless_of_case_or_whitespace():
+    """The resolver normalizes mode via .strip().lower(), so this is unreachable
+    through resolve_redis_config today — but the factory is the last line of
+    defence against a hand-built cfg (a fixture, a future migration) that didn't
+    go through the resolver, so it must normalize independently."""
+    for raw_mode in ("Cluster", " cluster ", "CLUSTER"):
+        cfg = RedisEndpointConfig(role=RedisRole.CACHE, mode=raw_mode, host="h")
+        with pytest.raises(RedisConfigurationError, match="cluster"):
+            build_redis_client(cfg)
