@@ -326,18 +326,76 @@ def test_provider_sentinel_fields_record_provenance():
 def test_provider_pool_knob_provenance():
     """build_bus_redis-style callers decide whether to apply their own defaults
     by checking `"<field>" not in cfg.source`; the provider-cache path must
-    attribute the pool knobs too, not just host/port/db/username/password/tls."""
+    attribute the pool knobs too, not just host/port/db/username/password/tls —
+    and only the knobs the provider JSON actually sets."""
     override = ProviderCacheOverride(
         provider_id="acme-prod",
-        connection={"host": "acme-cache", "maxConnections": 40, "socketTimeout": 7},
+        connection={
+            "host": "acme-cache", "maxConnections": 40, "socketTimeout": 7,
+            "socketConnectTimeout": 2.5, "healthCheckInterval": 15,
+        },
         credentials={"cache_password": "acme-pw"},
     )
     c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
     assert c.max_connections == 40
     assert c.socket_timeout == 7
+    assert c.socket_connect_timeout == 2.5
+    assert c.health_check_interval == 15
     for key in ("max_connections", "socket_timeout", "socket_connect_timeout",
                 "health_check_interval"):
         assert c.source[key] == "provider:acme-prod"
+
+
+def test_provider_pool_knobs_unset_use_defaults_and_have_no_provenance():
+    """A provider JSON that sets NONE of the pool knobs must resolve to the
+    same defaults as the dataclass AND leave them absent from source — the
+    bug this suite guards against claimed provider provenance for values that
+    were never read from the provider at all."""
+    override = ProviderCacheOverride(
+        provider_id="acme-prod",
+        connection={"host": "acme-cache"},
+        credentials={"cache_password": "acme-pw"},
+    )
+    c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    assert c.max_connections == 20
+    assert c.socket_timeout == 10.0
+    assert c.socket_connect_timeout == 5.0
+    assert c.health_check_interval == 30
+    for key in ("max_connections", "socket_timeout", "socket_connect_timeout",
+                "health_check_interval"):
+        assert key not in c.source
+
+
+def test_provider_missing_cache_password_is_not_attributed_to_provider():
+    """The provider supplied no cache_password. password must be None, and
+    source must say "default" — not lie that a provider set a credential it
+    never supplied (the Admin page renders this map)."""
+    override = ProviderCacheOverride(
+        provider_id="acme-prod",
+        connection={"host": "acme-cache"},
+        credentials={"cache_username": "acme"},
+    )
+    c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    assert c.password is None
+    assert c.source["password"] == "default"
+
+
+def test_provider_legacy_cache_url_attributes_only_what_url_supplied():
+    """A legacy cache_redis_url with no username and no explicit db must not
+    claim those fields came from the URL."""
+    override = ProviderCacheOverride(
+        provider_id="old", connection={},
+        credentials={"cache_redis_url": "redis://old-cache:6379"},
+    )
+    c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    assert c.host == "old-cache"
+    assert c.username is None
+    assert c.password is None
+    assert c.db == 0
+    assert "legacy" in c.source["host"]
+    assert c.source["username"] == "default"
+    assert c.source["password"] == "default"
+    assert c.source["db"] == "default"
 
 
 # ── describe() must never leak the password ─────────────────────────

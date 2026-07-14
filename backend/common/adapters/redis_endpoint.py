@@ -412,8 +412,15 @@ def _resolve_provider_cache(
 
     if not conn and legacy_url:
         f = _parse_url(legacy_url)
-        src = {k: f"{origin} cache_redis_url (legacy)" for k in
-               ("host", "port", "db", "username", "password", "tls")}
+        legacy_origin = f"{origin} cache_redis_url (legacy)"
+        # Only attribute what the URL actually supplied — _parse_url omits
+        # username/password/db entirely when the URL doesn't carry them, so a
+        # blanket assignment here would lie about their provenance.
+        src: Dict[str, str] = {
+            ("tls" if k == "tls_enabled" else k): legacy_origin for k in f
+        }
+        for key in ("host", "port", "db", "username", "password", "tls"):
+            src.setdefault(key, "default")
         return RedisEndpointConfig(
             role=RedisRole.CACHE,
             host=f["host"], port=f["port"], db=f.get("db", 0),
@@ -442,13 +449,36 @@ def _resolve_provider_cache(
         (n[0], int(n[1])) if isinstance(n, (list, tuple)) else (n["host"], int(n["port"]))
         for n in (sentinel.get("nodes") or [])
     )
-    src = {k: origin for k in (
-        "mode", "host", "port", "db", "username", "password", "tls",
-        "sentinel_master", "sentinel_nodes", "sentinel_username",
-        "sentinel_password", "sentinel_auth_enabled",
-        "max_connections", "socket_timeout", "socket_connect_timeout",
-        "health_check_interval",
-    )}
+
+    src: Dict[str, str] = {}
+
+    def _identity(key: str, present: bool) -> None:
+        # Identity fields ALWAYS get an entry: the real origin when the
+        # provider actually supplied it, "default" otherwise. Never blanket.
+        src[key] = origin if present else "default"
+
+    _identity("mode", "mode" in conn)
+    _identity("host", "host" in conn)
+    _identity("port", "port" in conn)
+    _identity("db", "db" in conn)
+    _identity("username", bool(creds.get("cache_username")))
+    _identity("password", bool(creds.get("cache_password")))
+    _identity("tls", bool(conn.get("tls")))
+    _identity("sentinel_master", bool(sentinel.get("masterName")))
+    _identity("sentinel_nodes", bool(sentinel.get("nodes")))
+    _identity("sentinel_username", bool(creds.get("cache_sentinel_username")))
+    _identity("sentinel_password", bool(creds.get("cache_sentinel_password")))
+    _identity("sentinel_auth_enabled", "authEnabled" in sentinel)
+
+    def _knob(json_key: str, key: str, default, cast):
+        # Pool knobs get an entry ONLY when the provider JSON actually
+        # supplies them — absent otherwise, so callers can tell "the
+        # provider set this" from "nobody set this, apply my own default".
+        if json_key in conn:
+            src[key] = origin
+            return cast(conn[json_key])
+        return default
+
     return RedisEndpointConfig(
         role=RedisRole.CACHE, mode=mode,
         host=conn.get("host") or "localhost",
@@ -462,7 +492,13 @@ def _resolve_provider_cache(
         sentinel_password=creds.get("cache_sentinel_password"),
         sentinel_auth_enabled=bool(sentinel.get("authEnabled", False)),
         tls=_tls_from_json(conn.get("tls") or {}),
-        max_connections=int(conn.get("maxConnections") or 20),
-        socket_timeout=float(conn.get("socketTimeout") or 10),
+        max_connections=_knob("maxConnections", "max_connections", 20, int),
+        socket_timeout=_knob("socketTimeout", "socket_timeout", 10.0, float),
+        socket_connect_timeout=_knob(
+            "socketConnectTimeout", "socket_connect_timeout", 5.0, float,
+        ),
+        health_check_interval=_knob(
+            "healthCheckInterval", "health_check_interval", 30, int,
+        ),
         source=src,
     )
