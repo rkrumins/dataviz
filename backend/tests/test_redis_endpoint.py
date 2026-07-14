@@ -34,6 +34,7 @@ for _role in ("STREAMS", "CACHE"):
         f"REDIS_{_role}_SENTINEL_AUTH_ENABLED", f"REDIS_{_role}_CLUSTER_NODES",
         f"REDIS_{_role}_MAX_CONNECTIONS", f"REDIS_{_role}_SOCKET_TIMEOUT",
         f"REDIS_{_role}_SOCKET_CONNECT_TIMEOUT", f"REDIS_{_role}_HEALTH_CHECK_INTERVAL",
+        f"REDIS_{_role}_RETRY_ON_TIMEOUT",
     ]
 
 
@@ -479,3 +480,42 @@ def test_pool_knobs_unset_have_no_provenance(monkeypatch):
     cfg = resolve_redis_config(RedisRole.STREAMS)
     assert cfg.max_connections == 20
     assert "max_connections" not in cfg.source
+
+
+# ── retry_on_timeout: per-role default, preserving both original builders ──
+
+def test_retry_on_timeout_defaults_per_role(monkeypatch):
+    """The ORIGINAL single-node bus builder hard-coded retry_on_timeout=True;
+    the original cache client (build_cache_client) never set it. The central
+    resolver must reproduce both defaults exactly, per role — not one blanket
+    value for everyone."""
+    s = resolve_redis_config(RedisRole.STREAMS)
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert s.retry_on_timeout is True
+    assert c.retry_on_timeout is False
+    assert "retry_on_timeout" not in s.source
+    assert "retry_on_timeout" not in c.source
+
+
+def test_retry_on_timeout_override_per_role(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_RETRY_ON_TIMEOUT", "false")
+    monkeypatch.setenv("REDIS_CACHE_RETRY_ON_TIMEOUT", "true")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert s.retry_on_timeout is False
+    assert c.retry_on_timeout is True
+    assert s.source["retry_on_timeout"] == "REDIS_STREAMS_RETRY_ON_TIMEOUT"
+    assert c.source["retry_on_timeout"] == "REDIS_CACHE_RETRY_ON_TIMEOUT"
+
+
+# ── implicit default endpoint: STREAMS must stay off FalkorDB's port ───────
+
+def test_streams_default_endpoint_is_not_falkordb(monkeypatch):
+    """With NO Redis env vars set at all, STREAMS must resolve to
+    localhost:6380 (the legacy bus builder's implicit default), NOT 6379 —
+    in this project's dev environment 6379 is FalkorDB, the graph database.
+    A bare run without .env would otherwise silently point the coordination
+    bus at the graph DB."""
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert (s.host, s.port) == ("localhost", 6380)
+    assert s.source["port"] == "default"

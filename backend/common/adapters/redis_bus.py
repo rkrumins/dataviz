@@ -36,14 +36,18 @@ def build_bus_redis(
     import dataclasses
 
     cfg = resolve_redis_config(RedisRole.STREAMS)
-    # Callers pass pool sizing; env wins when it explicitly set them.
+    # Callers pass pool sizing; env wins when it explicitly set them. Each
+    # field is an INDEPENDENT provenance entry in cfg.source, so each needs
+    # its own gate — a shared gate would let an operator who set only one of
+    # socket_timeout/socket_connect_timeout have it silently overwritten by
+    # the caller's default for the other.
     src = cfg.source
     if "max_connections" not in src:
         cfg = dataclasses.replace(cfg, max_connections=max_connections)
     if "socket_timeout" not in src:
+        cfg = dataclasses.replace(cfg, socket_timeout=float(socket_timeout))
+    if "socket_connect_timeout" not in src:
         cfg = dataclasses.replace(
-            cfg,
-            socket_timeout=float(socket_timeout),
-            socket_connect_timeout=float(socket_connect_timeout),
+            cfg, socket_connect_timeout=float(socket_connect_timeout),
         )
     return build_redis_client(cfg, decode_responses=decode_responses)

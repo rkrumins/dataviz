@@ -33,7 +33,7 @@ Config (per role R in {STREAMS, CACHE}) — all independent:
     REDIS_{R}_SENTINEL_USERNAME / _SENTINEL_PASSWORD / _SENTINEL_PASSWORD_FILE
     REDIS_{R}_SENTINEL_AUTH_ENABLED
     REDIS_{R}_MAX_CONNECTIONS / _SOCKET_TIMEOUT / _SOCKET_CONNECT_TIMEOUT
-    REDIS_{R}_HEALTH_CHECK_INTERVAL
+    REDIS_{R}_HEALTH_CHECK_INTERVAL / _RETRY_ON_TIMEOUT
 
 Legacy (still honoured, ROLE-SCOPED — they only ever meant one role):
     REDIS_URL + REDIS_USERNAME/REDIS_PASSWORD/REDIS_TLS_*   -> STREAMS
@@ -95,6 +95,7 @@ class RedisEndpointConfig:
     socket_timeout: float = 10.0
     socket_connect_timeout: float = 5.0
     health_check_interval: int = 30
+    retry_on_timeout: bool = False
     # field name -> where the value came from. Rendered by Admin > System > Redis.
     source: Dict[str, str] = field(default_factory=dict)
 
@@ -314,7 +315,16 @@ def resolve_redis_config(
         return default
 
     host = _pick("HOST", "host", "localhost")
-    port = _pick("PORT", "port", 6379, int)
+    port = _pick(
+        "PORT", "port",
+        # The implicit default (nothing configured at all) is role-specific:
+        # STREAMS must fall back to 6380, matching the legacy bus builder's
+        # `redis://localhost:6380/0`. In this project's dev environment port
+        # 6379 is FalkorDB (the graph database), not the coordination bus —
+        # do not "tidy" this back to one shared default.
+        6380 if role is RedisRole.STREAMS else 6379,
+        int,
+    )
     db = _pick("DB", "db", 0, int)
     username = _pick("USERNAME", "username", None)
 
@@ -409,6 +419,17 @@ def resolve_redis_config(
         src[key] = f"{prefix}{env_suffix}"
         return cast(raw)
 
+    # retry_on_timeout: ONE automatic redis-py retry after a transient socket
+    # timeout (network blip, Redis busy during an AOF rewrite). The ORIGINAL
+    # single-node bus builder hard-coded this True; the original cache client
+    # (build_cache_client) never set it at all. Preserve BOTH exactly — the
+    # default is per-ROLE, not one blanket value — while still letting an
+    # operator override either via REDIS_{ROLE}_RETRY_ON_TIMEOUT.
+    retry_on_timeout_raw = os.getenv(f"{prefix}RETRY_ON_TIMEOUT")
+    retry_on_timeout = _as_bool(retry_on_timeout_raw, role is RedisRole.STREAMS)
+    if retry_on_timeout_raw is not None:
+        src["retry_on_timeout"] = f"{prefix}RETRY_ON_TIMEOUT"
+
     return RedisEndpointConfig(
         role=role, mode=mode, host=host, port=port, db=db,
         username=username, password=password,
@@ -427,6 +448,7 @@ def resolve_redis_config(
         health_check_interval=_knob(
             "HEALTH_CHECK_INTERVAL", "health_check_interval", 30, int,
         ),
+        retry_on_timeout=retry_on_timeout,
         source=src,
     )
 
@@ -564,6 +586,7 @@ def build_redis_client(
         "socket_connect_timeout": cfg.socket_connect_timeout,
         "health_check_interval": cfg.health_check_interval,
         "max_connections": cfg.max_connections,
+        "retry_on_timeout": cfg.retry_on_timeout,
         **tls_client_kwargs(cfg.tls),
     }
     if cfg.username:

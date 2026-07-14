@@ -187,3 +187,67 @@ def test_bus_honours_password_and_tls(monkeypatch):
     assert captured["password"] == "bus-pw"
     assert captured["ssl"] is True
     assert captured["ssl_ca_certs"] == "/certs/streams/ca.crt"
+
+
+def test_bus_defaults_to_retry_on_timeout_true(monkeypatch):
+    """CRITICAL regression check: the original single-node bus builder
+    hard-coded `retry_on_timeout=True` on every client it built. The central
+    factory must still land it in the constructed client's kwargs by
+    default — no env needed."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://bus-host:6380/0")
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    assert build_bus_redis() == "C"
+    assert captured["retry_on_timeout"] is True
+
+
+def test_only_socket_connect_timeout_env_is_preserved(monkeypatch):
+    """An operator setting ONLY REDIS_STREAMS_SOCKET_CONNECT_TIMEOUT (e.g. for
+    fast failover detection) must not have it silently clobbered by
+    build_bus_redis's caller-supplied socket_timeout/socket_connect_timeout
+    defaults — the two fields have independent provenance and need
+    independent gates."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://bus-host:6380/0")
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_CONNECT_TIMEOUT", "2")
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    build_bus_redis(socket_connect_timeout=5, socket_timeout=10)
+    assert captured["socket_connect_timeout"] == 2.0
+    # The untouched field still gets the caller's default.
+    assert captured["socket_timeout"] == 10.0
+
+
+def test_only_socket_timeout_env_is_preserved(monkeypatch):
+    """Mirror of the above for REDIS_STREAMS_SOCKET_TIMEOUT alone."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://bus-host:6380/0")
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "30")
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    build_bus_redis(socket_connect_timeout=5, socket_timeout=10)
+    assert captured["socket_timeout"] == 30.0
+    # The untouched field still gets the caller's default.
+    assert captured["socket_connect_timeout"] == 5.0
+
+
+def test_bus_default_endpoint_is_not_falkordb(monkeypatch):
+    """With no Redis env vars at all, the bus must resolve to localhost:6380
+    (the legacy implicit default), NOT 6379 — 6379 is FalkorDB in this
+    project's dev environment."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    build_bus_redis()
+    assert captured["host"] == "localhost"
+    assert captured["port"] == 6380

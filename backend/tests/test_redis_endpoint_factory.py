@@ -171,6 +171,49 @@ def test_cluster_mode_config_is_refused_by_the_factory():
         build_redis_client(cfg)
 
 
+def test_standalone_passes_retry_on_timeout(monkeypatch):
+    """A resolved knob that never reaches the constructed client is the exact
+    bug class this factory exists to kill — assert on the captured kwargs,
+    not just on cfg.retry_on_timeout."""
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    build_redis_client(RedisEndpointConfig(role=RedisRole.STREAMS, host="h", retry_on_timeout=True))
+    assert captured["retry_on_timeout"] is True
+
+    captured.clear()
+    build_redis_client(RedisEndpointConfig(role=RedisRole.CACHE, host="h", retry_on_timeout=False))
+    assert captured["retry_on_timeout"] is False
+
+
+def test_sentinel_passes_retry_on_timeout_to_master_connection(monkeypatch):
+    """Same guarantee as the standalone case, but for the Sentinel-managed
+    master/replica data connection (master_for) — the sentinel-daemon
+    connection kwargs are a separate concern and are not asserted here."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["kw"] = kw
+
+        def master_for(self, name, **kw):
+            captured["master_kw"] = kw
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.STREAMS, mode="sentinel",
+        sentinel_master="mymaster", sentinel_nodes=(("s1", 26379),),
+        retry_on_timeout=True,
+    )
+    assert build_redis_client(cfg) == "MASTER"
+    assert captured["kw"]["retry_on_timeout"] is True
+    assert captured["master_kw"]["retry_on_timeout"] is True
+
+
 def test_cluster_mode_is_refused_regardless_of_case_or_whitespace():
     """The resolver normalizes mode via .strip().lower(), so this is unreachable
     through resolve_redis_config today — but the factory is the last line of
