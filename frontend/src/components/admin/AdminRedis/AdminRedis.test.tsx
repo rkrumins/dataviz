@@ -31,10 +31,13 @@ vi.mock('@/services/redisConfigService', () => ({
 describe('AdminRedis', () => {
   it('shows both endpoints as independent, with provenance and no secrets', async () => {
     render(<AdminRedis />)
-    await waitFor(() => expect(screen.getByText('mem-coord.gcp:6379')).toBeInTheDocument())
-    expect(screen.getByText('mem-cache.gcp:6379')).toBeInTheDocument()
-    // provenance is shown, the secret value is not
-    expect(screen.getByText(/REDIS_STREAMS_PASSWORD_FILE/)).toBeInTheDocument()
+    // Each endpoint is shown at least once (the cache endpoint appears both on its
+    // role card and in the "shared default" provider-impact panel — both meaningful).
+    await waitFor(() => expect(screen.getAllByText('mem-coord.gcp:6379').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('mem-cache.gcp:6379').length).toBeGreaterThan(0)
+    // provenance is shown (as the password's source chip, and in the env reference),
+    // the secret value itself never is
+    expect(screen.getAllByText(/REDIS_STREAMS_PASSWORD_FILE/).length).toBeGreaterThan(0)
     expect(screen.queryByText(/pw=|password=/i)).not.toBeInTheDocument()
   })
 
