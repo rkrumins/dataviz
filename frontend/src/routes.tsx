@@ -22,6 +22,7 @@ const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ defa
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminInfrastructure = lazy(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
+const AdminRedis = lazy(() => import('@/components/admin/AdminRedis').then(m => ({ default: m.AdminRedis })))
 const AdminBranding = lazy(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
@@ -195,6 +196,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="infrastructure">
                 <Lazy><AdminInfrastructure /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'redis',
+            element: (
+              <RequireNav group="admin" sectionKey="redis">
+                <Lazy><AdminRedis /></Lazy>
               </RequireNav>
             ),
           },
