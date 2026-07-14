@@ -372,7 +372,7 @@ function TestConnection({ role }: { role: RedisRole }) {
 // Role card — a full briefing per endpoint
 // ─────────────────────────────────────────────────────────────────────────
 
-function RoleCard({ role, index }: { role: RedisRoleConfig; index: number }) {
+function RoleCard({ role }: { role: RedisRoleConfig }) {
     const content = ROLE_CONTENT[role.role]
     const status = statusFor(role)
     const meta = STATUS_META[status]
@@ -386,11 +386,9 @@ function RoleCard({ role, index }: { role: RedisRoleConfig; index: number }) {
     return (
         <section
             className={cn(
-                'flex flex-col rounded-2xl border bg-canvas-elevated p-5 opacity-0 [animation-fill-mode:forwards]',
-                'animate-in fade-in slide-in-from-bottom-2 duration-500',
+                'flex flex-col rounded-2xl border bg-canvas-elevated p-5',
                 status === 'down' ? 'border-red-500/30' : status === 'degraded' ? 'border-amber-500/30' : 'border-glass-border',
             )}
-            style={{ animationDelay: `${120 + index * 90}ms` }}
         >
             {/* header */}
             <div className="flex items-start gap-3">
@@ -654,12 +652,11 @@ const MODEL_FACTS: { icon: ComponentType<{ className?: string }>; title: string;
 function MentalModel() {
     return (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            {MODEL_FACTS.map((f, i) => {
+            {MODEL_FACTS.map(f => {
                 const Icon = f.icon
                 return (
                     <div key={f.title}
-                        className="rounded-xl border border-glass-border bg-canvas-elevated p-4 opacity-0 [animation-fill-mode:forwards] animate-in fade-in slide-in-from-bottom-2 duration-500"
-                        style={{ animationDelay: `${i * 70}ms` }}>
+                        className="rounded-xl border border-glass-border bg-canvas-elevated p-4">
                         <div className="flex items-center gap-2">
                             <Icon className="h-4 w-4 text-indigo-500" />
                             <span className="text-xs font-semibold text-ink">{f.title}</span>
@@ -774,11 +771,11 @@ export function AdminRedis() {
                     </div>
                 </div>
             ) : data ? (
-                <div className="space-y-6">
+                <div className="space-y-6 animate-in fade-in duration-500">
                     <MentalModel />
                     <DeprecationNotice deprecations={data.deprecations} />
                     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                        {data.roles.map((role, i) => <RoleCard key={role.role} role={role} index={i} />)}
+                        {data.roles.map(role => <RoleCard key={role.role} role={role} />)}
                     </div>
                     <ProviderImpact cache={cache} />
                 </div>
