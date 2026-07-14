@@ -117,26 +117,40 @@ def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvide
     )
 
 
-def _assert_dedicated_cache_configured() -> None:
-    """WS2.1 decoupling guard. Deployed roles MUST run the provider cache on a
-    DEDICATED Redis, never the FalkorDB instance — a graph outage must not also
-    disable caching, and cache traffic must not contend with graph queries on
-    FalkorDB's single-threaded process. Fail fast at startup when CACHE_REDIS_URL
-    is unset in a WEB / WORKER / CONTROLPLANE role. In DEV a missing URL simply
-    runs cache-disabled (still decoupled — ``build_cache_client`` never
-    co-locates the cache on FalkorDB)."""
-    import os as _os
+def _assert_redis_roles_configured() -> None:
+    """Deployed roles must have every Redis endpoint they use resolvable.
+
+    The old guard only checked the *env* CACHE_REDIS_URL, so a deployment that
+    configured the cache purely per-provider failed to boot. Validate the roles
+    this process actually uses, and fail with the role, the resolved host and
+    what is missing — never a silent cache-off or a silent unauthenticated
+    connect.
+
+    The CACHE role is *not* required globally any more — a deployment may
+    configure it only per provider (extra_config.cacheConnection) — so it is
+    resolved and logged, not enforced. STREAMS is a single fleet-wide
+    coordination endpoint with no per-provider override, so it must resolve.
+    In DEV neither is enforced (still decoupled — ``build_cache_client`` never
+    co-locates the cache on FalkorDB).
+    """
     from backend.app.runtime.role import current_role, SynodicRole
+    from backend.common.adapters.redis_endpoint import (
+        RedisConfigurationError, RedisRole, resolve_redis_config,
+    )
 
     if current_role() == SynodicRole.DEV:
         return
-    if not _os.getenv("CACHE_REDIS_URL"):
-        raise RuntimeError(
-            f"CACHE_REDIS_URL is required in the {current_role().value!r} role: "
-            "the application cache must run on a DEDICATED Redis, not the "
-            "FalkorDB instance. Set CACHE_REDIS_URL (see common-config / "
-            "app-secrets)."
-        )
+    for role in (RedisRole.STREAMS, RedisRole.CACHE):
+        try:
+            cfg = resolve_redis_config(role)
+        except RedisConfigurationError as exc:
+            raise RuntimeError(f"Redis {role.value} endpoint mis-configured: {exc}")
+        if role is RedisRole.STREAMS and cfg.source.get("host", "default") == "default":
+            raise RuntimeError(
+                "Redis STREAMS endpoint is not configured. Set REDIS_STREAMS_HOST "
+                "(or the legacy REDIS_URL)."
+            )
+        logger.info("providers: redis %s", cfg.describe())
 
 
 class ProviderManager:
@@ -144,7 +158,7 @@ class ProviderManager:
 
     def __init__(self) -> None:
         # WS2.1: enforce operational/graph Redis decoupling at process start.
-        _assert_dedicated_cache_configured()
+        _assert_redis_roles_configured()
         # Workspace-centric cache: (provider_id, graph_name) -> breaker-wrapped provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
@@ -983,6 +997,7 @@ class ProviderManager:
         return self._create_provider_instance(
             row.provider_type, row.host, row.port, graph_name,
             row.tls_enabled, credentials, extra_config=merged_extra,
+            provider_id=provider_id,
         )
 
     @staticmethod
@@ -1018,6 +1033,7 @@ class ProviderManager:
         tls_enabled: bool,
         credentials: Optional[dict] = None,
         extra_config: Optional[dict] = None,
+        provider_id: Optional[str] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
@@ -1053,12 +1069,19 @@ class ProviderManager:
                 username=creds.get("username"),
                 password=creds.get("password"),
                 connection_config=_falkor_conn,
-                # Per-provider dedicated cache Redis (encrypted credential).
+                # Per-provider dedicated cache Redis (encrypted credential;
+                # deprecated alias — folded into credentials["cache_redis_url"]).
                 cache_redis_url=creds.get("cache_redis_url"),
                 auth_enabled=_auth_enabled,
                 # Connection-level TLS (the falkordbConnection.tls object adds
                 # CA/client-cert/verify mode). Previously dropped for FalkorDB.
                 tls_enabled=tls_enabled,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials) — resolved centrally by
+                # build_cache_client, never inherited from the graph connection.
+                provider_id=provider_id,
+                extra_config=extra_config,
+                credentials=creds,
             )
 
         elif ptype == "neo4j":

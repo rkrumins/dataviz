@@ -664,55 +664,32 @@ async def build_graph_client(
 
 
 def build_cache_client(
-    cfg: FalkorDBConnConfig, *, cache_url: Optional[str], pool_kwargs: dict,
+    *, provider_id: str, extra_config: Optional[dict], credentials: Optional[dict],
 ) -> Optional[Any]:
-    """Build the provider's cache Redis on a DEDICATED endpoint — or nothing.
+    """The provider's cache Redis — a DEDICATED endpoint, resolved centrally.
 
-    Only a dedicated ``cache_url`` produces a client:
+    Precedence: the provider's own ``extra_config.cacheConnection`` (+ its encrypted
+    cache_* credentials), else the global ``REDIS_CACHE_*`` endpoint, else the legacy
+    ``CACHE_REDIS_URL``. ``None`` means no cache is configured → cache disabled
+    (best-effort), never co-located on FalkorDB (ADR-020).
 
-    * ``cache_url`` set → a client on that dedicated Redis, with its own
-      host / auth / scheme. A ``rediss://`` URL also picks up the connection's
-      custom CA / client cert / verify mode (shared-PKI assumption) so
-      mutual-TLS caches work, not just system-trust ``rediss://``.
-    * ``cache_url`` unset → ``None`` (cache DISABLED). WS2.1: the provider's
-      cache is NEVER co-located on the FalkorDB instance. FalkorDB hosts the
-      graph and nothing else, so a graph outage cannot also wipe the cache or
-      let cache traffic contend with graph queries on FalkorDB's single-
-      threaded process. Decoupling is structural here, not conventional;
-      deployed roles additionally fail fast at startup when no dedicated cache
-      is configured (see ``ProviderManager``).
+    It no longer takes the FalkorDB ``FalkorDBConnConfig``: it used to derive its TLS
+    from the GRAPH's certs, which produced "no TLS" or "system trust store" depending
+    on the URL scheme. The cache owns its own PKI (ADR-021 follow-up).
     """
-    from redis.asyncio import Redis
-
-    socket_timeout = float(pool_kwargs.get("socket_timeout", 10.0))
-
-    if not cache_url:
-        # No dedicated endpoint → cache off. Do NOT mirror the FalkorDB
-        # topology — that is exactly the coupling this decoupling removes.
-        return None
-
-    extra: dict = {}
-    if cache_url.lower().startswith("rediss://"):
-        # rediss:// already implies ssl=True (from_url sets SSLConnection);
-        # add only the cert/verify kwargs so custom CA / mTLS apply.
-        extra = tls_client_kwargs(cfg.tls_settings())
-        extra.pop("ssl", None)
-    return Redis.from_url(
-        cache_url,
-        max_connections=pool_kwargs.get("max_connections"),
-        socket_connect_timeout=2.0,
-        socket_timeout=socket_timeout,
-        decode_responses=True,
-        **extra,
+    from backend.common.adapters.redis_endpoint import (
+        ProviderCacheOverride, RedisRole, build_redis_client, resolve_redis_config,
     )
 
-
-def build_cache_redis_fallback(
-    cfg: FalkorDBConnConfig, *, pool_kwargs: dict,
-) -> Optional[Any]:
-    """:func:`build_cache_client` with no dedicated URL. Always ``None`` now:
-    the provider cache is never co-located on FalkorDB (WS2.1 decoupling)."""
-    return build_cache_client(cfg, cache_url=None, pool_kwargs=pool_kwargs)
+    override = ProviderCacheOverride(
+        provider_id=provider_id,
+        connection=(extra_config or {}).get("cacheConnection") or {},
+        credentials=credentials or {},
+    )
+    cfg = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    if cfg.source.get("host", "default") == "default":
+        return None                      # nothing configured anywhere → cache off
+    return build_redis_client(cfg)
 
 
 # ============================================================================
