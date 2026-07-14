@@ -436,6 +436,14 @@ def build_revocation_backend() -> "RedisBackend":
         cfg,
         socket_timeout=REVOCATION_SOCKET_TIMEOUT_S,
         socket_connect_timeout=REVOCATION_SOCKET_TIMEOUT_S,
+        # STREAMS defaults retry_on_timeout=True (correct for the message
+        # bus — one automatic reconnect+resend after a transient blip).
+        # Revocation must fail open FAST: both timeouts above are already
+        # the tight fail-open budget, and a retry would silently spend
+        # that budget twice on every authenticated request during a
+        # Redis blip. Always off here, regardless of the STREAMS default
+        # or any REDIS_STREAMS_RETRY_ON_TIMEOUT override.
+        retry_on_timeout=False,
     )
     return RedisBackend(build_redis_client(cfg))
 
@@ -446,15 +454,53 @@ def get_revocation_service() -> RevocationService:
     Falls back to ``InMemoryBackend`` (with a warning) if Redis cannot
     be constructed at import time — this keeps unit tests and local
     dev usable without a running Redis.
+
+    This runs on EVERY authenticated request. If backend construction
+    raised past this function, ``_INSTANCE`` would stay ``None`` and
+    the same exception would fire again on every subsequent call — a
+    config typo or a mid-rotation secret-mount race would turn into a
+    total, unrecoverable auth outage instead of the fail-open
+    degradation this service exists to provide. So every failure mode
+    below falls back to ``InMemoryBackend``, logged loudly (never the
+    secret value) rather than swallowed silently.
     """
     global _INSTANCE
     if _INSTANCE is None:
+        from backend.common.adapters.redis_endpoint import RedisConfigurationError
+
         try:
             backend: RevocationBackend = build_revocation_backend()
         except ImportError:
             logger.warning(
                 "redis library not available — using InMemoryBackend. "
                 "RBAC revocation will not survive process restarts."
+            )
+            backend = InMemoryBackend()
+        except RedisConfigurationError as exc:
+            # e.g. a missing/empty *_PASSWORD_FILE during a secret-mount
+            # race, an incomplete sentinel config, or a stray cluster
+            # var. resolve_redis_config's error strings never include
+            # the secret value itself (only file paths / var names), so
+            # this is safe to log verbatim.
+            logger.error(
+                "Revocation Redis config invalid (role=streams): %s — "
+                "falling back to InMemoryBackend. RBAC revocation will "
+                "not survive process restarts or be shared across "
+                "replicas until this is fixed.",
+                exc,
+            )
+            backend = InMemoryBackend()
+        except Exception as exc:  # noqa: BLE001 — hot auth path: any other
+            # construction failure (bad int/float env cast, TLS/client
+            # kwarg error, ...) has the same catastrophic shape as the
+            # two cases above, so it gets the same fail-open treatment
+            # rather than escaping as an unhandled 500.
+            logger.error(
+                "Unexpected error building revocation Redis backend "
+                "(role=streams): %s: %s — falling back to InMemoryBackend. "
+                "RBAC revocation will not survive process restarts or be "
+                "shared across replicas until this is fixed.",
+                type(exc).__name__, exc,
             )
             backend = InMemoryBackend()
         _INSTANCE = RevocationService(backend)
