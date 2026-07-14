@@ -502,3 +502,66 @@ def _resolve_provider_cache(
         ),
         source=src,
     )
+
+
+# ── the factory ─────────────────────────────────────────────────────
+
+def build_redis_client(
+    cfg: RedisEndpointConfig, *, decode_responses: bool = True,
+) -> Any:
+    """The ONLY way to build a non-graph Redis client.
+
+    Every role goes through here, so auth and TLS cannot be forgotten for one
+    client and remembered for another — which is exactly the bug this replaces.
+    """
+    import redis.asyncio as aioredis
+    from backend.common.adapters.redis_tls import tls_client_kwargs
+
+    if cfg.mode == "cluster":
+        _reject_cluster(cfg.role, "cluster")
+
+    common: Dict[str, Any] = {
+        "decode_responses": decode_responses,
+        "socket_timeout": cfg.socket_timeout,
+        "socket_connect_timeout": cfg.socket_connect_timeout,
+        "health_check_interval": cfg.health_check_interval,
+        "max_connections": cfg.max_connections,
+        **tls_client_kwargs(cfg.tls),
+    }
+    if cfg.username:
+        common["username"] = cfg.username
+    if cfg.password:
+        common["password"] = cfg.password
+
+    if cfg.mode == "sentinel":
+        from redis.asyncio.sentinel import Sentinel
+
+        # Sentinel DAEMONS have their own auth. Passing the data-plane password to
+        # an unauthenticated sentinel makes redis-py raise on the AUTH reply and
+        # fails discover_master — send credentials only when configured.
+        sentinel_kwargs: Dict[str, Any] = {
+            "socket_timeout": cfg.socket_timeout,
+            "socket_connect_timeout": cfg.socket_connect_timeout,
+            **tls_client_kwargs(cfg.tls),
+        }
+        s_user = cfg.sentinel_username or (
+            cfg.username if cfg.sentinel_auth_enabled else None
+        )
+        s_pass = cfg.sentinel_password or (
+            cfg.password if cfg.sentinel_auth_enabled else None
+        )
+        if s_user:
+            sentinel_kwargs["username"] = s_user
+        if s_pass:
+            sentinel_kwargs["password"] = s_pass
+
+        sentinel = Sentinel(
+            list(cfg.sentinel_nodes), sentinel_kwargs=sentinel_kwargs, **common,
+        )
+        client = sentinel.master_for(cfg.sentinel_master, **common)
+        logger.info("redis_endpoint: %s", cfg.describe())
+        return client
+
+    client = aioredis.Redis(host=cfg.host, port=cfg.port, db=cfg.db, **common)
+    logger.info("redis_endpoint: %s", cfg.describe())
+    return client
