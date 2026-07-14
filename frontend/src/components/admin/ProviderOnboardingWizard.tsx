@@ -1405,12 +1405,26 @@ export function ProviderOnboardingWizard({
                   )}
 
                   <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
-                    <label className="flex items-center justify-between">
-                      <div>
+                    {/* What the cache is for + the best-effort promise */}
+                    <div className="flex items-start gap-2.5">
+                      <Zap className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-ink">Read cache</p>
+                        <p className="mt-0.5 text-xs leading-relaxed text-ink-muted">
+                          This provider caches computed graph reads (ancestor chains, labels, stats) so
+                          repeat reads are instant. The cache is best-effort — if it&rsquo;s ever
+                          unavailable, reads are recomputed and nothing breaks.
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center justify-between border-t border-glass-border/70 pt-3">
+                      <div className="pr-3">
                         <p className="text-sm font-medium text-ink">Use a dedicated cache for this provider</p>
                         <p className="text-xs text-ink-muted">
-                          Recommended in cluster mode. Otherwise this provider shares the platform&rsquo;s
-                          global cache Redis.
+                          Give this provider its own cache Redis — own host, credentials and TLS,
+                          insulated from changes to the global cache. Recommended when the graph runs
+                          in Redis Cluster mode.
                         </p>
                       </div>
                       <input
@@ -1421,6 +1435,22 @@ export function ProviderOnboardingWizard({
                         className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
                       />
                     </label>
+
+                    {/* DEFAULT — say plainly what happens when the box is left unchecked */}
+                    {!(formData.falkordbConnection?.cache.enabled ?? false) && (
+                      <div className="flex items-start gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2.5">
+                        <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                        <p className="text-[11px] leading-relaxed text-ink-secondary">
+                          <span className="font-semibold text-ink">Using the shared cache.</span>{' '}
+                          Left unchecked, this provider uses the platform&rsquo;s global cache Redis —
+                          configured centrally under{' '}
+                          <span className="font-medium text-indigo-600 dark:text-indigo-400">Admin › Redis</span>{' '}
+                          and shared with every other provider. Nothing more to set up here. If no
+                          global cache is configured there, the provider simply runs without a cache
+                          (reads are recomputed on demand — still fully functional, just not cached).
+                        </p>
+                      </div>
+                    )}
 
                     {formData.falkordbConnection?.cache.enabled && (
                       formData.falkordbConnection.cache.legacyUrlPresent ? (
