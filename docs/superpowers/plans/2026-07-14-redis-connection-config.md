@@ -103,6 +103,8 @@ for _role in ("STREAMS", "CACHE"):
         f"REDIS_{_role}_TLS_KEYFILE", f"REDIS_{_role}_TLS_CERT_REQS",
         f"REDIS_{_role}_TLS_CHECK_HOSTNAME", f"REDIS_{_role}_SENTINEL_MASTER",
         f"REDIS_{_role}_SENTINEL_NODES", f"REDIS_{_role}_CLUSTER_NODES",
+        f"REDIS_{_role}_MAX_CONNECTIONS", f"REDIS_{_role}_SOCKET_TIMEOUT",
+        f"REDIS_{_role}_SOCKET_CONNECT_TIMEOUT", f"REDIS_{_role}_HEALTH_CHECK_INTERVAL",
     ]
 
 
@@ -282,6 +284,27 @@ def test_describe_redacts_the_password(monkeypatch):
     text = resolve_redis_config(RedisRole.CACHE).describe()
     assert "super-secret" not in text
     assert "h" in text
+
+
+# ── pool knobs must be attributable ─────────────────────────────────
+
+def test_pool_knobs_record_provenance(monkeypatch):
+    """build_bus_redis (Task 3) decides whether to apply its caller-supplied
+    defaults by asking whether the env explicitly set a knob. Without a source
+    entry the caller's default silently overrides the operator's env."""
+    monkeypatch.setenv("REDIS_STREAMS_MAX_CONNECTIONS", "50")
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "3.5")
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.max_connections == 50
+    assert cfg.socket_timeout == 3.5
+    assert cfg.source["max_connections"] == "REDIS_STREAMS_MAX_CONNECTIONS"
+    assert cfg.source["socket_timeout"] == "REDIS_STREAMS_SOCKET_TIMEOUT"
+
+
+def test_pool_knobs_unset_have_no_provenance(monkeypatch):
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.max_connections == 20
+    assert "max_connections" not in cfg.source
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -633,6 +656,17 @@ def resolve_redis_config(
             f"{prefix}SENTINEL_NODES."
         )
 
+    # Pool knobs. Provenance MUST be recorded for these: build_bus_redis (Task 3)
+    # decides whether to apply its caller-supplied defaults by asking whether the
+    # env explicitly set them (`"max_connections" not in cfg.source`). Without a
+    # source entry the caller's default would silently override the operator's env.
+    def _knob(env_suffix: str, key: str, default, cast):
+        raw = os.getenv(f"{prefix}{env_suffix}")
+        if raw is None:
+            return default
+        src[key] = f"{prefix}{env_suffix}"
+        return cast(raw)
+
     return RedisEndpointConfig(
         role=role, mode=mode, host=host, port=port, db=db,
         username=username, password=password,
@@ -643,10 +677,14 @@ def resolve_redis_config(
         ),
         sentinel_auth_enabled=_as_bool(os.getenv(f"{prefix}SENTINEL_AUTH_ENABLED"), False),
         tls=tls,
-        max_connections=int(os.getenv(f"{prefix}MAX_CONNECTIONS", "20")),
-        socket_timeout=float(os.getenv(f"{prefix}SOCKET_TIMEOUT", "10")),
-        socket_connect_timeout=float(os.getenv(f"{prefix}SOCKET_CONNECT_TIMEOUT", "5")),
-        health_check_interval=int(os.getenv(f"{prefix}HEALTH_CHECK_INTERVAL", "30")),
+        max_connections=_knob("MAX_CONNECTIONS", "max_connections", 20, int),
+        socket_timeout=_knob("SOCKET_TIMEOUT", "socket_timeout", 10.0, float),
+        socket_connect_timeout=_knob(
+            "SOCKET_CONNECT_TIMEOUT", "socket_connect_timeout", 5.0, float,
+        ),
+        health_check_interval=_knob(
+            "HEALTH_CHECK_INTERVAL", "health_check_interval", 30, int,
+        ),
         source=src,
     )
 
