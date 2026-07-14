@@ -19,7 +19,7 @@ _ALL_VARS = [
     "REDIS_URL", "REDIS_USERNAME", "REDIS_PASSWORD", "CACHE_REDIS_URL",
     "REDIS_TLS_ENABLED", "REDIS_TLS_CA_CERTS", "REDIS_TLS_CERTFILE",
     "REDIS_TLS_KEYFILE", "REDIS_TLS_CERT_REQS", "REDIS_TLS_CHECK_HOSTNAME",
-    "REDIS_CLUSTER_NODES",
+    "REDIS_CLUSTER_NODES", "REDIS_SENTINEL_MASTER", "REDIS_SENTINEL_NODES",
 ]
 for _role in ("STREAMS", "CACHE"):
     _ALL_VARS += [
@@ -257,6 +257,58 @@ def test_sentinel_fields_unset_have_no_provenance(monkeypatch):
     assert "sentinel_nodes" not in s.source
     assert "sentinel_username" not in s.source
     assert "sentinel_auth_enabled" not in s.source
+
+
+# ── legacy unprefixed sentinel back-compat (STREAMS only) ───────────
+
+def test_legacy_unprefixed_sentinel_vars_enable_sentinel_mode(monkeypatch):
+    """The original (pre-central-resolver) bus builder selected Sentinel mode
+    implicitly from REDIS_SENTINEL_MASTER + REDIS_SENTINEL_NODES alone — there
+    was no MODE variable at all. A deployment following that recipe must keep
+    working after the migration, not silently fall back to standalone."""
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379,s2:26379")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.mode == "sentinel"
+    assert s.sentinel_master == "mymaster"
+    assert s.sentinel_nodes == (("s1", 26379), ("s2", 26379))
+    assert s.source["sentinel_master"] == "REDIS_SENTINEL_MASTER (legacy)"
+    assert s.source["sentinel_nodes"] == "REDIS_SENTINEL_NODES (legacy)"
+    assert "legacy" in s.source["mode"]
+
+
+def test_legacy_unprefixed_sentinel_vars_do_not_leak_into_cache(monkeypatch):
+    """CACHE must never read the unprefixed REDIS_SENTINEL_* vars — that would
+    be cross-role inheritance, the exact bug class this module exists to
+    prevent."""
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379,s2:26379")
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert c.mode == "standalone"
+    assert "sentinel_master" not in c.source
+    assert "sentinel_nodes" not in c.source
+
+
+def test_role_prefixed_sentinel_wins_over_legacy_unprefixed(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "new-master")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "n1:26379")
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "old-master")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "o1:26379")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.sentinel_master == "new-master"
+    assert s.sentinel_nodes == (("n1", 26379),)
+    assert s.source["sentinel_master"] == "REDIS_STREAMS_SENTINEL_MASTER"
+
+
+def test_explicit_standalone_mode_beats_legacy_sentinel_inference(monkeypatch):
+    """An operator who explicitly sets REDIS_STREAMS_MODE=standalone must get
+    standalone, even if the legacy unprefixed Sentinel vars are also set."""
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "standalone")
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.mode == "standalone"
 
 
 # ── per-provider cache override ─────────────────────────────────────

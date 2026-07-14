@@ -37,6 +37,7 @@ Config (per role R in {STREAMS, CACHE}) — all independent:
 
 Legacy (still honoured, ROLE-SCOPED — they only ever meant one role):
     REDIS_URL + REDIS_USERNAME/REDIS_PASSWORD/REDIS_TLS_*   -> STREAMS
+    REDIS_SENTINEL_MASTER + REDIS_SENTINEL_NODES             -> STREAMS (sentinel mode)
     CACHE_REDIS_URL                                          -> CACHE
 """
 from __future__ import annotations
@@ -261,6 +262,8 @@ def resolve_redis_config(
     Precedence:
         CACHE:   provider override -> REDIS_CACHE_*  -> CACHE_REDIS_URL (legacy)
         STREAMS: REDIS_STREAMS_*   -> REDIS_URL + REDIS_{USERNAME,PASSWORD,TLS_*}
+                 (legacy); REDIS_STREAMS_SENTINEL_* -> REDIS_SENTINEL_MASTER +
+                 REDIS_SENTINEL_NODES (legacy, implies sentinel mode)
 
     Layers do NOT merge across sources of different scope: a provider override is
     whole-endpoint (it never inherits the global cache's password or CA), because a
@@ -349,6 +352,37 @@ def resolve_redis_config(
     sentinel_nodes = _parse_nodes(sentinel_nodes_raw)
     if sentinel_nodes_raw:
         src["sentinel_nodes"] = f"{prefix}SENTINEL_NODES"
+
+    # STREAMS keeps honouring the historical UNPREFIXED REDIS_SENTINEL_MASTER /
+    # REDIS_SENTINEL_NODES: the original bus builder selected Sentinel mode
+    # implicitly whenever both were set (there was no MODE concept at all).
+    # Without this fallback, a deployment running the bus on Sentinel today
+    # silently falls back to standalone after adopting the central resolver —
+    # no error, no warning, just the wrong Redis. Role-prefixed vars still win
+    # when they supply either value, and an explicit {prefix}MODE always wins
+    # over this inference.
+    if (
+        role is RedisRole.STREAMS
+        and mode_raw is None
+        and not sentinel_master
+        and not sentinel_nodes
+    ):
+        legacy_sentinel_master = os.getenv("REDIS_SENTINEL_MASTER")
+        legacy_sentinel_nodes = _parse_nodes(os.getenv("REDIS_SENTINEL_NODES"))
+        if legacy_sentinel_master and legacy_sentinel_nodes:
+            sentinel_master = legacy_sentinel_master
+            sentinel_nodes = legacy_sentinel_nodes
+            src["sentinel_master"] = "REDIS_SENTINEL_MASTER (legacy)"
+            src["sentinel_nodes"] = "REDIS_SENTINEL_NODES (legacy)"
+            mode = "sentinel"
+            src["mode"] = "REDIS_SENTINEL_MASTER+REDIS_SENTINEL_NODES (legacy)"
+            logger.info(
+                "redis_endpoint: %s sentinel mode inferred from legacy "
+                "REDIS_SENTINEL_MASTER/REDIS_SENTINEL_NODES — migrate to "
+                "%sMODE=sentinel + %sSENTINEL_MASTER/%sSENTINEL_NODES.",
+                role.value, prefix, prefix, prefix,
+            )
+
     if mode == "sentinel" and not (sentinel_master and sentinel_nodes):
         raise RedisConfigurationError(
             f"{role.value}: sentinel mode requires {prefix}SENTINEL_MASTER and "

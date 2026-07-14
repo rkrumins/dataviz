@@ -69,14 +69,63 @@ def test_single_node_tls_adds_certs(monkeypatch):
 
 
 def test_sentinel_mode(monkeypatch):
-    # Sentinel topology for the STREAMS role is only recognised via the
-    # REDIS_STREAMS_* namespace by the central resolver (see
-    # test_redis_endpoint.py::test_sentinel_mode) — the resolver does not fall
-    # back to the old unprefixed REDIS_SENTINEL_MASTER/_NODES auto-detection
-    # that the standalone redis_bus.py builder used to do. See task-3-report.md
-    # for the flag on this (deploy/topologies/README.md still documents the old
-    # unprefixed vars for the bus). REDIS_PASSWORD (unprefixed) is still
-    # honoured — that legacy path IS preserved, mode-independently.
+    # The ORIGINAL (pre-central-resolver) builder selected Sentinel mode
+    # implicitly from the unprefixed REDIS_SENTINEL_MASTER/_NODES alone (no
+    # MODE concept existed). This is the back-compat path deploy/topologies/
+    # README.md still documents for the bus — it must keep working after the
+    # migration to the central resolver (see redis_endpoint.py's STREAMS-only
+    # legacy sentinel inference). REDIS_PASSWORD (unprefixed) is honoured too,
+    # exactly as the original builder did.
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379, s2:26379")
+    monkeypatch.setenv("REDIS_PASSWORD", "pw")
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, **kw):
+            captured["nodes"], captured["kw"] = nodes, kw
+
+        def master_for(self, name, **kw):
+            captured["master"], captured["master_kw"] = name, kw
+            return "MASTER"
+
+    mod = types.ModuleType("redis.asyncio.sentinel")
+    mod.Sentinel = FakeSentinel
+    monkeypatch.setitem(sys.modules, "redis.asyncio.sentinel", mod)
+
+    assert build_bus_redis() == "MASTER"
+    assert captured["master"] == "mymaster"
+    assert captured["nodes"] == [("s1", 26379), ("s2", 26379)]
+    assert captured["kw"]["password"] == "pw"
+
+
+def test_sentinel_with_tls(monkeypatch):
+    # See test_sentinel_mode above: the unprefixed legacy vars still work.
+    # REDIS_TLS_ENABLED (unprefixed) is honoured mode-independently.
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "m")
+    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379")
+    monkeypatch.setenv("REDIS_TLS_ENABLED", "true")
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, **kw):
+            captured["kw"] = kw
+
+        def master_for(self, name, **kw):
+            return "MASTER"
+
+    mod = types.ModuleType("redis.asyncio.sentinel")
+    mod.Sentinel = FakeSentinel
+    monkeypatch.setitem(sys.modules, "redis.asyncio.sentinel", mod)
+    build_bus_redis()
+    assert captured["kw"]["ssl"] is True
+
+
+def test_sentinel_mode_role_prefixed(monkeypatch):
+    # Pins the NEW REDIS_STREAMS_SENTINEL_* path alongside the legacy
+    # unprefixed path above — both must keep working.
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "mymaster")
@@ -102,9 +151,7 @@ def test_sentinel_mode(monkeypatch):
     assert captured["kw"]["password"] == "pw"
 
 
-def test_sentinel_with_tls(monkeypatch):
-    # See test_sentinel_mode above: Sentinel mode is REDIS_STREAMS_*-only now.
-    # REDIS_TLS_ENABLED (unprefixed) is still honoured mode-independently.
+def test_sentinel_with_tls_role_prefixed(monkeypatch):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "m")
