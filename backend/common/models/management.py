@@ -4,6 +4,7 @@ Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
 import json
 from typing import List, Optional, Dict, Any
+from urllib.parse import urlparse
 from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
@@ -178,13 +179,15 @@ class ManagementDbConfig(BaseModel):
 _FALKORDB_MODES = {"standalone", "sentinel", "cluster"}
 
 
-def _validate_node_list(nodes: Any, label: str) -> None:
+def _validate_node_list(nodes: Any, path: str) -> None:
     """Validate a list of host:port nodes (accepts [host, port] pairs,
     {host, port} objects, or "host:port" strings — matching the backend's
-    falkordb_connection._parse_nodes)."""
+    falkordb_connection._parse_nodes). ``path`` is the full dotted config
+    path to use in error messages (e.g. "falkordbConnection.sentinel.nodes"),
+    so this helper is reusable across any topology block, not just FalkorDB's."""
     if not isinstance(nodes, list) or len(nodes) == 0:
         raise ValueError(
-            f"falkordbConnection.{label} must be a non-empty list of host:port nodes."
+            f"{path} must be a non-empty list of host:port nodes."
         )
     for n in nodes:
         host = port = None
@@ -196,13 +199,13 @@ def _validate_node_list(nodes: Any, label: str) -> None:
             host, port = n[0], n[1]
         if not host or not str(host).strip():
             raise ValueError(
-                f"falkordbConnection.{label}: each node needs a non-empty host (got {n!r})."
+                f"{path}: each node needs a non-empty host (got {n!r})."
             )
         try:
             int(port)
         except (TypeError, ValueError):
             raise ValueError(
-                f"falkordbConnection.{label}: each node needs an integer port (got {n!r})."
+                f"{path}: each node needs an integer port (got {n!r})."
             )
 
 
@@ -226,10 +229,10 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
             raise ValueError(
                 "falkordbConnection.sentinel.masterName is required in sentinel mode."
             )
-        _validate_node_list(sent.get("nodes"), "sentinel.nodes")
+        _validate_node_list(sent.get("nodes"), "falkordbConnection.sentinel.nodes")
     elif mode == "cluster":
         clus = fc.get("cluster") or {}
-        _validate_node_list(clus.get("startupNodes"), "cluster.startupNodes")
+        _validate_node_list(clus.get("startupNodes"), "falkordbConnection.cluster.startupNodes")
     for key, caster, label in (
         ("socketTimeout", float, "a positive number"),
         ("graphPoolSize", int, "a positive integer"),
@@ -272,6 +275,59 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
 
 
 _SECRET_HINTS = ("password", "passwd", "secret", "token", "credential")
+
+
+def _redact_url_userinfo(value: str) -> str:
+    """Mask the password in a URL's userinfo, e.g.
+    ``redis://user:pw@host:6379/0`` -> ``redis://user:***@host:6379/0``.
+
+    Catches secrets that ride INSIDE a value under a non-secret-looking key —
+    e.g. legacy Neo4j ``extra_config["redisUrl"]`` — which ``redact_extra_config``'s
+    key-name scan alone would miss. Non-URL strings pass through untouched.
+    """
+    if "://" not in value or "@" not in value:
+        return value
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return value
+    if not parsed.password:
+        return value
+    netloc = f"{parsed.username or ''}:***@{parsed.hostname or ''}"
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def redact_extra_config(extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Mask secret-looking values anywhere in extra_config before it leaves the API.
+
+    extra_config is an UNENCRYPTED column and ProviderResponse/DataSourceResponse
+    return it, so any secret written there is both stored in the clear and echoed
+    back. The schema validators (``_validate_cache_connection`` /
+    ``_validate_falkordb_connection``) refuse NEW secrets; this is the
+    belt-and-braces pass that also covers rows already in the database — both a
+    secret-looking KEY anywhere in the tree (dicts and lists, case-insensitive)
+    and a password embedded in a URL's userinfo under an innocuous key (e.g. the
+    legacy Neo4j ``redisUrl``).
+    """
+    if not extra:
+        return extra
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                k: ("***" if any(h in k.lower() for h in _SECRET_HINTS) and node[k]
+                    else _walk(v))
+                for k, v in node.items()
+            }
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if isinstance(node, str):
+            return _redact_url_userinfo(node)
+        return node
+
+    return _walk(extra)
 
 
 def _validate_cache_connection(extra: Optional[Dict[str, Any]]) -> None:
@@ -323,6 +379,11 @@ def _validate_cache_connection(extra: Optional[Dict[str, Any]]) -> None:
                 "cacheConnection sentinel mode requires sentinel.masterName and "
                 "sentinel.nodes"
             )
+        # Shape-check the node list itself — without this, a malformed entry
+        # (e.g. a bare string with no port) passes the 422 gate here and only
+        # blows up later inside the resolver's node parsing, where it is
+        # swallowed and silently degrades to cache-disabled.
+        _validate_node_list(s.get("nodes"), "cacheConnection.sentinel.nodes")
 
 
 class ProviderCreateRequest(BaseModel):
@@ -388,6 +449,11 @@ class ProviderUpdateRequest(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
     credentials: Optional[ConnectionCredentials] = None
+    # Credentials updates MERGE with the stored blob (an omitted field keeps its
+    # existing value) — see provider_repo.update_provider. This is the explicit
+    # way to REMOVE a key outright, since "send it as null" is indistinguishable
+    # from "didn't touch it" once merged.
+    credentials_clear: Optional[List[str]] = Field(None, alias="credentialsClear")
     tls_enabled: Optional[bool] = Field(None, alias="tlsEnabled")
     is_active: Optional[bool] = Field(None, alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
@@ -677,6 +743,17 @@ class DataSourceCreateRequest(BaseModel):
     class Config:
         populate_by_name = True
 
+    @model_validator(mode="after")
+    def _validate_extra_config_cfg(self) -> "DataSourceCreateRequest":
+        # A data source's extra_config merges with (and can override) its
+        # provider's — see ProviderManager._merge_extra_config — and rides the
+        # same unencrypted column echoed back by DataSourceResponse. It must be
+        # held to the same gate as a provider's extra_config, or this endpoint
+        # is a side door around Provider's secret/cluster-mode validation.
+        _validate_falkordb_connection(self.extra_config)
+        _validate_cache_connection(self.extra_config)
+        return self
+
 
 class DataSourceUpdateRequest(BaseModel):
     provider_id: Optional[str] = Field(None, alias="providerId")
@@ -690,6 +767,12 @@ class DataSourceUpdateRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_extra_config_cfg(self) -> "DataSourceUpdateRequest":
+        _validate_falkordb_connection(self.extra_config)
+        _validate_cache_connection(self.extra_config)
+        return self
 
 
 class DataSourceResponse(BaseModel):

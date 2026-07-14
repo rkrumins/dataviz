@@ -880,6 +880,7 @@ class FalkorDBProvider(GraphDataProvider):
             host=self._host, port=self._port,
             username=self._username, password=self._password,
             tls_enabled=self._tls_enabled,
+            credentials=self._credentials,
         )
         # Probe the node that actually SERVES this graph, never just an entry
         # point. A Sentinel daemon answers PONG while the master it watches is
@@ -995,6 +996,7 @@ class FalkorDBProvider(GraphDataProvider):
                 host=self._host, port=self._port,
                 username=self._username, password=self._password,
                 tls_enabled=self._tls_enabled,
+                credentials=self._credentials,
             )
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")

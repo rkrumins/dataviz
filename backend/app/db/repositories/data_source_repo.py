@@ -16,6 +16,7 @@ from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
+    redact_extra_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,10 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
-        extraConfig=json.loads(row.extra_config) if row.extra_config else None,
+        # extra_config is an UNENCRYPTED column and, like a provider's, can hold
+        # secrets left over from before the request-boundary validator existed
+        # (or a sibling field like the legacy redisUrl). Redact on the way out.
+        extraConfig=redact_extra_config(json.loads(row.extra_config) if row.extra_config else None),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         createdAt=row.created_at,

@@ -161,6 +161,7 @@ def load_connection_config(
     username: Optional[str],
     password: Optional[str],
     tls_enabled: bool = False,
+    credentials: Optional[dict] = None,
 ) -> FalkorDBConnConfig:
     """Resolve a ``FalkorDBConnConfig`` from explicit provider config and
     env-var fallbacks. An absent/unknown mode resolves to ``standalone`` so
@@ -169,6 +170,13 @@ def load_connection_config(
     ``tls_enabled`` is the provider record's connection-level TLS flag; the
     finer-grained ``falkordbConnection.tls`` object (CA / client cert / key /
     verify mode) layers on top, with ``FALKORDB_TLS_*`` env fallbacks.
+
+    ``credentials`` is the provider's DECRYPTED credentials blob (from
+    ``provider_repo.get_credentials`` / ``connection_repo.get_credentials``),
+    if the caller already has it. It is where sentinel-daemon credentials
+    (``sentinel_username`` / ``sentinel_password``) live now; the old
+    ``explicit["sentinel"]`` plaintext location is still read as a fallback —
+    see the sentinel resolution below.
     """
     cfg = dict(explicit or {})
     mode = (cfg.get("mode") or os.getenv("FALKORDB_MODE") or "standalone").strip().lower()
@@ -188,6 +196,28 @@ def load_connection_config(
         or _as_bool(tls.get("enabled"), False)
         or _as_bool(os.getenv("FALKORDB_TLS_ENABLED"), False)
     )
+    # Sentinel-daemon credentials. These USED to live in
+    # extra_config.falkordbConnection.sentinel — an unencrypted column that the
+    # API returns (ProviderResponse.extra_config). They now come from the
+    # decrypted credentials blob (ConnectionCredentials.sentinel_username /
+    # .sentinel_password); the old plaintext location is still read as a
+    # fallback for one release so existing rows keep working, with a warning
+    # telling the operator to re-save the provider to migrate it.
+    sentinel_username = credentials.get("sentinel_username") if credentials else None
+    sentinel_password = credentials.get("sentinel_password") if credentials else None
+    if sentinel_password is None and sentinel.get("password"):
+        logger.warning(
+            "falkordb_connection: sentinel.password is set in extra_config "
+            "(PLAINTEXT, and returned by the API). Re-save the provider to move "
+            "it into the encrypted credentials blob (sentinel_password)."
+        )
+        sentinel_password = sentinel.get("password")
+    if sentinel_username is None:
+        sentinel_username = sentinel.get("username")
+    sentinel_username = sentinel_username or os.getenv("FALKORDB_SENTINEL_USERNAME")
+    sentinel_password = sentinel_password or _env_secret(
+        "FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE"
+    )
     return FalkorDBConnConfig(
         mode=mode,
         host=host,
@@ -206,13 +236,8 @@ def load_connection_config(
         # default is NO auth to the sentinels — sending AUTH to an unauthenticated
         # sentinel makes redis-py raise, which used to make discover_master fail and
         # take sentinel mode down entirely.
-        sentinel_username=(
-            sentinel.get("username") or os.getenv("FALKORDB_SENTINEL_USERNAME")
-        ),
-        sentinel_password=(
-            sentinel.get("password")
-            or _env_secret("FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE")
-        ),
+        sentinel_username=sentinel_username,
+        sentinel_password=sentinel_password,
         sentinel_auth_enabled=_as_bool(
             sentinel.get(
                 "authEnabled", os.getenv("FALKORDB_SENTINEL_AUTH_ENABLED", False),
