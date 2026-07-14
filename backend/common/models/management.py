@@ -218,6 +218,11 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
         return
     if not isinstance(fc, dict):
         raise ValueError("extra_config.falkordbConnection must be an object.")
+    # Same unencrypted-column exposure as cacheConnection (see
+    # _validate_cache_connection) — refuse a secret-named key carrying a real
+    # value anywhere under this block, not just the fields this function
+    # otherwise knows about.
+    _reject_secret_keys(fc, path="falkordbConnection")
     mode = fc.get("mode") or "standalone"
     if mode not in _FALKORDB_MODES:
         raise ValueError(
@@ -274,7 +279,55 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
                 raise ValueError(f"falkordbConnection.tls.{path_key} must be a string path.")
 
 
-_SECRET_HINTS = ("password", "passwd", "secret", "token", "credential")
+_SECRET_HINTS = (
+    "pass", "pwd", "pw", "secret", "token", "credential",
+    "apikey", "accesskey", "privatekey", "signingkey",
+)
+
+
+def _normalize_secret_key(key: str) -> str:
+    """Lowercase and strip "_"/"-" so "api_key", "apiKey", "API-KEY" all match
+    the single normalized hint "apikey"."""
+    return key.lower().replace("_", "").replace("-", "")
+
+
+def _looks_like_secret_key(key: str) -> bool:
+    normalized = _normalize_secret_key(key)
+    return any(hint in normalized for hint in _SECRET_HINTS)
+
+
+def _is_redaction_placeholder(value: Any) -> bool:
+    """True for ``redact_extra_config``'s own mask ("***") and empty/None
+    values — i.e. NOT a newly-introduced secret. A client that GETs a
+    provider (secrets already masked to "***") and PUTs it back unmodified
+    must not be rejected for echoing back its own placeholder."""
+    if value is None:
+        return True
+    if isinstance(value, str) and (value == "***" or not value.strip()):
+        return True
+    return False
+
+
+def _reject_secret_keys(block: Any, *, path: str) -> None:
+    """Recursively reject any secret-named key (see _SECRET_HINTS) carrying a
+    real value anywhere under ``block`` (dicts and lists). ``path`` is the
+    full dotted prefix to use in error messages (e.g. "cacheConnection" or
+    "falkordbConnection") — shared by both connection validators so they
+    can't drift out of sync (same ``path``-param idiom as _validate_node_list).
+    """
+    if isinstance(block, dict):
+        for k, v in block.items():
+            sub_path = f"{path}.{k}" if path else k
+            if _looks_like_secret_key(k) and not _is_redaction_placeholder(v):
+                raise ValueError(
+                    f"{sub_path} looks like a secret. extra_config is stored "
+                    f"unencrypted and returned by the API — put it in "
+                    f"credentials instead."
+                )
+            _reject_secret_keys(v, path=sub_path)
+    elif isinstance(block, list):
+        for item in block:
+            _reject_secret_keys(item, path=path)
 
 
 def _redact_url_userinfo(value: str) -> str:
@@ -304,12 +357,18 @@ def redact_extra_config(extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
 
     extra_config is an UNENCRYPTED column and ProviderResponse/DataSourceResponse
     return it, so any secret written there is both stored in the clear and echoed
-    back. The schema validators (``_validate_cache_connection`` /
-    ``_validate_falkordb_connection``) refuse NEW secrets; this is the
-    belt-and-braces pass that also covers rows already in the database — both a
-    secret-looking KEY anywhere in the tree (dicts and lists, case-insensitive)
-    and a password embedded in a URL's userinfo under an innocuous key (e.g. the
-    legacy Neo4j ``redisUrl``).
+    back. This function is purely NAME-based: it masks a secret-looking KEY
+    anywhere in the tree (dicts and lists, case/separator-insensitive — see
+    _SECRET_HINTS) and a password embedded in a URL's userinfo under an
+    innocuous key (e.g. the legacy Neo4j ``redisUrl``). It is not a general
+    secret-detection heuristic beyond those two cases.
+
+    The schema validators (``_validate_cache_connection`` /
+    ``_validate_falkordb_connection``, via the shared ``_reject_secret_keys``)
+    reject a secret-named key carrying a real value at write time, in both
+    ``cacheConnection`` and ``falkordbConnection``. This function is the
+    belt-and-braces pass that also covers rows already in the database from
+    before those validators existed.
     """
     if not extra:
         return extra
@@ -317,7 +376,7 @@ def redact_extra_config(extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     def _walk(node: Any) -> Any:
         if isinstance(node, dict):
             return {
-                k: ("***" if any(h in k.lower() for h in _SECRET_HINTS) and node[k]
+                k: ("***" if _looks_like_secret_key(k) and node[k]
                     else _walk(v))
                 for k, v in node.items()
             }
@@ -345,22 +404,7 @@ def _validate_cache_connection(extra: Optional[Dict[str, Any]]) -> None:
     if not isinstance(conn, dict):
         raise ValueError("cacheConnection must be an object")
 
-    def _scan(node: Any, path: str = "") -> None:
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if any(h in k.lower() for h in _SECRET_HINTS):
-                    raise ValueError(
-                        f"cacheConnection.{path}{k} looks like a secret. extra_config "
-                        f"is stored unencrypted and returned by the API — put it in "
-                        f"credentials (cache_password / cache_sentinel_password) "
-                        f"instead."
-                    )
-                _scan(v, f"{path}{k}.")
-        elif isinstance(node, list):
-            for item in node:
-                _scan(item, path)
-
-    _scan(conn)
+    _reject_secret_keys(conn, path="cacheConnection")
 
     mode = (conn.get("mode") or "standalone").strip().lower()
     if mode == "cluster":

@@ -13,6 +13,18 @@
    endpoint blocks it.
 5. cacheConnection sentinel mode checked for masterName/nodes presence but never
    validated the node list SHAPE, unlike falkordbConnection's sentinel validation.
+6. (CRITICAL, found in a later code review) _validate_falkordb_connection had NO
+   secret-key scan at all — unlike _validate_cache_connection's recursive `_scan` —
+   so a brand-new ProviderCreateRequest with extraConfig.falkordbConnection.
+   sentinel.password passed validation and landed in the plaintext column. Fixed by
+   extracting the scan into a shared `_reject_secret_keys(block, *, path)` helper
+   used by BOTH validators. It treats the redaction sentinel "***" (and empty/None)
+   as "not a new secret" so a GET-then-PUT round-trip of an existing row keeps
+   working.
+7. (CRITICAL, same review) `_SECRET_HINTS` was too narrow (password/passwd/secret/
+   token/credential) and gated both write-rejection AND read-redaction, so
+   apiKey/accessKey/privateKey/pw/pass leaked through both. Broadened + normalized
+   (lowercase, "_"/"-" stripped) so "api_key"/"apiKey"/"API-KEY" all match one hint.
 """
 import logging
 
@@ -127,14 +139,25 @@ def test_sentinel_password_prefers_encrypted_credentials_blob(caplog):
 async def test_sentinel_password_old_location_not_present_in_provider_response(db_session):
     """The redaction pass covers rows migrated by defect (1) as well: even
     before a provider is re-saved, its response never echoes the plaintext
-    sentinel password back."""
-    from backend.app.db.repositories import provider_repo
-    from backend.common.models.management import ProviderCreateRequest
+    sentinel password back.
 
-    created = await provider_repo.create_provider(db_session, ProviderCreateRequest(
-        name="sentinel-legacy", providerType="falkordb", host="h", port=6379,
-        credentials={"username": "u", "password": "p"},
-        extraConfig={
+    Inserted directly at the ORM layer (bypassing ProviderCreateRequest):
+    _validate_falkordb_connection now scans for secret-named keys too (see
+    the "falkordbConnection secret scan" tests below) and refuses this exact
+    payload as a NEW request, so the only way this shape exists is a row
+    that predates that validator — which is precisely what this test is
+    about."""
+    import json as _json
+    from backend.app.db.models import ProviderORM
+    from backend.app.db.repositories import provider_repo
+
+    row = ProviderORM(
+        id="prov_sentinel_legacy",
+        name="sentinel-legacy",
+        provider_type="falkordb",
+        host="h", port=6379,
+        tls_enabled=False, is_active=True,
+        extra_config=_json.dumps({
             "falkordbConnection": {
                 "mode": "sentinel",
                 "sentinel": {
@@ -143,9 +166,12 @@ async def test_sentinel_password_old_location_not_present_in_provider_response(d
                     "password": "leaked-sentinel-pw",
                 },
             },
-        },
-    ))
-    fetched = await provider_repo.get_provider(db_session, created.id)
+        }),
+    )
+    db_session.add(row)
+    await db_session.flush()
+
+    fetched = await provider_repo.get_provider(db_session, row.id)
     assert fetched.extra_config["falkordbConnection"]["sentinel"]["password"] == "***"
     assert "leaked-sentinel-pw" not in str(fetched.model_dump())
 
@@ -329,3 +355,202 @@ def test_cache_sentinel_well_formed_node_list_is_accepted():
         }},
     )
     assert req.extra_config["cacheConnection"]["sentinel"]["masterName"] == "m"
+
+
+# ── (6) falkordbConnection secret scan (CRITICAL 1) ───────────────────────────
+
+def test_falkordb_sentinel_password_new_secret_is_rejected():
+    """The bug: _validate_falkordb_connection had no secret-key scan at all, so
+    this exact payload used to pass and land in the plaintext column."""
+    from backend.common.models.management import ProviderCreateRequest
+
+    with pytest.raises(ValidationError, match="credentials"):
+        ProviderCreateRequest(
+            name="p", providerType="falkordb", host="h", port=6379,
+            credentials={"username": "u", "password": "p"},
+            extraConfig={"falkordbConnection": {
+                "mode": "sentinel",
+                "sentinel": {
+                    "masterName": "m",
+                    "nodes": [["h", 26379]],
+                    "password": "real-secret",
+                },
+            }},
+        )
+
+
+def test_falkordb_secret_anywhere_in_tree_is_rejected():
+    """Not just sentinel.password — any secret-named key anywhere under
+    falkordbConnection (e.g. a hypothetical cluster-auth token)."""
+    from backend.common.models.management import ProviderCreateRequest
+
+    with pytest.raises(ValidationError, match="credentials"):
+        ProviderCreateRequest(
+            name="p", providerType="falkordb", host="h", port=6379,
+            credentials={"username": "u", "password": "p"},
+            extraConfig={"falkordbConnection": {
+                "mode": "cluster",
+                "cluster": {"startupNodes": [["h", 6379]], "authToken": "leaked"},
+            }},
+        )
+
+
+def test_falkordb_sentinel_password_redaction_placeholder_round_trips():
+    """Back-compat: redact_extra_config masks an existing sentinel.password to
+    "***" on read. A client that GETs a provider and PUTs it back unmodified
+    sends that placeholder back — the scan must accept it, not reject it as a
+    new secret, or every round-trip update of an existing FalkorDB-sentinel
+    provider breaks."""
+    from backend.common.models.management import ProviderUpdateRequest
+
+    req = ProviderUpdateRequest(
+        extraConfig={"falkordbConnection": {
+            "mode": "sentinel",
+            "sentinel": {
+                "masterName": "m",
+                "nodes": [["h", 26379]],
+                "password": "***",
+            },
+        }},
+    )
+    assert req.extra_config["falkordbConnection"]["sentinel"]["password"] == "***"
+
+
+def test_falkordb_sentinel_password_empty_and_none_also_round_trip():
+    from backend.common.models.management import ProviderUpdateRequest
+
+    for placeholder in (None, ""):
+        req = ProviderUpdateRequest(
+            extraConfig={"falkordbConnection": {
+                "mode": "sentinel",
+                "sentinel": {
+                    "masterName": "m",
+                    "nodes": [["h", 26379]],
+                    "password": placeholder,
+                },
+            }},
+        )
+        assert req.extra_config["falkordbConnection"]["sentinel"]["password"] == placeholder
+
+
+def test_non_secret_falkordb_keys_are_accepted_by_the_validator():
+    """False-positive check: none of the legitimate non-secret falkordbConnection
+    fields — including keyPath, a diagnostic cert-file PATH, not a secret — trip
+    the new scan."""
+    from backend.common.models.management import ProviderCreateRequest
+
+    req = ProviderCreateRequest(
+        name="p", providerType="falkordb", host="h", port=6379,
+        credentials={"username": "u", "password": "p"},
+        extraConfig={"falkordbConnection": {
+            "mode": "sentinel",
+            "authEnabled": True,
+            "socketTimeout": 5,
+            "graphPoolSize": 10,
+            "sentinel": {"masterName": "m", "nodes": [["h", 26379]]},
+            "tls": {
+                "enabled": True,
+                "checkHostname": True,
+                "verifyMode": "required",
+                "caCertPath": "/certs/ca.crt",
+                "certPath": "/certs/client.crt",
+                "keyPath": "/certs/client.key",
+            },
+        }},
+    )
+    fc = req.extra_config["falkordbConnection"]
+    assert fc["authEnabled"] is True
+    assert fc["sentinel"]["masterName"] == "m"
+    assert fc["tls"]["keyPath"] == "/certs/client.key"
+    assert fc["tls"]["caCertPath"] == "/certs/ca.crt"
+    assert fc["tls"]["certPath"] == "/certs/client.crt"
+
+
+# ── (7) broadened _SECRET_HINTS (CRITICAL 2) ──────────────────────────────────
+
+@pytest.mark.parametrize("secret_key", [
+    "apiKey", "api_key", "API-KEY", "accessKey", "access_key",
+    "privateKey", "private_key", "pw", "pass", "pwd", "signingKey",
+])
+def test_broadened_secret_hints_rejected_in_cache_connection(secret_key):
+    """The live-leak scenario from the review: apiKey/accessKey/privateKey/pw/
+    pass all passed validation under the old narrow hint set."""
+    from backend.common.models.management import ProviderCreateRequest
+
+    with pytest.raises(ValidationError, match="credentials"):
+        ProviderCreateRequest(
+            name="p", providerType="falkordb", host="h", port=6379,
+            credentials={"username": "u", "password": "p"},
+            extraConfig={"cacheConnection": {"host": "h", secret_key: "sk-LIVE"}},
+        )
+
+
+def test_broadened_secret_hints_redacted_everywhere():
+    out = redact_extra_config({
+        "cacheConnection": {
+            "apiKey": "sk-LIVE",
+            "accessKey": "ak-LIVE",
+            "privateKey": "pk-LIVE",
+            "pw": "pw-LIVE",
+            "pass": "pass-LIVE",
+        },
+    })
+    conn = out["cacheConnection"]
+    assert conn["apiKey"] == "***"
+    assert conn["accessKey"] == "***"
+    assert conn["privateKey"] == "***"
+    assert conn["pw"] == "***"
+    assert conn["pass"] == "***"
+
+
+def test_non_secret_keys_are_not_redacted():
+    """False-positive check: none of the legitimate non-secret keys — in
+    particular keyPath (a diagnostic path, not a secret) and authEnabled (a
+    boolean, not a secret) — get masked. keyPath must stay visible on the
+    Admin page."""
+    out = redact_extra_config({
+        "falkordbConnection": {
+            "mode": "sentinel",
+            "authEnabled": True,
+            "sentinel": {"masterName": "m"},
+            "tls": {
+                "caCertPath": "/certs/ca.crt",
+                "certPath": "/certs/client.crt",
+                "keyPath": "/certs/client.key",
+            },
+        },
+    })
+    fc = out["falkordbConnection"]
+    assert fc["authEnabled"] is True
+    assert fc["sentinel"]["masterName"] == "m"
+    assert fc["tls"]["caCertPath"] == "/certs/ca.crt"
+    assert fc["tls"]["certPath"] == "/certs/client.crt"
+    assert fc["tls"]["keyPath"] == "/certs/client.key"
+
+
+# ── merge no-op: explicit null credential without credentialsClear ───────────
+
+async def test_explicit_null_credential_without_clear_is_merge_noop(db_session):
+    """An explicit `{"credentials": {"cache_password": null}}` body — built the
+    way FastAPI actually builds it, via model_validate, so __fields_set__ is
+    exercised — must be a NO-OP merge (keeps the existing value). This is what
+    distinguishes "omitted" from "explicit null": both end up filtered by
+    `if v is not None` in provider_repo.update_provider's merge, but only
+    because model_dump(exclude_unset=True) means the omitted sibling fields
+    never entered `incoming` at all. Clearing a credential requires listing it
+    in credentialsClear (see test_credentials_clear_alone_removes_the_key)."""
+    from backend.app.db.repositories import provider_repo
+    from backend.common.models.management import (
+        ProviderCreateRequest, ProviderUpdateRequest,
+    )
+
+    created = await provider_repo.create_provider(db_session, ProviderCreateRequest(
+        name="p4", providerType="falkordb", host="h", port=6379,
+        credentials={"username": "u", "cache_password": "cache-pw"},
+    ))
+    update_req = ProviderUpdateRequest.model_validate({"credentials": {"cache_password": None}})
+    await provider_repo.update_provider(db_session, created.id, update_req)
+
+    creds = await provider_repo.get_credentials(db_session, created.id)
+    assert creds["cache_password"] == "cache-pw"   # NOT cleared
+    assert creds["username"] == "u"
