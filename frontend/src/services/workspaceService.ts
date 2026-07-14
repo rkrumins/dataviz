@@ -99,8 +99,33 @@ export interface WorkspaceResponse {
     graphName?: string
 }
 
+/**
+ * What deleting a data source destroys in its VERSIONED graph — and what it does not.
+ *
+ * `falkorGraphOwned` is the important one, and it is a recorded fact rather than a guess: we own
+ * a graph if and only if we generated its name. When it is false the source is pinned to the
+ * customer's own graph (`nexus_lineage`), which the purge will not touch — and the user is
+ * entitled to know that BEFORE they click, not after.
+ *
+ * There is deliberately no grace period here. The delete is a hard delete with no restore, and a
+ * dialog offering a 30-day undo would be offering something the backend cannot do.
+ */
+export interface VersioningImpact {
+    versioned: boolean
+    commits: number
+    /** `owner` is a resolved human name, never a user id. Drafts are almost all "Untitled". */
+    openDrafts: { id: string; name: string; owner: string }[]
+    openReviews: number
+    /** Entities a HUMAN edited. Machine-imported rows don't count — they can be re-imported. */
+    curatedEntities: number
+    storageBytes: number
+    falkorGraphName: string | null
+    falkorGraphOwned: boolean
+}
+
 export interface WorkspaceDataSourceImpactResponse {
     views: { id: string; name: string; type: string }[]
+    versioning?: VersioningImpact | null
 }
 
 export interface ImpactedEntity {

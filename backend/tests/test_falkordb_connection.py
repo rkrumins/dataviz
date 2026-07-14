@@ -90,19 +90,29 @@ def fake_redis_and_falkor(monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             # Faithful to redis.asyncio.ConnectionPool, which exposes
-            # ``connection_kwargs``. Modelling it matters: the falkordb cluster
-            # adapter DESTRUCTIVELY pops host/port/username/password off this
-            # dict (see FakeFalkorDB). The fake previously lacked the attribute
-            # entirely, which is why real cluster bugs went undetected here.
+            # ``connection_kwargs``.
             self.connection_kwargs = dict(kwargs)
             captured.setdefault("pools", []).append(self)
 
-    class FakeRedis:
+        async def aclose(self):
+            captured.setdefault("closed", []).append(self)
+
+    class _ConnMixin:
+        async def flushdb(self, *a, **kw):          # bound by falkordb_over()
+            ...
+
+        async def execute_command(self, *args, **kw):
+            captured.setdefault("commands", []).append(args)
+
+        async def aclose(self):
+            captured.setdefault("closed", []).append(self)
+
+    class FakeRedis(_ConnMixin):
         def __init__(self, connection_pool=None, **kwargs):
             self.connection_pool = connection_pool
             self.kwargs = kwargs
 
-    class FakeMaster:
+    class FakeMaster(_ConnMixin):
         def __init__(self):
             self.connection_pool = FakePool(role="sentinel-master")
 
@@ -117,33 +127,35 @@ def fake_redis_and_falkor(monkeypatch):
             return FakeMaster()
 
     class FakeFalkorDB:
-        def __init__(self, connection_pool=None, **kwargs):
-            self.connection_pool = connection_pool
-            # Emulate ``falkordb.asyncio.cluster.Cluster_Conn``, which the real
-            # client applies to ANY pool whose server is cluster-enabled. It
-            # rebuilds a RedisCluster via
-            #     connection_kwargs.pop("username")   # NO default
-            # so two things must hold and are asserted by the cluster test:
-            #   1. the keys must EXIST — else KeyError on an unauthenticated
-            #      cluster (FalkorDB could not connect in cluster mode at all);
-            #   2. the pool we hand back is MUTATED (host/port stripped) — it
-            #      must be restored, or a later Redis(connection_pool=pool) op
-            #      silently falls back to localhost:6379.
-            # Opt-in (cluster tests only): the real adapter does NOT wrap
-            # standalone/sentinel pools, so it must not pop for those.
-            if captured.get("emulate_cluster_adapter"):
-                ck = getattr(connection_pool, "connection_kwargs", None)
-                if ck is not None:
-                    for _k in ("host", "port", "username", "password"):
-                        ck.pop(_k)          # bare pop — mirrors the real adapter
-            captured["falkordb"] = self
+        """Tripwire: constructing this must NEVER happen on the async path.
+
+        The real ``FalkorDB.__init__`` sniffs the topology via
+        ``falkordb.asyncio.cluster.Is_Cluster()``, which opens a **synchronous**
+        redis client and issues ``INFO`` — blocking I/O on the event loop. Against
+        a hung node that froze the entire process for 26s (measured), and
+        ``asyncio.wait_for`` could not interrupt it, defeating every timeout guard.
+        In cluster mode it additionally handed the pool to ``Cluster_Conn``, which
+        rebuilt the client while DROPPING socket timeouts / max_connections /
+        health_check_interval / TLS, and destructively popped host/port off the
+        pool (leaving it pointing at localhost:6379).
+
+        The factory must build the client itself and bind the facade via
+        ``falkordb_over()``. Any regression that reintroduces the constructor call
+        fails here, loudly.
+        """
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "FalkorDB.__init__ was called from the async connect path: it runs "
+                "a blocking synchronous INFO (Is_Cluster) on the event loop. "
+                "Build the client explicitly and use falkordb_over(conn)."
+            )
 
     class FakeClusterNode:
         def __init__(self, host, port):
             self.host = host
             self.port = port
 
-    class FakeRedisCluster:
+    class FakeRedisCluster(_ConnMixin):
         def __init__(self, startup_nodes=None, **kwargs):
             captured["cluster_startup_nodes"] = startup_nodes
             captured["cluster_kwargs"] = kwargs
@@ -185,7 +197,10 @@ async def test_build_graph_client_standalone(fake_redis_and_falkor):
     db, pool = await build_graph_client(
         cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0, "decode_responses": True},
     )
-    assert db.connection_pool is pool
+    # The facade is bound to a client WE built over the pool (falkordb_over) —
+    # FalkorDB.__init__ is never called (the fake raises if it is).
+    assert db.connection.connection_pool is pool
+    assert db.execute_command == db.connection.execute_command
     assert pool.kwargs["host"] == "gx" and pool.kwargs["port"] == 6400
 
 
@@ -198,8 +213,9 @@ async def test_build_graph_client_sentinel(fake_redis_and_falkor):
     db, pool = await build_graph_client(
         cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0, "max_connections": 24},
     )
-    # FalkorDB must be handed the sentinel master's pool.
-    assert db.connection_pool is pool
+    # The facade must be bound to the sentinel MASTER client (which re-resolves the
+    # master on every reconnect), and the returned pool must be that master's pool.
+    assert db.connection.connection_pool is pool
     assert fake_redis_and_falkor["master_for"] == "mymaster"
     assert fake_redis_and_falkor["sentinel_nodes"] == [("s1", 26379), ("s2", 26379)]
 
@@ -289,9 +305,16 @@ async def test_build_graph_client_sentinel_requires_master(fake_redis_and_falkor
 
 @pytest.mark.asyncio
 async def test_build_graph_client_cluster_routes_to_owning_node(fake_redis_and_falkor, monkeypatch):
-    # Emulate the real falkordb cluster adapter's destructive pop (see fixture).
-    fake_redis_and_falkor["emulate_cluster_adapter"] = True
-    cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[("n1", 7000), ("n2", 7001)])
+    """Regressions found against a LIVE 3-shard cluster.
+
+    The data plane must be a real cluster client entered at the OWNING node, and it
+    must carry the SAME connection tuning as every other topology. Previously the
+    falkordb adapter (``Cluster_Conn``) rebuilt the client and forwarded only
+    host/port/auth/retry, so cluster silently ran on redis-py defaults.
+    """
+    cfg = FalkorDBConnConfig(
+        mode="cluster", cluster_nodes=[("n1", 7000), ("n2", 7001)], tls_enabled=True,
+    )
 
     async def fake_resolve(_cfg, graph_name, socket_timeout):
         assert graph_name == "g"
@@ -301,25 +324,41 @@ async def test_build_graph_client_cluster_routes_to_owning_node(fake_redis_and_f
         "backend.app.providers.falkordb_connection.resolve_cluster_node_for_key",
         fake_resolve,
     )
-    db, pool = await build_graph_client(
-        cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0, "decode_responses": True},
-    )
-    assert pool.kwargs["host"] == "ownernode" and pool.kwargs["port"] == 7001
-    assert db.connection_pool is pool
+    pool_kwargs = {
+        "socket_timeout": 10.0, "socket_connect_timeout": 2.0,
+        "max_connections": 24, "health_check_interval": 30,
+    }
+    db, pool = await build_graph_client(cfg, graph_name="g", pool_kwargs=pool_kwargs)
 
-    # ── Regressions found against a LIVE 3-shard cluster ────────────────
-    # (1) username/password must always be PRESENT — Cluster_Conn pops them with
-    #     no default, so an UNAUTHENTICATED cluster raised KeyError: 'username'
-    #     and cluster mode could not connect at all.
-    assert "username" in pool.kwargs and "password" in pool.kwargs
-    # (2) the returned pool must SURVIVE the adapter's destructive pop. Stripped
-    #     of host/port, the provider's verification
-    #     ``Redis(connection_pool=pool).ping()`` silently fell back to
-    #     localhost:6379 and the connect failed with a bogus "refused".
+    # The pinned pool (used for the connect-verifying ping + teardown) points at the
+    # OWNING node — and, unlike before, is not destructively stripped of host/port by
+    # the adapter (which left redis-py silently reconnecting to localhost:6379).
+    assert pool.kwargs["host"] == "ownernode" and pool.kwargs["port"] == 7001
     assert pool.connection_kwargs["host"] == "ownernode"
     assert pool.connection_kwargs["port"] == 7001
-    assert "username" in pool.connection_kwargs
-    assert "password" in pool.connection_kwargs
+
+    # The CLIENT is a RedisCluster (follows MOVED/ASK on a reshard), entered at the
+    # owning node with the rest of the cluster as startup nodes.
+    ck = fake_redis_and_falkor["cluster_kwargs"]
+    assert db.connection is not None
+    assert ck["host"] == "ownernode" and ck["port"] == 7001
+
+    # ── The tuning that Cluster_Conn silently dropped ───────────────────
+    # max_connections: became 100 PER NODE (10x our cap, per shard).
+    # health_check_interval: became 0 — the idle-socket check was OFF, so stale
+    #   sockets after a failover stalled to asyncio.TimeoutError (never retried,
+    #   by design) instead of a retryable ConnectionError.
+    # socket_*_timeout: became redis-py's 5s defaults, slowing the fast-fail that
+    #   the provider bulkhead depends on.
+    assert ck["socket_timeout"] == 10.0
+    assert ck["socket_connect_timeout"] == 2.0
+    assert ck["max_connections"] == 24
+    assert ck["health_check_interval"] == 30
+    # TLS: Cluster_Conn took `ssl` from FalkorDB.__init__'s own param, which is
+    # False whenever a connection_pool is passed — so a TLS pool silently became a
+    # PLAINTEXT cluster data plane. RedisCluster needs ssl=True, not a
+    # connection_class.
+    assert ck["ssl"] is True
 
 
 @pytest.mark.asyncio

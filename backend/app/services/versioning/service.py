@@ -227,6 +227,10 @@ class GraphVersioningService:
         data_source_id: str,
         workspace_id: str,
         kind: str = "manual",
+        # True ONLY when the versioning layer itself mints the FalkorDB graph (blank models,
+        # forks). False when we are PINNED to a graph that already existed — the customer's.
+        # Defaults to False on purpose: see the note at the ProjectionStateORM below.
+        owns_falkor_graph: bool = False,
         actor: Optional[str] = None,
         base_ontology_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
@@ -280,6 +284,12 @@ class GraphVersioningService:
                     graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1,
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
+                    # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
+                    # FalkorDB graph IFF WE GENERATED ITS NAME. A bootstrap pins us to the
+                    # customer's real graph (`nexus_lineage`) — that is theirs, it predates us, it
+                    # may be shared, and a purge must never touch it. Default FALSE: a graph we
+                    # cannot PROVE we created is a graph we will not delete.
+                    owns_falkor_graph=bool(owns_falkor_graph),
                 )
             )
             return {"graph_id": graph.id, "main_branch_id": main.id, "genesis_commit_id": genesis.id}
@@ -1365,6 +1375,9 @@ class GraphVersioningService:
                 graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
                 falkor_graph_name=(f"{parent_name}__fork_{fork.id}" if parent_name else None),
                 falkor_provider=(parent_ps.falkor_provider if parent_ps else None),  # same instance as parent
+                # WE minted this name (`…__fork_<id>`), so the key is ours and nobody else's — the
+                # one case where ownership is provable rather than merely asserted.
+                owns_falkor_graph=bool(parent_name),
             ))
             return {
                 "graph_id": fork.id,
@@ -3360,10 +3373,14 @@ class GraphVersioningService:
 
     async def get_graph_by_data_source(self, data_source_id: str) -> Optional[Dict[str, object]]:
         """Reverse lookup: the versioned graph backing a data source (1:1 via the
-        ``uq_graphs_data_source`` unique constraint), or ``None``."""
+        ``uq_graphs_data_source`` unique constraint), or ``None``.
+
+        Soft-deleted graphs are invisible here. A graph awaiting purge is being dismantled row by
+        row; anything that resolved it would be reading a graph that is half gone."""
         async with self._session() as s:
             g = (await s.execute(
-                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id,
+                                       GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
 
@@ -3384,7 +3401,8 @@ class GraphVersioningService:
         workspace for tenant isolation)."""
         async with self._session() as s:
             g = (await s.execute(
-                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id,
+                                       GraphORM.deleted_at.is_(None))   # purge in flight => gone
             )).scalar_one_or_none()
             if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
                 return None

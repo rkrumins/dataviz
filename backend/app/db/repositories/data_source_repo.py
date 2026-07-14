@@ -262,9 +262,60 @@ async def get_data_source_impact(session: AsyncSession, ds_id: str):
         if r[0] not in seen_ids:
             views.append({"id": r[0], "name": r[1], "type": "context_model"})
 
+    # The VERSIONED half of the blast radius. Views can be rebuilt; commits, open drafts and
+    # human curation cannot — and it is those that a confirmation dialog owes the user, alongside
+    # the reassurance that their own FalkorDB graph is not going anywhere.
+    #
+    # (`_name_draft_owners` runs here, not in graphver: the versioning store has no idea who a
+    # user is, and this is the layer that already holds a session that does.)
+    #
+    # Best-effort: if graphver is unreachable we still return the view impact rather than 500 the
+    # dialog. A delete confirmation that fails to open is a delete confirmation nobody reads.
+    versioning = None
+    try:
+        from backend.common.models.management import VersioningImpact
+        from backend.app.services.versioning.lifecycle import versioning_impact
+        ds_row = await get_data_source_orm(session, ds_id)
+        if ds_row is not None:
+            raw = await versioning_impact(ds_id, ds_row.workspace_id)
+            if raw:
+                raw["openDrafts"] = await _name_draft_owners(session, raw.get("openDrafts") or [])
+                versioning = VersioningImpact(**raw)
+    except Exception:                                    # pragma: no cover - best effort
+        logger.exception("versioning impact unavailable for ds=%s", ds_id)
+
     return WorkspaceDataSourceImpactResponse(
-        views=[ImpactedEntity(**v) for v in views]
+        views=[ImpactedEntity(**v) for v in views],
+        versioning=versioning,
     )
+
+
+async def _name_draft_owners(session: AsyncSession, drafts: list) -> list:
+    """Turn `usr_cd8b62ea79b6` into `Priya Raman`.
+
+    Drafts are overwhelmingly called "Untitled draft", so a list of draft NAMES tells the user
+    nothing at all. The owner is the whole point: it is what turns "36 drafts will be deleted"
+    from a statistic into a reason to go and ask someone first. An opaque user id does that job
+    no better than the name did.
+    """
+    if not drafts:
+        return drafts
+    from backend.app.db.models import UserORM
+
+    ids = {d.get("owner") for d in drafts if d.get("owner")}
+    names: dict = {}
+    if ids:
+        rows = (await session.execute(
+            select(UserORM.id, UserORM.first_name, UserORM.last_name, UserORM.email)
+            .where(UserORM.id.in_(list(ids))))).all()
+        for uid, first, last, email in rows:
+            names[uid] = " ".join(p for p in (first, last) if p).strip() or email
+
+    for d in drafts:
+        # A user who has since been removed still leaves a draft behind. Say so plainly rather
+        # than printing their id at someone.
+        d["owner"] = names.get(d.get("owner"), "a former member")
+    return drafts
 
 
 

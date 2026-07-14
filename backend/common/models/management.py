@@ -992,9 +992,54 @@ class ProviderImpactResponse(BaseModel):
     views: List[ImpactedEntity] = []
 
 
+class DraftImpact(BaseModel):
+    """An unpublished draft that a delete would destroy, and the person who will lose it.
+
+    Not an `ImpactedEntity`: that model's `type` is a KIND ("view", "workspace"), and an owner is
+    not a kind. Drafts are overwhelmingly named "Untitled draft", so the name alone identifies
+    nothing — the OWNER is the load-bearing field here.
+    """
+
+    id: str
+    name: str
+    owner: str = ""                            # resolved to a human name by the repository layer
+
+
+class VersioningImpact(BaseModel):
+    """What deleting a data source destroys in its VERSIONED graph — and what it does not.
+
+    The second half matters as much as the first. A data source is usually pinned to the
+    customer's own FalkorDB graph (`nexus_lineage`), and a user about to delete something is
+    entitled to know, before they click, that their actual graph data is not going anywhere.
+    A confirmation that only lists horrors teaches people to click through it.
+    """
+
+    versioned: bool = False
+    commits: int = 0
+    openDrafts: List[DraftImpact] = []         # WHO has work in flight — the forgotten casualty
+    openReviews: int = 0
+    curatedEntities: int = 0                   # entities a HUMAN edited: the irreplaceable part
+    storageBytes: int = 0
+
+    # ── the reassurance ──
+    falkorGraphName: Optional[str] = None
+    falkorGraphOwned: bool = False             # False -> "your graph data will NOT be touched"
+
+    # NOTE: there is deliberately no `gracePeriodDays` here. It was, and then it was a lie: the
+    # delete path is a hard DELETE with no restore, so a dialog promising a 30-day undo would have
+    # been promising something the backend cannot honour. The tombstone on `graphs.deleted_at`
+    # exists to hide a graph WHILE ITS PURGE RUNS, not to offer an undo window. If we ever want a
+    # real one it needs the data-source row soft-deleted too — until then we say "cannot be
+    # undone", and we mean it.
+
+    class Config:
+        populate_by_name = True
+
+
 class WorkspaceDataSourceImpactResponse(BaseModel):
     """Blast-radius report when removing a Data Source from a Workspace."""
     views: List[ImpactedEntity] = []
+    versioning: Optional[VersioningImpact] = None
 
 
 class DataSourceMoveRequest(BaseModel):

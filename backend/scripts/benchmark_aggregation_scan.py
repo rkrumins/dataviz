@@ -211,6 +211,11 @@ async def main() -> None:
     ap.add_argument("--drop", action="store_true")
     args = ap.parse_args()
 
+    # Speaks PLAIN standalone Redis: against a Cluster this reaches only the slots
+    # of one node and against Sentinel it can land on a demoted replica — a wipe or
+    # GRAPH.DELETE would half-apply and a reindex would silently skip shards.
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+    assert_standalone_env("benchmark_aggregation_scan.py")
     db = FalkorDB(host=args.host, port=args.port)
     g = db.select_graph(args.graph)
     if args.drop:

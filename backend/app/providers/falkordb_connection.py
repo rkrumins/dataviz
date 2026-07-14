@@ -6,10 +6,15 @@ FalkorDB client to the *one* node that owns the graph key (Cluster),
 follows the master on failover (Sentinel), or connects directly
 (standalone) — selected by operator config, behaving correctly in each.
 
-The ``falkordb.asyncio.FalkorDB`` client only accepts ``connection_pool=``,
-so Sentinel and Cluster are wired via the adapter approach: resolve the
-right node/master, hand ``FalkorDB`` an ordinary single-node
-``ConnectionPool``, and rebuild that pool on failover / MOVED (see
+We build the async redis client for the resolved topology OURSELVES and bind
+the FalkorDB facade to it (``falkordb_over``) — we never let
+``FalkorDB.__init__`` construct it. That constructor sniffs the topology with
+a **synchronous** ``INFO`` on the event loop (an app-wide freeze against a hung
+node) and, in cluster mode, rebuilds the client while silently dropping our
+socket timeouts, pool cap, health check and TLS. We already know the mode from
+config, so the sniff is both dangerous and pointless. See ``falkordb_over``.
+
+Pools are rebuilt on failover / MOVED (see
 ``FalkorDBProvider._rebuild_graph_client_for_failover``).
 
 Config rides the provider record's ``extra_config`` JSON (no migration):
@@ -539,8 +544,7 @@ async def build_graph_client(
     lifecycle and ``FalkorDB(connection_pool=...)`` construction are
     identical across modes.
     """
-    from falkordb.asyncio import FalkorDB
-    from redis.asyncio import ConnectionPool
+    from redis.asyncio import ConnectionPool, Redis
 
     socket_timeout = float(pool_kwargs.get("socket_timeout", 10.0))
     # Raw ConnectionPool needs connection_class=SSLConnection + ssl_* kwargs
@@ -549,7 +553,7 @@ async def build_graph_client(
 
     if cfg.mode == "standalone":
         pool = ConnectionPool(host=cfg.host, port=cfg.port, **pool_kwargs, **_tls_pool)
-        return FalkorDB(connection_pool=pool), pool
+        return falkordb_over(Redis(connection_pool=pool)), pool
 
     if cfg.mode == "sentinel":
         from redis.asyncio.sentinel import Sentinel
@@ -587,27 +591,26 @@ async def build_graph_client(
         # re-resolves the master on failover (redis-py re-runs discover_master on
         # every (re)connect), so a promoted replica is picked up without a rebuild.
         master = sentinel.master_for(cfg.sentinel_master, **master_kwargs)
-        return FalkorDB(connection_pool=master.connection_pool), master.connection_pool
+        return falkordb_over(master), master.connection_pool
 
     if cfg.mode == "cluster":
         host, port = await resolve_cluster_node_for_key(cfg, graph_name, socket_timeout)
-        node_kwargs = {**pool_kwargs, **_tls_pool}
-        # The falkordb client's cluster adapter (falkordb.asyncio.cluster.
-        # Cluster_Conn) rebuilds a RedisCluster from the pool we hand it and does
-        #     username = connection_kwargs.pop("username")
-        #     password = connection_kwargs.pop("password")
-        # with NO default — so both keys MUST exist on the pool's
-        # connection_kwargs or FalkorDB(connection_pool=...) raises
-        # ``KeyError: 'username'`` and cluster mode cannot connect at all
-        # (including against an UNAUTHENTICATED cluster, where they'd otherwise
-        # be absent). Always set them, defaulting to None. The sentinel branch
-        # above injects auth for the same reason; cluster was missing it.
-        node_kwargs.setdefault("username", cfg.username)
-        node_kwargs.setdefault("password", cfg.password)
-        pool = ConnectionPool(host=host, port=port, **node_kwargs)
-        # Cluster_Conn destroys the pool it is handed — see
-        # ``falkordb_client_preserving_pool``.
-        db = falkordb_client_preserving_pool(pool)
+        # Same defence as the sentinel branch: a caller handing us bare pool kwargs
+        # must never reach an AUTHENTICATED cluster unauthenticated.
+        node_kwargs = dict(pool_kwargs)
+        if cfg.username and "username" not in node_kwargs:
+            node_kwargs["username"] = cfg.username
+        if cfg.password and "password" not in node_kwargs:
+            node_kwargs["password"] = cfg.password
+        # The data plane is a RedisCluster WE build (see ``build_cluster_conn``), so
+        # it follows MOVED/ASK on a reshard and honours our timeouts, pool cap,
+        # health check and TLS — none of which survive falkordb's own adapter.
+        db = falkordb_over(build_cluster_conn(cfg, host, port, node_kwargs))
+        # A pinned single-node pool to the OWNING node, kept for the caller's
+        # connect-verifying ``Redis(connection_pool=pool).ping()`` and teardown:
+        # it proves the node that actually serves this graph is reachable and
+        # authenticating, which pinging an arbitrary cluster node would not.
+        pool = ConnectionPool(host=host, port=port, **node_kwargs, **_tls_pool)
         logger.info(
             "falkordb_connection: cluster graph %r routed to owning node %s:%d%s",
             graph_name, host, port,
@@ -711,41 +714,106 @@ def build_graph_pool_kwargs(
         ),
         **resilient_pool_kwargs(socket_timeout=socket_timeout),
     }
-    # ``username``/``password`` must ALWAYS be present, even as None. The
-    # falkordb client wraps any pool whose server is cluster-enabled in
-    # ``falkordb.asyncio.cluster.Cluster_Conn``, which rebuilds a RedisCluster
-    # via ``connection_kwargs.pop("username")`` / ``pop("password")`` with NO
-    # default. Setting them only when truthy (the old behaviour) meant that
-    # against an UNAUTHENTICATED cluster the keys were absent and every
-    # ``FalkorDB(connection_pool=...)`` raised ``KeyError: 'username'`` — i.e.
-    # Redis Cluster mode could not connect at all. None is equivalent to
-    # omitting them for redis-py (no AUTH is sent).
-    kw["username"] = cfg.username or None
-    kw["password"] = cfg.password or None
+    # Credentials only when we actually have them: once an instance is learned to
+    # be unauthenticated, ``apply_learned_auth`` clears them and they must vanish
+    # from EVERY pool builder (test_falkordb_auth_matrix).
+    #
+    # These keys were briefly forced present-as-None to survive the falkordb cluster
+    # adapter, whose ``connection_kwargs.pop("username")`` had no default and raised
+    # ``KeyError: 'username'`` against an unauthenticated cluster. We no longer route
+    # through that adapter (see ``falkordb_over``), so the workaround is gone.
+    if cfg.username:
+        kw["username"] = cfg.username
+    if cfg.password:
+        kw["password"] = cfg.password
     return kw
 
 
-def falkordb_client_preserving_pool(pool: Any) -> Any:
-    """``FalkorDB(connection_pool=pool)`` that does not destroy ``pool``.
+def falkordb_over(conn: Any) -> Any:
+    """Bind the FalkorDB facade to an async redis client WE already built.
 
-    The falkordb client wraps ANY pool whose server is cluster-enabled in
-    ``falkordb.asyncio.cluster.Cluster_Conn``, which rebuilds its own RedisCluster
-    by DESTRUCTIVELY popping ``host`` / ``port`` / ``username`` / ``password`` off
-    ``pool.connection_kwargs``. That mutates the pool we hand back — and every
-    caller reuses it for direct Redis ops (notably the connection-verifying
-    ``Redis(connection_pool=pool).ping()``) and for teardown. Stripped of
-    host/port, redis-py silently reconnects to **localhost:6379** and the connect
-    fails with a bogus "connection refused to localhost".
+    Never call ``FalkorDB(...)`` / ``FalkorDB(connection_pool=...)`` from the
+    async path. Its ``__init__`` calls ``falkordb.asyncio.cluster.Is_Cluster()``,
+    which opens a **synchronous** redis client and issues ``INFO`` to sniff the
+    topology — blocking socket I/O executed on the event loop. Against a hung or
+    blackholed node that blocks the WHOLE process (measured: **26s**), and
+    ``asyncio.wait_for`` cannot interrupt it — a blocked loop never fires its own
+    timer — so it defeats every timeout guard in ``_run_guarded`` and turns one
+    unreachable provider into an app-wide freeze. It is also pure waste: we KNOW
+    the topology from ``cfg.mode``.
 
-    Snapshot + restore. Use this at EVERY FalkorDB-from-pool construction site
-    that can face a cluster node, so the hazard cannot be reintroduced.
+    Sniffing aside, letting ``__init__`` build the client is actively wrong in
+    cluster mode, where it hands the pool to ``Cluster_Conn`` — which rebuilds a
+    ``RedisCluster`` from scratch, forwarding only host/port/auth/retry and
+    silently DROPPING:
+
+    * ``socket_timeout`` / ``socket_connect_timeout`` → redis-py's 5s defaults,
+    * ``max_connections`` → 100 **per node** (10x our cap, per shard),
+    * ``health_check_interval`` → 0, i.e. the idle-socket check is OFF, so stale
+      sockets after a failover stall to ``asyncio.TimeoutError`` (which
+      ``_run_guarded`` refuses to retry, by design) instead of a retryable
+      ``ConnectionError``,
+    * ``ssl`` → ``FalkorDB.__init__``'s own ``ssl`` param, which is ``False``
+      whenever the caller passes ``connection_pool=`` — so a TLS pool silently
+      became a **plaintext** data plane.
+
+    It additionally popped those keys off the pool DESTRUCTIVELY, leaving the
+    pool we hand back pointing at localhost:6379.
+
+    The FalkorDB class's entire state is the three attributes assigned below
+    (``falkordb/asyncio/falkordb.py:127-129``); ``select_graph()``,
+    ``list_graphs()`` and ``config_get/set()`` all derive from ``self.connection``.
+    So constructing the client ourselves and binding it here is complete — and
+    every topology then honours the SAME pool kwargs.
     """
     from falkordb.asyncio import FalkorDB
 
-    _before = dict(pool.connection_kwargs)
-    db = FalkorDB(connection_pool=pool)
-    pool.connection_kwargs.update(_before)
+    db = FalkorDB.__new__(FalkorDB)      # bypass __init__'s blocking topology sniff
+    db.connection = conn
+    db.flushdb = conn.flushdb
+    db.execute_command = conn.execute_command
     return db
+
+
+def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwargs: dict) -> Any:
+    """A ``RedisCluster`` over ``cfg``'s topology, honouring OUR pool kwargs.
+
+    Entered at the node we already resolved (``host``/``port``) with the rest of
+    the cluster as startup nodes, so discovery still works if that node is down.
+    RedisCluster applies ``max_connections`` PER node pool — the same per-endpoint
+    semantics as the standalone pool.
+
+    TLS goes on as ``ssl=True`` + ``ssl_*`` (``tls_client_kwargs``), NOT as
+    ``connection_class=SSLConnection`` (``tls_pool_kwargs``): RedisCluster builds
+    its own per-node pools and does not accept a connection_class.
+    """
+    from redis.asyncio.cluster import RedisCluster
+    from redis.cluster import ClusterNode
+
+    startup = [ClusterNode(h, p) for h, p in (cfg.cluster_nodes or [])
+               if (h, p) != (host, port)]
+    return RedisCluster(
+        host=host, port=port, startup_nodes=startup or None,
+        **pool_kwargs, **tls_client_kwargs(cfg.tls_settings()),
+    )
+
+
+async def aclose_graph_client(db: Any, pool: Any) -> None:
+    """Close BOTH halves of a ``(client, pool)`` entry, best effort.
+
+    The client owns real sockets that the pool does not: in cluster mode it is a
+    ``RedisCluster`` with a pool PER node, while ``pool`` is only the pinned
+    owning-node pool kept for the connect-verifying ping. Closing the pool alone
+    leaked every node pool.
+    """
+    conn = getattr(db, "connection", None)
+    for closeable in (conn, pool):
+        if closeable is None:
+            continue
+        try:
+            await closeable.aclose()
+        except Exception:                            # pragma: no cover - best effort
+            pass
 
 
 def build_node_client(
@@ -756,13 +824,24 @@ def build_node_client(
     Used when the caller has already discovered the owning cluster node (so the
     slot lookup is not repeated per graph) — TLS still applied here, since raw
     pools need ``connection_class=SSLConnection``.
+
+    In CLUSTER mode the client is still a full ``RedisCluster`` entered at that
+    node, not a plain pinned client: the node is the owner *now*, but a reshard or
+    failover moves the slot, and only a cluster client follows the resulting
+    MOVED/ASK. The pinned pool is returned alongside for the connect-verifying
+    ping and teardown, exactly as in ``build_graph_client``.
     """
-    from redis.asyncio import ConnectionPool
+    from redis.asyncio import ConnectionPool, Redis
 
     pool = ConnectionPool(
         host=host, port=port, **pool_kwargs, **tls_pool_kwargs(cfg.tls_settings()),
     )
-    return falkordb_client_preserving_pool(pool), pool
+    conn = (
+        build_cluster_conn(cfg, host, port, pool_kwargs)
+        if cfg.mode == "cluster"
+        else Redis(connection_pool=pool)
+    )
+    return falkordb_over(conn), pool
 
 
 def env_conn_config() -> FalkorDBConnConfig:
@@ -1043,10 +1122,7 @@ class TopologyGraphClients:
         async with lock:
             entry = self._clients.pop(key, None)
         if entry is not None:
-            try:
-                await entry[1].aclose()
-            except Exception:                        # pragma: no cover - best effort
-                pass
+            await aclose_graph_client(*entry)
 
     async def invalidate_config(self, cfg: FalkorDBConnConfig) -> None:
         """Drop EVERY client + owner mapping for one instance. Called when a
@@ -1057,10 +1133,7 @@ class TopologyGraphClients:
         for k in keys:
             entry = self._clients.pop(k, None)
             if entry is not None:
-                try:
-                    await entry[1].aclose()
-                except Exception:                    # pragma: no cover - best effort
-                    pass
+                await aclose_graph_client(*entry)
         for k in [k for k in self._owner if k[0] == ident]:
             self._owner.pop(k, None)
         if keys:
@@ -1069,11 +1142,8 @@ class TopologyGraphClients:
 
     async def aclose(self) -> None:
         entries, self._clients = list(self._clients.values()), {}
-        for _db, pool in entries:
-            try:
-                await pool.aclose()
-            except Exception:                        # pragma: no cover - best effort
-                pass
+        for db, pool in entries:
+            await aclose_graph_client(db, pool)
 
 
 # One cache per process: the registry factory, the env factory, the projector

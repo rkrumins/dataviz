@@ -195,6 +195,51 @@ mode does not split a single graph; it routes the client to the node that
 **owns** the graph key (§4) and provides HA + spreads *different* graphs
 across shards.
 
+### Topology support matrix (verified live)
+
+Every service — viz-service, **aggregation-worker**, **versioning projection
+worker**, insights, control plane — reaches FalkorDB through the *same*
+topology-aware factory (`build_graph_client` / the graph-client cache), so
+none of them carries topology logic of its own. Verified against a live
+3-master cluster (v4.18.11) and a live Sentinel quorum (1 master + 1 replica +
+3 sentinels, quorum 2):
+
+| Operation | Standalone | Cluster | Sentinel |
+|---|---|---|---|
+| Connect + `ensure_indices` / `ensure_projections` | ✅ | ✅ | ✅ |
+| `GRAPH.QUERY` write / `GRAPH.RO_QUERY` read | ✅ | ✅ (routed to the owning shard) | ✅ |
+| Dedicated `{graph}_proj` (aggregation projection) | ✅ | ✅ (own client; may land on a *different* shard) | ✅ |
+| **Aggregation worker** `materialize_aggregated_edges_batch` | ✅ | ✅ | ✅ |
+| **Versioning projection** factory MERGE + read-back | ✅ | ✅ | ✅ |
+| `get_schema_stats` (insights / health) | ✅ | ✅ | ✅ |
+| `GRAPH.LIST` (keyless) | ✅ | ✅ **union over all primaries** — a single node sees only its own shard | ✅ |
+| `drop_graph` / eviction / orphan purge (`GRAPH.DELETE`) | ✅ | ✅ (verified on all 3 shards) | ✅ |
+| Hard master crash → promotion | n/a | n/a | ✅ **writes self-heal, no data loss** |
+
+**Cross-slot hazards: none.** An exhaustive audit of every command we issue on
+the graph connection found **zero** pipelines, `MULTI`/`EXEC`, Lua/`EVAL`,
+multi-key commands, `GRAPH.COPY`, `GRAPH.BULK` or graph renames. Every graph
+command is either keyed to a single graph (so it routes by slot) or a keyless
+admin command that fans out explicitly. `_bulk_write_batch` is a
+LOADING-aware retry wrapper around ordinary single-key `GRAPH.QUERY`, not a
+bulk loader.
+
+**Sentinel failover behaviour (measured).** With writes in flight, `SHUTDOWN
+NOSAVE` on the master produced: `ConnectionError` → reconnect+retry 1/3, then
+`TimeoutError` retries 2/3 and 3/3, worst single write **6.2s** (inside its 15s
+budget) — and **zero errors escaped to the caller**. Sentinel promoted the
+replica, the client followed it, and pre-failover data survived replication.
+The redis-py Sentinel pool re-runs `discover_master` on every reconnect, so a
+promoted replica is picked up without rebuilding the client.
+
+**Ops scripts are NOT topology-aware — by design.** The seed / import /
+maintenance scripts speak plain standalone Redis. Against a Cluster they would
+reach only one node's slots, and against Sentinel they can land on a demoted
+replica — so a wipe or `GRAPH.DELETE` would half-apply and a reindex would
+silently skip shards. They all call `assert_standalone_env()` and **refuse to
+run** outside standalone. Drive the change through the application (which is
+topology-aware) or point them at a standalone instance.
+
 ### 7.1 Where config lives
 
 Two layers, most-specific wins:

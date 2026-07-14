@@ -588,6 +588,30 @@ See [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#
 
 ---
 
+## ADR-021: Build the FalkorDB client ourselves (never `FalkorDB.__init__`)
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** Proving Redis Cluster compatibility end-to-end surfaced two defects, both caused by letting the `falkordb` library construct our client from a `ConnectionPool`.
+
+1. **A blocking connect — in every mode, including standalone (production's default).** `FalkorDB.__init__` sniffs the topology with `falkordb.asyncio.cluster.Is_Cluster()`, which opens a **synchronous** redis client and issues `INFO`. That is blocking socket I/O executed **on the event loop**. Against a hung/blackholed node it froze the whole process for **26s** (measured), and `asyncio.wait_for` could not interrupt it — a blocked loop never fires its own timer — so it defeated every timeout guard in `_run_guarded`. This is a **third, independent mechanism** behind "one unreachable provider freezes the app", alongside the in-process-projector event-loop wedge and DB-session-pool starvation.
+2. **Cluster silently ran on library defaults.** In cluster mode the pool was handed to `Cluster_Conn`, which rebuilds a `RedisCluster` forwarding only host/port/auth/retry — **dropping** `socket_timeout` and `socket_connect_timeout` (→ redis-py's 5s), `max_connections` (→ **100 per node**, 10× our cap, per shard), `health_check_interval` (→ **0**: the idle-socket check OFF, the exact stale-socket-after-failover trap the sentinel branch documents) and `ssl` (→ **False**, so a TLS pool silently became a **plaintext** data plane). It also popped host/port off our pool destructively, leaving it pointing at `localhost:6379`.
+
+**Decision:** We already know the topology from `cfg.mode`, so the library's sniff is both dangerous and pointless. `build_graph_client` / `build_node_client` construct the async client **explicitly** per mode (`Redis` / Sentinel master / `RedisCluster` with our full pool kwargs + TLS) and bind the FalkorDB facade to it via `falkordb_over()` — the `FalkorDB` class's entire state is three attributes (`connection`, `flushdb`, `execute_command`); everything else derives from `connection`.
+
+**Reasoning:** The topology is operator config, not something to discover at runtime over a socket. Owning construction makes every topology honour the *same* connection tuning, and removes an entire class of coupling to library internals (the `Cluster_Conn` destructive-pop workarounds are gone).
+
+**Trade-offs:**
+- (+) Connect no longer blocks the event loop: 26,044ms stall → **6–10ms**. An unreachable node now surfaces at the bounded async ping.
+- (+) Cluster honours our timeouts, pool cap, health check and TLS.
+- (+) Retires two workarounds (`falkordb_client_preserving_pool`; "username/password must always be present", which violated the learned-no-auth credential-stripping invariant).
+- (+) Teardown now closes the client, not just the pinned pool — cluster's per-node pools previously leaked.
+- (−) We depend on `FalkorDB`'s three-attribute shape. A regression test constructs a tripwire `FalkorDB` that raises if `__init__` is ever called from the connect path, so a library change or a reintroduced call fails loudly.
+
+**Verified live** on a 3-master FalkorDB cluster and a Sentinel quorum — see [FALKORDB_DEPLOYMENT.md → Topology support matrix](FALKORDB_DEPLOYMENT.md#topology-support-matrix-verified-live).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -612,3 +636,4 @@ See [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#
 | 018 | Retire the dead graph-service | Accepted | Low |
 | 019 | Control-plane internal auth (loop-split descoped) | Accepted | Low |
 | 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |
+| 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |

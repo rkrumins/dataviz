@@ -96,6 +96,13 @@ class GraphORM(VersioningBase):
     created_at = Column(Text, nullable=False, default=_now)
     created_by = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # SOFT DELETE. A versioned graph holds human-authored history — commits, drafts, curation.
+    # Destroying it is irreversible and reclaiming millions of version rows is a long background
+    # job, so the graph disappears from every read the instant the user asks while the rows
+    # survive a grace period. An undo window is the difference between a mistake and a disaster.
+    # EVERY read path must filter `deleted_at IS NULL` (see ix_graphs_live).
+    deleted_at = Column(Text, nullable=True)
+    deleted_by = Column(Text, nullable=True)
 
     __table_args__ = _plain(
         UniqueConstraint("data_source_id", name="uq_graphs_data_source"),
@@ -235,6 +242,15 @@ class ProjectionStateORM(VersioningBase):
     shard_map = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
+    # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
+    # pinning is what makes projection a fast-forward instead of a reseed. So "delete the versioned
+    # graph" must NEVER mean "delete that FalkorDB graph": it is not ours, it predates us, and it
+    # may be shared. We own it IFF WE GENERATED ITS NAME.
+    #
+    # DEFAULT FALSE, deliberately. The costs are not symmetric: refusing to delete leaks a graph;
+    # deleting wrongly destroys a customer's data. A graph we cannot prove we created is a graph
+    # we will not delete.
+    owns_falkor_graph = Column(Boolean, nullable=False, default=False)
     # Live progress of an in-flight FULL reseed (items applied / total), written
     # throttled by the projector and cleared on completion/failure — drives the
     # Data health rebuild progress bar. NULL when no full seed is running.

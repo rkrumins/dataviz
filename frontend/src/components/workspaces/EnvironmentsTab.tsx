@@ -12,6 +12,10 @@ import {
 } from '@/services/workspaceService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import {
+    useDataSourceDeletion, impactSections, deleteCaveat,
+} from '@/components/admin/workspace/useDataSourceDeletion'
 
 // ============================================================
 // Helpers
@@ -264,19 +268,11 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
         setError(null)
     }
 
-    const handleRemove = async (dsId: string) => {
-        if (!confirm('Remove this data source?')) return
-        setLoading(true)
-        setError(null)
-        try {
-            await workspaceService.removeDataSource(workspace.id, dsId)
-            onRefresh()
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to remove data source')
-        } finally {
-            setLoading(false)
-        }
-    }
+    // Removing a data source destroys its version history: commits, colleagues' unpublished
+    // drafts, hand-curated entities. This asked `confirm('Remove this data source?')` — a
+    // sentence that mentions none of it, from a dialog that cannot. It goes through the same
+    // blast-radius flow as every other delete now.
+    const deletion = useDataSourceDeletion(workspace.id, onRefresh)
 
     const handleSetPrimary = async (dsId: string) => {
         setLoading(true)
@@ -397,7 +393,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                                             )}
                                             {dataSources.length > 1 && (
                                                 <button
-                                                    onClick={() => handleRemove(ds.id)}
+                                                    onClick={() => deletion.open(ds.id, ds.label || ds.id)}
                                                     disabled={loading}
                                                     className="p-1.5 text-red-500 bg-canvas border border-transparent hover:bg-red-500/10 hover:border-red-500/20 rounded transition-colors disabled:opacity-50"
                                                     title="Remove Data Source"
@@ -458,6 +454,21 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                 </div>
             )}
             {error && !editingDsId && <p className="text-xs text-red-500 bg-red-500/10 p-2 rounded-lg border border-red-500/20 mt-2">{error}</p>}
+
+            <DangerConfirmDialog
+                isOpen={!!deletion.target}
+                title="Remove data source"
+                subtitle={deletion.target?.label}
+                confirmPhrase={deletion.target?.label ?? ''}
+                confirmLabel="Remove data source"
+                sections={impactSections(deletion.target?.impact ?? null)}
+                loadingImpact={deletion.target?.loading}
+                impactUnknown={deletion.target?.unknown}
+                safeMessage="Nothing depends on this data source, and it has no version history."
+                caveat={deleteCaveat(deletion.target?.impact ?? null)}
+                onClose={deletion.close}
+                onConfirm={deletion.confirm}
+            />
         </div>
     )
 }
