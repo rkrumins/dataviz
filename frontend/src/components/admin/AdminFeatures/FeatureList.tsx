@@ -11,7 +11,7 @@
  * sentence that matters in that state, and it's the one you want while scanning for what your users
  * have lost.
  */
-import { Loader2, ShieldAlert } from 'lucide-react'
+import { FlaskConical, Loader2, ShieldAlert, Sunset } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ToggleSwitch } from './ToggleSwitch'
 import type { FeatureCategory, FeatureDefinition } from '@/services/featuresService'
@@ -104,6 +104,21 @@ export function FeatureList({
                                             <ShieldAlert
                                                 className="w-3 h-3 text-amber-500 shrink-0"
                                                 aria-label="Not enforced by the server"
+                                            />
+                                        )}
+                                        {/* A preview must LOOK like a preview. An admin turning on
+                                            an unfinished feature for everybody should know that's
+                                            what they're doing. */}
+                                        {feature.stage === 'experimental' && (
+                                            <FlaskConical
+                                                className="w-3 h-3 text-fuchsia-500 shrink-0"
+                                                aria-label="Preview — still being built"
+                                            />
+                                        )}
+                                        {feature.stage === 'deprecated' && (
+                                            <Sunset
+                                                className="w-3 h-3 text-ink-muted shrink-0"
+                                                aria-label="Being removed"
                                             />
                                         )}
                                     </span>

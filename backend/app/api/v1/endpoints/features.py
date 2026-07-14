@@ -310,7 +310,7 @@ async def create_definition(
 ):
     """
     Create a new feature definition. Body: key, name, description, category (id), type, default (value),
-    optional userOverridable, options, helpUrl, adminHint, impactWhenOff, sortOrder.
+    optional options, helpUrl, adminHint, impactWhenOff, sortOrder.
 
     A definition created here has no gate in the code, so it reports implemented=false
     until someone actually wires it. That is not a limitation — it is the point.
@@ -347,7 +347,6 @@ async def create_definition(
             category_id=str(category_id),
             type=ftype,
             default_value=default_value,
-            user_overridable=bool(body.get("userOverridable", False)),
             options=options_str,
             help_url=body.get("helpUrl"),
             admin_hint=body.get("adminHint"),
@@ -375,8 +374,8 @@ async def patch_definition(
 ):
     """
     Update a feature definition (metadata). Partial update: only provided fields are changed.
-    Body can include: name, description, category, type, default, userOverridable,
-    options, helpUrl, adminHint, impactWhenOff, sortOrder, deprecated.
+    Body can include: name, description, category, type, default, options, helpUrl,
+    adminHint, impactWhenOff, sortOrder, deprecated.
 
     NOT "implemented" — that is a fact about the code, derived from config/feature_wiring.py.
     """
@@ -386,7 +385,6 @@ async def patch_definition(
         "category": "category_id",
         "type": "type",
         "default": "default_value",
-        "userOverridable": "user_overridable",
         "options": "options",
         "helpUrl": "help_url",
         "adminHint": "admin_hint",
@@ -406,7 +404,7 @@ async def patch_definition(
             fields[col] = json.dumps(v) if not isinstance(v, str) else v
         elif api_key == "options":
             fields[col] = json.dumps(v) if v is not None and not isinstance(v, str) else v
-        elif api_key in ("userOverridable", "deprecated"):
+        elif api_key in ("deprecated",):
             fields[col] = bool(v)
         elif api_key == "sortOrder":
             fields[col] = int(v)

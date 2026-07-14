@@ -240,3 +240,48 @@ async def test_a_view_ALREADY_built_in_a_withdrawn_mode_stays_editable(
         f"/api/v1/views/{view_id}", json={"viewType": "reference"},
     )
     assert converted.status_code == 403
+
+
+# ── Data governance: the two flags that close real holes ──────────────────────
+
+async def test_graph_export_off_refuses_the_job_AND_the_download(test_client: AsyncClient):
+    """The hole this closes.
+
+    An admin could turn off "Export layers" (`semanticLayerExportEnabled`), watch the page go green,
+    and believe their lineage could not leave the product — while the graph DATA itself walked out
+    through the export job and its download, which no flag covered. Locking the SHAPE of the estate
+    while leaving the CONTENTS open is the kind of gap that only looks safe.
+
+    Both routes carry the gate. Gating creation alone would stop new exports while an
+    already-queued one stayed collectable: the file leaves anyway, and the admin thinks they shut
+    the door.
+    """
+    _set_flag("graphExportEnabled", False)
+
+    started = await test_client.post("/api/v1/ws_x/versioning/graphs/g_x/exports", json={})
+    assert started.status_code == 403, started.text
+    assert started.json()["detail"]["feature"] == "graphExportEnabled"
+
+    fetched = await test_client.get(
+        "/api/v1/ws_x/versioning/graphs/g_x/exports/job_x/download",
+    )
+    assert fetched.status_code == 403, (
+        "gating the job but not the download leaves the file collectable — the door is still open"
+    )
+
+
+async def test_blank_models_off_refuses_lineage_with_no_source_behind_it(test_client: AsyncClient):
+    """The provenance switch.
+
+    A hand-drawn model looks exactly like a discovered one on the canvas, and once it is in the
+    estate nobody downstream can tell which is which. Until this flag existed the only way to forbid
+    it was to turn version control off entirely — which also took drafts, reviews and history with
+    it, so nobody ever did and the rule went unenforced.
+    """
+    _set_flag("blankModelsEnabled", False)
+
+    resp = await test_client.post(
+        "/api/v1/ws_x/versioning/blank-graphs", json={"name": "Drawn by hand"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["feature"] == "blankModelsEnabled"

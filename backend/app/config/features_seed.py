@@ -72,6 +72,12 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
+    "graphExportEnabled":
+        "Exporting graph data is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "blankModelsEnabled":
+        "Building a lineage model from scratch is turned off for this deployment — lineage must "
+        "come from a connected data source. An administrator can enable it under Admin → Features.",
     "semanticLayerEditMode":
         "Semantic layers are read-only for this deployment. Publishing, cloning and exporting "
         "still work. An administrator can enable editing under Admin → Features.",
@@ -117,7 +123,8 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
     _category("auth", "Authentication", "UserPlus", "emerald", 2),
     _category("lineage", "Lineage", "GitBranch", "amber", 3),
     _category("semantic_layers", "Semantic Layers", "Layers", "indigo", 4),
-    _category("notifications", "Notifications", "Bell", "slate", 5),
+    _category("governance", "Data Governance", "Shield", "rose", 5),
+    _category("notifications", "Notifications", "Bell", "slate", 6),
     _category("display", "Display & UI", "Palette", "blue", 6, preview=True),
     _category("security", "Security", "Shield", "rose", 7, preview=True),
     _category("integrations", "Integrations", "Plug", "sky", 8, preview=True),
@@ -145,7 +152,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "editing",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": True,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -171,7 +177,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "views",
         "type": "string[]",
         "default_value": json.dumps(["graph", "hierarchy", "reference", "layered-lineage"]),
-        "user_overridable": False,
         "options": json.dumps([
             {"id": "graph", "label": "Graph"},
             {"id": "hierarchy", "label": "Hierarchy"},
@@ -199,7 +204,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "auth",
         "type": "boolean",
         "default_value": json.dumps(False),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -226,7 +230,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "lineage",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -251,12 +254,63 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "lineage",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": True,
         "options": None,
         "help_url": None,
         "admin_hint": (
             "Trace can be expensive on very large graphs. Turning it off is a legitimate way to "
             "protect a struggling provider without taking the whole view away."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    # ── Data governance ────────────────────────────────────────────────────────
+    {
+        "key": "graphExportEnabled",
+        "name": "Export graph data",
+        "description": (
+            "Let people download the lineage data itself — the nodes and edges of a graph — as a "
+            "file they can take away."
+        ),
+        "impact_when_off": (
+            "The export controls disappear and the server refuses both the export job and the "
+            "download. Everything inside the product is unaffected: people can still read, filter "
+            "and trace every graph they have access to. Files already downloaded are not recalled — "
+            "this stops new ones leaving."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "This is the switch that decides whether your lineage can leave the product. Note that "
+            "'Export layers' only covers the SCHEMA — the shape of your estate. This one covers the "
+            "data. If you are turning one off for confidentiality, you almost certainly want both."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "blankModelsEnabled",
+        "name": "Build lineage from scratch",
+        "description": (
+            "Let people create a lineage model by hand, with no data source behind it — drawing the "
+            "nodes and edges themselves."
+        ),
+        "impact_when_off": (
+            "Lineage must come from a connected data source. The blank-model option disappears from "
+            "the View wizard and the server refuses to provision one. Every blank model already "
+            "built keeps working and stays editable — this only stops NEW ones."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this off if your rule is that all lineage must trace back to a real system. A "
+            "hand-drawn model looks exactly like a discovered one on the canvas, and once it is in "
+            "the estate nobody downstream can tell which is which."
         ),
         "sort_order": 1,
         "deprecated": False,
@@ -278,7 +332,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "semantic_layers",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -313,7 +366,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         # it off on purpose. Permission (`workspace:ontology:manage`) still applies underneath;
         # this only decides whether a non-admin who HAS that permission may use it.
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -339,7 +391,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "semantic_layers",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -363,7 +414,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "semantic_layers",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -388,7 +438,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "semantic_layers",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -413,7 +462,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "semantic_layers",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (
@@ -436,7 +484,6 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "category_id": "notifications",
         "type": "boolean",
         "default_value": json.dumps(True),
-        "user_overridable": False,
         "options": None,
         "help_url": None,
         "admin_hint": (

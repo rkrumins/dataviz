@@ -26,8 +26,13 @@ const POPOVER_WIDTH = 268
 
 export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMenuProps) {
   // Bulk import writes to a draft — pointless (and misleading) when the admin
-  // has versioning off, so the item is hidden entirely. Export stays.
+  // has versioning off, so the item is hidden entirely.
   const versioningEnabled = useFeature('versioningEnabled')
+  // Export is the door the DATA leaves by, and it now has its own switch. It used to have none:
+  // an admin could turn off "Export layers" (the SCHEMA), watch the page go green, and the lineage
+  // itself still walked out through here. Locking the shape of the estate while leaving the
+  // contents open is the kind of gap that only looks safe.
+  const exportEnabled = useFeature('graphExportEnabled')
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -130,22 +135,26 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                 </button>
               )}
 
-              {/* Export — always available (published state is fine; it’s a re-importable backup). */}
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!onExport}
-                onClick={() => { if (onExport) runItem(onExport) }}
-                className="w-full flex items-start gap-2.5 px-3 py-2 text-left text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <LucideIcons.Download className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
-                <span className="min-w-0">
-                  <span className="block text-[13px] font-medium">Export…</span>
-                  <span className="block text-[11px] text-ink-muted/80 leading-snug">
-                    Download the graph — also a re-importable backup.
+              {/* Export — the door the DATA leaves by, and the server now refuses it when the
+                  admin has turned it off. Hidden rather than disabled: a greyed-out control invites
+                  people to hunt for the permission they think they're missing. */}
+              {exportEnabled && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!onExport}
+                  onClick={() => { if (onExport) runItem(onExport) }}
+                  className="w-full flex items-start gap-2.5 px-3 py-2 text-left text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <LucideIcons.Download className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-medium">Export…</span>
+                    <span className="block text-[11px] text-ink-muted/80 leading-snug">
+                      Download the graph — also a re-importable backup.
+                    </span>
                   </span>
-                </span>
-              </button>
+                </button>
+              )}
             </motion.div>
           )}
         </>,

@@ -222,6 +222,11 @@ class FeatureDefinitionORM(Base):
     category_id = Column(Text, nullable=False)  # references feature_categories.id
     type = Column(Text, nullable=False)  # "boolean" | "string[]"
     default_value = Column(Text, nullable=False)  # JSON: true | false | ["graph",...]
+    # RETIRED. Declared true on two flags, served to the frontend, and honoured by absolutely
+    # nothing — the same decorative-field bug as `implemented`, in the same table. Nothing reads or
+    # writes it now; the column stays only because dropping it is a migration with no payoff. Do not
+    # revive it: per-user opt-outs on a deployment-wide governance switch is a different feature,
+    # and it would need building, not un-commenting.
     user_overridable = Column(Boolean, nullable=False, default=False)
     options = Column(Text, nullable=True)  # JSON: [{"id","label"},...] for string[]
     help_url = Column(Text, nullable=True)

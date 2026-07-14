@@ -37,6 +37,23 @@ from typing import Literal
 
 Posture = Literal["capability", "security"]
 
+#: Where a flag is in its life. This is the answer to two questions that had none:
+#:
+#:   "How do I add a flag for a feature I am still BUILDING?"
+#:       `experimental`. The drift guard's both-halves rule is relaxed (the halves don't exist
+#:       yet), but the flag must default OFF — shipping a half-built feature switched on is how a
+#:       preview becomes an incident. The page badges it so an admin knows what they're turning on.
+#:
+#:   "What happens when a feature stops being optional?"
+#:       `deprecated`. The flag is on its way out: you remove the gates from the code, and the
+#:       guard then enforces the OPPOSITE of the usual rule — the key must appear NOWHERE in
+#:       either tree. Then you delete the definition and the stored value is cleaned up.
+#:
+#: Without this, a flag has only two states — "exists" and "gone" — and the space between them is
+#: where dead switches accumulate. Every flag on this page is a permanent obligation until somebody
+#: deliberately ends it, and nothing in the system was asking anybody to.
+Stage = Literal["experimental", "active", "deprecated"]
+
 
 @dataclass(frozen=True)
 class FeatureWiring:
@@ -46,6 +63,9 @@ class FeatureWiring:
 
     #: Fail-open (capability) or fail-closed (security) when the flag can't be resolved.
     posture: Posture
+
+    #: Where it is in its life. See `Stage`. Defaults to the only state worth shipping.
+    stage: Stage = "active"
 
     #: Where the SERVER refuses when this is off. Empty = no server enforcement, which means
     #: the flag is cosmetic and anyone who knows the URL still has the feature.
@@ -71,6 +91,26 @@ class FeatureWiring:
     def enforced_server_side(self) -> bool:
         """False means the toggle is decoration: the endpoint is still reachable."""
         return bool(self.server_gates)
+
+    @property
+    def must_default_on(self) -> bool:
+        """The policy, in code: a working feature is AVAILABLE unless an admin says otherwise.
+
+        Users cannot ask for a capability they have never seen, so a capability flag that ships OFF
+        is a feature nobody discovers and nobody requests — it just quietly isn't part of the
+        product. Defaulting them ON is the difference between "an admin may restrict this" and "an
+        admin must go and find this".
+
+        SECURITY flags are exempt, and `signupEnabled` is why the exemption exists: ON there does
+        not mean "users can see a feature", it means any stranger who reaches the login page can
+        create an account. A blanket default-ON rule would have opened the door on every fresh
+        deployment in the name of discoverability.
+
+        EXPERIMENTAL flags are exempt in the other direction: they must default OFF, because the
+        feature is not finished and switching an unfinished thing on for everyone is not a preview,
+        it's an incident.
+        """
+        return self.stage == "active" and self.posture == "capability"
 
     @property
     def wired(self) -> bool:
@@ -148,6 +188,35 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=(
             "Announcements are hidden, not deactivated — turning this back on restores them",
         ),
+    ),
+    # ── Data governance ────────────────────────────────────────────────────────
+    "graphExportEnabled": FeatureWiring(
+        key="graphExportEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /graphs/{id}/exports — start an export job",
+            "GET /graphs/{id}/exports/{job}/download — take the file",
+        ),
+        ui_surfaces=("Export controls on the canvas and the context-view menu",),
+        still_allowed=(
+            "Reading, filtering and tracing every graph in the product",
+            "Exports already downloaded are not recalled — this stops NEW ones",
+        ),
+    ),
+    "blankModelsEnabled": FeatureWiring(
+        key="blankModelsEnabled",
+        posture="capability",
+        server_gates=("POST /blank-graphs — provision a lineage model with no data source",),
+        ui_surfaces=(
+            "Blank-model option in the View wizard",
+            "'Start from scratch' on the canvas empty state",
+        ),
+        still_allowed=(
+            "Every blank model already built keeps working and stays editable",
+            "Building views on top of real data sources",
+        ),
+        # It provisions a versioned graph, so version control has to be on for it to mean anything.
+        depends_on=("versioningEnabled",),
     ),
     # ── Semantic layers ────────────────────────────────────────────────────────
     "semanticLayerEditMode": FeatureWiring(
@@ -243,6 +312,7 @@ def wiring_payload(key: str) -> dict:
     """
     w = FEATURE_WIRING.get(key)
     return {
+        "stage": w.stage if w else "active",
         "implemented": bool(w.wired) if w else False,
         "enforcedServerSide": bool(w.enforced_server_side) if w else False,
         "posture": w.posture if w else "capability",

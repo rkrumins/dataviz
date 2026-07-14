@@ -75,7 +75,7 @@ __all__ = [
 #: then, tracking provenance for an editor that does not exist is machinery for its own sake.
 _CODE_OWNED = (
     "name", "description", "admin_hint", "impact_when_off", "help_url",
-    "category_id", "type", "options", "user_overridable", "sort_order",
+    "category_id", "type", "options", "sort_order",
 )
 
 

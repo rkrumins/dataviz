@@ -700,7 +700,12 @@ function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: Sc
     // and then bouncing the user back to "Use existing data" (which is what the guard further
     // down does on its own) is the worst of both: the option looks available, does nothing, and
     // explains nothing. If it cannot be chosen, it must not be shown.
-    const blankAvailable = useFeature('versioningEnabled')
+    // Blank models need BOTH: version control (a blank model IS a versioned graph — it has
+    // nowhere to live without it) and the provenance switch that decides whether hand-drawn
+    // lineage is allowed here at all. Until `blankModelsEnabled` existed, the only way to forbid
+    // hand-drawn lineage was to turn version control off entirely, which also took drafts, reviews
+    // and history with it — so nobody ever did, and the rule went unenforced.
+    const blankAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')
     const options: { id: ScopeMode; label: string; icon: ReactNode }[] = [
         { id: 'existing', label: 'Use existing data', icon: <Database className="w-4 h-4" /> },
         ...(blankAvailable
@@ -1114,7 +1119,7 @@ export function ScopeStep({
     const isBlank = scopeMode === 'blank'
     // Blank models are versioning-native (authored via drafts/publishes) — the
     // whole mode disappears when the admin turns version control off.
-    const blankModeAvailable = useFeature('versioningEnabled')
+    const blankModeAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')
     useEffect(() => {
         if (!blankModeAvailable && scopeMode === 'blank') onScopeModeChange('existing')
     }, [blankModeAvailable, scopeMode, onScopeModeChange])

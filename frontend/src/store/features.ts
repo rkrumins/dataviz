@@ -38,6 +38,8 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
     editModeEnabled: true,
     traceEnabled: true,
+    graphExportEnabled: true,
+    blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
     semanticLayerEditMode: true,
     semanticLayerImportEnabled: true,

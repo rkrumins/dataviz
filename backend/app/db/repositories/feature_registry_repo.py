@@ -81,7 +81,6 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
         "category": row.category_id,
         "type": row.type,
         "default": default_val,
-        "userOverridable": row.user_overridable,
         "options": options,
         "helpUrl": row.help_url,
         "adminHint": row.admin_hint,
@@ -112,7 +111,6 @@ async def create_definition(
     category_id: str,
     type: str,
     default_value: str,
-    user_overridable: bool = False,
     options: str | None = None,
     help_url: str | None = None,
     admin_hint: str | None = None,
@@ -132,7 +130,6 @@ async def create_definition(
         category_id=category_id,
         type=type,
         default_value=default_value,
-        user_overridable=user_overridable,
         options=options,
         help_url=help_url,
         admin_hint=admin_hint,
@@ -161,7 +158,7 @@ async def update_definition(
     # API caller can make that true or false by saying so.
     allowed = {
         "name", "description", "category_id", "type", "default_value",
-        "user_overridable", "options", "help_url", "admin_hint", "impact_when_off",
+        "options", "help_url", "admin_hint", "impact_when_off",
         "sort_order", "deprecated",
     }
     for k, v in fields.items():

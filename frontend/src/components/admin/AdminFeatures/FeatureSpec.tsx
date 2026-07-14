@@ -19,7 +19,8 @@
  * the server does without a CI guard failing.
  */
 import {
-    ArrowRight, Ban, Check, EyeOff, Lock, ShieldAlert, ShieldCheck, Sparkles, ZapOff,
+    ArrowRight, Ban, Check, EyeOff, FlaskConical, Lock, ShieldAlert, ShieldCheck, Sparkles,
+    Sunset, ZapOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { resolveCategoryStyle } from './constants'
@@ -87,6 +88,24 @@ export function FeatureSpec({
                             title="If this setting can't be read, we assume the more restrictive answer rather than the permissive one."
                         >
                             Security setting
+                        </Badge>
+                    )}
+                    {feature.stage === 'experimental' && (
+                        <Badge
+                            icon={FlaskConical}
+                            tone="fuchsia"
+                            title="This feature is still being built. Turning it on exposes unfinished work to everyone."
+                        >
+                            Preview — still being built
+                        </Badge>
+                    )}
+                    {feature.stage === 'deprecated' && (
+                        <Badge
+                            icon={Sunset}
+                            tone="muted"
+                            title="This switch is on its way out. Don't build anything new on it."
+                        >
+                            Being removed
                         </Badge>
                     )}
                 </div>
@@ -289,7 +308,7 @@ function Badge({
     children,
 }: {
     icon: React.ElementType
-    tone: 'emerald' | 'amber' | 'rose'
+    tone: 'emerald' | 'amber' | 'rose' | 'fuchsia' | 'muted'
     title?: string
     children: React.ReactNode
 }) {
@@ -297,6 +316,8 @@ function Badge({
         emerald: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25',
         amber: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
         rose: 'bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/25',
+        fuchsia: 'bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400 border-fuchsia-500/25',
+        muted: 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border-glass-border',
     }[tone]
     return (
         <span

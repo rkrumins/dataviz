@@ -55,7 +55,6 @@ export interface FeatureDefinition {
   category: string
   type: 'boolean' | 'string[]'
   default: boolean | string[]
-  userOverridable?: boolean
   options?: FeatureOption[]
   helpUrl?: string
   adminHint?: string
@@ -76,6 +75,16 @@ export interface FeatureDefinition {
   // about four flags on the day it was written. It is now derived from the gates that actually
   // exist, and a CI guard fails the build if any of it drifts from the code.
 
+  /**
+   * Where this flag is in its life.
+   *
+   *   experimental — the feature is still being BUILT. Ships off; turning it on is opting into
+   *                  something unfinished. The page has to say so, or an admin flips it expecting
+   *                  a feature and gets a building site.
+   *   active       — shipped, wired end-to-end, enforced by the server. Ships ON.
+   *   deprecated   — on its way out. Still honoured, but don't build anything new on it.
+   */
+  stage?: 'experimental' | 'active' | 'deprecated'
   /** Does this flag change anything at all? A false here means the toggle is decoration. */
   implemented?: boolean
   /** Does the SERVER refuse when this is off? A flag that only hides a button is not enforcement. */
@@ -385,7 +394,6 @@ export interface CreateDefinitionBody {
   category: string
   type: 'boolean' | 'string[]'
   default: boolean | string[]
-  userOverridable?: boolean
   options?: FeatureOption[]
   helpUrl?: string | null
   adminHint?: string | null

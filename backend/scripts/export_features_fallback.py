@@ -48,7 +48,6 @@ def main() -> None:
             "category": d["category_id"],
             "type": d["type"],
             "default": default_val,
-            "userOverridable": d["user_overridable"],
             "options": options,
             "helpUrl": d.get("help_url"),
             "adminHint": d.get("admin_hint"),
