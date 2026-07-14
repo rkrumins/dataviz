@@ -205,6 +205,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/DECISIONS.md?raw'),
   },
   {
+    slug: 'changelog',
+    section: 'architecture',
+    title: 'Changelog',
+    description: 'Notable changes, newest first — including known limitations',
+    importFn: () => import('@root/CHANGELOG.md?raw'),
+  },
+  {
     slug: 'scaling-architecture',
     section: 'architecture',
     title: 'Scaling Architecture (Future)',

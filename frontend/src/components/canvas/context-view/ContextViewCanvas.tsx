@@ -1328,49 +1328,6 @@ export function ContextViewCanvas({
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
 
-  // Optimized Effect: Fetch aggregated edges only when the visible set actually changes
-  // Uses expandedNodes (user-driven) as the primary trigger, not nodes array reference.
-  // A 500ms debounce coalesces rapid expand/collapse actions.
-  //
-  // GATED ON !trace.isTracing: skeleton-first /trace v2 returns AGGREGATED
-  // edges at the trace's effective level, so the parallel /aggregated-lineage
-  // fetch is redundant + racy when a trace is active. In browse mode the
-  // hook fires as before.
-  useEffect(() => {
-    if (!showLineageFlow || nodes.length === 0) return
-    if (trace.isTracing) return
-
-    const fetchDebounced = setTimeout(() => {
-      const currentVisibleList = getVisibleContainerUrns()
-
-      // Exclude expanded nodes from aggregation targets.
-      // When a node is expanded, its children are already in the visible list and will
-      // represent it. Including BOTH parent and children causes the Cypher CONTAINS*0..5
-      // traversal to find the same TRANSFORMS edges at multiple hierarchy levels,
-      // producing duplicate/inflated aggregated edge counts.
-      // (Earlier this caused missing lineage because orphan nodes like Snowflake weren't
-      // loaded — that's now fixed by the initial graph load fetching orphan nodes.)
-      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
-      const aggregationTargets = currentVisibleList.filter(urn => {
-        const nodeId = urnToIdMap.get(urn)
-        return nodeId && !expandedNodes.has(nodeId)
-      })
-
-      // Only fetch if the target set actually changed
-      const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
-      if (aggregationKey === prevAggregationKeyRef.current) return
-      prevAggregationKeyRef.current = aggregationKey
-
-      if (aggregationTargets.length > 0) {
-        fetchAggregated(aggregationTargets, aggregationTargets)
-      }
-    }, 150) // Snappy refetch on expand/collapse — old 500ms felt laggy
-            // when iteratively drilling. 150ms is still long enough to
-            // coalesce a rapid sequence of clicks but feels live.
-
-    return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing, aggregatedCacheVersion])
-
   // === Extracted Hooks ===
 
   // Canonical reference layout (assignments + scope) for THIS view — the authoritative render source
@@ -1479,7 +1436,10 @@ export function ContextViewCanvas({
         }
       }
     }
-    return Array.from(out)
+    // Kept as a Set: LayerColumn tests membership once per rendered row, and
+    // an advanced search can match thousands of nodes — an array turns that
+    // into an O(matches) scan per row on every render.
+    return out
   }, [searchResults, advancedMatchUrns, displayFlat])
 
   // Action: Move entity to layer (updated for unified context menu)
@@ -1621,6 +1581,93 @@ export function ContextViewCanvas({
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
 
+  // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
+  // (Expanded nodes are excluded: their children are already visible and stand in
+  // for them, so including both ends would double-count the same TRANSFORMS edges
+  // at two hierarchy levels.)
+  //
+  // Two gates keep this off the hot path. `/edges/aggregated` is the most
+  // expensive endpoint we have — it is the tightest fair-share bucket on the
+  // backend (5 rps) — and the aggregation target set changes with EVERY page of
+  // children that lands. Without the quiescence gate, draining a large container
+  // one page at a time produced one aggregated fan-out per page.
+  //
+  //   1. Skip entirely while any child load is in flight. The tree is mid-flight;
+  //      whatever we computed now would be superseded the moment the page lands.
+  //      `loadingNodes` is in the dep array, so settling re-runs the effect.
+  //   2. Debounce, so expanding a spine (several parents loading back-to-back)
+  //      collapses into a single fetch once the dust settles.
+  //
+  // GATED ON !trace.isTracing: skeleton-first /trace v2 returns AGGREGATED
+  // edges at the trace's effective level, so the parallel /aggregated-lineage
+  // fetch is redundant + racy when a trace is active. In browse mode the
+  // hook fires as before.
+  useEffect(() => {
+    if (!showLineageFlow || nodes.length === 0) return
+    if (trace.isTracing) return
+    // Wait for the tree to settle. Re-runs when loadingNodes empties.
+    if (loadingNodes.size > 0) return
+
+    const fetchDebounced = setTimeout(() => {
+      const currentVisibleList = getVisibleContainerUrns()
+
+      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
+      const aggregationTargets = currentVisibleList.filter(urn => {
+        const nodeId = urnToIdMap.get(urn)
+        return nodeId && !expandedNodes.has(nodeId)
+      })
+
+      // Only fetch if the target set actually changed
+      const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
+      if (aggregationKey === prevAggregationKeyRef.current) return
+      prevAggregationKeyRef.current = aggregationKey
+
+      if (aggregationTargets.length > 0) {
+        fetchAggregated(aggregationTargets, aggregationTargets)
+      }
+    }, 300)
+
+    return () => clearTimeout(fetchDebounced)
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing, aggregatedCacheVersion, loadingNodes])
+
+  // A node can become expanded WITHOUT going through the toggle handler that
+  // loads its first page — the per-view expanded-state restore above replays a
+  // saved expansion set onto a freshly-hydrated canvas that only has roots. Such
+  // a node would otherwise render as an expanded container with nothing under it
+  // but a "Load more" row, which reads as a bug.
+  //
+  // So: any expanded node with a childCount but zero loaded children gets its
+  // FIRST page automatically. Pages 2+ stay explicit (that's the Load-more row).
+  //
+  // This cannot become a pump. `autoLoadedFirstPageRef` records every node we
+  // have already auto-loaded and we never revisit one, so even a node whose
+  // fetch returns nothing (childCount disagreeing with reality) is attempted
+  // exactly once. Without that ref the "zero children loaded" condition would
+  // stay true forever and re-fire on every render — the same shape as the
+  // sentinel bug this change removes.
+  const autoLoadedFirstPageRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (trace.isTracing) return
+    if (expandedNodes.size === 0) return
+
+    for (const nodeId of expandedNodes) {
+      if (autoLoadedFirstPageRef.current.has(nodeId)) continue
+      if (loadingNodes.has(nodeId)) continue
+      if (failedNodes.has(nodeId)) continue
+
+      const node = displayMap.get(nodeId)
+      if (!node) continue
+      const childCount = (node.data?.childCount as number) ?? 0
+      if (childCount === 0) continue
+      // Already has children on the canvas — this is a page-2+ situation, which
+      // is the Load-more row's job, not ours.
+      if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
+
+      autoLoadedFirstPageRef.current.add(nodeId)
+      void loadChildren(nodeId)
+    }
+  }, [expandedNodes, displayMap, childMap, loadingNodes, failedNodes, loadChildren, trace.isTracing])
+
   // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
   // expands collapsed ancestors (lazy-loading from the backend if needed),
   // then scrolls the now-visible target into view. Works during trace mode
@@ -1704,17 +1751,28 @@ export function ContextViewCanvas({
     scrollIntoView: scrollHitIntoView,
   })
 
-  // "Frame matches" — scroll the horizontal canvas container so the
-  // first match-bearing node is centered, expanding the spine to it
-  // so collapsed ancestors reveal their children. This is a viewport-
-  // not-zoom action since the context view is a horizontal layered
-  // layout (no React Flow zoom).
+  // "Frame matches" — scroll the horizontal canvas container so the first
+  // match-bearing node is centered. This is a viewport-not-zoom action since
+  // the context view is a horizontal layered layout (no React Flow zoom).
+  //
+  // Framing NEVER expands. It used to: when no match was rendered it dumped
+  // every match URN *and* every ancestor URN into `expandedNodes` in one go.
+  // On a 600-match result that pre-marked the entire containment closure as
+  // expanded, so each child that subsequently arrived was already flagged for
+  // expansion and immediately requested its own children — a breadth-first
+  // auto-expansion of the whole matched subtree, one page per round-trip.
+  //
+  // Matches under collapsed ancestors are surfaced by the count badges on those
+  // ancestors instead. To actually walk to one, the user picks a match and uses
+  // "Show on canvas" (`revealSearchHit`), which expands a single ancestor spine.
   const handleFrameMatches = useCallback(async (urns: string[]) => {
     if (urns.length === 0) return
     const container = horizontalScrollRef.current
     if (!container) return
 
-    // First pass: look for an already-rendered node and scroll to it.
+    // Scroll to the first match — or, failing that, the first match-BEARING
+    // ancestor, which is the row carrying the "N inside" badge. Either way we
+    // only ever target something already on screen.
     for (const urn of urns) {
       // The DOM ids are keyed by canvas node id which may equal the URN
       // or be a derived id. Search both.
@@ -1726,16 +1784,7 @@ export function ContextViewCanvas({
         return
       }
     }
-
-    // None of the matches are rendered yet — most likely they're sitting
-    // under collapsed ancestors. Expand every URN we know about so the
-    // matches become reachable; the user can then re-click Frame.
-    setExpandedNodes((prev) => {
-      const next = new Set(prev)
-      for (const urn of urns) next.add(urn)
-      return next
-    })
-  }, [setExpandedNodes])
+  }, [])
 
   // Hydration phase mirrored into the canvas store by CanvasRouter — drives
   // the ghost-card stack in empty layers and the GhostLineageOverlay.

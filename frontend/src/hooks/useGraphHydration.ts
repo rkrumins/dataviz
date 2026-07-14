@@ -19,6 +19,7 @@ import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 import { resetCircuitBreakers } from '@/services/circuitBreaker'
 import { useProviderHealthStore } from '@/store/providerHealth'
@@ -432,9 +433,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (controller.signal.aborted) return
 
                         // Children are NOT prefetched. Top-level assigned entities
-                        // render collapsed; the user expands a parent to fire the
-                        // existing 20-per-page lazy loader (loadChildren below),
-                        // and AutoLoadSentinel pages through the rest on scroll.
+                        // render collapsed; expanding a parent fires the lazy loader
+                        // (loadChildren below) for its first CHILDREN_PAGE_SIZE page,
+                        // and the LoadMoreItem row pages through the rest on click.
                     } else {
                         // ── Type-based loading (empty/new views) ──
                         // No assignments yet — load by entity type so the view has data
@@ -836,7 +837,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 const result = await provider.getChildrenWithEdges(urn, {
                     edgeTypes: fetchTypes,
                     lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
-                    limit: 20,
+                    limit: CHILDREN_PAGE_SIZE,
                     offset: currentChildrenCount,
                     includeLineageEdges: true,
                 })

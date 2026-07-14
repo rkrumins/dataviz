@@ -13,6 +13,7 @@ const filenameMap: Record<string, string> = {
   'SETUP.md': 'setup',
   'ARCHITECTURE.md': 'architecture',
   'DECISIONS.md': 'decisions',
+  'CHANGELOG.md': 'changelog',
   'BACKEND.md': 'backend',
   'FRONTEND.md': 'frontend',
   'DATA_ARCHITECTURE.md': 'data-architecture',
