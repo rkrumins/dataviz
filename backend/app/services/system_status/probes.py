@@ -110,6 +110,12 @@ def _cache_redis():
             return None                      # cache not configured -> nothing to probe
         cfg = dataclasses.replace(
             cfg, socket_timeout=1.0, socket_connect_timeout=1.0, max_connections=2,
+            # Pin OFF: build_redis_client applies the CACHE role's default of 30,
+            # but the original probe (bare aioredis.from_url(...)) never set this,
+            # so redis-py defaulted it to 0 (disabled). A probe opens a
+            # short-lived, tightly-budgeted connection — it does not want
+            # redis-py's periodic idle-socket liveness PING.
+            health_check_interval=0,
         )
         _cache_redis_client = build_redis_client(cfg)
     return _cache_redis_client
@@ -493,7 +499,14 @@ async def probe_falkordb() -> dict:
         cluster_primary_nodes, env_conn_config, resolve_sentinel_master,
     )
 
-    cfg = env_conn_config()
+    try:
+        cfg = env_conn_config()
+    except Exception as exc:
+        # env_conn_config() raises (never silently) when FALKORDB_PASSWORD_FILE
+        # is set but missing/empty — a probe must degrade to "down", not blow up
+        # the dashboard. _err() truncates to the exception text only (var name +
+        # path — never a secret value).
+        return _svc("falkordb", "FalkorDB", "down", error=_err(exc))
 
     if cfg.mode == "sentinel":
         # Probe the MASTER Sentinel currently names, not a Sentinel daemon: a

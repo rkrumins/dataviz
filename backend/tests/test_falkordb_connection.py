@@ -12,6 +12,7 @@ from backend.app.providers.falkordb_connection import (
     _parse_nodes,
     build_cache_redis_fallback,
     build_graph_client,
+    env_conn_config,
     load_connection_config,
     resolve_cluster_node_for_key,
 )
@@ -76,6 +77,78 @@ def test_load_config_ignores_bad_knobs():
     )
     assert cfg.socket_timeout is None
     assert cfg.graph_pool_size is None
+
+
+# ── env_conn_config: the ENV-configured default instance's credentials ──
+#
+# GAP: env_conn_config() used to pass username=None, password=None
+# UNCONDITIONALLY — an operator running the env instance with requirepass/ACL
+# auth had no way to tell the app, and the health probe reported a healthy
+# FalkorDB as DOWN. FALKORDB_USERNAME / FALKORDB_PASSWORD(_FILE) close that gap.
+
+def test_env_conn_config_unchanged_with_no_new_vars_set(monkeypatch):
+    """Back-compat: with none of the new vars set, behaviour is BYTE-FOR-BYTE
+    identical to before this change — every existing deployment keeps booting
+    unchanged."""
+    for var in ("FALKORDB_USERNAME", "FALKORDB_PASSWORD", "FALKORDB_PASSWORD_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = env_conn_config()
+    assert cfg.username is None
+    assert cfg.password is None
+
+
+def test_env_conn_config_reads_username_and_password(monkeypatch):
+    monkeypatch.setenv("FALKORDB_USERNAME", "graph-user")
+    monkeypatch.setenv("FALKORDB_PASSWORD", "graph-pw")
+    monkeypatch.delenv("FALKORDB_PASSWORD_FILE", raising=False)
+    cfg = env_conn_config()
+    assert cfg.username == "graph-user"
+    assert cfg.password == "graph-pw"
+
+
+def test_env_conn_config_password_file_wins_over_password(monkeypatch, tmp_path):
+    secret_file = tmp_path / "falkordb-password"
+    secret_file.write_text("from-file-pw\n")
+    monkeypatch.setenv("FALKORDB_PASSWORD", "from-env-pw")
+    monkeypatch.setenv("FALKORDB_PASSWORD_FILE", str(secret_file))
+    cfg = env_conn_config()
+    assert cfg.password == "from-file-pw"
+
+
+def test_env_conn_config_missing_password_file_is_a_hard_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("FALKORDB_PASSWORD_FILE", str(tmp_path / "does-not-exist"))
+    with pytest.raises(ProviderConfigurationError, match="FALKORDB_PASSWORD_FILE"):
+        env_conn_config()
+
+
+def test_env_conn_config_empty_password_file_is_a_hard_error(monkeypatch, tmp_path):
+    secret_file = tmp_path / "empty-password"
+    secret_file.write_text("   \n")            # whitespace-only
+    monkeypatch.setenv("FALKORDB_PASSWORD_FILE", str(secret_file))
+    with pytest.raises(ProviderConfigurationError, match="FALKORDB_PASSWORD_FILE"):
+        env_conn_config()
+
+
+def test_env_conn_config_hard_error_never_leaks_the_secret_value(monkeypatch, tmp_path):
+    secret_file = tmp_path / "empty-password"
+    secret_file.write_text("")
+    monkeypatch.setenv("FALKORDB_PASSWORD_FILE", str(secret_file))
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        env_conn_config()
+    message = str(exc_info.value)
+    assert "FALKORDB_PASSWORD_FILE" in message
+    assert str(secret_file) in message
+
+
+def test_sentinel_password_file_wins_over_sentinel_password(monkeypatch, tmp_path):
+    """FALKORDB_SENTINEL_PASSWORD_FILE — added for symmetry with the data-plane
+    FALKORDB_PASSWORD_FILE convention."""
+    secret_file = tmp_path / "sentinel-password"
+    secret_file.write_text("sentinel-file-pw")
+    monkeypatch.setenv("FALKORDB_SENTINEL_PASSWORD", "sentinel-env-pw")
+    monkeypatch.setenv("FALKORDB_SENTINEL_PASSWORD_FILE", str(secret_file))
+    cfg = load_connection_config(None, host="h", port=1, username=None, password=None)
+    assert cfg.sentinel_password == "sentinel-file-pw"
 
 
 # ── graph client construction (mocked) ──────────────────────────────

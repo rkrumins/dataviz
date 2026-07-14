@@ -27,7 +27,11 @@ Config rides the provider record's ``extra_config`` JSON (no migration):
 
 Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_SENTINEL_MASTER``, ``FALKORDB_SENTINEL_NODES``,
-``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port").
+``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"). The
+ENV-configured (unrouted) default instance additionally authenticates via
+``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` / ``FALKORDB_PASSWORD_FILE`` —
+see ``env_conn_config``. Provider rows keep resolving their own credentials
+from the encrypted credentials blob, never from these env vars.
 """
 import asyncio
 import hashlib
@@ -206,7 +210,8 @@ def load_connection_config(
             sentinel.get("username") or os.getenv("FALKORDB_SENTINEL_USERNAME")
         ),
         sentinel_password=(
-            sentinel.get("password") or os.getenv("FALKORDB_SENTINEL_PASSWORD")
+            sentinel.get("password")
+            or _env_secret("FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE")
         ),
         sentinel_auth_enabled=_as_bool(
             sentinel.get(
@@ -251,6 +256,43 @@ def _coerce_int(v: Any) -> Optional[int]:
     except (ValueError, TypeError):
         logger.warning("falkordb_connection: ignoring non-integer graphPoolSize %r", v)
         return None
+
+
+def _read_env_secret_file(path: str, var: str) -> str:
+    """Read a mounted secret file. A missing OR empty/whitespace-only file is a
+    HARD error — silently falling back to 'no password' is exactly how an
+    unauthenticated connect reaches production, whether the file is absent or
+    just empty (mount race, bad rotation).
+
+    Mirrors ``backend.common.adapters.redis_endpoint``'s ``_read_secret_file``
+    rule-for-rule, but independently implemented: FalkorDB's credentials must
+    never share a code path (or a value) with the CACHE/STREAMS Redis roles, so
+    a bug or a future change in one role's secret handling can't silently reach
+    the other. Never includes the secret VALUE in the error — only the env var
+    name and the path.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read().strip()
+    except OSError as exc:
+        raise ProviderConfigurationError(
+            f"{var}={path!r} could not be read: {exc}. Refusing to connect "
+            f"without the credential it names."
+        ) from exc
+    if not content:
+        raise ProviderConfigurationError(
+            f"{var}={path!r} is empty. Refusing to connect without the "
+            f"credential it names."
+        )
+    return content
+
+
+def _env_secret(env_var: str, file_var: str) -> Optional[str]:
+    """``{file_var}`` (a mounted secret file — wins) or plain ``{env_var}``."""
+    path = os.getenv(file_var)
+    if path:
+        return _read_env_secret_file(path, file_var)
+    return os.getenv(env_var)
 
 
 def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
@@ -850,16 +892,22 @@ def env_conn_config() -> FalkorDBConnConfig:
     Resolves ``FALKORDB_MODE`` / ``FALKORDB_SENTINEL_*`` / ``FALKORDB_CLUSTER_NODES``
     exactly like a provider row would — so the env-default (unrouted) graphs a
     deployment still has are reached over the right topology instead of being
-    hard-wired to standalone. The env instance carries no credentials (there are
-    no ``FALKORDB_USERNAME`` / ``_PASSWORD`` vars anywhere in the stack); an
-    authenticated instance must be registered as a provider row.
+    hard-wired to standalone.
+
+    Data-plane credentials: ``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` /
+    ``FALKORDB_PASSWORD_FILE`` (file wins; a missing or empty file is a hard
+    error — never a silent fall-back to an unauthenticated connect). This is
+    the ONLY credential source for this instance; none of the new vars set
+    reproduces the old behaviour exactly (``username=None, password=None``).
+    An authenticated PROVIDER ROW keeps resolving its own credentials from the
+    encrypted credentials blob, unaffected by these env vars.
     """
     return load_connection_config(
         None,
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
-        username=None,
-        password=None,
+        username=os.getenv("FALKORDB_USERNAME"),
+        password=_env_secret("FALKORDB_PASSWORD", "FALKORDB_PASSWORD_FILE"),
     )
 
 
