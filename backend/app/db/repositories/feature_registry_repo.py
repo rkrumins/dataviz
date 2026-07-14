@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.config.feature_wiring import FEATURE_WIRING
+from backend.app.config.feature_wiring import wiring_payload
 from ..models import FeatureCategoryORM, FeatureDefinitionORM, FeatureRegistryMetaORM
 
 
@@ -74,8 +74,6 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
     # The FACTS about this flag come from code, not from the row — see config/feature_wiring.py.
     # The admin page shows them ("Server-enforced", "what stops working", "what still works"),
     # and they must describe the deployment that is actually running, not what a row once said.
-    wiring = FEATURE_WIRING.get(row.key)
-
     return {
         "key": row.key,
         "name": row.name,
@@ -90,15 +88,10 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
         "impactWhenOff": getattr(row, "impact_when_off", None),
         "sortOrder": row.sort_order,
         "deprecated": row.deprecated,
-        # Derived, and reconciled into the row on every startup. Kept in the response for the
-        # existing consumers, but it is now a projection of the code rather than a claim about it.
-        "implemented": bool(wiring.wired) if wiring else False,
-        "enforcedServerSide": bool(wiring.enforced_server_side) if wiring else False,
-        "posture": wiring.posture if wiring else "capability",
-        "serverGates": list(wiring.server_gates) if wiring else [],
-        "uiSurfaces": list(wiring.ui_surfaces) if wiring else [],
-        "stillAllowed": list(wiring.still_allowed) if wiring else [],
-        "dependsOn": list(wiring.depends_on) if wiring else [],
+        # Derived, and reconciled into the row on every startup. `implemented` stays in the
+        # response for its existing consumers, but it is now a projection of the code rather
+        # than a claim about it.
+        **wiring_payload(row.key),
     }
 
 

@@ -231,6 +231,28 @@ def wiring_for(key: str) -> FeatureWiring | None:
     return FEATURE_WIRING.get(key)
 
 
+def wiring_payload(key: str) -> dict:
+    """The facts, in the shape the API and the admin page speak (camelCase).
+
+    ONE function, because there are two callers and they must not disagree: the live API
+    (`feature_registry_repo._row_to_definition`) and the offline fallback the frontend bundles
+    (`scripts/export_features_fallback.py`). The exporter had its own copy of this projection,
+    it was never updated, and so the bundled fallback went on hard-coding `implemented: false`
+    for every flag — which is how the page can render "12 switches are not enforced" while the
+    server enforces all twelve. Same bug as the column, one layer out.
+    """
+    w = FEATURE_WIRING.get(key)
+    return {
+        "implemented": bool(w.wired) if w else False,
+        "enforcedServerSide": bool(w.enforced_server_side) if w else False,
+        "posture": w.posture if w else "capability",
+        "serverGates": list(w.server_gates) if w else [],
+        "uiSurfaces": list(w.ui_surfaces) if w else [],
+        "stillAllowed": list(w.still_allowed) if w else [],
+        "dependsOn": list(w.depends_on) if w else [],
+    }
+
+
 def fail_safe_default(key: str) -> bool:
     """The `default=` every gate for `key` must pass. One place, so two gates on the same flag
     cannot disagree about which way it fails."""
