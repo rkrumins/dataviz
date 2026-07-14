@@ -24,7 +24,7 @@ beforeAll(() => {
 // LayerStudio → LayoutStep (LAYER_COLORS) → … → `@/store/workspaces` →
 // workspaceSwitchCleanup → `@/main`, which calls createRoot() at import time.
 // Same stub the other store-touching suites use.
-vi.mock('@/main', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
+vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
 
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),

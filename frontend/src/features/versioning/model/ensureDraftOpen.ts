@@ -25,11 +25,10 @@ import { VERSIONING_KEYS } from '../hooks/useVersioning'
 /** The branches/resolve caches must reflect a draft the moment it exists — the
  *  ?branch deep-link guard validates the URL param against the CACHED branches
  *  list, and a stale list makes it reject (and toast about) a draft this very
- *  function just opened or resumed. `@/main` is imported dynamically because a
- *  static import mounts the app at module load (breaks jsdom tests — same
- *  pattern as fetchWithTimeout). Fire-and-forget; never blocks the caller. */
+ *  function just opened or resumed. Loaded lazily so this model module keeps
+ *  react-query out of its static graph. Fire-and-forget; never blocks the caller. */
 function invalidateVersioningCaches(): void {
-  void import('@/main')
+  void import('@/lib/queryClient')
     .then((m) => m.getQueryClient()?.invalidateQueries({ queryKey: VERSIONING_KEYS.all }))
     .catch(() => {})
 }

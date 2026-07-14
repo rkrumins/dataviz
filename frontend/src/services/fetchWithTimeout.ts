@@ -128,8 +128,8 @@ async function tryRefresh(): Promise<boolean> {
             const after = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
             if (before === after) return
             try {
-              const mainMod = await import('@/main')
-              const qc = mainMod.getQueryClient()
+              const qcMod = await import('@/lib/queryClient')
+              const qc = qcMod.getQueryClient()
               if (qc) await qc.invalidateQueries()
             } catch {
               // best-effort — the next user-triggered render still
