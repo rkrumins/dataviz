@@ -335,6 +335,12 @@ class ProviderRegistry:
                 password=credentials.get("password", ""),
                 database=graph_name or "neo4j",
                 extra_config=extra_config,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials, including the legacy
+                # extra_config.redisUrl alias) — resolved centrally by
+                # build_neo4j_cache_client, never inherited from the Bolt credentials.
+                provider_id=provider_id,
+                credentials=credentials or {},
             )
 
         elif ptype == "datahub":
