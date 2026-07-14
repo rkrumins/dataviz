@@ -4,8 +4,28 @@ Seed feature_categories, feature_definitions, feature_flags, and feature_registr
 Runs at startup; uses per-row savepoints so multi-worker gunicorn on PostgreSQL
 doesn't cause IntegrityError cascades that roll back unrelated seed data.
 
-Single source of truth: SEED_DEFINITIONS drives both the schema and the default
-flag values (via _build_seed_flags_config). No separate hand-maintained dict.
+The CONTENT lives in ``app/config/features_seed.py`` (prose: names, descriptions, hints,
+impact copy) and the FACTS live in ``app/config/feature_wiring.py`` (where each flag is
+actually enforced). This module is only the machinery that gets them into the database.
+
+INSERT IS NOT ENOUGH — THE OLD BUG
+----------------------------------
+This seeder used to skip any definition whose key already existed. That is right for VALUES
+(an admin's settings are theirs, and a redeploy must not reset them) and quietly wrong for
+CONTENT: it meant no correction to a description — and no correction to ``implemented`` — could
+ever reach a database that had been seeded once. The registry's copy was frozen at whatever the
+first deploy wrote, which is much of why it drifted so far from the truth.
+
+The rule is now explicit, per column:
+
+  * ``implemented``  — CODE-OWNED. Always overwritten from ``FEATURE_WIRING``. It is a fact
+    about the source tree, and the database's opinion of it is not interesting.
+  * structure        — CODE-OWNED (type, options, category). An admin editing these could only
+    break the contract between the registry and the gates.
+  * prose            — ADMIN-OWNED, seed-provided. Backfilled when NULL/empty (so new copy, and
+    newly-added columns, reach existing rows) but NEVER clobbered: an admin may have reworded
+    it, and that edit is theirs to keep.
+  * ``feature_flags.config`` — ADMIN-OWNED. Untouched after the first seed. These are settings.
 """
 import json
 import logging
@@ -19,218 +39,45 @@ from backend.app.config.features import (
     DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE,
     DEFAULT_EXPERIMENTAL_NOTICE_TITLE,
 )
+from backend.app.config.feature_wiring import FEATURE_WIRING
+from backend.app.config.features_seed import (  # re-exported — scripts import these from here
+    DEFAULT_PREVIEW_FOOTER,
+    DEFAULT_PREVIEW_LABEL,
+    SEED_CATEGORIES,
+    SEED_DEFINITIONS,
+)
 from .models import FeatureCategoryORM, FeatureDefinitionORM, FeatureFlagsORM, FeatureRegistryMetaORM
 
 logger = logging.getLogger(__name__)
 
-# Default per-card "preview" copy — backend-driven so UI can change without frontend deploy.
-DEFAULT_PREVIEW_LABEL = "Not yet wired"
-DEFAULT_PREVIEW_FOOTER = "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
-
-# Seed data: categories first, then definitions (referencing category ids).
-SEED_CATEGORIES: list[dict[str, Any]] = [
-    {"id": "editing", "label": "Editing", "icon": "Pencil", "color": "indigo", "sort_order": 0, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "views", "label": "View Modes", "icon": "LayoutTemplate", "color": "violet", "sort_order": 1, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "auth", "label": "Authentication", "icon": "UserPlus", "color": "emerald", "sort_order": 2, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "lineage", "label": "Lineage", "icon": "GitBranch", "color": "amber", "sort_order": 3, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "display", "label": "Display & UI", "icon": "Palette", "color": "blue", "sort_order": 4, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "security", "label": "Security", "icon": "Shield", "color": "rose", "sort_order": 5, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "integrations", "label": "Integrations", "icon": "Plug", "color": "sky", "sort_order": 6, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "analytics", "label": "Analytics", "icon": "BarChart3", "color": "teal", "sort_order": 7, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "experimental", "label": "Experimental", "icon": "FlaskConical", "color": "fuchsia", "sort_order": 8, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "performance", "label": "Performance", "icon": "Zap", "color": "orange", "sort_order": 9, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "notifications", "label": "Notifications", "icon": "Bell", "color": "slate", "sort_order": 10, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
-    {"id": "semantic_layers", "label": "Semantic Layers", "icon": "Layers", "color": "indigo", "sort_order": 11, "preview": False, "preview_label": None, "preview_footer": None},
-    {"id": "other", "label": "Other", "icon": "LayoutTemplate", "color": "slate", "sort_order": 99, "preview": True, "preview_label": DEFAULT_PREVIEW_LABEL, "preview_footer": DEFAULT_PREVIEW_FOOTER},
+__all__ = [
+    "DEFAULT_PREVIEW_FOOTER",
+    "DEFAULT_PREVIEW_LABEL",
+    "SEED_CATEGORIES",
+    "SEED_DEFINITIONS",
+    "SEED_FLAGS_CONFIG",
+    "seed_feature_flags",
+    "seed_feature_registry",
+    "seed_feature_registry_meta",
 ]
 
-SEED_DEFINITIONS: list[dict[str, Any]] = [
-    {
-        "key": "editModeEnabled",
-        "name": "Edit mode",
-        "description": "Allow users to edit node properties from views and persist changes to the underlying data.",
-        "category_id": "editing",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": True,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 0,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "allowedViewModes",
-        "name": "View modes",
-        "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Context View, Layered Lineage).",
-        "category_id": "views",
-        "type": "string[]",
-        "default_value": json.dumps(["graph", "hierarchy", "reference", "layered-lineage"]),
-        "user_overridable": False,
-        "options": json.dumps([
-            {"id": "graph", "label": "Graph"},
-            {"id": "hierarchy", "label": "Hierarchy"},
-            {"id": "reference", "label": "Context View"},
-            {"id": "layered-lineage", "label": "Layered Lineage"},
-        ]),
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 1,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "signupEnabled",
-        "name": "Signup",
-        "description": "Allow new users to create an account from the login page (self-registration).",
-        "category_id": "auth",
-        "type": "boolean",
-        "default_value": json.dumps(False),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 2,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "traceEnabled",
-        "name": "Trace",
-        "description": "Enable lineage trace in graph and context views (trace upstream/downstream from a node).",
-        "category_id": "lineage",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": True,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 3,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerNonAdminEditing",
-        "name": "Non-admin editing",
-        "description": "Allow non-admin users to create, edit, and publish semantic layers. When disabled, only admins can manage semantic layer definitions.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(False),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": "Enable this to let team members define their own semantic layers without admin intervention. They can still only edit draft layers they created.",
-        "sort_order": 0,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerExportEnabled",
-        "name": "Export",
-        "description": "Allow users to export semantic layer definitions as JSON files for backup, migration, or sharing between environments.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 1,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerAutoSuggest",
-        "name": "Auto-suggest from graph",
-        "description": "Enable the 'Suggest from Graph' feature that automatically generates semantic layer definitions by analyzing the entity and relationship types in the connected data source.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 2,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerVersionHistory",
-        "name": "Version history & audit trail",
-        "description": "Show the full version history and audit trail for each semantic layer, including who made changes, when, and what was modified.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": None,
-        "sort_order": 3,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerEditMode",
-        "name": "Edit mode",
-        "description": "Allow users to enter edit mode on semantic layer definitions to modify entity types, relationships, hierarchy, and other structural settings.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": "When disabled, semantic layers are read-only for all users. Admins can still publish, clone, and export.",
-        "sort_order": 4,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "semanticLayerImportEnabled",
-        "name": "Import",
-        "description": "Allow users to import semantic layer definitions from exported JSON files. Supports creating new layers or updating existing ones with change detection and version management.",
-        "category_id": "semantic_layers",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": "Disable if you want to restrict semantic layer changes to the UI editor only, preventing bulk imports.",
-        "sort_order": 5,
-        "deprecated": False,
-        "implemented": False,
-    },
-    {
-        "key": "versioningEnabled",
-        "name": "Version control",
-        "description": "Drafts, reviews, publishing, history and rollback for data sources. When off, all version-control tools are hidden and canvases are view-only. Existing history is kept and stays safe.",
-        "category_id": "lineage",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": "Turning this off hides version control for every user and makes editing unavailable. Background sync of already-versioned data keeps running, and nothing is deleted.",
-        "sort_order": 4,
-        "deprecated": False,
-        "implemented": True,
-    },
-    {
-        "key": "announcementsEnabled",
-        "name": "Announcements",
-        "description": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
-        "category_id": "notifications",
-        "type": "boolean",
-        "default_value": json.dumps(True),
-        "user_overridable": False,
-        "options": None,
-        "help_url": None,
-        "admin_hint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
-        "sort_order": 0,
-        "deprecated": False,
-        "implemented": True,
-    },
-]
+#: Prose an admin may have reworded. Seeded once, backfilled if empty, never overwritten.
+_ADMIN_OWNED_PROSE = ("name", "description", "admin_hint", "impact_when_off", "help_url")
+
+#: Structure the code owns outright.
+_CODE_OWNED_STRUCTURE = ("category_id", "type", "options", "user_overridable", "sort_order")
+
+
+def _row_values(definition: dict[str, Any]) -> dict[str, Any]:
+    """The full column set for one definition — seed prose plus the code-derived truth."""
+    wiring = FEATURE_WIRING.get(definition["key"])
+    return {
+        **definition,
+        # DERIVED, never declared. This is the column that used to lie: it was hand-set here and
+        # tickable by an admin in the UI — a claim about the source tree owned by people who
+        # cannot change the source tree.
+        "implemented": bool(wiring.wired) if wiring else False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -250,42 +97,79 @@ SEED_FLAGS_CONFIG: dict[str, Any] = _build_seed_flags_config()
 # ---------------------------------------------------------------------------
 
 async def seed_feature_registry(session: AsyncSession) -> None:
-    """Insert default categories and definitions, skipping any that already exist.
+    """Insert default categories and definitions; reconcile the ones already there.
 
-    Uses per-row savepoints so a concurrent worker inserting the same row
-    causes only that savepoint to roll back — not the entire transaction.
-    This is critical for multi-worker gunicorn on PostgreSQL.
+    Uses per-row savepoints so a concurrent worker inserting the same row causes only that
+    savepoint to roll back — not the entire transaction. Critical for multi-worker gunicorn
+    on PostgreSQL.
     """
-    existing_cats = await session.execute(select(FeatureCategoryORM.id))
-    existing_cat_ids = {row[0] for row in existing_cats}
+    existing_cats = await session.execute(select(FeatureCategoryORM))
+    cats_by_id = {c.id: c for c in existing_cats.scalars()}
     cats_added = 0
     for c in SEED_CATEGORIES:
-        if c["id"] in existing_cat_ids:
+        row = cats_by_id.get(c["id"])
+        if row is None:
+            try:
+                async with session.begin_nested():
+                    session.add(FeatureCategoryORM(**c))
+                cats_added += 1
+            except Exception:
+                pass  # Another worker inserted this row — safe to skip
             continue
-        try:
-            async with session.begin_nested():
-                session.add(FeatureCategoryORM(**c))
-            cats_added += 1
-        except Exception:
-            pass  # Another worker inserted this row — safe to skip
+        # A category's "preview" chrome ("Not yet wired") is a claim about the code, so the code
+        # keeps it current: once its flags are wired the badge must go — on databases seeded long
+        # ago as much as on fresh ones.
+        row.preview = c["preview"]
+        row.preview_label = c["preview_label"]
+        row.preview_footer = c["preview_footer"]
+        row.sort_order = c["sort_order"]
 
-    existing_defs = await session.execute(select(FeatureDefinitionORM.key))
-    existing_def_keys = {row[0] for row in existing_defs}
+    existing_defs = await session.execute(select(FeatureDefinitionORM))
+    defs_by_key = {d.key: d for d in existing_defs.scalars()}
+    cats_synced = sum(1 for c in SEED_CATEGORIES if c["id"] in cats_by_id)
     defs_added = 0
+    defs_synced = 0
     for d in SEED_DEFINITIONS:
-        if d["key"] in existing_def_keys:
+        values = _row_values(d)
+        row = defs_by_key.get(d["key"])
+        if row is None:
+            try:
+                async with session.begin_nested():
+                    session.add(FeatureDefinitionORM(**values))
+                defs_added += 1
+            except Exception:
+                pass  # Another worker inserted this row — safe to skip
             continue
-        try:
-            async with session.begin_nested():
-                session.add(FeatureDefinitionORM(**d))
-            defs_added += 1
-        except Exception:
-            pass  # Another worker inserted this row — safe to skip
 
-    if cats_added or defs_added:
-        logger.info("Seeded feature registry: %d categories, %d definitions added.", cats_added, defs_added)
+        changed = False
+
+        # Code-owned: always reconciled.
+        if bool(row.implemented) != values["implemented"]:
+            row.implemented = values["implemented"]
+            changed = True
+        for column in _CODE_OWNED_STRUCTURE:
+            if getattr(row, column) != values[column]:
+                setattr(row, column, values[column])
+                changed = True
+
+        # Admin-owned prose: backfill only. A blank column means nobody has said anything yet —
+        # which includes the case of a column that did not exist until this deploy.
+        for column in _ADMIN_OWNED_PROSE:
+            if not (getattr(row, column, None) or "").strip() and values.get(column):
+                setattr(row, column, values[column])
+                changed = True
+
+        if changed:
+            defs_synced += 1
+
+    if cats_added or defs_added or defs_synced:
+        logger.info(
+            "Feature registry: +%d categories, +%d definitions, %d definitions reconciled "
+            "(%d categories present).",
+            cats_added, defs_added, defs_synced, cats_synced,
+        )
     else:
-        logger.debug("Feature registry already fully seeded; skipping.")
+        logger.debug("Feature registry already current; nothing to seed.")
 
 
 async def seed_feature_flags(session: AsyncSession) -> None:
@@ -293,6 +177,11 @@ async def seed_feature_flags(session: AsyncSession) -> None:
 
     Uses a savepoint so a concurrent worker race doesn't poison the session.
     Starts at version=1 so the first admin PATCH expects version=1 (not 0).
+
+    Deliberately does NOT reconcile an existing row: these are the admin's SETTINGS, and a
+    redeploy that reset them to defaults would silently undo their decisions. A flag added after
+    the first seed simply has no stored value, and every read falls back to the definition's
+    default until an admin saves.
     """
     r = await session.execute(select(FeatureFlagsORM).limit(1))
     if r.scalar_one_or_none() is not None:

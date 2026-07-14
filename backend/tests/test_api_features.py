@@ -4,6 +4,7 @@ API endpoint tests for /api/v1/admin/features/*.
 Tests the feature flags GET/PATCH, definition CRUD, and deprecation endpoints
 using the test_client fixture which overrides auth and DB session.
 """
+import pytest
 from httpx import AsyncClient
 
 
@@ -195,38 +196,77 @@ async def test_patch_experimental_notice_valid(test_client: AsyncClient):
     assert notice["enabled"] is True
 
 
-# ── PATCH with implemented ────────────────────────────────────────────
+# ── `implemented` is a fact about the CODE, and nobody may assert it ───────────
+#
+# It records whether a flag is actually wired to a gate. It used to be an admin-tickable
+# checkbox — a claim about the source tree, owned by someone who cannot change the source tree —
+# and it was wrong about four flags on the day it was written: it marked `signupEnabled` and
+# `traceEnabled` unwired when both were enforced, and marked eight decorative toggles as real
+# when they gated nothing at all.
+#
+# It is now DERIVED from `config/feature_wiring.py` and reconciled into the row at startup.
 
-async def test_patch_implemented_invalid_key(test_client: AsyncClient):
-    """PATCH implemented with unknown feature key returns 400."""
+
+@pytest.fixture
+async def seeded_registry(db_session):
+    """The real registry, in the test database.
+
+    Most tests in this file don't need it — but the two below are about what the registry SAYS
+    about the shipped flags, and conftest creates the tables without seeding them.
+    """
+    from backend.app.db.seed_feature_registry import (
+        seed_feature_flags,
+        seed_feature_registry,
+    )
+
+    await seed_feature_registry(db_session)
+    await seed_feature_flags(db_session)
+    await db_session.commit()
+
+
+async def test_patch_cannot_set_implemented(test_client: AsyncClient, seeded_registry):
+    """The write path is closed — for a VALID key, not just an unknown one.
+
+    (The previous version of this test only tried an unknown key, so it would have gone on
+    passing even if the real setter had survived.)
+    """
     get_resp = await test_client.get("/api/v1/admin/features")
     version = get_resp.json()["version"]
 
     resp = await test_client.patch(
         "/api/v1/admin/features",
-        json={
-            "version": version,
-            "implemented": {"nonexistent_feature": True},
-        },
+        json={"version": version, "implemented": {"traceEnabled": False}},
     )
     assert resp.status_code == 400
-    assert resp.json()["detail"]["field"] == "implemented"
+    body = resp.json()["detail"]
+    assert body["field"] == "implemented"
+    assert body["code"] == "READ_ONLY"
+
+    # And it did NOT take effect: traceEnabled is wired, and still says so.
+    after = await test_client.get("/api/v1/admin/features")
+    trace = next(d for d in after.json()["schema"] if d["key"] == "traceEnabled")
+    assert trace["implemented"] is True
 
 
-async def test_patch_implemented_invalid_value(test_client: AsyncClient):
-    """PATCH implemented with non-boolean value returns 400."""
-    get_resp = await test_client.get("/api/v1/admin/features")
-    version = get_resp.json()["version"]
+async def test_the_registry_reports_what_the_code_actually_does(
+    test_client: AsyncClient, seeded_registry,
+):
+    """Every flag we ship is wired to a real server gate, and the API says so.
 
-    resp = await test_client.patch(
-        "/api/v1/admin/features",
-        json={
-            "version": version,
-            "implemented": {"someKey": "not_a_boolean"},
-        },
-    )
-    # Could be 400 for unknown key or for invalid value type depending on order of checks
-    assert resp.status_code == 400
+    This is the bug the whole change exists to fix, asserted end-to-end over HTTP: an admin
+    reading this page is told the truth about which switches do something.
+    """
+    resp = await test_client.get("/api/v1/admin/features")
+    assert resp.status_code == 200
+
+    schema = resp.json()["schema"]
+    assert schema, "no feature definitions served"
+
+    for d in schema:
+        assert d["implemented"] is True, f"{d['key']} is offered to admins but is not wired"
+        assert d["enforcedServerSide"] is True, f"{d['key']} is not enforced by the server"
+        assert d["serverGates"], f"{d['key']} names no gate"
+        assert d["impactWhenOff"], f"{d['key']} cannot say what turning it off does"
 
 
 # ── Optimistic concurrency (version conflict) ─────────────────────────

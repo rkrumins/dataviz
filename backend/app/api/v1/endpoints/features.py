@@ -148,9 +148,11 @@ async def patch_features(
     session: AsyncSession = Depends(get_db_session),
 ):
     """
-    Update feature flags, experimental notice copy, and/or per-feature "implemented" (not-yet-wired) status.
-    Payload may include: feature keys (validated), "experimentalNotice": { "enabled", "title", "message" },
-    "implemented": { "featureKey": true/false, ... }.
+    Update feature flags and the experimental-notice copy.
+    Payload may include: feature keys (validated) and "experimentalNotice":
+    { "enabled", "title", "message" }.
+
+    "implemented" is REFUSED — it is derived from config/feature_wiring.py. See below.
     Rate limited (30/min per IP).
     """
     client_ip = request.client.host if request.client else "unknown"
@@ -168,33 +170,29 @@ async def patch_features(
 
     definitions = await feature_registry_repo.get_all_definitions(session, include_deprecated=True)
     categories = await feature_registry_repo.get_all_categories(session)
-    valid_feature_keys = {d["key"] for d in definitions}
 
-    if implemented_body is not None and isinstance(implemented_body, dict):
-        invalid = set(implemented_body.keys()) - valid_feature_keys
-        if invalid:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "detail": f"Unknown feature key(s) in implemented: {sorted(invalid)}",
-                    "code": "VALIDATION",
-                    "field": "implemented",
-                },
-            )
-        values_ok = all(isinstance(v, bool) or v in (0, 1) for v in implemented_body.values())
-        if not values_ok:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "detail": "implemented values must be boolean",
-                    "code": "VALIDATION",
-                    "field": "implemented",
-                },
-            )
-        await feature_registry_repo.update_definitions_implemented(
-            session, {k: bool(v) for k, v in implemented_body.items()}
+    # `implemented` is no longer something anyone can SAY.
+    #
+    # It records whether a flag is actually wired — a fact about the source tree — and it used
+    # to be a checkbox on this page. Predictably, it was wrong: it marked `signupEnabled` and
+    # `traceEnabled` unimplemented when both were wired, and marked eight decorative toggles as
+    # real when they gated nothing at all. Ticking a box cannot make a gate exist, so the box is
+    # gone: the value is derived from `config/feature_wiring.py` and reconciled into the row on
+    # every startup. We refuse the field loudly rather than ignoring it, so an old client that
+    # still sends it learns why instead of silently believing it worked.
+    if implemented_body is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "detail": (
+                    "'implemented' is derived from the code (config/feature_wiring.py) and "
+                    "cannot be set from the API — it describes whether a flag is actually "
+                    "enforced, which the database has no way to know."
+                ),
+                "code": "READ_ONLY",
+                "field": "implemented",
+            },
         )
-        definitions = await feature_registry_repo.get_all_definitions(session, include_deprecated=True)
 
     try:
         merged = validate_and_merge_values(definitions, payload)
@@ -285,7 +283,10 @@ async def create_definition(
 ):
     """
     Create a new feature definition. Body: key, name, description, category (id), type, default (value),
-    optional userOverridable, options, helpUrl, adminHint, sortOrder, implemented.
+    optional userOverridable, options, helpUrl, adminHint, impactWhenOff, sortOrder.
+
+    A definition created here has no gate in the code, so it reports implemented=false
+    until someone actually wires it. That is not a limitation — it is the point.
     """
     key = body.get("key")
     if not key or not isinstance(key, str):
@@ -324,7 +325,6 @@ async def create_definition(
             help_url=body.get("helpUrl"),
             admin_hint=body.get("adminHint"),
             sort_order=int(body.get("sortOrder", 99)),
-            implemented=bool(body.get("implemented", False)),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"detail": str(e), "code": "VALIDATION", "field": None})
@@ -348,7 +348,10 @@ async def patch_definition(
 ):
     """
     Update a feature definition (metadata). Partial update: only provided fields are changed.
-    Body can include: name, description, category, type, default, userOverridable, options, helpUrl, adminHint, sortOrder, deprecated, implemented.
+    Body can include: name, description, category, type, default, userOverridable,
+    options, helpUrl, adminHint, impactWhenOff, sortOrder, deprecated.
+
+    NOT "implemented" — that is a fact about the code, derived from config/feature_wiring.py.
     """
     mapping = {
         "name": "name",
@@ -360,14 +363,14 @@ async def patch_definition(
         "options": "options",
         "helpUrl": "help_url",
         "adminHint": "admin_hint",
+        "impactWhenOff": "impact_when_off",
         "sortOrder": "sort_order",
         "deprecated": "deprecated",
-        "implemented": "implemented",
     }
     fields = {}
     for api_key, col in mapping.items():
         v = body.get(api_key)
-        if v is None and api_key in ("helpUrl", "adminHint", "options"):
+        if v is None and api_key in ("helpUrl", "adminHint", "impactWhenOff", "options"):
             fields[col] = None
             continue
         if v is None:
@@ -376,7 +379,7 @@ async def patch_definition(
             fields[col] = json.dumps(v) if not isinstance(v, str) else v
         elif api_key == "options":
             fields[col] = json.dumps(v) if v is not None and not isinstance(v, str) else v
-        elif api_key in ("userOverridable", "deprecated", "implemented"):
+        elif api_key in ("userOverridable", "deprecated"):
             fields[col] = bool(v)
         elif api_key == "sortOrder":
             fields[col] = int(v)

@@ -1,15 +1,18 @@
 """
 Repository for feature_categories and feature_definitions (schema/metadata from DB).
-No hardcoded registry — all data comes from the database.
+The PROSE comes from the database (an admin may reword it); the FACTS about where each flag is
+enforced come from ``app/config/feature_wiring.py``, because only code can know what the code
+does. ``_row_to_definition`` is where the two are joined.
 Supports full CRUD for definitions: create, read, update, deprecate (soft delete).
 """
 import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.config.feature_wiring import FEATURE_WIRING
 from ..models import FeatureCategoryORM, FeatureDefinitionORM, FeatureRegistryMetaORM
 
 
@@ -55,24 +58,6 @@ async def get_definitions_map(session: AsyncSession) -> dict[str, dict[str, Any]
     return {d["key"]: d for d in defs}
 
 
-async def update_definitions_implemented(
-    session: AsyncSession, updates: dict[str, bool]
-) -> None:
-    """Set implemented flag for given feature keys. Keys must exist in feature_definitions; unknown keys are ignored."""
-    if not updates:
-        return
-    valid_keys = {d["key"] for d in await get_all_definitions(session, include_deprecated=True)}
-    for key, value in updates.items():
-        if key not in valid_keys:
-            continue
-        await session.execute(
-            update(FeatureDefinitionORM)
-            .where(FeatureDefinitionORM.key == key)
-            .values(implemented=bool(value))
-        )
-    await session.flush()
-
-
 def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
     """Map ORM row to API-shaped definition dict."""
     default_val = row.default_value
@@ -86,6 +71,11 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
             options = json.loads(row.options)
         except Exception:
             pass
+    # The FACTS about this flag come from code, not from the row — see config/feature_wiring.py.
+    # The admin page shows them ("Server-enforced", "what stops working", "what still works"),
+    # and they must describe the deployment that is actually running, not what a row once said.
+    wiring = FEATURE_WIRING.get(row.key)
+
     return {
         "key": row.key,
         "name": row.name,
@@ -97,9 +87,18 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
         "options": options,
         "helpUrl": row.help_url,
         "adminHint": row.admin_hint,
+        "impactWhenOff": getattr(row, "impact_when_off", None),
         "sortOrder": row.sort_order,
         "deprecated": row.deprecated,
-        "implemented": getattr(row, "implemented", False),
+        # Derived, and reconciled into the row on every startup. Kept in the response for the
+        # existing consumers, but it is now a projection of the code rather than a claim about it.
+        "implemented": bool(wiring.wired) if wiring else False,
+        "enforcedServerSide": bool(wiring.enforced_server_side) if wiring else False,
+        "posture": wiring.posture if wiring else "capability",
+        "serverGates": list(wiring.server_gates) if wiring else [],
+        "uiSurfaces": list(wiring.ui_surfaces) if wiring else [],
+        "stillAllowed": list(wiring.still_allowed) if wiring else [],
+        "dependsOn": list(wiring.depends_on) if wiring else [],
     }
 
 
@@ -124,8 +123,8 @@ async def create_definition(
     options: str | None = None,
     help_url: str | None = None,
     admin_hint: str | None = None,
+    impact_when_off: str | None = None,
     sort_order: int = 0,
-    implemented: bool = False,
 ) -> dict[str, Any]:
     """Insert a new feature definition. Raises ValueError if key exists or category_id invalid."""
     r = await session.execute(select(FeatureDefinitionORM).where(FeatureDefinitionORM.key == key))
@@ -144,9 +143,11 @@ async def create_definition(
         options=options,
         help_url=help_url,
         admin_hint=admin_hint,
+        impact_when_off=impact_when_off,
         sort_order=sort_order,
         deprecated=False,
-        implemented=implemented,
+        # `implemented` is DERIVED (config/feature_wiring.py) and reconciled at startup — a
+        # definition invented at runtime has no gate behind it, so it defaults to False.
     )
     session.add(row)
     await session.flush()
@@ -163,10 +164,12 @@ async def update_definition(
     row = r.scalar_one_or_none()
     if row is None:
         return None
+    # `implemented` is absent ON PURPOSE: it states whether a gate exists in the code, and no
+    # API caller can make that true or false by saying so.
     allowed = {
         "name", "description", "category_id", "type", "default_value",
-        "user_overridable", "options", "help_url", "admin_hint", "sort_order",
-        "deprecated", "implemented",
+        "user_overridable", "options", "help_url", "admin_hint", "impact_when_off",
+        "sort_order", "deprecated",
     }
     for k, v in fields.items():
         if k not in allowed:

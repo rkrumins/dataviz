@@ -8,6 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.feature_gate import require_admin_unless, require_feature
 from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import ontology_definition_repo
@@ -54,6 +55,39 @@ router = APIRouter()
 # ontologies tied to a workspace they administer).
 _REQUIRES_ONTOLOGY_READ = requires("workspace:ontology:read", workspace_any=True)
 _REQUIRES_ONTOLOGY_MANAGE = requires("workspace:ontology:manage", workspace_any=True)
+
+
+# ── Admin feature flags (Admin → Features) ────────────────────────────────────
+#
+# The six semantic-layer toggles were offered to admins and enforced NOWHERE: turning "Import"
+# off left everyone importing. These are the gates that make them mean something. Declared in
+# `config/feature_wiring.py`, held to the code by `tests/test_feature_wiring.py`.
+#
+# They are PER-ROUTE, not a router-wide `write_gate`, because on this router the HTTP method is
+# not a reliable proxy for "this changes something": `/suggest`, `/validate`, `/coverage` and
+# `/resolution-check` are POSTs that only ANALYSE. A method-based gate would take the analysis
+# away with the editing, and analysis is exactly what you still want when the model is frozen.
+#
+# Two gates stack on a write:
+#   * WHAT   — is editing available in this deployment at all?      (_GATE_EDIT)
+#   * WHO    — may a non-admin perform it?                          (_GATE_WRITER)
+# They answer different questions, so a write needs both. Reads carry neither.
+_GATE_EDIT = require_feature("semanticLayerEditMode")
+_GATE_WRITER = require_admin_unless("semanticLayerNonAdminEditing")
+_GATE_IMPORT = require_feature("semanticLayerImportEnabled")
+_GATE_EXPORT = require_feature("semanticLayerExportEnabled")
+_GATE_SUGGEST = require_feature("semanticLayerAutoSuggest")
+_GATE_HISTORY = require_feature("semanticLayerVersionHistory")
+
+#: Content writes: create/update/delete/restore/new-version, and import (importing IS editing —
+#: it just arrives as a file). Blocked when editing is off, and when a non-admin is refused.
+_EDIT_GATES = [Depends(_GATE_EDIT), Depends(_GATE_WRITER)]
+
+#: Lifecycle writes: publish and clone. Deliberately NOT gated by `_GATE_EDIT` — the product has
+#: always promised that turning editing off still lets an admin publish, clone and export what
+#: already exists. They still answer to `_GATE_WRITER`: they are writes, so "who may write?"
+#: applies.
+_LIFECYCLE_GATES = [Depends(_GATE_WRITER)]
 
 
 async def _invalidate_ontology_caches(
@@ -229,7 +263,8 @@ async def list_ontologies(
     return [it for it in items if it.id in visible_ids]
 
 
-@router.post("", response_model=OntologyDefinitionResponse, status_code=201)
+@router.post("", response_model=OntologyDefinitionResponse, status_code=201,
+             dependencies=_EDIT_GATES)
 async def create_ontology(
     req: OntologyCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
@@ -245,7 +280,8 @@ async def create_ontology(
     return result
 
 
-@router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse])
+@router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse],
+            dependencies=[Depends(_GATE_HISTORY)])
 async def list_ontology_versions(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -276,7 +312,7 @@ async def get_ontology(
     return ontology
 
 
-@router.get("/{ontology_id}/export")
+@router.get("/{ontology_id}/export", dependencies=[Depends(_GATE_EXPORT)])
 async def export_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -324,7 +360,8 @@ async def export_ontology(
     )
 
 
-@router.put("/{ontology_id}", response_model=OntologyDefinitionResponse)
+@router.put("/{ontology_id}", response_model=OntologyDefinitionResponse,
+            dependencies=_EDIT_GATES)
 async def update_ontology(
     ontology_id: str = Path(...),
     req: OntologyUpdateRequest = Body(...),
@@ -354,7 +391,7 @@ async def update_ontology(
     return ontology
 
 
-@router.delete("/{ontology_id}", status_code=204)
+@router.delete("/{ontology_id}", status_code=204, dependencies=_EDIT_GATES)
 async def delete_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -380,7 +417,8 @@ async def delete_ontology(
     await _invalidate_ontology_caches(session, ontology_id)
 
 
-@router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse)
+@router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse,
+             dependencies=_EDIT_GATES)
 async def restore_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -394,7 +432,8 @@ async def restore_ontology(
     return restored
 
 
-@router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse)
+@router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse,
+             dependencies=_LIFECYCLE_GATES)
 async def publish_ontology(
     ontology_id: str = Path(...),
     force: bool = Query(False, description="Bypass evolution_policy check (admin only)."),
@@ -425,7 +464,8 @@ async def publish_ontology(
     return ontology
 
 
-@router.post("/{ontology_id}/clone", response_model=OntologyDefinitionResponse, status_code=201)
+@router.post("/{ontology_id}/clone", response_model=OntologyDefinitionResponse, status_code=201,
+             dependencies=_LIFECYCLE_GATES)
 async def clone_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -459,7 +499,8 @@ async def clone_ontology(
     return result
 
 
-@router.post("/{ontology_id}/new-version", response_model=OntologyDefinitionResponse, status_code=201)
+@router.post("/{ontology_id}/new-version", response_model=OntologyDefinitionResponse,
+             status_code=201, dependencies=_EDIT_GATES)
 async def create_new_version(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -892,7 +933,8 @@ async def get_ontology_assignments(
     return await ontology_definition_repo.get_assignments(session, ontology_id)
 
 
-@router.get("/{ontology_id}/audit", response_model=List[OntologyAuditEntry])
+@router.get("/{ontology_id}/audit", response_model=List[OntologyAuditEntry],
+            dependencies=[Depends(_GATE_HISTORY)])
 async def get_ontology_audit_log(
     ontology_id: str = Path(...),
     action: Optional[str] = Query(None, description="Filter by action type (created, updated, published, deleted, restored, cloned)"),
@@ -917,7 +959,8 @@ async def get_ontology_audit_log(
     )
 
 
-@router.post("/import", response_model=OntologyImportResponse, status_code=200)
+@router.post("/import", response_model=OntologyImportResponse, status_code=200,
+             dependencies=[Depends(_GATE_IMPORT), *_EDIT_GATES])
 async def import_ontology_new(
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
@@ -939,7 +982,8 @@ async def import_ontology_new(
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200)
+@router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200,
+             dependencies=[Depends(_GATE_IMPORT), *_EDIT_GATES])
 async def import_ontology_into(
     ontology_id: str = Path(...),
     req: OntologyImportRequest = Body(...),
@@ -971,7 +1015,8 @@ async def import_ontology_into(
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@router.post("/suggest", response_model=OntologySuggestResponse, status_code=200)
+@router.post("/suggest", response_model=OntologySuggestResponse, status_code=200,
+             dependencies=[Depends(_GATE_SUGGEST)])
 async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),
     base_ontology_id: Optional[str] = None,

@@ -1,37 +1,29 @@
-name: Alembic guards
+name: Guards
 
-# `alembic_version.version_num` is VARCHAR(32). A revision id longer than that
-# fails alembic's own post-migration `UPDATE alembic_version` with
-# StringDataRightTruncation — and because alembic uses transactional DDL, the
-# WHOLE upgrade chain rolls back with it. The symptom is brutal and misleading:
-# a brand-new environment simply cannot be built, while every already-migrated
-# database keeps working fine, so it survives local testing.
+# Cheap, fast checks for contracts that are invisible until they detonate. Each is pure
+# `ast`/`pathlib` parsing — no database, no backend imports, no service containers — so the whole
+# workflow needs nothing but pytest, finishes in seconds, and cannot flake.
 #
-# backend/tests/test_alembic_revision_lengths.py has guarded this contract since
-# June — but nothing ever ran it: no workflow runs backend tests. So the bug has
-# now shipped three separate times (20260527_1200_user_provenance_and_config,
-# 20260707_1400_view_layout_overlays, 20260712_1730_view_activity_data_changed).
-# A test nobody runs is a comment. This job runs it.
+# 1. REVISION IDS. `alembic_version.version_num` is VARCHAR(32). A revision id longer than that
+#    fails alembic's own post-migration `UPDATE alembic_version` with StringDataRightTruncation —
+#    and because alembic uses transactional DDL, the WHOLE upgrade chain rolls back with it. The
+#    symptom is brutal and misleading: a brand-new environment simply cannot be built, while every
+#    already-migrated database keeps working fine, so it survives local testing. The guard test has
+#    existed since June; the bug still shipped three times, because nothing ran the test.
 #
-# Deliberately narrow: the test is pure `ast` + `pathlib` parsing of the version
-# files — no database, no backend imports, no service containers — so it needs
-# nothing but pytest, finishes in seconds, and cannot flake.
+# 2. FEATURE WIRING. The Admin → Features page must not lie about which switches do something.
+#
+# Both jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
+# reads as thrift and behaves as a hole: these guards exist precisely to catch the change made
+# somewhere else that quietly breaks them.
 
 on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'backend/alembic/**'
-      - 'backend/tests/test_alembic_revision_lengths.py'
-      - '.github/workflows/alembic-guards.yml'
   push:
     branches:
       - main
-    paths:
-      - 'backend/alembic/**'
-      - 'backend/tests/test_alembic_revision_lengths.py'
-      - '.github/workflows/alembic-guards.yml'
 
 permissions:
   contents: read
@@ -50,5 +42,36 @@ jobs:
       - name: Install pytest
         run: pip install --disable-pip-version-check pytest
 
+      # --noconftest is load-bearing, not tidiness. pytest loads backend/tests/conftest.py for
+      # anything under that directory, and that conftest imports the whole app (argon2, FastAPI,
+      # SQLAlchemy) — none of which this job installs. So this step exited 4 on a collection
+      # error every time it ran: the guard written because "a test nobody runs is a comment" was
+      # itself not running. These two tests are pure `ast`/`pathlib` parsing and need no fixtures.
       - name: Every revision id fits the 32-char version_num column
-        run: python -m pytest backend/tests/test_alembic_revision_lengths.py -q
+        run: python -m pytest backend/tests/test_alembic_revision_lengths.py -q --noconftest
+
+  feature-wiring:
+    name: Every feature flag is really wired
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+
+      - name: Install pytest
+        run: pip install --disable-pip-version-check pytest
+
+      # The Admin → Features page renders a switch per flag and tells an admin what each one
+      # does. For most of the product's life it was lying: eight of the twelve toggles were
+      # enforced NOWHERE — turning "Import" off left everyone importing — while the column that
+      # was supposed to say so (`implemented`) was an admin-tickable checkbox, i.e. a claim about
+      # the source tree owned by people who cannot change the source tree.
+      #
+      # This test holds `app/config/feature_wiring.py` against the actual tree: a flag that
+      # claims a server gate must be read somewhere in backend/app, and one that claims a UI
+      # surface must be read somewhere in frontend/src. It needs BOTH trees checked out, which is
+      # exactly what a CI job has and the dev container does not (it mounts backend only).
+      - name: Declared gates and UI surfaces exist
+        run: python -m pytest backend/tests/test_feature_wiring.py -q --noconftest
