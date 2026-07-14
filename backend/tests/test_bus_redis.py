@@ -24,22 +24,35 @@ def test_cluster_bus_raises(monkeypatch):
 
 
 def test_single_node_plain(monkeypatch):
+    # The central factory (redis_endpoint.build_redis_client) constructs via
+    # `aioredis.Redis(host=, port=, ...)`, not `from_url` — so this patches and
+    # asserts on the constructor kwargs instead of a URL string. Behaviour under
+    # test is unchanged: a plaintext endpoint sends no ssl kwargs.
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6399/0")
     captured = {}
     import redis.asyncio as aioredis
 
-    def fake_from_url(url, **kw):
-        captured["url"], captured["kw"] = url, kw
+    def fake_redis(**kw):
+        captured.update(kw)
         return "CLIENT"
 
-    monkeypatch.setattr(aioredis, "from_url", fake_from_url)
+    monkeypatch.setattr(aioredis, "Redis", fake_redis)
     assert build_bus_redis() == "CLIENT"
-    assert captured["url"] == "redis://localhost:6399/0"
-    assert "ssl" not in captured["kw"] and "ssl_ca_certs" not in captured["kw"]
+    assert captured["host"] == "localhost"
+    assert captured["port"] == 6399
+    assert captured["db"] == 0
+    assert "ssl" not in captured and "ssl_ca_certs" not in captured
 
 
-def test_single_node_tls_upgrades_scheme_and_adds_certs(monkeypatch):
+def test_single_node_tls_adds_certs(monkeypatch):
+    # Was test_single_node_tls_upgrades_scheme_and_adds_certs: the old builder
+    # upgraded the URL scheme to rediss:// (via from_url) so TLS was implied
+    # without a bare `ssl` kwarg. The central factory instead always passes
+    # `ssl=True` explicitly via tls_client_kwargs — there is no URL/scheme in
+    # play since it constructs `Redis(host=, port=, ...)` directly. The
+    # preserved behaviour: TLS-enabled + a custom CA cert reach the client
+    # constructor kwargs.
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("REDIS_URL", "redis://h:6380/0")
     monkeypatch.setenv("REDIS_TLS_ENABLED", "true")
@@ -47,21 +60,27 @@ def test_single_node_tls_upgrades_scheme_and_adds_certs(monkeypatch):
     captured = {}
     import redis.asyncio as aioredis
 
-    def fake_from_url(url, **kw):
-        captured["url"], captured["kw"] = url, kw
-        return "C"
-
-    monkeypatch.setattr(aioredis, "from_url", fake_from_url)
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
     build_bus_redis()
-    assert captured["url"].startswith("rediss://")  # scheme upgraded
-    assert captured["kw"]["ssl_ca_certs"] == "/ca.pem"
-    assert "ssl" not in captured["kw"]  # scheme already implies ssl
+    assert captured["host"] == "h"
+    assert captured["port"] == 6380
+    assert captured["ssl"] is True
+    assert captured["ssl_ca_certs"] == "/ca.pem"
 
 
 def test_sentinel_mode(monkeypatch):
+    # Sentinel topology for the STREAMS role is only recognised via the
+    # REDIS_STREAMS_* namespace by the central resolver (see
+    # test_redis_endpoint.py::test_sentinel_mode) — the resolver does not fall
+    # back to the old unprefixed REDIS_SENTINEL_MASTER/_NODES auto-detection
+    # that the standalone redis_bus.py builder used to do. See task-3-report.md
+    # for the flag on this (deploy/topologies/README.md still documents the old
+    # unprefixed vars for the bus). REDIS_PASSWORD (unprefixed) is still
+    # honoured — that legacy path IS preserved, mode-independently.
     _clear_bus_env(monkeypatch)
-    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
-    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379, s2:26379")
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379, s2:26379")
     monkeypatch.setenv("REDIS_PASSWORD", "pw")
     captured = {}
 
@@ -84,9 +103,12 @@ def test_sentinel_mode(monkeypatch):
 
 
 def test_sentinel_with_tls(monkeypatch):
+    # See test_sentinel_mode above: Sentinel mode is REDIS_STREAMS_*-only now.
+    # REDIS_TLS_ENABLED (unprefixed) is still honoured mode-independently.
     _clear_bus_env(monkeypatch)
-    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "m")
-    monkeypatch.setenv("REDIS_SENTINEL_NODES", "s1:26379")
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "m")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379")
     monkeypatch.setenv("REDIS_TLS_ENABLED", "true")
     captured = {}
 
@@ -102,3 +124,19 @@ def test_sentinel_with_tls(monkeypatch):
     monkeypatch.setitem(sys.modules, "redis.asyncio.sentinel", mod)
     build_bus_redis()
     assert captured["kw"]["ssl"] is True
+
+
+def test_bus_honours_password_and_tls(monkeypatch):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://bus-host:6380/0")
+    monkeypatch.setenv("REDIS_PASSWORD", "bus-pw")
+    monkeypatch.setenv("REDIS_TLS_ENABLED", "true")
+    monkeypatch.setenv("REDIS_TLS_CA_CERTS", "/certs/streams/ca.crt")
+    captured = {}
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: captured.update(kw) or "C")
+
+    assert build_bus_redis() == "C"
+    assert captured["password"] == "bus-pw"
+    assert captured["ssl"] is True
+    assert captured["ssl_ca_certs"] == "/certs/streams/ca.crt"
