@@ -34,6 +34,46 @@ from pydantic import ValidationError
 from backend.common.models.management import redact_extra_config
 
 
+# ── auth-configured flags (non-secret): "are credentials stored?" ────────────
+#
+# Credential VALUES are write-only (never returned). Without a "stored" signal
+# the edit form shows a blank password that reads as "no credentials" for a
+# provider that IS authenticated — the reported "stored but shows empty on
+# refresh" bug. authConfigured / cacheAuthConfigured carry presence only.
+
+def _auth_flags(creds: dict):
+    from types import SimpleNamespace
+    from backend.app.db.repositories.provider_repo import _to_response
+    from backend.app.db.repositories.connection_repo import _encrypt
+
+    row = SimpleNamespace(
+        id="p", name="p", provider_type="falkordb", host="h", port=6379,
+        tls_enabled=False, is_active=True, extra_config=None,
+        credentials=_encrypt(creds), falkor_max_resident=None,
+        permitted_workspaces=None, created_at="2026-01-01", updated_at="2026-01-01",
+    )
+    return _to_response(row)
+
+
+def test_auth_configured_reports_stored_graph_and_cache_credentials():
+    # password-only (requirepass / default user) still counts as configured
+    r = _auth_flags({"password": "p"})
+    assert r.auth_configured is True and r.cache_auth_configured is False
+    # ACL user + password
+    assert _auth_flags({"username": "u", "password": "p"}).auth_configured is True
+    # nothing stored
+    r0 = _auth_flags({})
+    assert r0.auth_configured is False and r0.cache_auth_configured is False
+    # cache-only (incl. legacy cache_redis_url)
+    assert _auth_flags({"cache_password": "c"}).cache_auth_configured is True
+    assert _auth_flags({"cache_redis_url": "redis://:x@h/0"}).cache_auth_configured is True
+
+
+def test_auth_configured_flags_never_leak_the_credential_value():
+    dumped = str(_auth_flags({"username": "secret-u", "password": "secret-p"}).model_dump())
+    assert "secret-u" not in dumped and "secret-p" not in dumped
+
+
 # ── (2) redaction ────────────────────────────────────────────────────────────
 
 def test_redaction_strips_secret_keys_from_extra_config():

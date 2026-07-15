@@ -99,6 +99,10 @@ interface CacheConnectionState {
 
 interface FalkorDBConnectionState {
   mode: FalkorDBMode
+  // Whether the instance requires authentication (maps to
+  // falkordbConnection.authEnabled). When false the graph connects
+  // unauthenticated and any stored credential is dropped on save.
+  authEnabled: boolean
   clusterStartupNodes: HostPort[]
   sentinelMasterName: string
   sentinelNodes: HostPort[]
@@ -124,6 +128,11 @@ interface ProviderOnboardingFormData {
   tlsEnabled: boolean
   username: string
   password: string
+  // Read-only edit indicators (from ProviderResponse). Credential VALUES are
+  // never returned, so these say only WHETHER a graph / cache credential is
+  // already stored — the form shows "stored — leave blank to keep".
+  authConfigured: boolean
+  cacheAuthConfigured: boolean
   schemaMappingEnabled: boolean
   schemaMapping: SchemaMappingState
   // Spanner uses project/instance/database identifiers rather than host/port.
@@ -222,6 +231,7 @@ const DEFAULT_CACHE_CONNECTION: CacheConnectionState = {
 
 const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
   mode: 'standalone',
+  authEnabled: true,
   clusterStartupNodes: [],
   sentinelMasterName: '',
   sentinelNodes: [],
@@ -332,6 +342,8 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
     tlsEnabled: provider?.tlsEnabled ?? false,
     username: '',
     password: '',
+    authConfigured: provider?.authConfigured ?? false,
+    cacheAuthConfigured: provider?.cacheAuthConfigured ?? false,
     schemaMappingEnabled: Boolean(schemaMapping),
     schemaMapping: {
       identityField: schemaMapping?.identity_field ?? DEFAULT_SCHEMA_MAPPING.identityField,
@@ -356,6 +368,9 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
     falkordbConnection: isFalkorDBProvider
       ? {
           mode: (fdbConn.mode as FalkorDBMode) ?? 'standalone',
+          // authEnabled defaults true (creds used when present); an explicit
+          // false was stored to connect unauthenticated.
+          authEnabled: fdbConn.authEnabled ?? true,
           clusterStartupNodes: hydrateNodes(fdbConn.cluster?.startupNodes),
           sentinelMasterName: fdbConn.sentinel?.masterName ?? '',
           sentinelNodes: hydrateNodes(fdbConn.sentinel?.nodes),
@@ -427,6 +442,10 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
       conn.mode = 'cluster'
       conn.cluster = { startupNodes: cleanNodes(fc.clusterStartupNodes) }
     }
+    // Auth on/off. Only emit the explicit `false` (the meaningful case that tells
+    // the backend to connect unauthenticated and ignore any stored credential);
+    // authEnabled=true is the backend default, so omit it.
+    if (!fc.authEnabled) conn.authEnabled = false
     const st = parseFloat(fc.socketTimeout)
     if (fc.socketTimeout.trim() && !Number.isNaN(st)) conn.socketTimeout = st
     const gp = parseInt(fc.graphPoolSize, 10)
@@ -446,7 +465,7 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
     }
     // Emit only when non-standalone OR an advanced knob/TLS is set; standalone
     // with no knobs stays the legacy single-host path (no key written).
-    if (conn.mode || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
+    if (conn.mode || conn.authEnabled === false || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
       out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
     }
 
@@ -507,10 +526,16 @@ function buildCredentials(formData: ProviderOnboardingFormData) {
   // master — this panel doesn't expose a separate sentinel-daemon credential.
   const cacheSentinelUsername = cacheActive && cache?.mode === 'sentinel' ? cacheUsername : undefined
   const cacheSentinelPassword = cacheActive && cache?.mode === 'sentinel' ? cachePassword : undefined
-  if (!formData.username && !formData.password && !cacheUsername && !cachePassword) return undefined
+  // When FalkorDB auth is toggled OFF, the graph credentials are being removed
+  // (handleSubmit adds them to credentialsClear) — never send them here.
+  const graphAuthOn =
+    formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)
+  const graphUsername = graphAuthOn ? formData.username || undefined : undefined
+  const graphPassword = graphAuthOn ? formData.password || undefined : undefined
+  if (!graphUsername && !graphPassword && !cacheUsername && !cachePassword) return undefined
   return {
-    username: formData.username || undefined,
-    password: formData.password || undefined,
+    username: graphUsername,
+    password: graphPassword,
     cache_username: cacheUsername,
     cache_password: cachePassword,
     cache_sentinel_username: cacheSentinelUsername,
@@ -1047,6 +1072,21 @@ export function ProviderOnboardingWizard({
           initialStateRef.current?.falkordbConnection?.cache.legacyUrlPresent &&
           !formData.falkordbConnection?.cache.legacyUrlPresent,
         )
+        // Clear stored secrets the form no longer wants. Omitting a credential
+        // field only KEEPS the stored value (provider_repo.update_provider merge
+        // semantics), so removing a secret requires naming its key here.
+        const credentialsClear: string[] = []
+        if (legacyCacheConverted) credentialsClear.push('cache_redis_url')
+        // FalkorDB auth toggled OFF → drop the stored graph credentials so the
+        // connection is genuinely unauthenticated (not just authEnabled=false
+        // over a lingering secret).
+        if (
+          formData.providerType === 'falkordb' &&
+          formData.falkordbConnection &&
+          !formData.falkordbConnection.authEnabled
+        ) {
+          credentialsClear.push('username', 'password', 'sentinel_username', 'sentinel_password')
+        }
         const req: ProviderUpdateRequest = {
           name: formData.name.trim(),
           host: formData.host || undefined,
@@ -1054,7 +1094,7 @@ export function ProviderOnboardingWizard({
           tlsEnabled: formData.tlsEnabled,
           credentials: buildCredentials(formData),
           extraConfig: buildExtraConfig(formData),
-          ...(legacyCacheConverted ? { credentialsClear: ['cache_redis_url'] } : {}),
+          ...(credentialsClear.length ? { credentialsClear } : {}),
         }
         const updated = await providerService.update(provider.id, req)
         await onUpdated?.(updated)
@@ -1323,27 +1363,74 @@ export function ProviderOnboardingWizard({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
+              {/* Authentication. FalkorDB gets an explicit "requires auth"
+                  toggle (falkordbConnection.authEnabled); other providers keep
+                  simple optional credentials. Stored secrets are NEVER returned
+                  by the API, so on edit we signal that they exist rather than
+                  showing empty fields that read as "no credentials". */}
+              {formData.providerType === 'falkordb' && (
+                <label className="flex items-center justify-between gap-3 rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
+                  <div>
+                    <p className="text-sm font-medium text-ink">Requires authentication</p>
+                    <p className="text-xs text-ink-muted">
+                      Turn off for an instance with no password — the connection is unauthenticated and any stored credential is removed on save.
+                    </p>
+                  </div>
                   <input
-                    value={formData.username}
-                    onChange={(event) => updateFormData({ username: event.target.value })}
-                    placeholder="optional"
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    type="checkbox"
+                    checked={formData.falkordbConnection?.authEnabled ?? true}
+                    onChange={(event) => updateFalkorConn({ authEnabled: event.target.checked })}
+                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
                   />
+                </label>
+              )}
+
+              {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) ? (
+                <div className="space-y-2">
+                  {mode === 'edit' && formData.authConfigured && (
+                    <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2">
+                      <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                      <p className="text-[11px] leading-relaxed text-ink-secondary">
+                        Credentials are <span className="font-medium text-ink">stored</span> for this provider — leave the fields blank to keep them, or type new values to replace.
+                      </p>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
+                      <input
+                        value={formData.username}
+                        onChange={(event) => updateFormData({ username: event.target.value })}
+                        placeholder={mode === 'edit' && formData.authConfigured ? 'default user — blank keeps stored' : 'default user (optional)'}
+                        className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
+                      <input
+                        type="password"
+                        value={formData.password}
+                        onChange={(event) => updateFormData({ password: event.target.value })}
+                        placeholder={mode === 'edit' && formData.authConfigured ? 'stored — enter to replace' : 'optional'}
+                        className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                  </div>
+                  {formData.providerType === 'falkordb' && (
+                    <p className="text-[11px] leading-tight text-ink-muted">
+                      Leave the username blank for a password-only instance (default user / <code>requirepass</code>) — the same credential authenticates every standalone, sentinel, or cluster node.
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(event) => updateFormData({ password: event.target.value })}
-                    placeholder="optional"
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  />
+              ) : (
+                <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-black/5 px-3 py-2.5 dark:bg-white/5">
+                  <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                  <p className="text-[11px] leading-relaxed text-ink-secondary">
+                    Connecting <span className="font-medium text-ink">without authentication</span>.
+                    {mode === 'edit' && formData.authConfigured ? ' The stored credentials will be removed when you save.' : ''}
+                  </p>
                 </div>
-              </div>
+              )}
 
               {formData.providerType === 'falkordb' && (
                 <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
@@ -1380,7 +1467,7 @@ export function ProviderOnboardingWizard({
                         {formData.falkordbConnection?.mode === 'cluster'
                           ? ' A Redis Cluster shares one credential across all shards — there is no per-node password.'
                           : ' Sentinel data-plane auth reuses these; the sentinel daemons only need their own auth if you enable it.'}
-                        {' '}Leave them blank for an unauthenticated instance.
+                        {' '}Turn off “Requires authentication” above for an unauthenticated instance.
                       </p>
                     </div>
                   )}
@@ -2067,14 +2154,18 @@ export function ProviderOnboardingWizard({
               <div className="flex-1">
                 <p className="text-sm font-medium uppercase tracking-wide text-slate-500">Access</p>
                 <p className="font-semibold text-slate-800 dark:text-slate-200">
-                  {formData.username ? 'Credentials supplied' : 'Anonymous / host-only access'}
+                  {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) && (formData.password || formData.username)
+                    ? 'Credentials supplied'
+                    : 'Anonymous / host-only access'}
                 </p>
               </div>
               <Check className="h-5 w-5 text-green-500" />
             </div>
             <p className="text-sm text-slate-500">
-              {formData.username
-                ? `The provider will be created with username ${formData.username}.`
+              {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) && (formData.password || formData.username)
+                ? (formData.username
+                    ? `The provider will be created with username ${formData.username}.`
+                    : `The provider will be created with password-only authentication (default user).`)
                 : `No credentials were entered. ${appName} will connect with the host and port settings only.`}
             </p>
           </div>

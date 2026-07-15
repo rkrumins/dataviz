@@ -31,6 +31,27 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------ #
 
 def _to_response(row: ProviderORM) -> ProviderResponse:
+    # Non-secret auth indicators — WHETHER a graph / cache credential is stored,
+    # never the value. The edit form needs this: credentials are write-only
+    # (Fernet, never returned), so without a "stored" signal a blank password
+    # field reads as "no credentials" even when auth is configured. A decrypt
+    # failure (rotated key) degrades to "not configured" rather than 500-ing the
+    # list endpoint.
+    auth_configured = False
+    cache_auth_configured = False
+    try:
+        creds = _decrypt(row.credentials) if row.credentials else {}
+    except Exception:  # pragma: no cover - defensive: never fail a read on creds
+        creds = {}
+    if creds:
+        auth_configured = bool(creds.get("username") or creds.get("password"))
+        cache_auth_configured = bool(
+            creds.get("cache_username")
+            or creds.get("cache_password")
+            or creds.get("cache_sentinel_username")
+            or creds.get("cache_sentinel_password")
+            or creds.get("cache_redis_url")
+        )
     return ProviderResponse(
         id=row.id,
         name=row.name,
@@ -39,6 +60,8 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
         port=row.port,
         tlsEnabled=bool(row.tls_enabled),
         isActive=bool(row.is_active),
+        authConfigured=auth_configured,
+        cacheAuthConfigured=cache_auth_configured,
         # extra_config is an UNENCRYPTED column; rows already in the DB may
         # carry secrets (e.g. the legacy falkordbConnection.sentinel.password
         # location) that the schema validator only blocks going forward. Redact
