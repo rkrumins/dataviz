@@ -526,7 +526,12 @@ class ProviderResponse(BaseModel):
     permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
-    # credentials are NEVER returned
+    # credentials are NEVER returned. These non-secret flags say only WHETHER a
+    # graph / cache credential is stored — so an edit form can show "stored —
+    # leave blank to keep" instead of an empty field that reads as "no
+    # credentials". They carry no value and are safe to return on every path.
+    auth_configured: bool = Field(False, alias="authConfigured")
+    cache_auth_configured: bool = Field(False, alias="cacheAuthConfigured")
 
     class Config:
         populate_by_name = True

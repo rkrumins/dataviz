@@ -109,6 +109,11 @@ export interface ProviderResponse {
     permittedWorkspaces: string[]
     createdAt: string
     updatedAt: string
+    // Non-secret: whether a graph / cache credential is stored. Credential
+    // VALUES are never returned (write-only), so the edit form uses these to
+    // show "stored — leave blank to keep" instead of an empty field.
+    authConfigured?: boolean
+    cacheAuthConfigured?: boolean
 }
 
 export interface ProviderStatusResponse {
