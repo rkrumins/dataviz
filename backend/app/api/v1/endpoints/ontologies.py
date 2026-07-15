@@ -916,12 +916,14 @@ async def get_ontology_impact(
 
     draft_entities = set(json.loads(draft_row.entity_type_definitions or "{}").keys())
     draft_rels = set(json.loads(draft_row.relationship_type_definitions or "{}").keys())
+    policy = getattr(draft_row, "evolution_policy", "reject") or "reject"
 
     if prev_row is None:
         # First publish — no breaking changes possible
         return {
             "allowed": True,
             "reason": None,
+            "evolutionPolicy": policy,
             "addedEntityTypes": sorted(draft_entities),
             "removedEntityTypes": [],
             "addedRelationshipTypes": sorted(draft_rels),
@@ -934,19 +936,16 @@ async def get_ontology_impact(
     removed_entities = sorted(prev_entities - draft_entities)
     removed_rels = sorted(prev_rels - draft_rels)
     has_breaking = bool(removed_entities or removed_rels)
-
-    policy = getattr(draft_row, "evolution_policy", "reject") or "reject"
     allowed = True
     reason = None
 
     if has_breaking and policy == "reject":
         allowed = False
         reason = (
-            f"Evolution policy is 'reject' and publishing would remove "
-            f"{len(removed_entities)} entity type(s) and "
-            f"{len(removed_rels)} relationship type(s). "
-            "Change the evolution_policy to 'deprecate' or 'migrate', "
-            "or restore the removed types."
+            f"Publishing would remove {len(removed_entities)} entity type(s) and "
+            f"{len(removed_rels)} relationship type(s) still present in the previous "
+            "published version. Restore the removed types, or (administrators) "
+            "force-publish to override breaking-change protection."
         )
 
     return {

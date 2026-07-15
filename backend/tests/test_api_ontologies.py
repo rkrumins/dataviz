@@ -294,3 +294,56 @@ def test_reconcile_relationship_endpoints_skips_partial_update_without_entity_ty
                           relationship_type_definitions={"FLOWS_TO": {"source_types": ["dataset"]}})
     _reconcile_relationship_endpoints(req)
     assert req.relationship_type_definitions["FLOWS_TO"]["source_types"] == ["dataset"]
+
+
+# ── Publish impact gate (unforced path) ───────────────────────────────
+
+async def test_unforced_publish_blocked_on_breaking_change(test_client: AsyncClient):
+    """Without ?force=true, publishing a draft that removes types still present
+    in the previous published version is blocked with 409 (policy=reject).
+    Regression guard: every other publish test forces, leaving this path untested."""
+    created = await _create_ontology(test_client, "Impact Gate Test")
+    ont_id = created["id"]
+
+    r = await test_client.post(f"/api/v1/admin/ontologies/{ont_id}/publish?force=true")
+    assert r.status_code == 200
+
+    # New version that drops an entity type present in v1
+    r = await test_client.post(f"/api/v1/admin/ontologies/{ont_id}/new-version")
+    assert r.status_code in (200, 201)
+    draft = r.json()
+    entity_defs = dict(draft["entityTypeDefinitions"])
+    removed = next(iter(entity_defs))
+    del entity_defs[removed]
+    r = await test_client.put(
+        f"/api/v1/admin/ontologies/{draft['id']}",
+        json={"entityTypeDefinitions": entity_defs},
+    )
+    assert r.status_code == 200
+
+    # Impact preview says blocked, with the removed type listed
+    r = await test_client.get(f"/api/v1/admin/ontologies/{draft['id']}/impact")
+    assert r.status_code == 200
+    impact = r.json()
+    assert impact["allowed"] is False
+    assert removed in impact["removedEntityTypes"]
+    assert impact["evolutionPolicy"] == "reject"
+
+    # Unforced publish → 409; forced publish → 200
+    r = await test_client.post(f"/api/v1/admin/ontologies/{draft['id']}/publish")
+    assert r.status_code == 409
+
+    r = await test_client.post(f"/api/v1/admin/ontologies/{draft['id']}/publish?force=true")
+    assert r.status_code == 200
+    assert r.json()["isPublished"] is True
+
+
+async def test_first_publish_impact_includes_policy(test_client: AsyncClient):
+    """First publish has no previous version — impact must still carry the
+    evolution policy (the publish dialog renders it)."""
+    created = await _create_ontology(test_client, "First Publish Impact")
+    r = await test_client.get(f"/api/v1/admin/ontologies/{created['id']}/impact")
+    assert r.status_code == 200
+    impact = r.json()
+    assert impact["allowed"] is True
+    assert impact["evolutionPolicy"] == "reject"

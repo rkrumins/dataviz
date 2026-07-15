@@ -10,6 +10,19 @@ export interface RelTypeWithClassifications extends RelationshipTypeSchema {
   isSystem?: boolean
 }
 
+/** Single source of truth for a new relationship type's visual defaults —
+ *  used by both the RelationshipTypeEditor blank form and the Coverage
+ *  panel's "Define" prefill so they can never disagree. */
+export const DEFAULT_REL_VISUAL = {
+  strokeColor: '#6366f1',
+  strokeWidth: 2,
+  strokeStyle: 'solid',
+  animated: true,
+  animationSpeed: 'normal',
+  arrowType: 'arrow',
+  curveType: 'bezier',
+} as const
+
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export interface Toast { type: ToastType; message: string; id: number; action?: { label: string; onClick: () => void } }
 

@@ -34,6 +34,7 @@ export function EntityTypeRow({
 }) {
   return (
     <button
+      id={`entity-type-row-${et.id}`}
       onClick={onEdit}
       className={cn(
         'w-full text-left p-3.5 rounded-xl border transition-all group',
@@ -168,12 +169,14 @@ export function EntityTypesPanel({
   onNew,
   onDelete,
   onDismissValidation,
+  removedTypes,
+  onRestore,
 }: {
   entityTypes: EntityTypeSchema[]
   entityStatMap: Map<string, EntityTypeSummary>
   isLocked: boolean
   search: string
-  validationResult: { isValid: boolean; issues: Array<{ severity: string; message: string }> } | null
+  validationResult: { isValid: boolean; issues: Array<{ severity: string; message: string; code?: string; affected?: string }> } | null
   editorPanel: EditorPanel
   changedIds?: Set<string>
   onSearch: (s: string) => void
@@ -181,6 +184,9 @@ export function EntityTypesPanel({
   onNew: () => void
   onDelete: (id: string, name: string) => void
   onDismissValidation: () => void
+  /** Types staged for removal — ghost rows with Restore until Save All. */
+  removedTypes?: EntityTypeSchema[]
+  onRestore?: (id: string) => void
 }) {
   const [showStagedOnly, setShowStagedOnly] = useState(false)
   const hasChanges = changedIds && changedIds.size > 0
@@ -197,11 +203,22 @@ export function EntityTypesPanel({
     )
   }, [entityTypes, search, showStagedOnly, changedIds])
 
-  // Build a map from entity type id to validation issues that mention it
+  // Build a map from entity type id to validation issues. The backend reports
+  // the affected type id structurally (issue.affected) — use it when present;
+  // fall back to the legacy substring heuristic only for issues without it.
   const validationIssuesByType = useMemo(() => {
     if (!validationResult || validationResult.isValid) return new Map<string, Array<{ severity: string; message: string }>>()
     const map = new Map<string, Array<{ severity: string; message: string }>>()
+    const byIdLower = new Map(entityTypes.map(et => [et.id.toLowerCase(), et.id]))
     for (const issue of validationResult.issues) {
+      const affectedId = issue.affected ? byIdLower.get(issue.affected.toLowerCase()) : undefined
+      if (affectedId) {
+        const existing = map.get(affectedId) ?? []
+        existing.push(issue)
+        map.set(affectedId, existing)
+        continue
+      }
+      if (issue.affected) continue // affects a type not in this panel (e.g. a relationship)
       for (const et of entityTypes) {
         if (issue.message.toLowerCase().includes(et.id.toLowerCase()) || issue.message.toLowerCase().includes(et.name.toLowerCase())) {
           const existing = map.get(et.id) ?? []
@@ -240,11 +257,15 @@ export function EntityTypesPanel({
               </button>
             )}
           </div>
-          {validationResult.issues.slice(0, 4).map((issue, i) => (
-            <p key={i} className="opacity-80 leading-snug">
-              {issue.severity === 'error' ? '  ' : '  '} {issue.message}
-            </p>
-          ))}
+          {!validationResult.isValid && (
+            <ValidationIssueList
+              issues={validationResult.issues}
+              onJumpToType={id => {
+                const el = document.getElementById(`entity-type-row-${id}`)
+                el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -330,6 +351,97 @@ export function EntityTypesPanel({
             </button>
           )}
         </div>
+      )}
+
+      {/* Types staged for removal — ghost rows, restorable until Save All */}
+      {removedTypes && removedTypes.length > 0 && (
+        <div className="mt-6">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-red-400/80 mb-2">
+            Staged for removal — applied on Save All
+          </p>
+          <div className="space-y-2">
+            {removedTypes.map(et => (
+              <div
+                key={et.id}
+                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-dashed border-red-300/40 dark:border-red-800/40 bg-red-50/20 dark:bg-red-950/10 opacity-70"
+              >
+                <LucideIcons.Trash2 className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-ink line-through truncate">{et.name}</p>
+                  <p className="text-[11px] text-ink-muted font-mono truncate">{et.id}</p>
+                </div>
+                {onRestore && (
+                  <button
+                    onClick={() => onRestore(et.id)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                  >
+                    <LucideIcons.Undo2 className="w-3 h-3" /> Restore
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ValidationIssueList — issues grouped by affected type, clickable chips that
+// scroll to the type's card, full list behind a "show all" disclosure.
+// ---------------------------------------------------------------------------
+
+function ValidationIssueList({ issues, onJumpToType }: {
+  issues: Array<{ severity: string; message: string; code?: string; affected?: string }>
+  onJumpToType: (typeId: string) => void
+}) {
+  const [showAll, setShowAll] = useState(false)
+
+  const grouped = useMemo(() => {
+    const byType = new Map<string, typeof issues>()
+    const general: typeof issues = []
+    for (const issue of issues) {
+      if (issue.affected) {
+        const list = byType.get(issue.affected) ?? []
+        list.push(issue)
+        byType.set(issue.affected, list)
+      } else {
+        general.push(issue)
+      }
+    }
+    return { byType, general }
+  }, [issues])
+
+  const visible = showAll ? issues : issues.slice(0, 4)
+
+  return (
+    <div className="space-y-1.5">
+      {grouped.byType.size > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {Array.from(grouped.byType.entries()).map(([typeId, typeIssues]) => (
+            <button
+              key={typeId}
+              onClick={() => onJumpToType(typeId)}
+              title={typeIssues.map(i => i.message).join('\n')}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border border-current/20 bg-white/40 dark:bg-black/20 hover:bg-white/70 dark:hover:bg-black/40 transition-colors"
+            >
+              <LucideIcons.Crosshair className="w-2.5 h-2.5" />
+              {typeId}
+              <span className="font-bold">{typeIssues.length}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {visible.map((issue, i) => (
+        <p key={i} className="opacity-80 leading-snug">
+          {issue.severity === 'error' ? '•' : '◦'} {issue.message}
+        </p>
+      ))}
+      {issues.length > 4 && (
+        <button onClick={() => setShowAll(v => !v)} className="font-semibold underline-offset-2 hover:underline opacity-90">
+          {showAll ? 'Show fewer' : `Show all ${issues.length} issues`}
+        </button>
       )}
     </div>
   )

@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
+import { usePreferencesStore } from '@/store/preferences'
 import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -120,13 +121,20 @@ export function OntologySidebar({
 }: OntologySidebarProps) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<StatusFilterOption>('all')
-  const [usageFilter, setUsageFilter] = useState<UsageFilterOption>('all')
-  const [collapsed, setCollapsed] = useState(false)
+  // Filters / layout survive refresh via the persisted preferences store.
+  const sidebarPrefs = usePreferencesStore(s => s.ontologySidebar)
+  const setSidebarPrefs = usePreferencesStore(s => s.setOntologySidebarPrefs)
+  const statusFilter = sidebarPrefs.statusFilter as StatusFilterOption
+  const setStatusFilter = (v: StatusFilterOption) => setSidebarPrefs({ statusFilter: v })
+  const usageFilter = sidebarPrefs.usageFilter as UsageFilterOption
+  const setUsageFilter = (v: UsageFilterOption) => setSidebarPrefs({ usageFilter: v })
+  const collapsed = sidebarPrefs.collapsed
+  const setCollapsed = (v: boolean) => setSidebarPrefs({ collapsed: v })
   const [legendOpen, setLegendOpen] = useState(false)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const hoveredRef = useRef<HTMLButtonElement | null>(null)
-  const [width, setWidth] = useState(DEFAULT_WIDTH)
+  // Width is local during drag (mousemove churn) and persisted on mouseup.
+  const [width, setWidth] = useState(sidebarPrefs.width ?? DEFAULT_WIDTH)
   const resizing = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(DEFAULT_WIDTH)
@@ -142,12 +150,14 @@ export function OntologySidebar({
       const delta = e.clientX - startX.current
       setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta)))
     }
-    const onMouseUp = () => {
+    const onMouseUp = (ev: MouseEvent) => {
       resizing.current = false
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      const delta = ev.clientX - startX.current
+      setSidebarPrefs({ width: Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta)) })
     }
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
@@ -235,7 +245,8 @@ export function OntologySidebar({
   }, [activeOntologyId, ontologies])
 
   // ── Group-by toggle ─────────────────────────────────────────────
-  const [groupBy, setGroupBy] = useState<'flat' | 'workspace' | 'status'>('flat')
+  const groupBy = sidebarPrefs.groupBy as 'flat' | 'workspace' | 'status'
+  const setGroupBy = (v: 'flat' | 'workspace' | 'status') => setSidebarPrefs({ groupBy: v })
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   function toggleGroup(key: string) {

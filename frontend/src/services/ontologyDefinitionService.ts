@@ -177,10 +177,13 @@ export const ontologyDefinitionService = {
         return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
     },
 
-    publish(id: string): Promise<OntologyDefinitionResponse> {
-        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/publish`, {
-            method: 'POST',
-        })
+    /** Publish a draft. `force` overrides the breaking-change block (admin
+     *  escape hatch — the server re-runs the impact check and 409s without it). */
+    publish(id: string, force = false): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(
+            `${ADMIN_API}/${id}/publish${force ? '?force=true' : ''}`,
+            { method: 'POST' },
+        )
     },
 
     clone(id: string): Promise<OntologyDefinitionResponse> {
@@ -296,6 +299,15 @@ export const ontologyDefinitionService = {
             method: 'POST',
             body: JSON.stringify(data),
         })
+    },
+
+    /**
+     * Export the semantic layer as raw JSON (the /export payload verbatim).
+     * Dedicated method because the shared request() JSON-parses into typed
+     * models — export is a document the caller downloads as-is.
+     */
+    async exportJson(id: string): Promise<Record<string, unknown>> {
+        return request<Record<string, unknown>>(`${ADMIN_API}/${id}/export`)
     },
 }
 

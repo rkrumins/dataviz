@@ -74,7 +74,9 @@ export function useSemanticLayerAccess(): SemanticLayerAccess {
         canEdit,
         canImport: canEdit && importOn,
         canExport: exportOn,
-        canSuggest: suggestOn,
+        // Server-side /suggest requires ontology:manage (ontologies.py) on top of
+        // the feature flag — mirror it or readers see a button that 403s.
+        canSuggest: canManage && suggestOn,
         canSeeHistory: historyOn,
         canPublish: canManage && allowedToWrite,
         editingBlockedBy,
