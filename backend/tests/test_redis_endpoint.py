@@ -545,3 +545,69 @@ def test_streams_default_endpoint_is_not_falkordb(monkeypatch):
     s = resolve_redis_config(RedisRole.STREAMS)
     assert (s.host, s.port) == ("localhost", 6380)
     assert s.source["port"] == "default"
+
+
+# ── credential normalization: username without a password is dropped ───────
+# redis-py would send `AUTH <user> ""` (→ WRONGPASS); on the sentinel-daemon
+# connection that kills discover_master and takes the whole tier down.
+# Normalized in RedisEndpointConfig.__post_init__ — the one point every
+# construction site (env, legacy URL, provider-cache JSON) passes through.
+
+def test_username_without_password_is_dropped(caplog):
+    import logging
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    with caplog.at_level(logging.WARNING):
+        cfg = RedisEndpointConfig(role=RedisRole.STREAMS, username="user")
+    assert cfg.username is None and cfg.password is None
+    assert any("without a password" in r.message for r in caplog.records)
+
+
+def test_empty_and_whitespace_credentials_mean_absent():
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.CACHE, username="  ", password="",
+        sentinel_username="", sentinel_password=" \t",
+    )
+    assert cfg.username is None and cfg.password is None
+    assert cfg.sentinel_username is None and cfg.sentinel_password is None
+
+
+def test_real_credentials_pass_through_unstripped():
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.STREAMS, username="u", password=" pw with spaces ",
+    )
+    assert (cfg.username, cfg.password) == ("u", " pw with spaces ")
+
+
+def test_env_username_without_password_never_reaches_the_client(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "bus")
+    monkeypatch.setenv("REDIS_STREAMS_USERNAME", "user")   # no password anywhere
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.username is None
+
+
+def test_sentinel_daemon_username_without_password_is_dropped(monkeypatch):
+    """The tier-killing variant: AUTH <user> "" against the sentinel DAEMONS
+    fails discover_master, so the whole sentinel deployment reads as down."""
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "m")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_USERNAME", "sentineluser")
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.sentinel_username is None
+
+
+def test_provider_cache_username_without_password_is_dropped():
+    from backend.common.adapters.redis_endpoint import ProviderCacheOverride
+
+    ov = ProviderCacheOverride(
+        provider_id="p1",
+        connection={"mode": "standalone", "host": "cache", "port": 6379},
+        credentials={"cache_username": "user"},          # no cache_password
+    )
+    cfg = resolve_redis_config(RedisRole.CACHE, provider_cache=ov)
+    assert cfg.username is None

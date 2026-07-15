@@ -99,6 +99,38 @@ class RedisEndpointConfig:
     # field name -> where the value came from. Rendered by Admin > System > Redis.
     source: Dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Credential normalization, at the ONE point every construction site
+        # (env resolution, legacy URL, provider-cache JSON, tests) passes
+        # through: ""/whitespace-only means "absent", and a username WITHOUT a
+        # password is dropped — the client builder would otherwise make
+        # redis-py send ``AUTH <user> ""`` (→ WRONGPASS), and on the
+        # sentinel-daemon connection that kills ``discover_master`` and takes
+        # the whole tier down. Mirrors ``falkordb_connection.
+        # normalize_credentials`` rule-for-rule but independently implemented:
+        # the roles deliberately never share a credential code path (see
+        # ``_read_secret_file``).
+        for user_field, pass_field, what in (
+            ("username", "password", "data-plane"),
+            ("sentinel_username", "sentinel_password", "sentinel-daemon"),
+        ):
+            user = getattr(self, user_field)
+            pw = getattr(self, pass_field)
+            if isinstance(user, str) and not user.strip():
+                user = None
+            if isinstance(pw, str) and not pw.strip():
+                pw = None
+            if user and not pw:
+                logger.warning(
+                    "redis_endpoint (%s): a %s username is configured without "
+                    "a password — ignoring the username (redis AUTH needs "
+                    "both; set the password or clear the username).",
+                    self.role.value, what,
+                )
+                user = None
+            object.__setattr__(self, user_field, user)
+            object.__setattr__(self, pass_field, pw)
+
     @property
     def is_configured(self) -> bool:
         """Did an operator actually point this role at an endpoint?
