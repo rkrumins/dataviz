@@ -147,17 +147,37 @@ async def _invalidate_ontology_caches(
         from backend.app.db.repositories.stats_repo import invalidate_schema_facet
         ds_rows = (
             await session.execute(
-                select(WorkspaceDataSourceORM.id).where(
+                select(
+                    WorkspaceDataSourceORM.id,
+                    WorkspaceDataSourceORM.workspace_id,
+                ).where(
                     WorkspaceDataSourceORM.ontology_id == ontology_id
                 )
             )
         ).all()
-        for (ds_id,) in ds_rows:
+        for (ds_id, _ws_id) in ds_rows:
             await invalidate_schema_facet(session, ds_id)
     except Exception as exc:  # never block the mutation on cache plumbing
         import logging
         logging.getLogger(__name__).warning(
             "schema-facet invalidation failed for ontology %s: %s", ontology_id, exc)
+        ds_rows = []
+
+    # Bump the hot-read GraphCache generation for the same data sources. The
+    # /children-with-edges and /edges/aggregated responses embed the SERVER-side
+    # containment/lineage split (ContextEngine classifies before caching), so an
+    # ontology edit must unreach those entries too — otherwise canvases keep the
+    # pre-edit grouping for up to the cache TTL (15 min). Known limitation:
+    # draft-branch entries (branch_id != "") are not enumerated here and fall
+    # back to TTL expiry.
+    try:
+        from backend.app.services.graph_cache import invalidate_aggregated_reads
+        for (ds_id, ws_id) in ds_rows:
+            await invalidate_aggregated_reads(ws_id, ds_id)
+    except Exception as exc:  # never block the mutation on cache plumbing
+        import logging
+        logging.getLogger(__name__).warning(
+            "graph-cache generation bump failed for ontology %s: %s", ontology_id, exc)
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:
@@ -843,6 +863,7 @@ async def check_ontology_resolution(
         ],
         advisoryWarnings=report.advisory_warnings,
         blockingReasons=report.blocking_reasons,
+        coveragePercent=report.coverage_percent,
         fingerprint=report.fingerprint,
     )
 
@@ -1072,19 +1093,8 @@ async def suggest_ontology(
     repo = SQLAlchemyOntologyRepository(session)
     svc = LocalOntologyService(repo)
 
-    # We need OntologyMetadata for the suggest call — build a minimal one from stats
-    from backend.common.models.graph import OntologyMetadata
-    introspected = OntologyMetadata(
-        containmentEdgeTypes=[],
-        lineageEdgeTypes=[],
-        edgeTypeMetadata={},
-        entityTypeHierarchy={},
-        rootEntityTypes=[],
-    )
-
     suggestion = await svc.suggest_from_introspection(
         introspected_stats=stats,
-        introspected_ontology=introspected,
         base_ontology_id=base_ontology_id,
     )
 

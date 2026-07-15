@@ -31,6 +31,7 @@ import {
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import { useToast } from '@/components/ui/toast'
+import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -124,6 +125,10 @@ export function SemanticStep({
     onOntologiesLoaded,
 }: SemanticStepProps) {
     const { showToast } = useToast()
+    // Direct service mutations below (createDraft) bypass useOntologyMutations'
+    // onSuccess hooks, so invalidate the react-query ontology + schema caches
+    // explicitly — otherwise lists and open canvases serve stale data.
+    const { invalidateAll: invalidateOntologyCaches } = useOntologyMutations()
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [loadingOntologies, setLoadingOntologies] = useState(true)
     const [sourceStates, setSourceStates] = useState<Record<string, SourceState>>(() =>
@@ -328,6 +333,7 @@ export function SemanticStep({
                 name: state.draftName.trim() || `${catalogItems.find(c => c.id === itemId)?.name} Schema`,
             }
             const created = await ontologyDefinitionService.create(createReq)
+            invalidateOntologyCaches()
             // Update ontologies list
             setOntologies(prev => {
                 const updated = [created, ...prev]
@@ -350,7 +356,7 @@ export function SemanticStep({
                 error: err instanceof Error ? err.message : 'Failed to create draft',
             })
         }
-    }, [sourceStates, catalogItems, updateSource, updateOntologySelection])
+    }, [sourceStates, catalogItems, updateSource, updateOntologySelection, invalidateOntologyCaches])
 
     // ─── Skip source ────────────────────────────────────────────────────
 
@@ -1139,6 +1145,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                                 <p className="text-[11px] text-ink-secondary leading-snug mb-2">
                                     Generate a new semantic layer draft from the {graphCounts.entities} entity type{graphCounts.entities !== 1 ? 's' : ''}{' '}
                                     and {graphCounts.rels} relationship{graphCounts.rels !== 1 ? 's' : ''} detected.
+                                    Containment and lineage are pre-classified from edge names — review and adjust before publishing.
                                 </p>
                                 <div className="flex items-center gap-3">
                                     <span className="inline-flex items-center gap-1 text-[11px] text-ink-muted">

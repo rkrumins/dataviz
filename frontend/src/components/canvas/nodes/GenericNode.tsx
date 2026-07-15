@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
 import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
+import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
@@ -81,11 +82,13 @@ export const GenericNode = memo(function GenericNode({
   // Support both typeId and type fields
   const typeId = entityData.typeId || (entityData as unknown as Record<string, unknown>).type as string || 'unknown'
 
-  const getEntityType = useSchemaStore((s) => s.getEntityType)
-  const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
-
-  const entityType = getEntityType(typeId)
-  const schemaVisual = getEntityVisual(typeId)
+  // View-scoped lookup: inside a ViewExecutionContext these resolve against
+  // the VIEW's data source ontology (same source as edge containment/lineage
+  // classification), not whichever scope the global store last loaded —
+  // otherwise a node could style with one ontology while its edges classify
+  // with another. Outside a view context they fall back to the global store.
+  const entityType = useViewEntityType(typeId)
+  const schemaVisual = useViewEntityVisual(typeId)
 
   // Hash-palette fallback for types not in the schema (custom graphs)
   const visual: EntityVisualConfig = schemaVisual ?? {

@@ -435,7 +435,7 @@ export function OntologySchemaPage() {
       }
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
-      showToast('success', 'All changes saved')
+      showToast('success', 'All changes saved — views on this semantic layer will pick them up automatically')
       doDiscard()
     } catch (err: unknown) {
       showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -1121,6 +1121,23 @@ export function OntologySchemaPage() {
   function handleUpdateContainmentEdgeTypes(newList: string[]) {
     if (!selectedOntology || isLocked) return
     setWorkingContainment(newList)
+    // Keep the per-relationship is_containment flags in agreement with the list —
+    // the backend treats the flags as the source of truth whenever relationship
+    // definitions are present in the save payload (which the batch save always sends).
+    const baseDefs = workingRelDefs ?? { ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) }
+    const listUpper = new Set(newList.map(t => t.toUpperCase()))
+    const syncedDefs = Object.fromEntries(
+      Object.entries(baseDefs).map(([rid, def]) => {
+        const d = def as Record<string, unknown>
+        if (!d || d.is_system) return [rid, def]
+        const flag = listUpper.has(rid.toUpperCase())
+        if (Boolean(d.is_containment ?? d.isContainment ?? false) === flag) return [rid, def]
+        const next: Record<string, unknown> = { ...d, is_containment: flag }
+        delete next.isContainment
+        return [rid, next]
+      })
+    )
+    setWorkingRelDefs(syncedDefs)
     hasStagedChangesRef.current = true
     showToast('info', 'Containment edge types updated — save to persist')
   }

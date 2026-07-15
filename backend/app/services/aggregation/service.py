@@ -403,7 +403,48 @@ class AggregationService:
 
         logger.info("Aggregation skipped for data source %s", ds_id)
 
+        # Skipping aggregation means the worker's ensure_indices call never
+        # runs for this source — without this, the graph's per-label indexes
+        # only materialize on the first read that triggers a full ontology
+        # resolution, and that first user query pays the DDL + cold-scan
+        # cost. Ensure them now, best-effort: a failure must never turn a
+        # confirmed skip into an error.
+        try:
+            await self._ensure_indices_for_skip(ds_id, state.workspace_id, session)
+        except Exception as exc:
+            logger.warning(
+                "post-skip ensure_indices failed for data source %s: %s", ds_id, exc
+            )
+
         return await self.get_readiness(ds_id, session)
+
+    async def _ensure_indices_for_skip(
+        self, ds_id: str, workspace_id: Optional[str], session: AsyncSession
+    ) -> None:
+        """Best-effort label-index creation for a source whose aggregation was skipped."""
+        provider = await self._registry.get_provider_for_workspace(
+            workspace_id, session, data_source_id=ds_id,
+        )
+        ensure = getattr(provider, "ensure_indices", None)
+        if ensure is None:
+            return
+
+        entity_type_ids: list[str] = []
+        from backend.app.db.models import OntologyORM, WorkspaceDataSourceORM
+
+        ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        if ds is not None and ds.ontology_id:
+            ontology = await session.get(OntologyORM, ds.ontology_id)
+            if ontology is not None:
+                entity_type_ids = list(
+                    json.loads(ontology.entity_type_definitions or "{}").keys()
+                )
+
+        await ensure(entity_type_ids)
+        logger.info(
+            "ensured %d ontology label indexes for skipped data source %s",
+            len(entity_type_ids), ds_id,
+        )
 
     # ── Status ────────────────────────────────────────────────────────
 
@@ -1239,9 +1280,9 @@ class AggregationService:
 
             - NotFoundError  — DS row or ontology row missing
             - ValueError     — DS exists but ontology_id is null
-            - OntologyResolutionError — gate failed (any of:
-              missing_entity_types, missing_edge_types,
-              unclassified_relationships, no_lineage)
+            - OntologyResolutionError — gate failed (no_lineage; partial
+              coverage and unclassified relationships are advisory-only
+              and no longer block)
 
         Returns dict with:
             ontology_id, ontology_fingerprint, workspace_id, provider_id,
