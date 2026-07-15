@@ -182,6 +182,31 @@ def test_resolve_ontology_containment_from_flag_still_works():
     assert "OWNS" in resolved.containment_edge_types
 
 
+def test_resolve_ontology_reconciles_per_rel_flag_from_list():
+    # When containment/lineage is declared via the persisted LIST only (the rel
+    # def's flag left at its False default), the resolved rel def's
+    # is_containment/is_lineage flag must be flipped to match — so per-edge
+    # consumers (build_synthetic_schema's per-edge isContainment, the
+    # Relationships panel, the commit gate's lineage check) agree with the
+    # top-level list instead of diverging.
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={"layer": {"name": "Layer"}, "object": {"name": "Object"}},
+        relationship_type_definitions={
+            "CONTAINS": {"name": "Contains"},   # flag defaults False
+            "FLOWS_TO": {"name": "Flows To"},   # flag defaults False
+        },
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS_TO"],
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    defs = {k.upper(): v for k, v in resolved.relationship_type_definitions.items()}
+    assert defs["CONTAINS"].is_containment is True
+    assert defs["CONTAINS"].is_lineage is False
+    assert defs["FLOWS_TO"].is_lineage is True
+    assert defs["FLOWS_TO"].is_containment is False
+
+
 # ---------------------------------------------------------------------------
 # validate_ontology — SHACL-lite checks
 # ---------------------------------------------------------------------------

@@ -296,11 +296,26 @@ def resolve_ontology(
             return types
         return [t for t in types if str(t).lower() in entity_ids_lower]
 
+    # Reconcile each rel def's per-relationship `is_containment`/`is_lineage`
+    # flag with the UNIONED top-level lists above. Save-time never keeps the two
+    # in sync (the persisted list and the per-rel flag are independent), so a
+    # containment type added via the list only (e.g. the Hierarchy panel, or a
+    # blank/custom ontology) leaves the flag at its False default. Consumers that
+    # read the per-edge flag (build_synthetic_schema's per-edge isContainment,
+    # the Relationships panel, the commit gate's lineage check) would then
+    # disagree with consumers that read the list (Hierarchy panel, the resolved
+    # top-level sets). Aligning the flag to the union makes the resolved ontology
+    # internally consistent — additive only (a flag already True stays True).
+    containment_ci = {str(t).upper() for t in containment}
+    lineage_ci = {str(t).upper() for t in lineage}
+
     rel_defs = {
         rid: replace(
             rd,
             source_types=_self_consistent_endpoints(rd.source_types),
             target_types=_self_consistent_endpoints(rd.target_types),
+            is_containment=rd.is_containment or (str(rid).upper() in containment_ci),
+            is_lineage=rd.is_lineage or (str(rid).upper() in lineage_ci),
         )
         for rid, rd in rel_defs.items()
     }

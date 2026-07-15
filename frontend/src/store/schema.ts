@@ -324,7 +324,10 @@ export const useSchemaStore = create<SchemaState>()(
             const nextContainment = explicitContainment.length > 0
               ? explicitContainment
               : deriveContainmentEdgeTypes(relationshipTypes)
-            const nextLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
+            const explicitLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
+            const nextLineage = explicitLineage.length > 0
+              ? explicitLineage
+              : deriveLineageEdgeTypes(relationshipTypes)
             // Null (not undefined) when the backend couldn't digest the ontology —
             // the drift check reads null as "skip", and `undefined` would be an
             // absent field rather than a stated one.
@@ -761,6 +764,18 @@ export function deriveContainmentEdgeTypes(
   relationshipTypes: Array<{ id: string; isContainment?: boolean }>,
 ): string[] {
   return relationshipTypes.filter(rt => rt.isContainment).map(rt => rt.id)
+}
+
+/**
+ * Lineage counterpart of {@link deriveContainmentEdgeTypes} — derive lineage
+ * edge type ids from per-relationship `isLineage` flags when the top-level
+ * `lineageEdgeTypes` array is empty (same lossy-payload guard). Kept symmetric
+ * with containment so a UI-declared lineage relationship isn't silently ignored.
+ */
+export function deriveLineageEdgeTypes(
+  relationshipTypes: Array<{ id: string; isLineage?: boolean }>,
+): string[] {
+  return relationshipTypes.filter(rt => rt.isLineage).map(rt => rt.id)
 }
 
 /** Pure helper: check edge type against a set of lineage types (case-insensitive) */

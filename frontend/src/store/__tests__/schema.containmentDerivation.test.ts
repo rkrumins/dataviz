@@ -10,7 +10,7 @@
  * containment. The store must fall back to the flags.
  */
 import { describe, expect, it, beforeEach } from 'vitest'
-import { useSchemaStore, deriveContainmentEdgeTypes } from '../schema'
+import { useSchemaStore, deriveContainmentEdgeTypes, deriveLineageEdgeTypes } from '../schema'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
 
 function entityType(id: string) {
@@ -26,7 +26,7 @@ function entityType(id: string) {
   }
 }
 
-function relType(id: string, isContainment: boolean) {
+function relType(id: string, isContainment: boolean, isLineage = false) {
   return {
     id,
     name: id,
@@ -37,7 +37,7 @@ function relType(id: string, isContainment: boolean) {
     bidirectional: false,
     showLabel: true,
     isContainment,
-    isLineage: false,
+    isLineage,
     category: 'association',
   }
 }
@@ -74,6 +74,23 @@ describe('deriveContainmentEdgeTypes', () => {
   })
 })
 
+describe('deriveLineageEdgeTypes', () => {
+  it('returns the ids of relationships flagged isLineage', () => {
+    expect(
+      deriveLineageEdgeTypes([
+        { id: 'FLOWS_TO', isLineage: true },
+        { id: 'HAS_COLUMN', isLineage: false },
+        { id: 'DERIVES_FROM', isLineage: true },
+      ]),
+    ).toEqual(['FLOWS_TO', 'DERIVES_FROM'])
+  })
+
+  it('returns empty when no relationship is lineage', () => {
+    expect(deriveLineageEdgeTypes([{ id: 'HAS_COLUMN', isLineage: false }])).toEqual([])
+    expect(deriveLineageEdgeTypes([])).toEqual([])
+  })
+})
+
 describe('schema store — containment fallback from isContainment flags', () => {
   beforeEach(() => {
     useSchemaStore.getState().reset()
@@ -101,5 +118,17 @@ describe('schema store — containment fallback from isContainment flags', () =>
     )
 
     expect(useSchemaStore.getState().schema?.containmentEdgeTypes).toEqual(['CONTAINS'])
+  })
+
+  it('derives lineageEdgeTypes from flags when the top-level array is empty', () => {
+    useSchemaStore.getState().loadFromBackend(
+      graphSchema({
+        lineageEdgeTypes: [],
+        relationshipTypes: [relType('FLOWS_TO', false, true), relType('HAS_COLUMN', true, false)] as any,
+      }),
+      SCOPE,
+    )
+
+    expect(useSchemaStore.getState().schema?.lineageEdgeTypes).toEqual(['FLOWS_TO'])
   })
 })
