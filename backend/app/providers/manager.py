@@ -881,6 +881,7 @@ class ProviderManager:
         self._last_used.pop(cache_key, None)
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
+        self._reachable_probe.pop(cache_key, None)
         if provider is None:
             return
         inflight = 0
@@ -1067,6 +1068,16 @@ class ProviderManager:
             return None
         base = dict(provider_config or {})
         override = dict(datasource_config or {})
+        # cacheConnection is a PROVIDER-level endpoint (its credentials come from the
+        # provider's encrypted blob). A data source (workspace:datasource:manage, a lower
+        # privilege than provider config) must not introduce or override it — doing so would
+        # let it redirect the provider's cache to an attacker host and exfiltrate the cache
+        # credentials. The provider's cacheConnection is always authoritative.
+        if "cacheConnection" in override:
+            logger.warning(
+                "Ignoring data-source cacheConnection override (provider-level only)."
+            )
+            override.pop("cacheConnection", None)
         if "schemaMapping" in base and "schemaMapping" in override:
             merged_mapping = dict(base["schemaMapping"])
             merged_mapping.update(

@@ -1,0 +1,46 @@
+"""Regression test — a data source must not override a provider's cacheConnection.
+
+``ProviderManager._merge_extra_config`` used to do a top-level ``base.update(override)``,
+so a data source's ``extra_config.cacheConnection`` won on merge. Since the provider's
+cache credentials come from its own encrypted blob but the merged config (including
+``host``) flowed to ``build_cache_client``, a data source (workspace-scoped,
+``workspace:datasource:manage``) could redirect the provider's cache to an attacker
+host and exfiltrate the provider's cache credentials on connect. cacheConnection is
+now provider-authoritative: a data-source-supplied one is dropped (with a warning).
+"""
+from backend.app.providers.manager import ProviderManager
+
+
+class TestMergeExtraConfigCacheConnection:
+    def test_datasource_cache_connection_override_is_dropped(self, caplog):
+        provider_cfg = {"cacheConnection": {"host": "provider-cache.internal"}}
+        ds_cfg = {"cacheConnection": {"host": "attacker"}}
+        with caplog.at_level("WARNING"):
+            result = ProviderManager._merge_extra_config(provider_cfg, ds_cfg)
+        assert result["cacheConnection"] == {"host": "provider-cache.internal"}
+        assert "attacker" not in str(result)
+        assert any("cacheConnection" in rec.message for rec in caplog.records)
+
+    def test_datasource_cache_connection_with_no_provider_one_is_absent(self):
+        result = ProviderManager._merge_extra_config(
+            {"other": "value"}, {"cacheConnection": {"host": "attacker"}}
+        )
+        assert "cacheConnection" not in result
+        assert result["other"] == "value"
+
+    def test_provider_only_cache_connection_passes_through_untouched(self):
+        provider_cfg = {"cacheConnection": {"host": "provider-cache.internal"}}
+        result = ProviderManager._merge_extra_config(provider_cfg, None)
+        assert result["cacheConnection"] == {"host": "provider-cache.internal"}
+
+    def test_benign_datasource_key_still_merges_through(self):
+        """The block is cacheConnection-only — other override keys are unaffected."""
+        provider_cfg = {
+            "cacheConnection": {"host": "provider-cache.internal"},
+            "schemaMapping": {"nodeLabel": "Entity", "urnProperty": "urn"},
+        }
+        ds_cfg = {"schemaMapping": {"nodeLabel": "Node"}}
+        result = ProviderManager._merge_extra_config(provider_cfg, ds_cfg)
+        assert result["cacheConnection"] == {"host": "provider-cache.internal"}
+        assert result["schemaMapping"]["nodeLabel"] == "Node"  # overridden
+        assert result["schemaMapping"]["urnProperty"] == "urn"  # preserved from base
