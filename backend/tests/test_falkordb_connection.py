@@ -78,6 +78,62 @@ def test_load_config_ignores_bad_knobs():
     assert cfg.graph_pool_size is None
 
 
+# ── credential normalization ────────────────────────────────────────
+
+@pytest.mark.parametrize("username,password,expected", [
+    (None, None, (None, None)),
+    ("", "", (None, None)),
+    ("", None, (None, None)),
+    (None, "", (None, None)),
+    ("   ", " \t ", (None, None)),               # whitespace-only → absent
+    ("", "pw", (None, "pw")),                     # password-only auth (requirepass)
+    (None, "pw", (None, "pw")),
+    ("user", "", (None, None)),                   # username w/o password → dropped
+    ("user", None, (None, None)),
+    ("default", "pw", ("default", "pw")),         # explicit default user passes through
+    ("user", " pw with spaces ", ("user", " pw with spaces ")),  # never stripped
+    ("user", 'p@$$w"rd,=:', ("user", 'p@$$w"rd,=:')),            # special chars intact
+])
+def test_normalize_credentials_matrix(username, password, expected):
+    from backend.app.providers.falkordb_connection import normalize_credentials
+    assert normalize_credentials(username, password) == expected
+
+
+def test_normalize_credentials_warns_on_username_without_password(caplog):
+    import logging
+    from backend.app.providers.falkordb_connection import normalize_credentials
+    with caplog.at_level(logging.WARNING):
+        assert normalize_credentials("user", None) == (None, None)
+    assert any("username" in r.message and "password" in r.message
+               for r in caplog.records)
+
+
+def test_load_config_normalizes_empty_string_credentials():
+    cfg = load_connection_config(None, host="h", port=1, username="", password="")
+    assert cfg.username is None
+    assert cfg.password is None
+
+
+def test_load_config_normalizes_sentinel_credentials():
+    cfg = load_connection_config(
+        {"mode": "sentinel",
+         "sentinel": {"masterName": "m", "nodes": [["s1", 26379]]}},
+        host="h", port=1, username=None, password=None,
+        credentials={"sentinel_username": "  ", "sentinel_password": ""},
+    )
+    assert cfg.sentinel_username is None
+    assert cfg.sentinel_password is None
+
+
+def test_empty_string_and_none_credentials_share_one_identity():
+    """""-vs-None must be ONE instance for the client cache and the
+    learned-auth set, or a mark recorded under one spelling misses the other."""
+    from backend.app.providers.falkordb_connection import TopologyGraphClients
+    a = load_connection_config(None, host="h", port=1, username="", password="")
+    b = load_connection_config(None, host="h", port=1, username=None, password=None)
+    assert TopologyGraphClients.identity(a) == TopologyGraphClients.identity(b)
+
+
 # ── env_conn_config: the ENV-configured default instance's credentials ──
 #
 # GAP: env_conn_config() used to pass username=None, password=None

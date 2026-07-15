@@ -218,6 +218,12 @@ def load_connection_config(
     sentinel_password = sentinel_password or _env_secret(
         "FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE"
     )
+    # Single normalization chokepoint: ""/whitespace-only → None, and a
+    # username without a password is dropped (see normalize_credentials).
+    username, password = normalize_credentials(username, password)
+    sentinel_username, sentinel_password = normalize_credentials(
+        sentinel_username, sentinel_password, context="FalkorDB sentinel",
+    )
     return FalkorDBConnConfig(
         mode=mode,
         host=host,
@@ -318,6 +324,38 @@ def _env_secret(env_var: str, file_var: str) -> Optional[str]:
     if path:
         return _read_env_secret_file(path, file_var)
     return os.getenv(env_var)
+
+
+def normalize_credentials(
+    username: Optional[str], password: Optional[str], *, context: str = "FalkorDB",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Collapse every spelling of "no credential" into ``None``.
+
+    ``""`` and whitespace-only values already behave as absent in the kwargs
+    builders (truthiness checks) but NOT in ``TopologyGraphClients.identity``
+    or the learned-auth set — so ``username=""`` and ``username=None`` used to
+    be two different instances, and a learned-unauth mark or a cache
+    invalidation recorded under one spelling missed the other.
+
+    A username WITHOUT a password is dropped entirely: the kwargs builders
+    would make redis-py send ``AUTH <user> ""`` (→ WRONGPASS) while the raw
+    RESP preflight sends no AUTH at all (it gates on the password) — the two
+    paths returned contradictory verdicts for the same misconfigured row.
+    Values with real content are passed through UNTOUCHED (never stripped —
+    a password may legitimately contain edge whitespace).
+    """
+    if isinstance(username, str) and not username.strip():
+        username = None
+    if isinstance(password, str) and not password.strip():
+        password = None
+    if username and not password:
+        logger.warning(
+            "%s: a username is configured without a password — ignoring the "
+            "username (redis AUTH needs both; set a password or clear the "
+            "username).", context,
+        )
+        username = None
+    return username, password
 
 
 def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:

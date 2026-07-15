@@ -657,6 +657,15 @@ class FalkorDBProvider(GraphDataProvider):
             and auth_enabled.strip().lower() in ("false", "0", "no", "off")
         )
         self._auth_enabled = not auth_off
+        # Normalize BEFORE storing: ""/whitespace-only creds must mean "absent"
+        # here exactly as they do in load_connection_config, or preflight (which
+        # reads self._username/_password directly) and the connect path would
+        # disagree about whether this provider authenticates.
+        from backend.app.providers.falkordb_connection import normalize_credentials
+        username, password = normalize_credentials(
+            username, password,
+            context=f"FalkorDB provider {provider_id or f'{self._host}:{port}'}",
+        )
         self._username = username if self._auth_enabled else None
         self._password = password if self._auth_enabled else None
         # Footgun guard: auth EXPLICITLY disabled while a graph password is saved
