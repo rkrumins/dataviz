@@ -1,0 +1,91 @@
+# FalkorDB in Sentinel HA with TLS EVERYWHERE: master + 2 replicas and all
+# three sentinel daemons terminate TLS (the combination that was broken before
+# sentinel_kwargs carried TLS — discovery dialed the handshake port plaintext).
+#
+#   ./deploy/topologies/gen-certs.sh
+#   docker compose -f deploy/topologies/docker-compose.falkordb-sentinel-tls.yml up -d
+#
+# Integration test env (sentinel.tls inherits the data-plane TLS — no extra var):
+#   FALKORDB_TEST_MODE=sentinel FALKORDB_TEST_SENTINEL_MASTER=mymaster \
+#   FALKORDB_TEST_SENTINEL_NODES=127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381 \
+#   FALKORDB_TEST_PASSWORD=testpass \
+#   FALKORDB_TEST_TLS=1 FALKORDB_TEST_TLS_CA=deploy/topologies/certs/ca.crt \
+#   pytest backend/tests/integration/test_topologies.py -v
+#
+# Mixed-mode drill (TLS data plane, PLAINTEXT sentinels): use the plain
+# docker-compose.falkordb-sentinel.yml sentinels against these TLS data nodes
+# and set FALKORDB_TEST_SENTINEL_TLS=0 (→ sentinel.tls.enabled=false).
+x-falkor-tls: &falkor-tls
+  image: falkordb/falkordb:v4.18.11
+  restart: unless-stopped
+  volumes:
+    - ./certs:/certs:ro
+
+services:
+  falkordb-master:
+    <<: *falkor-tls
+    ports: ["6379:6379"]
+    environment:
+      REDIS_ARGS: >-
+        --requirepass testpass --masterauth testpass
+        --port 0 --tls-port 6379
+        --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key
+        --tls-ca-cert-file /certs/ca.crt --tls-auth-clients no
+        --tls-replication yes
+
+  falkordb-replica-1:
+    <<: *falkor-tls
+    depends_on: [falkordb-master]
+    ports: ["6380:6379"]
+    environment:
+      REDIS_ARGS: >-
+        --replicaof falkordb-master 6379
+        --requirepass testpass --masterauth testpass
+        --port 0 --tls-port 6379
+        --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key
+        --tls-ca-cert-file /certs/ca.crt --tls-auth-clients no
+        --tls-replication yes
+
+  falkordb-replica-2:
+    <<: *falkor-tls
+    depends_on: [falkordb-master]
+    ports: ["6381:6379"]
+    environment:
+      REDIS_ARGS: >-
+        --replicaof falkordb-master 6379
+        --requirepass testpass --masterauth testpass
+        --port 0 --tls-port 6379
+        --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key
+        --tls-ca-cert-file /certs/ca.crt --tls-auth-clients no
+        --tls-replication yes
+
+  # TLS-terminating sentinels: plaintext port off, TLS on 26379.
+  sentinel-1: &sentinel-tls
+    image: redis:7-alpine
+    depends_on: [falkordb-master]
+    ports: ["26379:26379"]
+    volumes:
+      - ./certs:/certs:ro
+    command: >-
+      sh -c '
+      printf "port 0\n
+      tls-port 26379\n
+      tls-cert-file /certs/server.crt\n
+      tls-key-file /certs/server.key\n
+      tls-ca-cert-file /certs/ca.crt\n
+      tls-auth-clients no\n
+      tls-replication yes\n
+      sentinel monitor mymaster falkordb-master 6379 2\n
+      sentinel auth-pass mymaster testpass\n
+      sentinel down-after-milliseconds mymaster 5000\n
+      sentinel failover-timeout mymaster 10000\n
+      sentinel resolve-hostnames yes\n" > /tmp/s.conf &&
+      redis-server /tmp/s.conf --sentinel'
+
+  sentinel-2:
+    <<: *sentinel-tls
+    ports: ["26380:26379"]
+
+  sentinel-3:
+    <<: *sentinel-tls
+    ports: ["26381:26379"]
