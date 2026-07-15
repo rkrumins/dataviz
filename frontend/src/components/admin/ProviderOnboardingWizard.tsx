@@ -140,6 +140,13 @@ interface ProviderOnboardingFormData {
   spanner?: SpannerFormState
   // FalkorDB connection topology (standalone / sentinel / cluster).
   falkordbConnection?: FalkorDBConnectionState
+  // The provider's extra_config exactly as loaded (edit mode only; never
+  // rendered). buildExtraConfig REBUILDS the payload from the form fields,
+  // and the backend replaces extra_config wholesale on update — so any key
+  // the form doesn't own (falkordbConnection.addressRemap / connectTimeout /
+  // probeDeadlineS, sentinel.tls, ops-set top-level keys, ...) must be
+  // carried through from here or a routine Save silently deletes it.
+  rawExtraConfig?: Record<string, any>
 }
 
 interface ConnectivityCheck {
@@ -323,7 +330,7 @@ function parseLegacyCacheUrl(raw: string): Partial<CacheConnectionState> | null 
   }
 }
 
-function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
+export function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
   const extra = provider?.extraConfig ?? {}
   const isSpannerProvider = provider?.providerType === 'spanner'
@@ -340,6 +347,7 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
     host: provider?.host ?? '',
     port: provider?.port ?? defaultPortForProvider(provider?.providerType ?? ''),
     tlsEnabled: provider?.tlsEnabled ?? false,
+    rawExtraConfig: provider?.extraConfig ?? undefined,
     username: '',
     password: '',
     authConfigured: provider?.authConfigured ?? false,
@@ -408,8 +416,41 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
   }
 }
 
-function buildExtraConfig(formData: ProviderOnboardingFormData) {
-  const out: Record<string, any> = {}
+// extra_config keys the FORM owns: it rebuilds these from its fields, so a
+// missing form value means "delete the key" (e.g. disabling the cache removes
+// cacheConnection). Everything NOT listed is carried through verbatim from the
+// loaded provider — the backend replaces extra_config wholesale on update, so
+// dropping unknown keys here silently deletes ops-configured settings.
+const FORM_OWNED_EXTRA_KEYS = new Set([
+  'schemaMapping',
+  'projectId', 'instanceId', 'databaseId', 'graphName', 'useEmulator',
+  'falkordbConnection', 'cacheConnection',
+])
+// Same contract one level down, inside falkordbConnection: keys the form
+// edits vs. advanced knobs that only ride the API/ops tooling
+// (addressRemap, connectTimeout, probeDeadlineS, and future additions).
+const FORM_OWNED_FALKORDB_CONN_KEYS = new Set([
+  'mode', 'sentinel', 'cluster', 'authEnabled',
+  'socketTimeout', 'graphPoolSize', 'tls',
+])
+
+function preserveUnknownKeys(
+  raw: Record<string, any> | undefined,
+  owned: Set<string>,
+): Record<string, any> {
+  const kept: Record<string, any> = {}
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (!owned.has(key)) kept[key] = value
+  }
+  return kept
+}
+
+export function buildExtraConfig(formData: ProviderOnboardingFormData) {
+  // Unknown keys from the loaded provider survive the rebuild; the form-owned
+  // keys written below override them.
+  const out: Record<string, any> = preserveUnknownKeys(
+    formData.rawExtraConfig, FORM_OWNED_EXTRA_KEYS,
+  )
 
   if (formData.schemaMappingEnabled) {
     out.schemaMapping = {
@@ -434,10 +475,21 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
 
   if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
     const fc = formData.falkordbConnection
+    const rawConn = (formData.rawExtraConfig?.falkordbConnection ?? {}) as Record<string, any>
+    // Advanced knobs the form doesn't render (addressRemap, connectTimeout,
+    // probeDeadlineS, ...) must survive a Save.
+    const preservedConn = preserveUnknownKeys(rawConn, FORM_OWNED_FALKORDB_CONN_KEYS)
     const conn: Record<string, unknown> = {}
     if (fc.mode === 'sentinel') {
       conn.mode = 'sentinel'
-      conn.sentinel = { masterName: fc.sentinelMasterName.trim(), nodes: cleanNodes(fc.sentinelNodes) }
+      // Spread the stored sentinel object first: it can carry keys this panel
+      // doesn't edit (sentinel.tls, authEnabled, legacy creds pending
+      // migration) — the form owns only masterName + nodes.
+      conn.sentinel = {
+        ...(rawConn.sentinel ?? {}),
+        masterName: fc.sentinelMasterName.trim(),
+        nodes: cleanNodes(fc.sentinelNodes),
+      }
     } else if (fc.mode === 'cluster') {
       conn.mode = 'cluster'
       conn.cluster = { startupNodes: cleanNodes(fc.clusterStartupNodes) }
@@ -463,10 +515,15 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
       if (fc.tlsKeyPath.trim()) tls.keyPath = fc.tlsKeyPath.trim()
       conn.tls = tls
     }
-    // Emit only when non-standalone OR an advanced knob/TLS is set; standalone
-    // with no knobs stays the legacy single-host path (no key written).
-    if (conn.mode || conn.authEnabled === false || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
-      out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
+    // Emit only when non-standalone OR an advanced knob/TLS is set (or a
+    // preserved unknown key exists); standalone with no knobs stays the
+    // legacy single-host path (no key written).
+    if (
+      conn.mode || conn.authEnabled === false || conn.socketTimeout != null ||
+      conn.graphPoolSize != null || conn.tls ||
+      Object.keys(preservedConn).length > 0
+    ) {
+      out.falkordbConnection = { ...preservedConn, mode: conn.mode ?? 'standalone', ...conn }
     }
 
     // Dedicated cache: non-secret topology + TLS paths ONLY. Emitted as a
