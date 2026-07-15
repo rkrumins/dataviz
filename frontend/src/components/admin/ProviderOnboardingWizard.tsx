@@ -2281,9 +2281,9 @@ export function ProviderOnboardingWizard({
                     ? `${appName} is probing the provider now. This should only take a few seconds.`
                     : mode === 'create'
                       ? 'Run a live connection test before creating the provider so you know these settings are reachable.'
-                      : 'Save changes as-is, or re-test later from the provider management flow if you need to validate connectivity.'}
+                      : 'Save changes as-is, or test the PENDING settings now — the per-row Test button on the provider list probes the last saved config, not unsaved edits.'}
             </div>
-            {mode === 'create' && connectivityCheck.state !== 'idle' && (
+            {(mode === 'edit' || connectivityCheck.state !== 'idle') && (
               <div className="mt-3 flex justify-end">
                 <button
                   type="button"
@@ -2296,7 +2296,11 @@ export function ProviderOnboardingWizard({
                   ) : (
                     <RefreshCw className="h-4 w-4" />
                   )}
-                  {connectivityCheck.state === 'failure' ? 'Retry connection test' : 'Test again'}
+                  {connectivityCheck.state === 'failure'
+                    ? 'Retry connection test'
+                    : connectivityCheck.state === 'idle'
+                      ? 'Test pending settings'
+                      : 'Test again'}
                 </button>
               </div>
             )}

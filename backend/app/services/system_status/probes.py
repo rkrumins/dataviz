@@ -402,12 +402,24 @@ async def probe_bus_redis() -> dict:
 
 
 async def probe_cache_redis() -> dict:
+    """Health of the GLOBAL cache endpoint only. Providers whose caches ride
+    their own ``extra_config.cacheConnection`` are not covered by this probe
+    (they resolve per-provider at connect time); a deployment with ONLY
+    per-provider caches correctly reports "unknown" here, not "down"."""
     client = _cache_redis()
     if client is None:
-        return _svc("cacheRedis", "Redis · Cache", "unknown",
-                    error="CACHE_REDIS_URL not configured")
+        return _svc(
+            "cacheRedis", "Redis · Cache", "unknown",
+            error=(
+                "no global cache endpoint configured (REDIS_CACHE_* / legacy "
+                "CACHE_REDIS_URL); per-provider cacheConnection caches are "
+                "not covered by this probe"
+            ),
+            detail={"scope": "global"},
+        )
 
     result = await _redis_probe("cacheRedis", "Redis · Cache", client, _BUDGET_REDIS)
+    result.setdefault("detail", {})["scope"] = "global"
     if result["status"] == "down":
         return result
     # Cache-specific effectiveness stats, best-effort on top of the base info.
