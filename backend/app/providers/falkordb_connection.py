@@ -89,6 +89,12 @@ class FalkorDBConnConfig:
     # is the max graph-query connection pool size.
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
+    # Cross-cluster address remap: pairs of ("host[:port]", "host[:port]").
+    # Redis announces the addresses IT knows (cluster slot map, sentinel
+    # discover-master) — pod IPs that a client in ANOTHER GKE cluster cannot
+    # reach. The remap rewrites every DISCOVERED address before it is dialed;
+    # empty (the default) is a strict no-op. See remap_address().
+    address_remap: Tuple[Tuple[str, str], ...] = ()
     # TLS / mutual-TLS (cert inputs are file PATHS → non-secret, ride config/env).
     tls_enabled: bool = False
     tls_ca_certs: Optional[str] = None
@@ -162,6 +168,116 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
         except (ValueError, TypeError, IndexError, KeyError):
             logger.warning("falkordb_connection: ignoring malformed node entry %r", entry)
     return out
+
+
+def _split_host_port(s: str) -> Tuple[str, Optional[int]]:
+    """``"h:6379"`` → ``("h", 6379)``; ``"h"`` → ``("h", None)``."""
+    host, _, port = s.rpartition(":")
+    if host and port.isdigit():
+        return host, int(port)
+    return s, None
+
+
+def _parse_address_remap(raw: Any) -> Tuple[Tuple[str, str], ...]:
+    """Parse the addressRemap config into normalized ``(from, to)`` pairs.
+
+    Accepts:
+      - ``{"10.0.0.5:6379": "graph.example.com:6379", "old-host": "new-host"}``
+        (the ``falkordbConnection.addressRemap`` JSON object)
+      - ``"10.0.0.5:6379=graph.example.com:6379,old=new"``
+        (the ``FALKORDB_ADDRESS_REMAP`` env CSV)
+    Both sides take ``host`` or ``host:port``. Malformed entries are skipped
+    with a warning (same convention as ``_parse_nodes``).
+    """
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        items = []
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            src, sep, dst = chunk.partition("=")
+            if not sep:
+                logger.warning(
+                    "falkordb_connection: ignoring addressRemap entry %r "
+                    "(expected from=to)", chunk,
+                )
+                continue
+            items.append((src.strip(), dst.strip()))
+    elif isinstance(raw, dict):
+        items = [(str(k).strip(), str(v).strip()) for k, v in raw.items()]
+    else:
+        logger.warning(
+            "falkordb_connection: ignoring addressRemap of type %s "
+            "(expected object or from=to CSV)", type(raw).__name__,
+        )
+        return ()
+    out = []
+    for src, dst in items:
+        if not src or not dst:
+            logger.warning(
+                "falkordb_connection: ignoring addressRemap entry %r=%r "
+                "(empty side)", src, dst,
+            )
+            continue
+        out.append((src, dst))
+    return tuple(out)
+
+
+def remap_address(cfg: FalkorDBConnConfig, host: str, port: int) -> Tuple[str, int]:
+    """Rewrite a DISCOVERED address through the operator's addressRemap.
+
+    An exact ``host:port`` entry wins over a host-only entry; a host-only
+    entry preserves the port unless its target names one. No entry → the
+    address passes through untouched (and an empty remap is a strict no-op).
+
+    Applied at every point a topology-discovered address is dialed: the
+    cluster slot-owner lookup, the primaries fan-out, the RedisCluster's own
+    MOVED/ASK redirects (redis-py's ``address_remap`` hook), and the sentinel
+    master discovery. The addresses the OPERATOR configured (startup nodes,
+    sentinel nodes, host/port) are never remapped — they are reachable by
+    definition, and remapping them would make the config lie about itself.
+    """
+    port = int(port)
+    if not cfg.address_remap:
+        return host, port
+    host_only_target: Optional[str] = None
+    for src, dst in cfg.address_remap:
+        s_host, s_port = _split_host_port(src)
+        if s_port is not None:
+            if s_host == host and s_port == port:
+                d_host, d_port = _split_host_port(dst)
+                mapped = (d_host, d_port if d_port is not None else port)
+                logger.debug(
+                    "falkordb_connection: remapped %s:%d -> %s:%d",
+                    host, port, mapped[0], mapped[1],
+                )
+                return mapped
+        elif s_host == host and host_only_target is None:
+            host_only_target = dst
+    if host_only_target is not None:
+        d_host, d_port = _split_host_port(host_only_target)
+        mapped = (d_host, d_port if d_port is not None else port)
+        logger.debug(
+            "falkordb_connection: remapped %s:%d -> %s:%d",
+            host, port, mapped[0], mapped[1],
+        )
+        return mapped
+    return host, port
+
+
+def _address_remap_kwargs(cfg: FalkorDBConnConfig) -> dict:
+    """The redis-py ``RedisCluster(address_remap=...)`` hook, or nothing.
+
+    Verified against redis-py 8 (``redis.asyncio.cluster.RedisCluster``):
+    ``address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]]``,
+    applied by the NodesManager to every discovered node address — which is
+    what keeps MOVED/ASK redirects dialable from another cluster.
+    """
+    if not cfg.address_remap:
+        return {}
+    return {"address_remap": lambda addr: remap_address(cfg, addr[0], addr[1])}
 
 
 def load_connection_config(
@@ -301,6 +417,9 @@ def load_connection_config(
         cluster_nodes=_parse_nodes(
             cluster.get("startupNodes") or os.getenv("FALKORDB_CLUSTER_NODES")
         ),
+        address_remap=_parse_address_remap(
+            cfg.get("addressRemap") or os.getenv("FALKORDB_ADDRESS_REMAP")
+        ),
         socket_timeout=_coerce_float(cfg.get("socketTimeout")),
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
         tls_enabled=tls_on,
@@ -439,6 +558,32 @@ def projection_socket_timeout() -> float:
     ``backend/app/config/resilience.py``)."""
     write_budget = float(os.getenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "60"))
     return write_budget + _resilience.PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS
+
+
+def _sentinel_class(cfg: FalkorDBConnConfig):
+    """The ``Sentinel`` class to construct for ``cfg`` — plain when no remap is
+    configured (byte-for-byte the existing behavior), else a subclass whose
+    discovered addresses go through ``remap_address``.
+
+    Needed because ``master_for`` dials whatever ``discover_master`` returns
+    INTERNALLY on every (re)connect — the transparent-failover property — so a
+    return-value rewrite at our call sites cannot reach it.
+    """
+    from redis.asyncio.sentinel import Sentinel
+
+    if not cfg.address_remap:
+        return Sentinel
+
+    class _RemapSentinel(Sentinel):
+        async def discover_master(self, service_name):
+            host, port = await super().discover_master(service_name)
+            return remap_address(cfg, host, int(port))
+
+        async def discover_slaves(self, service_name):
+            slaves = await super().discover_slaves(service_name)
+            return [remap_address(cfg, h, int(p)) for h, p in slaves]
+
+    return _RemapSentinel
 
 
 def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
@@ -716,7 +861,13 @@ async def _resolve_cluster_node_once(
     from redis.cluster import ClusterNode
 
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
+    # address_remap: discovery itself follows the slot map when a startup node
+    # redirects, so even this short-lived client needs the rewrite.
+    cluster = RedisCluster(
+        startup_nodes=nodes,
+        **_conn_auth_kwargs(cfg, socket_timeout),
+        **_address_remap_kwargs(cfg),
+    )
     try:
         # redis.asyncio.cluster initializes lazily; force it so the slot
         # map is populated before we look up the owning node.
@@ -724,7 +875,9 @@ async def _resolve_cluster_node_once(
             await cluster.initialize()
         slot = cluster.keyslot(graph_name)
         node = cluster.nodes_manager.get_node_from_slot(slot)
-        return node.host, int(node.port)
+        # The slot map answers with the address the CLUSTER knows (a pod IP);
+        # rewrite it into one the caller can actually dial.
+        return remap_address(cfg, node.host, node.port)
     finally:
         try:
             await cluster.aclose()
@@ -761,8 +914,6 @@ async def build_graph_client(
         return falkordb_over(Redis(connection_pool=pool)), pool
 
     if cfg.mode == "sentinel":
-        from redis.asyncio.sentinel import Sentinel
-
         if not cfg.sentinel_master or not cfg.sentinel_nodes:
             raise ProviderConfigurationError(
                 "FalkorDB sentinel mode requires sentinel.masterName and "
@@ -787,7 +938,10 @@ async def build_graph_client(
             master_kwargs["username"] = cfg.username
         if cfg.password and "password" not in master_kwargs:
             master_kwargs["password"] = cfg.password
-        sentinel = Sentinel(
+        # _sentinel_class: plain Sentinel, or the remapping subclass when
+        # addressRemap is configured — master_for re-runs discover_master on
+        # every reconnect, so the rewrite must live INSIDE the class.
+        sentinel = _sentinel_class(cfg)(
             cfg.sentinel_nodes,
             sentinel_kwargs=_sentinel_auth_kwargs(cfg, socket_timeout),
             **master_kwargs,
@@ -980,6 +1134,9 @@ def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwarg
     return RedisCluster(
         host=host, port=port, startup_nodes=startup or None,
         **pool_kwargs, **tls_client_kwargs(cfg.tls_settings()),
+        # Every slot-map/MOVED/ASK address this client dials goes through the
+        # operator's remap — the redirects announce pod IPs too.
+        **_address_remap_kwargs(cfg),
     )
 
 
@@ -1245,6 +1402,8 @@ class TopologyGraphClients:
             # Frozen dataclass (hashable). Flipping the sentinel-daemon TLS
             # override must invalidate cached clients like any config change.
             cfg.sentinel_tls,
+            # Different remap → different reachable endpoints → different client.
+            cfg.address_remap,
         )
 
     def _pool_kwargs(self, cfg: FalkorDBConnConfig) -> dict:
@@ -1419,7 +1578,9 @@ async def resolve_sentinel_master(
             sentinel_kwargs=_sentinel_auth_kwargs(c, socket_timeout),
         )
         host, port = await sentinel.discover_master(c.sentinel_master)
-        return host, int(port)
+        # Sentinels announce the master address THEY know (a pod IP) —
+        # rewrite it into one this client can actually dial.
+        return remap_address(c, host, int(port))
 
     # Sentinel daemons have their own auth (see _sentinel_auth_kwargs); negotiate the
     # same way so a credentialed config against unauthenticated sentinels self-heals.
@@ -1460,11 +1621,15 @@ async def _cluster_primary_nodes_once(
     from redis.cluster import ClusterNode
 
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
+    cluster = RedisCluster(
+        startup_nodes=nodes,
+        **_conn_auth_kwargs(cfg, socket_timeout),
+        **_address_remap_kwargs(cfg),
+    )
     try:
         if hasattr(cluster, "initialize"):
             await cluster.initialize()
-        return [(n.host, int(n.port)) for n in cluster.get_primaries()]
+        return [remap_address(cfg, n.host, n.port) for n in cluster.get_primaries()]
     finally:
         try:
             await cluster.aclose()

@@ -288,9 +288,28 @@ def fake_redis_and_falkor(monkeypatch):
             self.port = port
 
     class FakeRedisCluster(_ConnMixin):
+        # The addresses this fake "cluster" announces (as a real slot map
+        # would: pod IPs). Tests override via captured["cluster_announced"].
         def __init__(self, startup_nodes=None, **kwargs):
             captured["cluster_startup_nodes"] = startup_nodes
             captured["cluster_kwargs"] = kwargs
+
+        async def initialize(self):
+            captured["cluster_initialized"] = True
+
+        def keyslot(self, key):
+            return 42
+
+        @property
+        def nodes_manager(self):
+            announced = captured.get("cluster_announced", [("10.0.0.5", 7001)])
+            host, port = announced[0]
+            node = types.SimpleNamespace(host=host, port=port)
+            return types.SimpleNamespace(get_node_from_slot=lambda slot: node)
+
+        def get_primaries(self):
+            announced = captured.get("cluster_announced", [("10.0.0.5", 7001)])
+            return [types.SimpleNamespace(host=h, port=p) for h, p in announced]
 
     # redis.asyncio
     redis_asyncio = types.ModuleType("redis.asyncio")
@@ -426,6 +445,143 @@ async def test_sentinel_auth_enabled_reuses_data_plane_credentials(fake_redis_an
     await build_graph_client(cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0})
     sk = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
     assert sk["password"] == "graphpass"
+
+
+# ── cross-cluster address remap ─────────────────────────────────────
+
+def test_parse_address_remap_json_and_env_forms():
+    from backend.app.providers.falkordb_connection import _parse_address_remap
+
+    assert _parse_address_remap(
+        {"10.0.0.5:6379": "graph.example.com:6379", "old-host": "new-host"}
+    ) == (("10.0.0.5:6379", "graph.example.com:6379"), ("old-host", "new-host"))
+    assert _parse_address_remap(
+        "10.0.0.5:6379=graph.example.com:6379, old=new"
+    ) == (("10.0.0.5:6379", "graph.example.com:6379"), ("old", "new"))
+    assert _parse_address_remap(None) == ()
+    # Malformed entries are skipped, valid ones kept.
+    assert _parse_address_remap("no-equals-sign,a=b,=x") == (("a", "b"),)
+    assert _parse_address_remap(["not", "a", "dict"]) == ()
+
+
+def _remap_cfg(remap, mode="standalone", **kw):
+    extra = {"mode": mode, "addressRemap": remap}
+    if mode == "sentinel":
+        extra["sentinel"] = {"masterName": "m", "nodes": [["s1", 26379]]}
+    if mode == "cluster":
+        extra["cluster"] = {"startupNodes": [["seed", 7000]]}
+    return load_connection_config(extra, host="h", port=6379,
+                                  username=None, password=None, **kw)
+
+
+def test_remap_address_matrix():
+    from backend.app.providers.falkordb_connection import remap_address
+
+    cfg = _remap_cfg({
+        "10.0.0.5:6379": "edge.example.com:16379",   # exact host:port
+        "10.0.0.5": "fallback.example.com",          # host-only (loses to exact)
+        "10.0.0.6": "edge2.example.com",             # host-only, port preserved
+        "10.0.0.7": "edge3.example.com:26379",       # host-only, port replaced
+    })
+    assert remap_address(cfg, "10.0.0.5", 6379) == ("edge.example.com", 16379)
+    assert remap_address(cfg, "10.0.0.5", 7000) == ("fallback.example.com", 7000)
+    assert remap_address(cfg, "10.0.0.6", 6380) == ("edge2.example.com", 6380)
+    assert remap_address(cfg, "10.0.0.7", 6379) == ("edge3.example.com", 26379)
+    assert remap_address(cfg, "unmapped", 6379) == ("unmapped", 6379)
+    # Empty remap is a strict no-op.
+    empty = _remap_cfg(None)
+    assert empty.address_remap == ()
+    assert remap_address(empty, "10.0.0.5", 6379) == ("10.0.0.5", 6379)
+
+
+@pytest.mark.asyncio
+async def test_cluster_owner_resolution_remaps_the_announced_address(fake_redis_and_falkor):
+    """The slot map answers with the address the CLUSTER knows (a pod IP,
+    unreachable from another GKE cluster). The owner returned to callers — and
+    therefore the pinned owning-node pool — must be the remapped endpoint."""
+    fake_redis_and_falkor["cluster_announced"] = [("10.0.0.5", 7001)]
+    cfg = _remap_cfg({"10.0.0.5:7001": "edge.example.com:17001"}, mode="cluster")
+    host, port = await resolve_cluster_node_for_key(cfg, "g", 5.0)
+    assert (host, port) == ("edge.example.com", 17001)
+
+
+@pytest.mark.asyncio
+async def test_discovery_cluster_client_carries_the_address_remap_hook(fake_redis_and_falkor):
+    """CANARY for redis-py bumps: the short-lived discovery RedisCluster (and by
+    the same code path build_cluster_conn's data-plane client) must forward the
+    address_remap kwarg — discovery itself follows the slot map on redirects."""
+    fake_redis_and_falkor["cluster_announced"] = [("10.0.0.5", 7001)]
+    cfg = _remap_cfg({"10.0.0.5": "edge.example.com"}, mode="cluster")
+    await resolve_cluster_node_for_key(cfg, "g", 5.0)
+    hook = fake_redis_and_falkor["cluster_kwargs"].get("address_remap")
+    assert callable(hook)
+    assert hook(("10.0.0.5", 7001)) == ("edge.example.com", 7001)
+    assert hook(("other", 7000)) == ("other", 7000)
+
+
+@pytest.mark.asyncio
+async def test_no_remap_means_no_hook_and_untouched_addresses(fake_redis_and_falkor):
+    """Default-off: absent addressRemap, nothing changes — no kwarg, announced
+    addresses pass through verbatim."""
+    fake_redis_and_falkor["cluster_announced"] = [("10.0.0.5", 7001)]
+    cfg = _remap_cfg(None, mode="cluster")
+    host, port = await resolve_cluster_node_for_key(cfg, "g", 5.0)
+    assert (host, port) == ("10.0.0.5", 7001)
+    assert "address_remap" not in fake_redis_and_falkor["cluster_kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_cluster_primaries_are_remapped(fake_redis_and_falkor):
+    from backend.app.providers.falkordb_connection import cluster_primary_nodes
+
+    fake_redis_and_falkor["cluster_announced"] = [("10.0.0.5", 7001), ("10.0.0.6", 7002)]
+    cfg = _remap_cfg({"10.0.0.5": "edge-a", "10.0.0.6": "edge-b"}, mode="cluster")
+    assert await cluster_primary_nodes(cfg, 5.0) == [("edge-a", 7001), ("edge-b", 7002)]
+
+
+@pytest.mark.asyncio
+async def test_build_cluster_conn_forwards_the_remap_hook(fake_redis_and_falkor):
+    from backend.app.providers.falkordb_connection import build_cluster_conn
+
+    cfg = _remap_cfg({"10.0.0.5": "edge"}, mode="cluster")
+    build_cluster_conn(cfg, "seed", 7000, {"socket_timeout": 10.0})
+    assert callable(fake_redis_and_falkor["cluster_kwargs"].get("address_remap"))
+
+
+@pytest.mark.asyncio
+async def test_sentinel_discovered_master_is_remapped(fake_redis_and_falkor):
+    """resolve_sentinel_master (preflight/probes) rewrites what the sentinels
+    announce; the fixture's sentinels announce 'discovered-master'."""
+    from backend.app.providers.falkordb_connection import resolve_sentinel_master
+
+    cfg = _remap_cfg({"discovered-master": "edge-master.example.com"}, mode="sentinel")
+    host, port = await resolve_sentinel_master(cfg, 5.0)
+    assert (host, port) == ("edge-master.example.com", 6379)
+
+
+@pytest.mark.asyncio
+async def test_sentinel_data_plane_uses_the_remapping_subclass(fake_redis_and_falkor):
+    """master_for re-runs discover_master internally on every reconnect, so the
+    remap must live INSIDE the Sentinel class handed to the data plane."""
+    from backend.app.providers.falkordb_connection import _sentinel_class
+
+    plain = _remap_cfg(None, mode="sentinel")
+    remapped = _remap_cfg({"discovered-master": "edge"}, mode="sentinel")
+    import sys
+    base = sys.modules["redis.asyncio.sentinel"].Sentinel
+    assert _sentinel_class(plain) is base                     # no remap → untouched
+    cls = _sentinel_class(remapped)
+    assert cls is not base and issubclass(cls, base)
+    inst = cls([("s1", 26379)])
+    assert await inst.discover_master("m") == ("edge", 6379)
+
+
+def test_identity_changes_when_remap_changes():
+    from backend.app.providers.falkordb_connection import TopologyGraphClients
+
+    a = _remap_cfg(None, mode="cluster")
+    b = _remap_cfg({"10.0.0.5": "edge"}, mode="cluster")
+    assert TopologyGraphClients.identity(a) != TopologyGraphClients.identity(b)
 
 
 # ── sentinel daemon TLS ─────────────────────────────────────────────
