@@ -6,6 +6,7 @@ requested names instead of force-refreshing all ≤200 cached assets.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -187,3 +188,97 @@ async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
     )
     assert forced == ["", "g1", "g2", "g3"]
     assert res["jobs_queued"] == 4
+
+
+@pytest.mark.asyncio
+async def test_refresh_bounds_enqueue_concurrency(monkeypatch) -> None:
+    """The per-asset fan-out must be microbatched at
+    ``INSIGHTS_REFRESH_ENQUEUE_CONCURRENCY`` — a click can't fire an
+    unbounded ~200-wide burst that holds a WEB session hostage."""
+    monkeypatch.setattr(resilience, "INSIGHTS_REFRESH_ENQUEUE_CONCURRENCY", 3)
+
+    active = 0
+    peak = 0
+
+    async def fake_force(provider_id, asset_name=""):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.01)  # hold the slot so concurrency can build
+            return "1-1"
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_force", fake_force)
+
+    async def no_check(_session, _provider_id):
+        return None
+
+    monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
+
+    names = [(f"g{i}",) for i in range(10)]
+
+    class _Rows:
+        def all(self):
+            return names
+
+    class _S:
+        async def execute(self, _stmt):
+            return _Rows()
+
+    res = await insights.refresh_all_assets(provider_id="p1", body=None, session=_S())
+
+    assert res["jobs_queued"] == 11        # list sentinel + 10 assets
+    assert peak <= 3                       # never exceeds the cap
+    assert peak > 1                        # ... but genuinely runs concurrently
+
+
+@pytest.mark.asyncio
+async def test_force_enqueue_survives_release_claim_redis_error(monkeypatch) -> None:
+    """A Redis blip on the (non-safe) ``release_claim`` must not raise out
+    of the force-enqueue — that would surface as a misleading
+    DB_UNAVAILABLE 503. It degrades to the Redis-tolerant enqueue below."""
+    async def boom_release(_scope_key, **_kw):
+        raise ConnectionError("redis down")
+
+    async def down_enqueue_safe(_provider_id, _asset_name, **_kw):
+        return None  # Redis fully down: the tolerant enqueue lands nothing
+
+    monkeypatch.setattr(enqueue_mod, "release_claim", boom_release)
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_safe", down_enqueue_safe)
+
+    # Must NOT raise; returns None (nothing queued) rather than a 503.
+    assert await enqueue_mod.enqueue_discovery_job_force("p1", "g1") is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_survives_redis_down_without_503(monkeypatch) -> None:
+    """End-to-end: when Redis is unreachable, the refresh endpoint returns
+    a 202 dict with a degraded ``jobs_queued`` instead of raising."""
+    async def boom_release(_scope_key, **_kw):
+        raise ConnectionError("redis down")
+
+    async def down_enqueue_safe(_provider_id, _asset_name, **_kw):
+        return None
+
+    monkeypatch.setattr(enqueue_mod, "release_claim", boom_release)
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_safe", down_enqueue_safe)
+
+    async def no_check(_session, _provider_id):
+        return None
+
+    monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
+
+    class _Rows:
+        def all(self):
+            return [("g1",), ("g2",)]
+
+    class _S:
+        async def execute(self, _stmt):
+            return _Rows()
+
+    res = await insights.refresh_all_assets(provider_id="p1", body=None, session=_S())
+    assert isinstance(res, dict)
+    assert res["jobs_queued"] == 0     # degraded: nothing queued, but no 503
+    assert res["list_job_id"] is None

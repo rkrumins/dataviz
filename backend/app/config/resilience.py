@@ -284,6 +284,15 @@ INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(os.getenv("INSIGHTS_UI_STALE_THRESHO
 # tail of cached assets.
 INSIGHTS_MAX_PROVIDER_REFRESH: int = int(os.getenv("INSIGHTS_MAX_PROVIDER_REFRESH", "200"))
 
+# Bound on how many discovery-enqueue Redis round-trips the Refresh
+# button fires concurrently. Enqueues are cheap, but the endpoint holds
+# one WEB DB session for the whole fan-out, so bounding caps the Redis
+# burst and shortens the session hold. 200/16 ≈ 13 sequential hops →
+# still a sub-second POST.
+INSIGHTS_REFRESH_ENQUEUE_CONCURRENCY: int = int(
+    os.getenv("INSIGHTS_REFRESH_ENQUEUE_CONCURRENCY", "16")
+)
+
 # Worker XAUTOCLAIM idle-time threshold. A pending entry must be at
 # least this old before another consumer reclaims it for redelivery.
 # Same value used by the periodic trim's PEL-freshness gate.

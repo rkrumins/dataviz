@@ -347,7 +347,16 @@ async def enqueue_discovery_job_force(
     if not provider_id:
         return None
     scope_key = f"{provider_id}:{asset_name}"
-    await release_claim(scope_key, stream=DISCOVERY_STREAM)
+    try:
+        await release_claim(scope_key, stream=DISCOVERY_STREAM)
+    except _REDIS_BENIGN_ERRORS as exc:
+        # A Redis blip on the (non-safe) release must not surface as a
+        # misleading DB_UNAVAILABLE 503 — enqueue below is Redis-tolerant,
+        # so degrade to "fewer jobs queued" instead of raising.
+        logger.warning(
+            "release_claim failed scope=%s (Redis down?): %s — enqueue will dedup/degrade",
+            scope_key, exc,
+        )
     return await enqueue_discovery_job_safe(provider_id, asset_name, priority=True)
 
 
