@@ -84,6 +84,53 @@ reseed graphs from Cloud SQL after the cluster is green.
    --ignore-daemonsets --delete-emptydir-data` → PDB serializes the eviction,
    same observations as (3).
 
+## Clients in ANOTHER cluster (cross-GKE)
+
+Everything above serves in-cluster clients: the shards announce per-pod
+hostnames (`--cluster-announce-hostname
+$(POD_NAME).falkordb-cluster.synodic.svc.cluster.local`), which resolve only
+inside this cluster. A client in a DIFFERENT GKE cluster that follows the
+slot map / `MOVED` redirects lands on unresolvable names and times out —
+the classic "provider keeps flapping offline cross-cluster" symptom.
+
+Two pieces make cross-cluster work:
+
+1. **A reachable path per shard pod.** Expose each `falkordb-shard-N-0` pod
+   individually (Multi-Cluster Services exporting the `falkordb-cluster`
+   headless Service, or one internal LB per shard). A single LB in front of
+   the whole cluster is NOT enough — redirects name individual nodes.
+2. **`addressRemap` on the client side**, mapping each announced hostname to
+   its reachable endpoint. Per-provider (survives wizard edits) or env-wide:
+
+   ```json
+   "falkordbConnection": {
+     "mode": "cluster",
+     "cluster": {"startupNodes": [["falkordb-shard-0.mcs.example.internal", 6379],
+                                  ["falkordb-shard-1.mcs.example.internal", 6379],
+                                  ["falkordb-shard-2.mcs.example.internal", 6379]]},
+     "addressRemap": {
+       "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local": "falkordb-shard-0.mcs.example.internal",
+       "falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local": "falkordb-shard-1.mcs.example.internal",
+       "falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local": "falkordb-shard-2.mcs.example.internal"
+     },
+     "connectTimeout": 5,
+     "probeDeadlineS": 6
+   }
+   ```
+
+   Env-wide equivalent for the env-default instance:
+   `FALKORDB_ADDRESS_REMAP="<announced>=<reachable>,..."` (host-only entries
+   preserve the port). `connectTimeout` / `probeDeadlineS` raise the dial and
+   warmup-probe budgets for the extra cross-cluster latency without fleet-wide
+   env changes.
+
+   The remap applies to every DISCOVERED address (slot map, MOVED/ASK,
+   sentinel discover-master); operator-configured startupNodes are dialed
+   as written. Validation harness: `deploy/topologies/
+   docker-compose.falkordb-cluster-remap.yml` reproduces the unreachable-
+   announce shape locally — the integration run fails without the remap and
+   passes with it.
+
 ## Deferred (tracked in doc §8/§11)
 
 - BGSAVE→GCS DR CronJob (RPO backstop; effective RPO is Cloud SQL's).
