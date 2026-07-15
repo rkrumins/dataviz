@@ -35,6 +35,27 @@ _SSL_VERIFY = {
 }
 
 
+def _normalize_cert_path(path: Optional[str]) -> Optional[str]:
+    """Return a plain filesystem path for a cert/CA input.
+
+    Operators (and GCP tooling) commonly supply a ``file:`` URI —
+    e.g. ``file:/etc/certs/redis-ca-bundle.pem`` or ``file:///etc/certs/ca.pem``.
+    redis-py / ``ssl.load_verify_locations`` want a bare path and would try to
+    open a file literally named ``file:/...`` (→ silent verify failure). Strip a
+    leading ``file:`` scheme (and any authority slashes) and surrounding
+    whitespace so both the URI and bare-path forms work. Anything without the
+    scheme is returned unchanged.
+    """
+    if not path:
+        return None
+    p = path.strip()
+    if p.lower().startswith("file:"):
+        p = p[5:]
+        while p.startswith("//"):        # file:///abs, file://abs
+            p = p[2:]
+    return p or None
+
+
 @dataclass(frozen=True)
 class TLSSettings:
     """Normalized TLS settings, shared by graph / cache / bus."""
@@ -69,9 +90,9 @@ class TLSSettings:
             check = False
         return cls(
             enabled=bool(enabled),
-            ca_certs=ca_certs or None,
-            certfile=certfile or None,
-            keyfile=keyfile or None,
+            ca_certs=_normalize_cert_path(ca_certs),
+            certfile=_normalize_cert_path(certfile),
+            keyfile=_normalize_cert_path(keyfile),
             cert_reqs=reqs,
             check_hostname=check,
         )

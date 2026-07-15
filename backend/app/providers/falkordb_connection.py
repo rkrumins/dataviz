@@ -1257,16 +1257,37 @@ async def resolve_sentinel_master(
 async def cluster_primary_nodes(
     cfg: FalkorDBConnConfig, socket_timeout: float,
 ) -> List[Tuple[str, int]]:
-    """Every primary in the cluster (the nodes that own slots)."""
-    from redis.asyncio.cluster import RedisCluster
-    from redis.cluster import ClusterNode
+    """Every primary in the cluster (the nodes that own slots).
 
-    nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    if not nodes:
+    Wrapped in ``with_auth_negotiation`` for the same reason the slot-owner
+    lookup (``resolve_cluster_node_for_key``) is: an unauthenticated cluster must
+    not read as unreachable over a stale provider password, and a missing/wrong
+    credential must surface as a clear ProviderConfigurationError rather than the
+    RAW ``RedisClusterException`` ("...provide at least one reachable node", which
+    wraps redis-py 8's RESP3 ``HELLO``-with-no-AUTH error) — which the operation
+    breaker would treat as an outage. This keyless ``GRAPH.LIST`` path (graph
+    name-availability) previously skipped that negotiation, so a cluster with auth
+    but no configured credential leaked both raw errors here.
+    """
+    if not cfg.cluster_nodes:
         raise ProviderConfigurationError(
             "FalkorDB cluster mode requires cluster.startupNodes (or "
             "FALKORDB_CLUSTER_NODES)."
         )
+
+    async def _primaries(c: FalkorDBConnConfig) -> List[Tuple[str, int]]:
+        return await _cluster_primary_nodes_once(c, socket_timeout)
+
+    return await with_auth_negotiation(cfg, _primaries)
+
+
+async def _cluster_primary_nodes_once(
+    cfg: FalkorDBConnConfig, socket_timeout: float,
+) -> List[Tuple[str, int]]:
+    from redis.asyncio.cluster import RedisCluster
+    from redis.cluster import ClusterNode
+
+    nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
     cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
     try:
         if hasattr(cluster, "initialize"):

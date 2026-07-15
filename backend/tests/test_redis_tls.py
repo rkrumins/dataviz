@@ -34,6 +34,29 @@ def test_client_kwargs_enabled():
     assert kw["ssl_check_hostname"] is True
 
 
+def test_file_uri_prefix_is_stripped_from_cert_paths():
+    """Operators / GCP tooling pass a ``file:`` URI (e.g.
+    ``REDIS_CACHE_TLS_CA_CERTS=file:/etc/certs/redis-ca-bundle.pem``). redis-py
+    and ssl.load_verify_locations want a bare path — a literal ``file:/...``
+    silently fails verification (SSL_VERIFY_FAILED). Both forms must normalize."""
+    for raw, want in [
+        ("file:/etc/certs/redis-ca-bundle.pem", "/etc/certs/redis-ca-bundle.pem"),
+        ("file:///etc/certs/ca.pem", "/etc/certs/ca.pem"),
+        ("  file:/etc/certs/ca.pem  ", "/etc/certs/ca.pem"),
+        ("/plain/path/ca.pem", "/plain/path/ca.pem"),          # untouched
+    ]:
+        t = TLSSettings.from_fields(
+            enabled=True, ca_certs=raw, certfile=raw, keyfile=raw,
+        )
+        assert t.ca_certs == want
+        assert t.certfile == want
+        assert t.keyfile == want
+        kw = tls_client_kwargs(t)
+        assert kw["ssl_ca_certs"] == want
+        # build_ssl_context reads the same normalized tls.ca_certs (single source
+        # of normalization is from_fields), so the preflight path is covered too.
+
+
 def test_pool_kwargs_sets_connection_class_not_ssl_flag():
     from redis.asyncio.connection import SSLConnection
     t = TLSSettings.from_fields(enabled=True, cert_reqs="none")

@@ -775,8 +775,8 @@ def _build_candidate_cypher(
     *,
     where_fragment: str,
     entity_types_param: bool,
-    scope_continuation: str,
     candidate_cap: int,
+    scope_continuation: str = "",
     within_hops_continuation: str = "",
     scope_pre_filter: str = "",
 ) -> str:
@@ -792,11 +792,16 @@ def _build_candidate_cypher(
     within N hops of the anchor URN-set). Both continuations end with
     ``WITH DISTINCT n`` so multiple stack cleanly.
 
-    ``scope_pre_filter`` (W1.1b) replaces the ``MATCH (n)`` prefix with
-    a root-anchored MATCH when the root URN set is small enough that
-    the indexed root lookup beats a label scan. When set,
-    ``scope_continuation`` must be empty (the pre-filter already
-    enforces the scope clamp); the executor selects between shapes.
+    ``scope_pre_filter`` replaces the ``MATCH (n)`` prefix with a
+    root-anchored MATCH chain, so the predicate WHERE and the
+    ``LIMIT candidate_cap`` apply to nodes ALREADY clamped to the scope
+    subtree. This is the correctness-critical shape whenever a
+    containment scope exists: the post-filter shape (``scope_continuation``,
+    appended AFTER the cap) caps the graph-wide candidate set first and
+    then intersects with scope, which silently drops in-scope matches
+    when the predicate is broad. When ``scope_pre_filter`` is set,
+    ``scope_continuation`` must be empty (the pre-filter already enforces
+    the clamp); the two are mutually exclusive.
     """
     if scope_pre_filter:
         parts: List[str] = [scope_pre_filter]
@@ -1305,7 +1310,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         where_fragment, scope_mode, visible_urns, base_params,
     )
 
-    scope_continuation = ""
+    scope_chain = ""
     if scope_mode == "data_source":
         if query.scope.root_urns:
             notes.append(
@@ -1322,11 +1327,11 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         )
 
     if scope_urn_sets:
-        scope_continuation, scope_params = _build_scope_continuation_chain(
+        scope_chain, scope_params = _build_scope_continuation_chain(
             provider, scope_urn_sets, query.scope.max_depth or 12,
         )
         base_params.update(scope_params)
-        if not scope_continuation:
+        if not scope_chain:
             notes.append(
                 "scope.root_urns / descendantOf were supplied but the "
                 "provider has no containment edge types configured — "
@@ -1355,10 +1360,14 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
             "check that edgeClass / edgeTypes resolve to a non-empty set."
         )
 
+    # Scope-first shape: anchor the candidate scan on the scope subtree so
+    # the candidate cap applies to IN-SCOPE nodes. Feeding the chain as
+    # ``scope_continuation`` (post-filter) would cap the graph-wide set first
+    # and silently drop in-scope matches for broad predicates.
     cand_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
-        scope_continuation=scope_continuation,
+        scope_pre_filter=scope_chain,
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
     )
@@ -1877,9 +1886,9 @@ async def execute_deep_search(
     where_fragment, _visible_clause_added = _maybe_add_visible_urns_clause(
         where_fragment, scope_mode, visible_urns_list, base_params,
     )
-    scope_continuation = ""
+    scope_chain = ""
     if scope_urn_sets:
-        scope_continuation, scope_params = _build_scope_continuation_chain(
+        scope_chain, scope_params = _build_scope_continuation_chain(
             provider, scope_urn_sets, query.scope.max_depth or 12,
         )
         base_params.update(scope_params)
@@ -1906,10 +1915,14 @@ async def execute_deep_search(
         # production and so /search/explain can be re-issued to surface
         # the same note to the UI.
         logger.warning("deep_search: %s", et_note)
+    # Scope-first shape: anchor the candidate scan on the scope subtree so the
+    # candidate cap applies to IN-SCOPE nodes (see explain_deep_search + the
+    # _build_candidate_cypher docstring). Post-filter would drop in-scope
+    # matches for broad predicates by capping the graph-wide set first.
     cand_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
-        scope_continuation=scope_continuation,
+        scope_pre_filter=scope_chain,
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
     )
