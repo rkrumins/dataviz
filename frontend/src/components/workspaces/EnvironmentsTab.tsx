@@ -16,6 +16,7 @@ import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import {
     useDataSourceDeletion, impactSections, deleteCaveat,
 } from '@/components/admin/workspace/useDataSourceDeletion'
+import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 
 // ============================================================
 // Helpers
@@ -272,7 +273,9 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
     // drafts, hand-curated entities. This asked `confirm('Remove this data source?')` — a
     // sentence that mentions none of it, from a dialog that cannot. It goes through the same
     // blast-radius flow as every other delete now.
-    const deletion = useDataSourceDeletion(workspace.id, onRefresh)
+    const [trashKey, setTrashKey] = useState(0)
+    const deletion = useDataSourceDeletion(
+        workspace.id, () => { onRefresh(); setTrashKey(k => k + 1) })
 
     const handleSetPrimary = async (dsId: string) => {
         setLoading(true)
@@ -455,17 +458,27 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
             )}
             {error && !editingDsId && <p className="text-xs text-red-500 bg-red-500/10 p-2 rounded-lg border border-red-500/20 mt-2">{error}</p>}
 
+            {/* The trash renders nothing when empty. */}
+            <DeletedDataSources
+                wsId={workspace.id}
+                canManage
+                refreshKey={trashKey}
+                onRestore={deletion.restore}
+                onDeletePermanently={deletion.openPermanent}
+            />
+
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title="Remove data source"
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
                 subtitle={deletion.target?.label}
-                confirmPhrase={deletion.target?.label ?? ''}
-                confirmLabel="Remove data source"
-                sections={impactSections(deletion.target?.impact ?? null)}
+                confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                sections={impactSections(deletion.target?.impact ?? null,
+                                         deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}
                 impactUnknown={deletion.target?.unknown}
                 safeMessage="Nothing depends on this data source, and it has no version history."
-                caveat={deleteCaveat(deletion.target?.impact ?? null)}
+                caveat={deleteCaveat(deletion.target?.impact ?? null, deletion.target?.permanent)}
                 onClose={deletion.close}
                 onConfirm={deletion.confirm}
             />

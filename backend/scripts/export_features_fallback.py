@@ -17,6 +17,7 @@ from backend.app.config.features import (
     DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE,
     DEFAULT_EXPERIMENTAL_NOTICE_TITLE,
 )
+from backend.app.config.feature_wiring import wiring_payload
 from backend.app.db.seed_feature_registry import SEED_CATEGORIES, SEED_DEFINITIONS
 
 
@@ -47,13 +48,16 @@ def main() -> None:
             "category": d["category_id"],
             "type": d["type"],
             "default": default_val,
-            "userOverridable": d["user_overridable"],
             "options": options,
             "helpUrl": d.get("help_url"),
             "adminHint": d.get("admin_hint"),
+            "impactWhenOff": d.get("impact_when_off"),
             "sortOrder": d["sort_order"],
             "deprecated": d["deprecated"],
-            "implemented": d.get("implemented", False),
+            # The facts, from the same function the live API uses. This used to be
+            # `d.get("implemented", False)` — reading a key the seed no longer even has, so every
+            # flag in the bundled fallback claimed to be unwired.
+            **wiring_payload(d["key"]),
         })
     experimental_notice = None
     if DEFAULT_EXPERIMENTAL_NOTICE_ENABLED and DEFAULT_EXPERIMENTAL_NOTICE_TITLE:

@@ -47,6 +47,7 @@ export default {
         accent: {
           lineage: 'var(--nx-accent-lineage)',
           business: 'var(--nx-accent-business)',
+          explore: 'var(--nx-accent-explore)',
           technical: 'var(--nx-accent-technical)',
           warning: 'var(--nx-accent-warning)',
           muted: 'var(--nx-accent-muted)',

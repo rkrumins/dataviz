@@ -49,6 +49,7 @@ import { RefreshControl } from '@/components/insights/RefreshControl'
 import { DataSourceProfileDrawer } from '@/components/insights/DataSourceProfileDrawer'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
+import { mapWithConcurrency } from '@/lib/concurrency'
 
 // Plain-language sort options — field + direction folded into one
 // control so the toolbar reads like a sentence, not a query builder.
@@ -65,6 +66,15 @@ const SORT_OPTIONS: Array<{
     { label: 'Longest since refresh', by: 'refreshed', dir: 'asc' },
 ]
 import { useAssetStats, ASSET_STATS_QUERY_KEY_PREFIX } from '@/hooks/useAssetStats'
+
+// Post-refresh poll loop bounds. Concurrency is capped well under the
+// 30-slot WEB DB pool so a Refresh-all can't storm it into
+// "too many connections" — it settles the visible page in bounded
+// microbatches ("not all in one go") rather than one ~50-wide blast.
+const REFRESH_POLL_CONCURRENCY = 4
+const REFRESH_POLL_BASE_MS = 2_500
+const REFRESH_POLL_MAX_MS = 10_000
+const REFRESH_POLL_DEADLINE_MS = 90_000
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
@@ -1129,13 +1139,17 @@ export function RegistryAssets() {
                     : "Couldn't queue a refresh right now — showing the latest available data.",
             )
         }
-        // Invalidate every per-row asset-stats query under this
-        // provider so mounted rows re-read (and show the refreshing
-        // spinner from the claim-backed ``meta.refreshing`` signal).
+        // Mark every per-row asset-stats query under this provider stale
+        // WITHOUT a simultaneous refetch burst (``refetchType: 'none'``).
+        // The bounded poll loop below is the single controlled fetch
+        // driver: it writes fresh envelopes (incl. the claim-backed
+        // ``meta.refreshing`` spinner signal) into these same query keys,
+        // and the mounted rows observe them.
         queryClient.invalidateQueries({
             predicate: (q) =>
                 q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
                 && q.queryKey[1] === selectedProviderId,
+            refetchType: 'none',
         })
 
         // Wait only for the VISIBLE page's jobs to finish (bounded, light):
@@ -1143,25 +1157,41 @@ export function RegistryAssets() {
         // worker releases the claim on success AND failure, so this
         // terminates promptly; 90s safety cap). fetchQuery writes into the
         // same query keys the rows render from, so figures update in place.
-        const deadline = Date.now() + 90_000
+        //
+        // Polling is microbatched at ``REFRESH_POLL_CONCURRENCY`` so a full
+        // page (up to 50 rows) can't fire 50 concurrent GETs and exhaust
+        // the WEB DB pool. On any 503/timeout the round backs off (up to
+        // ``REFRESH_POLL_MAX_MS``) instead of hammering — "respect the
+        // boundaries" — and the errored asset stays pending for a retry.
+        const deadline = Date.now() + REFRESH_POLL_DEADLINE_MS
         const pending = new Set(pagedAssets)
+        let roundDelay = 0   // first round fires immediately → prompt spinner feedback
         while (pending.size > 0 && Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 2500))
-            const checks = await Promise.allSettled(
-                Array.from(pending).map(async name => {
+            if (roundDelay > 0) await new Promise(r => setTimeout(r, roundDelay))
+            const results = await mapWithConcurrency(
+                Array.from(pending),
+                REFRESH_POLL_CONCURRENCY,
+                async name => {
                     const env = await queryClient.fetchQuery({
                         queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, name],
                         queryFn: () => providerService.getAssetStats(providerId, name),
                         staleTime: 0,
+                        retry: 0,   // don't multiply the under-load 503 storm
                     })
                     return { name, refreshing: !!(env as any)?.meta?.refreshing }
-                }),
+                },
             )
-            for (const c of checks) {
-                if (c.status === 'fulfilled' && !c.value.refreshing) {
-                    pending.delete(c.value.name)
+            let sawRejection = false
+            for (const r of results) {
+                if (r.status === 'fulfilled') {
+                    if (!r.value.refreshing) pending.delete(r.value.name)
+                } else {
+                    sawRejection = true   // keep name pending, retry next round
                 }
             }
+            roundDelay = sawRejection
+                ? Math.min(REFRESH_POLL_MAX_MS, (roundDelay || REFRESH_POLL_BASE_MS) * 2)
+                : REFRESH_POLL_BASE_MS
         }
 
         // Final re-list so the bulk summaries (sort keys, counts,

@@ -127,6 +127,7 @@ async def resolve_provider_conn_config(provider_id: str, session_factory=None):
         username=creds.get("username") if auth_enabled else None,
         password=creds.get("password") if auth_enabled else None,
         tls_enabled=bool(row.tls_enabled),
+        credentials=creds,
     )
 
 

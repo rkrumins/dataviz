@@ -92,3 +92,10 @@ export function fromDiffVsMain(resp: DiffVsMainResponse, branchId: string): Chan
 export function fromPrDiff(resp: DiffVsMainResponse, prId: string): ChangeSet {
   return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'pr', prId })
 }
+
+/** What a pull brought in from Published — attributed to the `pull` commit that recorded it, so it
+ *  renders in the same visual language as every other diff (emerald added / amber modified / rose
+ *  removed, per useDiffDecoration). */
+export function fromIncomingDiff(resp: DiffVsMainResponse, pullCommitId: string): ChangeSet {
+  return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'commit', commitId: pullCommitId })
+}

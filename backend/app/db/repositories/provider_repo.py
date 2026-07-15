@@ -17,6 +17,7 @@ from backend.common.models.management import (
     ProviderResponse,
     ProviderImpactResponse,
     ImpactedEntity,
+    redact_extra_config,
 )
 
 # Re-use credential encryption from connection_repo
@@ -38,7 +39,11 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
         port=row.port,
         tlsEnabled=bool(row.tls_enabled),
         isActive=bool(row.is_active),
-        extraConfig=json.loads(row.extra_config) if row.extra_config else None,
+        # extra_config is an UNENCRYPTED column; rows already in the DB may
+        # carry secrets (e.g. the legacy falkordbConnection.sentinel.password
+        # location) that the schema validator only blocks going forward. Redact
+        # on the way OUT so every response path is covered.
+        extraConfig=redact_extra_config(json.loads(row.extra_config) if row.extra_config else None),
         falkorMaxResident=row.falkor_max_resident,
         permittedWorkspaces=json.loads(row.permitted_workspaces) if row.permitted_workspaces else ["*"],
         createdAt=row.created_at,
@@ -126,8 +131,22 @@ async def update_provider(
         row.host = req.host
     if req.port is not None:
         row.port = req.port
-    if req.credentials is not None:
-        row.credentials = _encrypt(req.credentials.model_dump())
+    if req.credentials is not None or req.credentials_clear:
+        # MERGE, don't replace. `model_dump()` emits None for every field the
+        # caller omitted, so a full replace silently wiped secrets the admin
+        # never touched (e.g. editing the cache host blanked the FalkorDB
+        # password). Omitted key = keep; explicit clear = list the key in
+        # `credentials_clear` (checked independently of `credentials` so a
+        # clear-only request — no other credentials in the payload — still
+        # takes effect).
+        existing = _decrypt(row.credentials) if row.credentials else {}
+        incoming = (
+            req.credentials.model_dump(exclude_unset=True) if req.credentials else {}
+        )
+        merged = {**existing, **{k: v for k, v in incoming.items() if v is not None}}
+        for key in (req.credentials_clear or []):
+            merged.pop(key, None)
+        row.credentials = _encrypt(merged)
     if req.tls_enabled is not None:
         row.tls_enabled = req.tls_enabled
     if req.is_active is not None:
@@ -170,6 +189,9 @@ async def has_workspaces(session: AsyncSession, provider_id: str) -> bool:
         select(WorkspaceDataSourceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        # Tombstones must not count as subscribers, or a deleted data source
+        # would block this provider from ever being deleted.
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
@@ -191,6 +213,7 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
         .join(WorkspaceDataSourceORM, WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     workspaces = [{"id": r[0], "name": r[1], "type": "workspace"} for r in ws_result.all()]
     
@@ -200,6 +223,7 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
         .join(WorkspaceDataSourceORM, ContextModelORM.data_source_id == WorkspaceDataSourceORM.id)
         .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
         .where(CatalogItemORM.provider_id == provider_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
     

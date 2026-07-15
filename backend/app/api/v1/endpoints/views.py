@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.feature_gate import ensure_view_mode_allowed
 from backend.app.auth.dependencies import (
     get_optional_user,
     get_permission_claims,
@@ -436,6 +437,10 @@ async def create_view(
                 detail="Missing permission: workspace:view:create",
             )
 
+    # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
+    # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
+    await ensure_view_mode_allowed(req.view_type, session)
+
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
@@ -504,6 +509,12 @@ async def update_view(
                 status_code=403,
                 detail="Missing permission: workspace:view:edit",
             )
+
+    # Only when the type CHANGES. Withdrawing a layout stops NEW work in it; a view already
+    # built in that layout must stay editable, or "existing views keep working" — which is what
+    # the admin is told — would be false the moment they renamed one.
+    if req.view_type is not None and req.view_type != existing.view_type:
+        await ensure_view_mode_allowed(req.view_type, session)
 
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,

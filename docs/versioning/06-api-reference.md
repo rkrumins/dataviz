@@ -55,6 +55,7 @@ Service domain exceptions are translated centrally by `_domain_errors()` (`versi
 | `AccessDenied` | **403** | `{type:"access_denied", message}` |
 | `ApprovalRequired` | **409** | `{type:"approval_required", pending:[…]}` |
 | `NotUpToDate` | **409** | `{type:"not_up_to_date", branchId, behindBy, message}` |
+| `PullRequestExists` | **409** | `{type:"pull_request_exists", prId, branchId, title, message}` — the branch already has a live PR ([03 §3.8](03-branching-commits-merge.md)); `prId` is the one that exists, so route the user *to* it |
 | `ConcurrencyError` | **409** | `{type:"integrity", message}` |
 | `ValueError` | **404** | `str(message)` |
 
@@ -99,7 +100,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`. "Gate" is the requ
 | `GET · POST · DELETE .../branches/{bid}/members[…]` (`:1243/1254/1268`) | `_READ` / `_MANAGE` / `_MANAGE` | Shared-branch collaborators: `{subjectType:"user\|group", subjectId, role:"viewer\|editor\|maintainer"}`. |
 | `PATCH /graphs/{gid}/branches/{bid}` (`:1365`) | `_MANAGE` | `{name?, description?, isShared?}` (owner/maintainer); `""` clears. |
 | `POST .../branches/{bid}/abandon` (`:1354`) | `_MANAGE` | Discard the draft → `BranchResponse`. |
-| `POST .../branches/{bid}/rebase` (`:1380`) | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, changes, baseCommitSeq}`; `clean:false` → resolve and resubmit. |
+| `POST .../branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, changes, incoming, baseCommitSeq, alreadyUpToDate}`; `clean:false` → resolve and resubmit. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{commitIds, commitCount, contributors, stats, fromSeq, toSeq}`. A clean pull always writes a `pull` commit ([03 §3.7](03-branching-commits-merge.md)). |
 
 ### 2.4 Changes → checkpoint → publish
 | Method · Path | Gate | Purpose / key fields |
@@ -125,7 +126,8 @@ See [04 · Projection & Cache](04-projection-and-cache.md) for what these actual
 | `GET .../branches/{bid}/state` (`:1509`) | `_READ` | `?asOfSeq` → `{nodes, edges, watermark}` (materialized, viewer-scoped). |
 | `GET .../commits/{cid}/state` (`:1525`) | `_READ` | Time-travel: full state at a commit. |
 | `GET .../entities/{eid}/history` (`:1541`) | `_READ` | `EntityHistoryResponse{versions, userNames}` — the per-entity revision timeline. |
-| `GET .../branches/{bid}/diff` (`:1603`) | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` (id-keyed field diff). |
+| `GET .../branches/{bid}/diff` (`:1603`) | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` (**id-keyed** field diff — enough to *count* what changed, not to *show* it: no payloads, so a UI can only print raw URNs). |
+| `GET .../branches/{bid}/diff-window` | `_READ` | `?fromSeq&toSeq` → `DiffVsMainResponse` — the same window with **whole-payload before/after**, i.e. the renderable shape. Backs "what came in when I pulled": the window is `main` between the draft's old and new base, both recorded on the `pull` commit. O(changed). |
 | `GET .../branches/{bid}/diff-vs-main` (`:1618`) | `_READ` | Whole node/edge payloads with `before/after` — the shape the canvas overlay + Changes panel consume. |
 | `GET .../branches/{bid}/diff-vs-main/summary · /children` (`:1633/1652`) | `_READ` | Hierarchical containment-tree diff: `{groups[DiffTreeNode], counts, entityCounts, edgeCounts, impact}` + lazy children by `containerKey`. |
 | `GET .../commits/{cid}/diff/summary · /children` (`:1673/1691`) | `_READ` | Same, for a single commit (History drill-down). |

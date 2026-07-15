@@ -105,6 +105,8 @@ interface DeploymentDashboardPanelProps {
   onSuggest: (workspaceId: string, dataSourceId: string) => void
   onCreateDraft?: () => void
   onSuggestFromGraph?: () => void
+  /** semanticLayerAutoSuggest flag — hides every "Suggest" affordance when off (server 403s otherwise). */
+  canSuggest?: boolean
   isAssigning: boolean
   isLoading?: boolean
 }
@@ -117,6 +119,7 @@ export function DeploymentDashboardPanel({
   onSuggest,
   onCreateDraft,
   onSuggestFromGraph,
+  canSuggest = true,
   isAssigning,
   isLoading = false,
 }: DeploymentDashboardPanelProps) {
@@ -306,7 +309,7 @@ export function DeploymentDashboardPanel({
 
           {(onCreateDraft || onSuggestFromGraph) && (
             <div className="flex items-center gap-2 flex-shrink-0 pt-1">
-              {onSuggestFromGraph && (
+              {canSuggest && onSuggestFromGraph && (
                 <button onClick={onSuggestFromGraph}
                   className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border border-glass-border text-ink-secondary hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-500/[0.04] transition-all">
                   <Sparkles className="w-4 h-4" />
@@ -515,10 +518,12 @@ export function DeploymentDashboardPanel({
                   <p className="text-xs font-semibold text-ink truncate">{o.dataSourceLabel}</p>
                   <p className="text-[10px] text-ink-muted">in {o.workspaceName}</p>
                 </div>
-                <button onClick={() => onSuggest(o.workspaceId, o.dataSourceId)} disabled={isAssigning}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20">
-                  <Sparkles className="w-3 h-3" /> Suggest
-                </button>
+                {canSuggest && (
+                  <button onClick={() => onSuggest(o.workspaceId, o.dataSourceId)} disabled={isAssigning}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20">
+                    <Sparkles className="w-3 h-3" /> Suggest
+                  </button>
+                )}
               </div>
             ))}
             {orphans.length > 6 && (
@@ -821,6 +826,7 @@ export function DeploymentDashboardPanel({
                         viewCount={viewCounts.byDataSource[entry.dataSourceId] ?? 0}
                         isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
                         isAssigning={isAssigning}
+                        canSuggest={canSuggest}
                         onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
                         onNavigateToOntology={onNavigateToOntology}
                         onSuggest={onSuggest}
@@ -852,6 +858,7 @@ export function DeploymentDashboardPanel({
               onNavigateSchemaTab={(ontId, tab) => navigate(`/schema/${ontId}?tab=${tab}`)}
               keyOf={keyOf}
               isAssigning={isAssigning}
+              canSuggest={canSuggest}
             />
           ))}
         </div>
@@ -898,6 +905,7 @@ export function DeploymentDashboardPanel({
         onSuggest={runBulkSuggest}
         onUnassign={runBulkUnassign}
         isAssigning={isAssigning}
+        canSuggest={canSuggest}
       />
     </PageContainer>
   )
@@ -1091,7 +1099,7 @@ function CoverageRing({
 // Data source row — shared between workspace & ontology modes
 // ───────────────────────────────────────────────────────────────────────
 function DataSourceRow({
-  entry, isSelected, onToggleSelect, viewCount, isDrift, isAssigning,
+  entry, isSelected, onToggleSelect, viewCount, isDrift, isAssigning, canSuggest,
   onRowClick, onNavigateToOntology, onSuggest, onUnassign, onNavigateSchemaTab,
 }: {
   entry: DeploymentEntry
@@ -1100,6 +1108,7 @@ function DataSourceRow({
   viewCount: number
   isDrift: boolean
   isAssigning: boolean
+  canSuggest: boolean
   onRowClick: () => void
   onNavigateToOntology: (ontId: string) => void
   onSuggest: (wsId: string, dsId: string) => void
@@ -1248,13 +1257,15 @@ function DataSourceRow({
       </span>
 
       {!entry.ontologyId ? (
-        <button
-          onClick={e => { e.stopPropagation(); onSuggest(entry.workspaceId, entry.dataSourceId) }}
-          disabled={isAssigning}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20"
-        >
-          <Sparkles className="w-3 h-3" /> Suggest
-        </button>
+        canSuggest && (
+          <button
+            onClick={e => { e.stopPropagation(); onSuggest(entry.workspaceId, entry.dataSourceId) }}
+            disabled={isAssigning}
+            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20"
+          >
+            <Sparkles className="w-3 h-3" /> Suggest
+          </button>
+        )
       ) : (
         <button
           onClick={e => { e.stopPropagation(); onUnassign(entry.workspaceId, entry.dataSourceId) }}
@@ -1293,7 +1304,7 @@ function MenuItem({
 // ───────────────────────────────────────────────────────────────────────
 function OntologyGroupCard({
   group, index, viewCounts, driftKeys, selectedKeys, onToggleSelect,
-  onNavigateToOntology, onRowClick, onSuggest, onUnassign, onNavigateSchemaTab, keyOf, isAssigning,
+  onNavigateToOntology, onRowClick, onSuggest, onUnassign, onNavigateSchemaTab, keyOf, isAssigning, canSuggest,
 }: {
   group: {
     ontology: OntologyDefinitionResponse | null
@@ -1312,6 +1323,7 @@ function OntologyGroupCard({
   onNavigateSchemaTab: (ontId: string, tab: 'health' | 'history') => void
   keyOf: (e: DeploymentEntry) => string
   isAssigning: boolean
+  canSuggest: boolean
 }) {
   const isUnassigned = group.key === '__unassigned__'
   const ont = group.ontology
@@ -1381,6 +1393,7 @@ function OntologyGroupCard({
             viewCount={viewCounts[entry.dataSourceId] ?? 0}
             isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
             isAssigning={isAssigning}
+            canSuggest={canSuggest}
             onRowClick={() => onRowClick(entry.workspaceId, entry.dataSourceId)}
             onNavigateToOntology={onNavigateToOntology}
             onSuggest={onSuggest}
@@ -1528,13 +1541,14 @@ function CoverageMatrix({
 // Bulk selection bar
 // ───────────────────────────────────────────────────────────────────────
 function BulkSelectionBar({
-  count, onClear, onSuggest, onUnassign, isAssigning,
+  count, onClear, onSuggest, onUnassign, isAssigning, canSuggest,
 }: {
   count: number
   onClear: () => void
   onSuggest: () => void
   onUnassign: () => void
   isAssigning: boolean
+  canSuggest: boolean
 }) {
   if (count === 0) return null
   return (
@@ -1544,14 +1558,16 @@ function BulkSelectionBar({
           {count} data source{count !== 1 ? 's' : ''} selected
         </span>
         <div className="w-px h-5 bg-glass-border" />
-        <button
-          onClick={onSuggest}
-          disabled={isAssigning}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm shadow-indigo-500/20"
-        >
-          <Sparkles className="w-3.5 h-3.5" />
-          Suggest for all
-        </button>
+        {canSuggest && (
+          <button
+            onClick={onSuggest}
+            disabled={isAssigning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm shadow-indigo-500/20"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Suggest for all
+          </button>
+        )}
         <button
           onClick={onUnassign}
           disabled={isAssigning}

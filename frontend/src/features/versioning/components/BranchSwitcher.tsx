@@ -19,6 +19,7 @@ import { useBranches, useMergeRequests, useOpenDraft, useResolveGraph } from '..
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
+import { isLivePr } from '../model/prStatus'
 import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
@@ -59,9 +60,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Which drafts already have an OPEN review (PR)? Badge them in the list so it's clear at a glance.
   const mrsQ = useMergeRequests(workspaceId, graphId)
   const openPrBranchIds = useMemo(
-    () => new Set((mrsQ.data ?? [])
-      .filter((p) => p.status !== 'merged' && p.status !== 'closed')
-      .map((p) => p.sourceBranchId)),
+    () => new Set((mrsQ.data ?? []).filter(isLivePr).map((p) => p.sourceBranchId)),
     [mrsQ.data],
   )
 

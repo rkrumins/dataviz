@@ -60,6 +60,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useFeatureList } from '@/store/features'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
@@ -844,6 +845,20 @@ function ViewWizardBody({
     const { clearAssignments } = useReferenceModelStore()
     const isBlank = scopeMode === 'blank'
 
+    // Admin → Features → View modes. `null` means no restriction (see useFeatureList).
+    //
+    // The empty INTERSECTION is guarded too, and it isn't hypothetical: the registry offers four
+    // layouts and this wizard can only build three (`layered-lineage` views exist and render, but
+    // are not created here). An admin who allows only that one would otherwise be handed a layout
+    // step with nothing in it and no explanation — a dead end. Showing the layouts instead defers
+    // to the server, which refuses the create with a sentence a person can act on.
+    const allowedViewModes = useFeatureList('allowedViewModes')
+    const availableLayoutTypes = useMemo(() => {
+        if (!allowedViewModes) return LAYOUT_TYPES
+        const allowed = LAYOUT_TYPES.filter(t => allowedViewModes.includes(t.id))
+        return allowed.length > 0 ? allowed : LAYOUT_TYPES
+    }, [allowedViewModes])
+
     // Blank provisioning result — held so a failed createView retry reuses the
     // same data source instead of provisioning a duplicate.
     const provisionRef = useRef<BlankGraphResult | null>(null)
@@ -1251,6 +1266,19 @@ function ViewWizardBody({
         setFormData(prev => ({ ...prev, ...updates }))
     }, [markDirty])
 
+    // `layoutType` defaults to 'reference'. If an admin has withdrawn that layout its card is no
+    // longer rendered — but the default is still sitting in the form, so a user who presses Next
+    // without clicking anything submits a layout the server will refuse. They never chose it and
+    // cannot see it, so the 403 would be unattributable.
+    //
+    // Only when CREATING. An existing view keeps the layout it was built with: withdrawing a
+    // layout stops new work in it, and must not silently rewrite the views already in it.
+    useEffect(() => {
+        if (mode === 'edit') return
+        if (availableLayoutTypes.some(t => t.id === formData.layoutType)) return
+        updateFormData({ layoutType: availableLayoutTypes[0].id })
+    }, [mode, availableLayoutTypes, formData.layoutType, updateFormData])
+
     /** Restore an autosaved draft, landing back on the step it was left on. */
     const handleResumeDraft = useCallback(() => {
         if (!pendingDraft) return
@@ -1489,7 +1517,7 @@ function ViewWizardBody({
                 <LayoutStep
                     formData={formData}
                     updateFormData={updateFormData}
-                    layoutTypes={LAYOUT_TYPES}
+                    layoutTypes={availableLayoutTypes}
                     dataSourceId={formData.dataSourceId}
                     blank={isBlank}
                 />

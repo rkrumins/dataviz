@@ -55,6 +55,7 @@ async def list_stats_polling(
             WorkspaceDataSourceORM.id == DataSourcePollingConfigORM.data_source_id,
             isouter=True,
         )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .order_by(WorkspaceDataSourceORM.workspace_id, WorkspaceDataSourceORM.id)
     )
     result = await session.execute(stmt)

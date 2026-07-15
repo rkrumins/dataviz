@@ -91,17 +91,34 @@ def _http() -> httpx.AsyncClient:
 
 
 def _cache_redis():
+    """Probe client for the CACHE endpoint — resolved centrally so it carries the
+    same auth + TLS as the real cache client. A probe that cannot authenticate
+    reports a healthy cache as DOWN."""
     global _cache_redis_client
     if _cache_redis_client is None:
-        import redis.asyncio as aioredis
+        import dataclasses
 
-        url = os.getenv("CACHE_REDIS_URL")
-        if not url:
-            return None
-        _cache_redis_client = aioredis.from_url(
-            url, decode_responses=True,
-            socket_connect_timeout=1, socket_timeout=1,
+        from backend.common.adapters.redis_endpoint import (
+            RedisConfigurationError, RedisRole, build_redis_client,
+            resolve_redis_config,
         )
+        try:
+            cfg = resolve_redis_config(RedisRole.CACHE)
+        except RedisConfigurationError:
+            return None
+        if not cfg.is_configured:
+            return None                      # cache not configured -> nothing to probe
+                                             # (is_configured handles sentinel mode)
+        cfg = dataclasses.replace(
+            cfg, socket_timeout=1.0, socket_connect_timeout=1.0, max_connections=2,
+            # Pin OFF: build_redis_client applies the CACHE role's default of 30,
+            # but the original probe (bare aioredis.from_url(...)) never set this,
+            # so redis-py defaulted it to 0 (disabled). A probe opens a
+            # short-lived, tightly-budgeted connection — it does not want
+            # redis-py's periodic idle-socket liveness PING.
+            health_check_interval=0,
+        )
+        _cache_redis_client = build_redis_client(cfg)
     return _cache_redis_client
 
 
@@ -415,14 +432,35 @@ async def probe_cache_redis() -> dict:
     return result
 
 
-async def _falkor_node_probe(host: str, port: int, label: str) -> dict:
-    """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
-    short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+def _build_falkor_probe_client(
+    host: str, port: int, *, username=None, password=None, tls=None,
+):
+    """Short-lived probe client for ONE FalkorDB node, carrying the graph
+    connection's auth + TLS. It used to be a bare Redis(host, port), which cannot
+    talk to an authenticated instance at all."""
     import redis.asyncio as aioredis
 
-    client = aioredis.Redis(
+    from backend.common.adapters.redis_tls import tls_client_kwargs
+
+    kw = dict(
         host=host, port=port, decode_responses=True,
         socket_connect_timeout=1, socket_timeout=1.5,
+        **tls_client_kwargs(tls),
+    )
+    if username:
+        kw["username"] = username
+    if password:
+        kw["password"] = password
+    return aioredis.Redis(**kw)
+
+
+async def _falkor_node_probe(
+    host: str, port: int, label: str, *, username=None, password=None, tls=None,
+) -> dict:
+    """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
+    short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+    client = _build_falkor_probe_client(
+        host, port, username=username, password=password, tls=tls,
     )
     try:
         result = await _redis_probe("falkordbNode", label, client, _BUDGET_FALKOR)
@@ -462,7 +500,14 @@ async def probe_falkordb() -> dict:
         cluster_primary_nodes, env_conn_config, resolve_sentinel_master,
     )
 
-    cfg = env_conn_config()
+    try:
+        cfg = env_conn_config()
+    except Exception as exc:
+        # env_conn_config() raises (never silently) when FALKORDB_PASSWORD_FILE
+        # is set but missing/empty — a probe must degrade to "down", not blow up
+        # the dashboard. _err() truncates to the exception text only (var name +
+        # path — never a secret value).
+        return _svc("falkordb", "FalkorDB", "down", error=_err(exc))
 
     if cfg.mode == "sentinel":
         # Probe the MASTER Sentinel currently names, not a Sentinel daemon: a
@@ -475,13 +520,19 @@ async def probe_falkordb() -> dict:
         except Exception as exc:
             return _svc("falkordb", "FalkorDB · Sentinel", "down",
                         error=_err(exc), detail={"mode": "sentinel"})
-        result = await _falkor_node_probe(host, port, "FalkorDB · Sentinel")
+        result = await _falkor_node_probe(
+            host, port, "FalkorDB · Sentinel",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        )
         result["detail"]["mode"] = "sentinel"
         result["detail"]["master"] = f"{host}:{port}"
         return result
 
     if cfg.mode != "cluster":
-        return await _falkor_node_probe(cfg.host, cfg.port, "FalkorDB")
+        return await _falkor_node_probe(
+            cfg.host, cfg.port, "FalkorDB",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        )
 
     try:
         async with asyncio.timeout(_BUDGET_FALKOR):
@@ -492,7 +543,10 @@ async def probe_falkordb() -> dict:
                     detail={"mode": "cluster"})
 
     results = await asyncio.gather(
-        *(_falkor_node_probe(h, p, f"shard {h}:{p}") for h, p in nodes),
+        *(_falkor_node_probe(
+            h, p, f"shard {h}:{p}",
+            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        ) for h, p in nodes),
         return_exceptions=True,
     )
     shards = [r for r in results if isinstance(r, dict)]
@@ -700,6 +754,7 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
                     .outerjoin(ProviderORM,
                                ProviderORM.id == WorkspaceDataSourceORM.provider_id)
                     .where(WorkspaceDataSourceORM.id.in_(ids))
+                    .where(WorkspaceDataSourceORM.deleted_at.is_(None))
                 )).all()
         for r in rows:
             out[r.id] = {
@@ -715,12 +770,13 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
 
 
 async def _present_data_source_ids() -> list[str]:
-    """The ids of data sources that currently EXIST in the management DB.
+    """The ids of data sources that are LIVE in the management DB.
 
     Versioned-graph metrics are scoped to these so the numbers reflect live
     entities — the graphver store has no GC, so graphs for deleted sources
     (and dev/test seed graphs) accumulate and would otherwise dominate every
-    count and the projection list.
+    count and the projection list. A soft-deleted source is exactly such an
+    orphaned graph, so tombstones are excluded.
     """
     from sqlalchemy import select
 
@@ -730,7 +786,8 @@ async def _present_data_source_ids() -> list[str]:
     async with asyncio.timeout(_BUDGET_DB):
         async with get_session_factory(PoolRole.READONLY)() as s:
             return list((await s.execute(
-                select(WorkspaceDataSourceORM.id))).scalars().all())
+                select(WorkspaceDataSourceORM.id)
+                .where(WorkspaceDataSourceORM.deleted_at.is_(None)))).scalars().all())
 
 
 # ── Data-plane sections ──────────────────────────────────────────────
@@ -1145,6 +1202,7 @@ async def probe_stats_polling() -> Optional[dict]:
             WorkspaceDataSourceORM.id == DataSourcePollingConfigORM.data_source_id,
             isouter=True,
         )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     try:
         async with asyncio.timeout(_BUDGET_DB):
@@ -1239,7 +1297,8 @@ async def probe_overview(app_state) -> Optional[dict]:
                 out["workspaces"] = (await s.execute(
                     select(func.count()).select_from(WorkspaceORM))).scalar()
                 present_ids = list((await s.execute(
-                    select(WorkspaceDataSourceORM.id))).scalars().all())
+                    select(WorkspaceDataSourceORM.id)
+                    .where(WorkspaceDataSourceORM.deleted_at.is_(None)))).scalars().all())
                 out["dataSources"] = len(present_ids)
                 total_p, active_p = (await s.execute(select(
                     func.count(),

@@ -54,7 +54,10 @@ export function BlankCanvasEmptyState({
   // nothing at all when clicked, and said nothing about why. Permission and availability are
   // different reasons to be read-only, and the user is owed the one that is actually true.
   const versioningEnabled = useFeature('versioningEnabled')
-  const canBuild = canManage && versioningEnabled
+  // The provenance switch. A hand-drawn model looks exactly like a discovered one on the canvas,
+  // and once it's in the estate nobody downstream can tell which is which.
+  const blankModelsEnabled = useFeature('blankModelsEnabled')
+  const canBuild = canManage && versioningEnabled && blankModelsEnabled
 
   // Root types first (the natural tops of the containment tree); pad with the
   // lowest-level types when the ontology declares no explicit roots.

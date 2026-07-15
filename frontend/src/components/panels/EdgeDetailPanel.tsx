@@ -51,6 +51,7 @@ import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { patchEdge, deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
+import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 
@@ -689,6 +690,14 @@ function EdgeCard({
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const [isEditing, setIsEditing] = useState(false)
 
+    // PATCH/DELETE /edges/{id} both 403 server-side when either flag is off — don't
+    // offer edit/delete controls that would fail (same dual-flag gate as EntityDrawer).
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const versioningEnabled = useFeature('versioningEnabled')
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const editModeEnabled = useFeature('editModeEnabled')
+    const canEditEdge = versioningEnabled && editModeEnabled
+
     // Server-rejected immutable keys — we hide them in the editor and never
     // include them in the PATCH payload. The backend ignores edge type changes,
     // and `isAggregated` / `sourceEdgeCount` / `sourceEdges` are client-only.
@@ -816,34 +825,38 @@ function EdgeCard({
                 </button>
 
                 {/* Edit button — expands the card and switches to PropertyEditor */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation()
-                        if (!isExpanded) onToggleExpand()
-                        setIsEditing((v) => !v)
-                    }}
-                    className={cn(
-                        "w-6 h-6 flex items-center justify-center rounded transition-colors",
-                        isEditing
-                            ? "bg-accent-lineage/15 text-accent-lineage"
-                            : "text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
-                    )}
-                    title={isEditing ? "Done editing" : "Edit properties"}
-                >
-                    <Pencil className="w-3 h-3" />
-                </button>
+                {canEditEdge && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            if (!isExpanded) onToggleExpand()
+                            setIsEditing((v) => !v)
+                        }}
+                        className={cn(
+                            "w-6 h-6 flex items-center justify-center rounded transition-colors",
+                            isEditing
+                                ? "bg-accent-lineage/15 text-accent-lineage"
+                                : "text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
+                        )}
+                        title={isEditing ? "Done editing" : "Edit properties"}
+                    >
+                        <Pencil className="w-3 h-3" />
+                    </button>
+                )}
 
                 {/* Delete button — stages delete_edge; restored on discard */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation()
-                        stageEdgeDelete()
-                    }}
-                    className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                    title="Delete edge"
-                >
-                    <Trash2 className="w-3 h-3" />
-                </button>
+                {canEditEdge && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            stageEdgeDelete()
+                        }}
+                        className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                        title="Delete edge"
+                    >
+                        <Trash2 className="w-3 h-3" />
+                    </button>
+                )}
 
                 {onDeselect && (
                     <button

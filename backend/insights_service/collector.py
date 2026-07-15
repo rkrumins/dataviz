@@ -89,6 +89,12 @@ async def _open_context(
         # right granularity. ContextEngine.for_workspace already loaded
         # the row, so this hits the session's identity map.
         ds_row = await session.get(WorkspaceDataSourceORM, envelope.data_source_id)
+        # A job enqueued before the source was deleted is still on the stream;
+        # without this it would poll the provider for a deleted data source.
+        if ds_row is not None and ds_row.deleted_at is not None:
+            raise RuntimeError(
+                f"Data source {envelope.data_source_id} has been deleted — poll rejected."
+            )
         provider_id = (
             ds_row.provider_id if ds_row is not None else envelope.data_source_id
         )

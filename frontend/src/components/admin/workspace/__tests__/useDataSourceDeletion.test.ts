@@ -1,10 +1,12 @@
 /**
- * The delete dialog's job is to tell the truth about what is about to be destroyed.
+ * The delete dialog's job is to tell the truth about what is about to happen.
  *
- * These tests pin the three ways it previously lied:
+ * These pin the four ways it previously lied or over-charged:
  *   1. it never mentioned the version history at all;
  *   2. a FAILED impact probe rendered as the green "safe to delete" panel;
- *   3. it reassured people about graph data we were in fact about to drop.
+ *   3. it reassured people about graph data we were in fact about to drop;
+ *   4. it demanded a type-to-confirm for an action that is now reversible — friction that
+ *      teaches people to stop reading the dialog, spent on the one that costs nothing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
@@ -14,12 +16,20 @@ import {
 import type { WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 
 vi.mock('@/services/workspaceService', () => ({
-    workspaceService: { getDataSourceImpact: vi.fn(), removeDataSource: vi.fn() },
+    workspaceService: {
+        getDataSourceImpact: vi.fn(),
+        removeDataSource: vi.fn(),
+        restoreDataSource: vi.fn(),
+    },
 }))
+const toast = vi.fn()
+vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: toast }) }))
+
 import { workspaceService } from '@/services/workspaceService'
 
 const VERSIONED: WorkspaceDataSourceImpactResponse = {
     views: [{ id: 'v1', name: 'Finance lineage', type: 'view' }],
+    restoreWindowDays: 30,
     versioning: {
         versioned: true,
         commits: 71,
@@ -37,8 +47,8 @@ const VERSIONED: WorkspaceDataSourceImpactResponse = {
 
 describe('the versioned blast radius', () => {
     it('names the irreplaceable things, and puts the drafts first', () => {
-        const s = impactSections(VERSIONED)
-        // Drafts lead: they are the only line belonging to someone not in the room.
+        const s = impactSections(VERSIONED, true)
+        // Drafts lead: the only line belonging to someone who is not in the room.
         expect(s[0].label).toBe('Unpublished drafts')
         expect(s[0].count).toBe(2)
         expect(s.find(x => x.label === 'Hand-curated entities')?.count).toBe(181)
@@ -48,17 +58,42 @@ describe('the versioned blast radius', () => {
     })
 
     it('identifies a draft by its OWNER — "Untitled draft" identifies nobody', () => {
-        const drafts = impactSections(VERSIONED)[0]
-        expect(drafts.items?.map(i => i.name)).toEqual([
+        expect(impactSections(VERSIONED, true)[0].items?.map(i => i.name)).toEqual([
             'Untitled draft — Priya Raman',
             'Q3 rework — Sam Okoro',
         ])
     })
 
+    it('a REVERSIBLE removal does not claim things are erased', () => {
+        const soft = impactSections(VERSIONED, false)
+        const hard = impactSections(VERSIONED, true)
+        // Same counts — the disruption is identical and the user still sees all of it...
+        expect(soft.map(s => s.count)).toEqual(hard.map(s => s.count))
+        // ...but nothing is described as destroyed, because nothing is.
+        expect(soft.find(s => s.label === 'Revisions')?.consequence).not.toContain('erased')
+        expect(hard.find(s => s.label === 'Revisions')?.consequence).toContain('erased')
+    })
+
+    it('an unversioned source shows only the views', () => {
+        const s = impactSections(
+            { views: [{ id: 'v1', name: 'A', type: 'view' }], versioning: null, restoreWindowDays: 30 })
+        expect(s).toHaveLength(1)
+        expect(s[0].label).toBe('View')          // one view; the label agrees with the count
+    })
+})
+
+describe('the caveat', () => {
+    it('leads with the undo window when the delete is reversible', () => {
+        const c = deleteCaveat(VERSIONED, false)
+        expect(c).toContain('Nothing is deleted today')
+        expect(c).toContain('30 days')
+    })
+
     it('says their graph data is safe when the graph is not ours', () => {
-        const caveat = deleteCaveat(VERSIONED)
-        expect(caveat).toContain('nexus_lineage')
-        expect(caveat).toContain('safe')
+        const c = deleteCaveat(VERSIONED, true)
+        expect(c).toContain('nexus_lineage')
+        expect(c).toContain('safe')
+        expect(c).toContain('cannot be undone')
     })
 
     it('does NOT reassure when the graph IS ours — we are about to drop it', () => {
@@ -67,15 +102,9 @@ describe('the versioned blast radius', () => {
             versioning: { ...VERSIONED.versioning!, falkorGraphOwned: true,
                           falkorGraphName: 'gv_abc123' },
         }
-        const caveat = deleteCaveat(owned)
-        expect(caveat).toContain('also deletes the graph')
-        expect(caveat).not.toContain('safe')
-    })
-
-    it('an unversioned source shows only the views', () => {
-        const s = impactSections({ views: [{ id: 'v1', name: 'A', type: 'view' }], versioning: null })
-        expect(s).toHaveLength(1)
-        expect(s[0].label).toBe('View')          // one view; the label agrees with the count
+        const c = deleteCaveat(owned, true)
+        expect(c).toContain('also deletes the graph')
+        expect(c).not.toContain('safe')
     })
 })
 
@@ -94,24 +123,60 @@ describe('a failed impact probe', () => {
         await waitFor(() => expect(result.current.target?.loading).toBe(false))
         expect(result.current.target?.unknown).toBe(true)
         expect(result.current.target?.impact).toBeNull()
-        // and therefore: sections are empty, but `unknown` — not the empty sections —
-        // is what the dialog keys the green panel off.
-        expect(impactSections(result.current.target?.impact ?? null)).toEqual([])
     })
 
     it('a SUCCESSFUL empty probe is genuinely safe, and says so', async () => {
         vi.mocked(workspaceService.getDataSourceImpact)
-            .mockResolvedValue({ views: [], versioning: null })
+            .mockResolvedValue({ views: [], versioning: null, restoreWindowDays: 30 })
 
         const { result } = renderHook(() => useDataSourceDeletion('ws1', () => {}))
         await act(async () => { await result.current.open('ds1', 'Scratch') })
 
         await waitFor(() => expect(result.current.target?.loading).toBe(false))
         expect(result.current.target?.unknown).toBe(false)   // <- the distinction that matters
-        // A section may exist with count 0; the dialog keys the green panel off the SUM, so
-        // what must be true is that nothing is destroyed — not that the array is empty.
         const total = impactSections(result.current.target?.impact ?? null)
             .reduce((n, s) => n + s.count, 0)
         expect(total).toBe(0)
+    })
+})
+
+describe('remove vs delete permanently', () => {
+    beforeEach(() => vi.clearAllMocks())
+
+    it('remove is reversible, and hands the user an Undo', async () => {
+        vi.mocked(workspaceService.getDataSourceImpact).mockResolvedValue(VERSIONED)
+        const onChanged = vi.fn()
+        const { result } = renderHook(() => useDataSourceDeletion('ws1', onChanged))
+
+        await act(async () => { await result.current.open('ds1', 'Finance') })
+        await waitFor(() => expect(result.current.target?.permanent).toBe(false))
+        await act(async () => { await result.current.confirm() })
+
+        expect(workspaceService.removeDataSource).toHaveBeenCalledWith('ws1', 'ds1', false)
+        expect(onChanged).toHaveBeenCalled()
+
+        // The undo is IN the toast. Most undos happen seconds after the mistake, long before
+        // anyone thinks to go hunting for a trash can — so the trash comes to them.
+        const [, msg, action] = toast.mock.calls.at(-1)!
+        expect(msg).toBe('Finance removed')
+        expect(action.label).toBe('Undo')
+
+        await act(async () => { action.onClick() })
+        await waitFor(() =>
+            expect(workspaceService.restoreDataSource).toHaveBeenCalledWith('ws1', 'ds1'))
+    })
+
+    it('delete permanently is irreversible, and offers no Undo', async () => {
+        vi.mocked(workspaceService.getDataSourceImpact).mockResolvedValue(VERSIONED)
+        const { result } = renderHook(() => useDataSourceDeletion('ws1', () => {}))
+
+        await act(async () => { await result.current.openPermanent('ds1', 'Finance') })
+        await waitFor(() => expect(result.current.target?.permanent).toBe(true))
+        await act(async () => { await result.current.confirm() })
+
+        expect(workspaceService.removeDataSource).toHaveBeenCalledWith('ws1', 'ds1', true)
+        const [, msg, action] = toast.mock.calls.at(-1)!
+        expect(msg).toBe('Finance deleted permanently')
+        expect(action).toBeUndefined()          // there is nothing to undo, so do not pretend
     })
 })

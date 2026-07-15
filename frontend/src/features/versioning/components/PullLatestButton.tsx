@@ -13,9 +13,10 @@ import { useMemo, useState } from 'react'
 import { ArrowDownToLine, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
-import type { ResolutionMap } from '@/services/versioningApiService'
+import type { IncomingChanges, ResolutionMap } from '@/services/versioningApiService'
 import { ConflictResolver } from '@/features/reviews/components/ConflictResolver'
 import { useDiffVsMain, usePullLatestDraft } from '../hooks/useVersioning'
+import { IncomingChangesSheet } from './IncomingChangesSheet'
 
 const VARIANTS = {
   row: 'shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage hover:bg-canvas-base disabled:opacity-50',
@@ -41,6 +42,8 @@ export function PullLatestButton({
   const [started, setStarted] = useState(false)
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** What the pull brought in — shown for review instead of a content-free toast. */
+  const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
 
   // Lazy: the diff only loads once a Pull is in flight. Seeds are read at resolve-submit time, by
   // when the diff has arrived. entityId → merged payload (the diff `after`), as in PrDetailDrawer.
@@ -58,12 +61,18 @@ export function PullLatestButton({
       { branchId, resolutions },
       {
         onSuccess: (res) => {
-          if (res.clean) {
-            setConflicts(null); setError(null); setStarted(false)
-            showToast('success', res.alreadyUpToDate ? 'Already up to date with main.' : 'Pulled the latest changes from main.')
-          } else {
+          if (!res.clean) {
             setConflicts(res.conflicts)
             setError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
+            return
+          }
+          setConflicts(null); setError(null); setStarted(false)
+          // Show WHAT came in, rather than asserting that something did. A pull takes other people's
+          // work into your branch; ending that in a toast told the user nothing about it.
+          if (res.incoming && res.incoming.commitCount > 0) {
+            setIncoming(res.incoming)
+          } else {
+            showToast('info', 'Already up to date — nothing new to bring in.')
           }
         },
         onError: (e) => { setError(null); showToast('error', (e as Error).message) },
@@ -93,6 +102,15 @@ export function PullLatestButton({
           error={error}
           onCancel={() => { setConflicts(null); setError(null); setStarted(false) }}
           onResolve={(resolutions) => run(resolutions)}
+        />
+      )}
+
+      {incoming && (
+        <IncomingChangesSheet
+          wsId={wsId}
+          graphId={graphId}
+          incoming={incoming}
+          onClose={() => setIncoming(null)}
         />
       )}
     </>

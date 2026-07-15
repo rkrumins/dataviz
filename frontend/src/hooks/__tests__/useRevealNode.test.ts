@@ -23,7 +23,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // workspaces store → workspaceSwitchCleanup → main, so importing
 // useRevealNode (which uses toCanvasNode) drags in that chain. Stub
 // `@/main` to keep the import tree dead-end for the test.
-vi.mock('@/main', () => ({
+vi.mock('@/lib/queryClient', () => ({
   getQueryClient: () => ({}),
 }))
 

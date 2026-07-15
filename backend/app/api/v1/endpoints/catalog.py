@@ -2,10 +2,11 @@
 Enterprise Catalog endpoints — CRUD for data products (Catalog Items).
 Catalog Items abstract a physical provider's namespace (e.g. graph) into a manageable entity.
 """
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import and_, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires, get_permission_claims
@@ -20,6 +21,8 @@ from backend.common.models.management import (
     CatalogItemResponse,
     ProviderImpactResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -128,9 +131,16 @@ async def list_catalog_bindings(
             WorkspaceORM.name.label("workspace_name"),
             view_count.label("view_count"),
         )
+        # The tombstone filter belongs in the ON clause, not a WHERE: as a WHERE it
+        # would drop the catalog item from the list entirely instead of showing it
+        # as unbound, and an item whose only data source was deleted IS bindable
+        # again (see the uq_ds_catalog_item_live partial index).
         .outerjoin(
             WorkspaceDataSourceORM,
-            CatalogItemORM.id == WorkspaceDataSourceORM.catalog_item_id,
+            and_(
+                CatalogItemORM.id == WorkspaceDataSourceORM.catalog_item_id,
+                WorkspaceDataSourceORM.deleted_at.is_(None),
+            ),
         )
         .outerjoin(
             WorkspaceORM,
@@ -203,14 +213,18 @@ async def delete_catalog_item(
     _auth=Depends(_REQUIRES_CATALOG_MANAGE),
 ):
     """Delete a catalog item. Rejects if workspaces are still subscribed unless force=true."""
+    from datetime import datetime, timezone
+
     from backend.app.db.models import WorkspaceDataSourceORM
-    from sqlalchemy import select, delete as sa_delete
+    from sqlalchemy import select, update as sa_update
 
     if not force:
-        # Check for active subscriptions
+        # Check for active subscriptions. A tombstoned data source is not a
+        # subscription — counting it would make the item permanently undeletable.
         result = await session.execute(
             select(WorkspaceDataSourceORM.id)
             .where(WorkspaceDataSourceORM.catalog_item_id == item_id)
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
             .limit(1)
         )
         if result.scalar_one_or_none():
@@ -219,11 +233,38 @@ async def delete_catalog_item(
                 detail="Cannot delete catalog item: one or more workspaces still subscribe to it. Use force=true to override.",
             )
     else:
-        # Force mode: de-allocate from all workspaces first
+        # Force mode: de-allocate from all workspaces first.
+        # Soft-delete, never a hard DELETE: every child of a data source is wired
+        # ON DELETE SET NULL, so a raw delete ERASES the view/context-model links
+        # and makes the source unrestorable. Live rows only, so re-forcing a
+        # delete cannot overwrite an existing tombstone's timestamp/actor.
+        doomed = (await session.execute(
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.workspace_id)
+            .where(WorkspaceDataSourceORM.catalog_item_id == item_id,
+                   WorkspaceDataSourceORM.deleted_at.is_(None))
+        )).all()
+
         await session.execute(
-            sa_delete(WorkspaceDataSourceORM)
+            sa_update(WorkspaceDataSourceORM)
             .where(WorkspaceDataSourceORM.catalog_item_id == item_id)
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+            .values(
+                deleted_at=datetime.now(timezone.utc).isoformat(),
+                deleted_by=_auth.id,
+            )
         )
+
+        # Tombstone their graphs too, exactly as the data-source delete route does. Without this
+        # the data source is in the trash while its versioned graph is still live and resolvable
+        # — the one inconsistent state in the whole lifecycle. (The reaper would eventually catch
+        # it, but "eventually" is not a design.)
+        from backend.app.services.versioning import purge_worker
+        for ds_id, ws_id in doomed:
+            try:
+                await purge_worker.tombstone_graphs_for_data_source(
+                    data_source_id=ds_id, workspace_id=ws_id, actor=_auth.id)
+            except Exception:                                # pragma: no cover - best effort
+                logger.exception("could not tombstone graphs for %s", ds_id)
 
     deleted = await catalog_repo.delete_catalog_item(session, item_id)
     if not deleted:

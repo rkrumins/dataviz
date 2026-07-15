@@ -36,7 +36,7 @@
 import { useAuthStore, claimsSnapshot } from './auth'
 import type { PermissionClaims } from '@/services/authService'
 import { authService } from '@/services/authService'
-import { getQueryClient } from '@/main'
+import { getQueryClient } from '@/lib/queryClient'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { notifyPermissionsChanged } from './permissionChangeBus'
 

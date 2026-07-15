@@ -115,9 +115,9 @@ async def _collect_in_session(
         return
 
     ds_orm = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-    if ds_orm is None:
+    if ds_orm is None or ds_orm.deleted_at is not None:
         job.status = "failed"
-        job.error_message = "workspace_data_source row missing — purge aborted"
+        job.error_message = "workspace_data_source row missing or deleted — purge aborted"
         job.completed_at = _now()
         job.updated_at = _now()
         return

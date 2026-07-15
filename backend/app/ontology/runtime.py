@@ -69,7 +69,7 @@ async def build_resolution_report(
     """Run the ontology-resolution gate for ``ds_id``.
 
     Raises:
-        DataSourceMissing: no workspace_data_sources row for ds_id.
+        DataSourceMissing: no live workspace_data_sources row for ds_id.
         OntologyNotAssigned: DS row exists but ontology_id is null.
         OntologyMissing: ontology_id refers to a row that no longer exists.
 
@@ -79,7 +79,9 @@ async def build_resolution_report(
     from backend.app.db.models import OntologyORM, WorkspaceDataSourceORM
 
     ds = await session.get(WorkspaceDataSourceORM, ds_id)
-    if ds is None:
+    # The row survives a soft delete, so without the tombstone check ontology
+    # resolution would keep succeeding for a deleted data source.
+    if ds is None or ds.deleted_at is not None:
         raise DataSourceMissing(ds_id)
     if not ds.ontology_id:
         raise OntologyNotAssigned(ds_id)

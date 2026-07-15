@@ -228,6 +228,7 @@ class ProviderRegistry:
         return self._create_provider_instance(
             row.provider_type, row.host, row.port, graph_name,
             row.tls_enabled, credentials, extra_config=merged_extra,
+            provider_id=provider_id,
         )
 
     async def _instantiate_from_connection(
@@ -285,6 +286,7 @@ class ProviderRegistry:
         tls_enabled: bool,
         credentials: dict,
         extra_config: Optional[dict] = None,
+        provider_id: Optional[str] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
@@ -313,9 +315,16 @@ class ProviderRegistry:
                 username=creds.get("username"),
                 password=creds.get("password"),
                 connection_config=_falkor_conn,
+                # Deprecated alias — folded into credentials["cache_redis_url"].
                 cache_redis_url=creds.get("cache_redis_url"),
                 auth_enabled=_auth_enabled,
                 tls_enabled=tls_enabled,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials) — resolved centrally by
+                # build_cache_client, never inherited from the graph connection.
+                provider_id=provider_id,
+                extra_config=extra_config,
+                credentials=creds,
             )
 
         elif ptype == "neo4j":
@@ -326,6 +335,12 @@ class ProviderRegistry:
                 password=credentials.get("password", ""),
                 database=graph_name or "neo4j",
                 extra_config=extra_config,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials, including the legacy
+                # extra_config.redisUrl alias) — resolved centrally by
+                # build_neo4j_cache_client, never inherited from the Bolt credentials.
+                provider_id=provider_id,
+                credentials=credentials or {},
             )
 
         elif ptype == "datahub":

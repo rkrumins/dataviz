@@ -8,10 +8,9 @@ import { Loader2, GitPullRequestArrow, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { PullRequest } from '@/services/versioningApiService'
 import { useViewPullRequests, useDataSourcePullRequests } from '../../versioning/hooks/useVersioning'
+import { isLivePr } from '../../versioning/model/prStatus'
 import { PrListRow } from './PrListRow'
 import { PrDetailDrawer } from './PrDetailDrawer'
-
-const TERMINAL = new Set(['merged', 'closed'])
 
 export function ViewPrList({
   wsId,
@@ -32,7 +31,7 @@ export function ViewPrList({
 
   const rows = useMemo(() => {
     const list: PullRequest[] = q.data ?? []
-    return activeOnly ? list.filter((p) => !TERMINAL.has(p.status)) : list
+    return activeOnly ? list.filter(isLivePr) : list
   }, [q.data, activeOnly])
   const hiddenByFilter = (q.data?.length ?? 0) - rows.length
 

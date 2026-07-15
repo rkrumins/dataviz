@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network, History, Palette,
+    UserCog, Users2, KeyRound, Network, History, Palette, Database,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
@@ -35,6 +35,7 @@ const adminGroups = [
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
             { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
+            { path: 'redis', label: 'Redis', icon: Database, description: 'Cache & streams endpoints, auth & TLS' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
@@ -73,6 +74,7 @@ export function AdminPage() {
     // spec from the store.
     const overviewVisible       = useNavPermission(useAdminSectionSpec('overview'))
     const infrastructureVisible = useNavPermission(useAdminSectionSpec('infrastructure'))
+    const redisVisible = useNavPermission(useAdminSectionSpec('redis'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
@@ -85,6 +87,7 @@ export function AdminPage() {
     const itemVisibility: Record<string, boolean> = {
         overview:       overviewVisible,
         infrastructure: infrastructureVisible,
+        redis:         redisVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
         announcements: announcementsVisible,

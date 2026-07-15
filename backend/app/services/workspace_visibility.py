@@ -96,9 +96,13 @@ async def compute_visible_ontology_ids(
     user_ws_ids = _user_workspace_ids(claims)
     if not user_ws_ids:
         return set()
+    # Tombstoned data sources must not keep granting visibility: without the
+    # deleted_at filter a deleted source still projects its ontology/provider/
+    # catalog item into the caller's readable set (RBAC leak).
     stmt = (
         select(WorkspaceDataSourceORM.ontology_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .where(WorkspaceDataSourceORM.ontology_id.is_not(None))
         .distinct()
     )
@@ -124,6 +128,7 @@ async def compute_visible_provider_ids(
     via_data_sources_stmt = (
         select(WorkspaceDataSourceORM.provider_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .distinct()
     )
     visible: set[str] = {
@@ -183,6 +188,7 @@ async def compute_visible_catalog_ids(
     via_data_sources_stmt = (
         select(WorkspaceDataSourceORM.catalog_item_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .where(WorkspaceDataSourceORM.catalog_item_id.is_not(None))
         .distinct()
     )

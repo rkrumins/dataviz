@@ -55,14 +55,50 @@ export interface FeatureDefinition {
   category: string
   type: 'boolean' | 'string[]'
   default: boolean | string[]
-  userOverridable?: boolean
   options?: FeatureOption[]
   helpUrl?: string
   adminHint?: string
   sortOrder?: number
   deprecated?: boolean
-  /** When false, show "preview / not yet wired" badge for this feature. Managed in DB per feature. */
+
+  // ── The prose the DB owns ────────────────────────────────────────────────
+  /**
+   * "What happens if I turn this off?" — the one question that decides whether an admin flips a
+   * switch that affects everybody, and the one this page never answered.
+   */
+  impactWhenOff?: string
+
+  // ── The facts the CODE owns (backend/app/config/feature_wiring.py) ───────
+  //
+  // These are served, not stored. `implemented` used to be a column an admin could tick — a claim
+  // about the source tree owned by someone who cannot change the source tree — and it was wrong
+  // about four flags on the day it was written. It is now derived from the gates that actually
+  // exist, and a CI guard fails the build if any of it drifts from the code.
+
+  /**
+   * Where this flag is in its life.
+   *
+   *   experimental — the feature is still being BUILT. Ships off; turning it on is opting into
+   *                  something unfinished. The page has to say so, or an admin flips it expecting
+   *                  a feature and gets a building site.
+   *   active       — shipped, wired end-to-end, enforced by the server. Ships ON.
+   *   deprecated   — on its way out. Still honoured, but don't build anything new on it.
+   */
+  stage?: 'experimental' | 'active' | 'deprecated'
+  /** Does this flag change anything at all? A false here means the toggle is decoration. */
   implemented?: boolean
+  /** Does the SERVER refuse when this is off? A flag that only hides a button is not enforcement. */
+  enforcedServerSide?: boolean
+  /** How it behaves when it can't be read: capability → fail open, security → fail closed. */
+  posture?: 'capability' | 'security'
+  /** Concretely, which endpoints refuse. */
+  serverGates?: string[]
+  /** Concretely, which parts of the UI disappear. */
+  uiSurfaces?: string[]
+  /** What keeps working when it's off — turning a feature off is never destructive. */
+  stillAllowed?: string[]
+  /** Flags that must be on for this one to mean anything. */
+  dependsOn?: string[]
 }
 
 export interface FeatureCategory {
@@ -85,11 +121,47 @@ export interface ExperimentalNotice {
   updatedAt?: string
 }
 
+/** Who changed a flag, when, and what it moved from. */
+export interface FeatureChange {
+  id?: string
+  key?: string
+  from: unknown
+  to: unknown
+  actorId?: string | null
+  actorName: string
+  at: string
+}
+
+/** One counted consequence of turning a flag off — measured against THIS estate. */
+export interface ImpactFact {
+  count: number
+  /** Plural noun for what is counted: "views", "semantic layers". */
+  label: string
+  /** What becomes of them. */
+  consequence: string
+  /** `warning` = they lose something. `neutral` = affected, but nothing is lost. */
+  tone: 'warning' | 'neutral'
+  detail: string[]
+}
+
+/**
+ * `known: false` means WE DID NOT MEASURE — the probe failed, or this flag has no honest count
+ * behind it. It does NOT mean "nothing would be affected", and the UI must never render it as
+ * reassurance: "we didn't look" and "we looked and found nothing" are different answers, and only
+ * one of them is comforting.
+ */
+export interface FeatureImpact {
+  known: boolean
+  facts: ImpactFact[]
+}
+
 export interface FeaturesResponse {
   schema?: FeatureDefinition[]
   categories?: FeatureCategory[]
   values: Record<string, unknown>
   updatedAt?: string
+  /** The most recent change per flag — "turned off by X, 2 days ago", beside the switch. */
+  lastChanges?: Record<string, FeatureChange>
   /** Optimistic concurrency; required for PATCH. From API or 0 when using fallback. */
   version: number
   /** When set, show the early-access banner with this title and message. */
@@ -217,6 +289,28 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 // ─── Service ───────────────────────────────────────────────────────────────
 
 export const featuresService = {
+  /** What turning this flag off would touch, counted against this estate. Never throws — a failed
+   *  probe returns `known: false`, which the dialog says out loud rather than papering over. */
+  async impact(key: string): Promise<FeatureImpact> {
+    try {
+      return await request<FeatureImpact>(`${FEATURES_API}/${encodeURIComponent(key)}/impact`)
+    } catch {
+      return { known: false, facts: [] }
+    }
+  },
+
+  /** Everything that has happened to one flag, newest first. */
+  async history(key: string): Promise<FeatureChange[]> {
+    try {
+      const body = await request<{ history: FeatureChange[] }>(
+        `${FEATURES_API}/${encodeURIComponent(key)}/history`,
+      )
+      return body.history ?? []
+    } catch {
+      return []
+    }
+  },
+
   /** Feature definitions (schema). From API or embedded fallback when offline. */
   getSchema(): FeatureDefinition[] {
     return EMBEDDED_SCHEMA
@@ -300,7 +394,6 @@ export interface CreateDefinitionBody {
   category: string
   type: 'boolean' | 'string[]'
   default: boolean | string[]
-  userOverridable?: boolean
   options?: FeatureOption[]
   helpUrl?: string | null
   adminHint?: string | null

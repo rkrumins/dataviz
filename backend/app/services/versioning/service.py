@@ -181,12 +181,43 @@ class NotUpToDate(RuntimeError):
         self.behind_by = head_seq - base_seq
 
 
+class PullRequestExists(RuntimeError):
+    """A branch already has a live (non-terminal) pull request, and a branch may have at most one.
+
+    This is not an arbitrary restriction — it falls out of what a PR *is* here. A PR points at a
+    source *branch* and its diff is computed live from that branch at read time, never snapshotted.
+    So commits pushed after the PR was raised are **already** part of it, and a second PR from the
+    same branch would be a duplicate of the first, not a new proposal. Merging either one marks the
+    branch ``merged``, at which point the sibling is unmergeable (it fails ``_require_open``) — a
+    dead row the UI still renders as actionable.
+
+    ``.pr_id`` lets the caller route the user to the review that already exists instead of dead-ending
+    on an error."""
+
+    def __init__(self, pr_id: str, branch_id: str, title: Optional[str] = None):
+        super().__init__(
+            f"branch {branch_id} already has an open pull request ({pr_id}); "
+            f"its new commits are already included in that review")
+        self.pr_id = pr_id
+        self.branch_id = branch_id
+        self.title = title
+
+
 #: editor and maintainer may edit; only maintainer (and the owner) may manage/publish.
 ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 
 # Terminal PR statuses — a merged or closed PR no longer "needs attention", so it is excluded
 # from the active-PR scope the view indicator counts (the rest: open/mergeable/approved/conflicts).
+# It is also the definition of "live" for the one-live-PR-per-branch invariant (PullRequestExists,
+# uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
+
+# The "nothing came in" answer for a pull that was already up to date (see _incoming_from_main).
+# Same shape as a real one, so a client never has to special-case the no-op.
+_EMPTY_INCOMING: Dict[str, object] = {
+    "branch_id": None, "commit_ids": [], "commit_count": 0, "contributors": [],
+    "stats": {"create": 0, "update": 0, "delete": 0}, "from_seq": 0, "to_seq": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -825,6 +856,7 @@ class GraphVersioningService:
                     s, graph, draft, main_id, merged_state, theirs, actor, message,
                     containment_edge_types=containment_edge_types,
                     ontology_rules=ontology_rules,
+                    merged_via="direct_publish",   # this path bypasses any open review on the branch
                 )
         return await self._retry_seq(f"publish {branch_id}", _once)
 
@@ -832,13 +864,20 @@ class GraphVersioningService:
         self, s, graph, draft, main_id, merged_state, theirs, actor, message,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        merged_via: str = "review",
     ) -> str:
         """Squash a draft's (already-merged, conflict-free) state onto ``main`` as a
         single ``squash_publish`` commit: cascade incident-edge deletes, assert
         referential integrity, write the net delta, advance the head + merkle, and
         mark the draft merged + projection target. Shared by :meth:`publish` and the
         reviewed :meth:`merge_mr` (so both attribute contributors and re-gate ontology
-        identically)."""
+        identically).
+
+        ``merged_via`` records HOW the branch reached main for any PR this squash resolves:
+        ``review`` (merged through the PR) or ``direct_publish`` (an admin published the branch,
+        bypassing its open review). Resolving PRs *here* — in the body BOTH entry points share —
+        is what makes "no live PR survives a squash of its source branch" an invariant rather than
+        a thing each caller must remember."""
         # merged_state/theirs may be SPARSE (bounded merge). Hydrate the live main
         # neighborhood the next two guards reason about so they behave identically to the
         # full-state path: incident edges of tombstoned nodes (to cascade) + endpoints of
@@ -934,6 +973,18 @@ class GraphVersioningService:
         draft.status = "merged"
         draft.base_commit_seq = new_seq            # rebased onto new main
 
+        # The branch is now merged, so every PR raised from it is settled — its changes ARE on main.
+        # Leaving them live (what `publish` used to do) stranded a PR pointing at a dead branch:
+        # unmergeable (`_require_open` rejects it) yet still rendered as actionable, with an empty
+        # diff. Resolve them all here, in the shared body, so no squash path can skip it.
+        for pr in await self._live_prs_for_branch(s, draft.id):
+            pr.status = "merged"
+            pr.resulting_commit_id = squash.id
+            pr.merged_at = _now()
+            pr.merged_by = actor
+            pr.merged_via = merged_via
+            pr.updated_at = _now()
+
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = new_seq
@@ -950,7 +1001,41 @@ class GraphVersioningService:
         (``{clean: False, conflicts}``) for resolution — resubmit with ``resolutions={entity_id:
         payload|None}``. On a clean rebase the draft's own edits are rewritten to the merged result
         and ``base_commit_seq`` advances to the current main head, so the draft is up-to-date and
-        mergeable. Returns ``{clean, conflicts, changes, base_commit_seq}``."""
+        mergeable.
+
+        A clean pull ALWAYS writes a ``pull`` commit on the draft, even when the draft's own edits
+        needed no rewriting. It previously wrote a commit only when `deltas` was non-empty — and
+        `deltas` covers only the entities the draft itself touched, so the ordinary case (upstream
+        work that doesn't collide with yours) recorded *nothing*: `base_commit_seq` moved and the
+        branch history showed a silent gap exactly where someone else's changes arrived. The commit
+        carries the upstream commits it folded in (``source_commit_ids``/``source_commit_count``/
+        ``contributors``), so history can say "pulled N changes from Published" and drill into them.
+
+        Returns ``{clean, conflicts, changes, incoming, base_commit_seq}`` where ``changes`` is the
+        rewrite to YOUR edits and ``incoming`` is what came in from main. They are different things:
+        conflating them is why the UI could only ever report the former.
+
+        ``_retry_seq``-wrapped like every other commit-writing path. It has to be, now that a pull
+        ALWAYS commits: two concurrent pulls on one draft would otherwise both allocate the same
+        ``commit_seq`` and one would die on ``uq_commits_branch_seq``. (It escaped that before only
+        because the common case wrote no commit at all.) On retry the loser re-reads the draft, finds
+        ``base_commit_seq`` already advanced, and returns ``already_up_to_date`` — one pull lands,
+        the other is correctly a no-op."""
+        return await self._retry_seq(
+            f"rebase {branch_id}",
+            lambda: self._rebase_draft_once(
+                graph_id=graph_id, branch_id=branch_id, actor=actor,
+                resolutions=resolutions, message=message,
+            ),
+        )
+
+    async def _rebase_draft_once(
+        self, *, graph_id: str, branch_id: str, actor: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        message: str = "pull latest from main",
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
+        collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             draft = await s.get(BranchORM, branch_id)
@@ -960,9 +1045,12 @@ class GraphVersioningService:
             if draft.kind == "main":
                 raise ValueError("main has no base to rebase")
             main_id = await self._main_branch_id(s, graph_id)
-            if (draft.base_commit_seq or 0) >= graph.main_head_commit_seq:
+            from_seq = draft.base_commit_seq or 0
+            to_seq = graph.main_head_commit_seq
+            if from_seq >= to_seq:
                 return {"clean": True, "conflicts": [], "changes": _delta_stats([]),
-                        "base_commit_seq": draft.base_commit_seq, "already_up_to_date": True}
+                        "incoming": _EMPTY_INCOMING, "base_commit_seq": draft.base_commit_seq,
+                        "already_up_to_date": True}
 
             merged_state, conflicts, _theirs = await self._compute_merge(
                 s, graph_id, graph, draft, main_id, dict(resolutions or {})
@@ -970,34 +1058,142 @@ class GraphVersioningService:
             if conflicts:
                 return {"clean": False, "conflicts": conflicts}
 
+            # What arrived from main in (from_seq, to_seq] — the record of what this pull brought in.
+            incoming = await self._incoming_from_main(s, graph_id, main_id, from_seq, to_seq)
+
             # Rewrite ONLY the draft's own edits to the merged result, then re-base onto the new main
             # head — entities the draft never touched come from the advanced base automatically.
             self._cascade_incident_edges(merged_state)
             self._assert_referential_integrity(merged_state)
             own = await self._branch_own_payloads(s, graph_id, draft.id)
             deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
-            if deltas:
-                kind_by_entity = await self._kind_map_multi(
-                    s, [(graph_id, draft.id), (graph_id, main_id)],
-                    entity_ids=[d.entity_id for d in deltas],
-                )
-                commit = CommitORM(
-                    graph_id=graph_id, branch_id=draft.id,
-                    commit_seq=await self._next_seq(s, graph_id, draft.id),
-                    parent_commit_id=draft.head_commit_id, kind="checkpoint",
-                    message=message, actor=actor,
-                    originating_view_id=draft.originating_view_id,
-                )
-                s.add(commit)
-                await s.flush()
-                await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
-                commit.merkle_root = await self._merkle_root(s, graph_id, draft.id)
-                commit.stats = _delta_stats(deltas)
-                draft.head_commit_id = commit.id
-            draft.base_commit_seq = graph.main_head_commit_seq
+
+            # ALWAYS commit. The version rows written are still only the draft's own rebased edits
+            # (a draft must hold nothing but its own changed entities — `_composed_state` depends on
+            # it), so with no rewrites this is a commit with no version rows. That is fine and
+            # intended: genesis has none either. The COMMIT ROW is the record; the version rows are
+            # the data. Without this, the pull is invisible.
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, draft.id), (graph_id, main_id)],
+                entity_ids=[d.entity_id for d in deltas],
+            ) if deltas else {}
+            commit = CommitORM(
+                graph_id=graph_id, branch_id=draft.id,
+                commit_seq=await self._next_seq(s, graph_id, draft.id),
+                parent_commit_id=draft.head_commit_id, kind="pull",
+                message=message, actor=actor,
+                originating_view_id=draft.originating_view_id,
+                source_branch_id=main_id,
+                source_commit_ids=incoming["commit_ids"] or None,
+                source_commit_count=incoming["commit_count"],
+                contributors=incoming["contributors"] or None,
+            )
+            s.add(commit)
+            await s.flush()
+            await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
+            commit.merkle_root = await self._merkle_root(s, graph_id, draft.id)
+            # `stats` describes what CAME IN, not the rewrite to your own edits — it's what the user
+            # means by "what did I just pull". The rebase of your edits is reported separately as
+            # `changes`, and its version rows are the commit's actual data.
+            commit.stats = dict(incoming["stats"])
+            commit.stats["rebased"] = _delta_stats(deltas)
+            commit.stats["from_seq"] = from_seq
+            commit.stats["to_seq"] = to_seq
+            draft.head_commit_id = commit.id
+
+            draft.base_commit_seq = to_seq
             draft.updated_at = _now()
             return {"clean": True, "conflicts": [], "changes": _delta_stats(deltas),
-                    "base_commit_seq": draft.base_commit_seq}
+                    "incoming": incoming, "base_commit_seq": draft.base_commit_seq}
+
+    async def diff_window(
+        self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int,
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, list]:
+        """Whole-payload before/after diff of a branch between two seqs — the ``DiffVsMainResponse``
+        shape the Changes panel and the canvas overlay consume.
+
+        Distinct from :meth:`diff_commits`, which answers the same question in an **id-keyed** shape
+        (`added: [id]`, `modified: {id: fields}`). That's enough to *count* what changed but not to
+        *show* it: with no payloads the UI can only render raw URNs instead of names. This is what
+        lets "what came in when I pulled" be reviewed in the same visual language as every other diff.
+
+        **O(changed)**, same two-phase technique as `diff_commits`: scan only the version rows in
+        ``(from_seq, to_seq]``, then resolve those entities at each endpoint."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._assert_branch_readable(s, branch, viewer)
+            changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
+            if not changed:
+                return {"added": [], "removed": [], "modified": []}
+            before = await self._values_at(s, graph_id, branch_id, changed, from_seq)
+            after = await self._values_at(s, graph_id, branch_id, changed, to_seq)
+            added: List[dict] = []
+            removed: List[dict] = []
+            modified: List[dict] = []
+            for eid in changed:
+                was, now = before.get(eid), after.get(eid)
+                kind = "edge" if _is_edge_payload(now or was or {}) else "node"
+                if was is None and now is not None:
+                    added.append({"entityId": eid, "kind": kind, "after": now})
+                elif was is not None and now is None:
+                    removed.append({"entityId": eid, "kind": kind, "before": was})
+                elif was is not None and now is not None and was != now:
+                    modified.append({"entityId": eid, "kind": kind, "before": was, "after": now})
+            return {"added": added, "removed": removed, "modified": modified}
+
+    async def _incoming_from_main(
+        self, s, graph_id: str, main_id: str, from_seq: int, to_seq: int,
+    ) -> Dict[str, object]:
+        """What arrived on ``main`` in ``(from_seq, to_seq]`` — the payload of a pull.
+
+        Two halves, both **O(changed)**, never O(graph):
+          • the commits folded in (ids, count, distinct actors) — the provenance a `pull` commit
+            records, and what the "merged N commits" drill-down reads back;
+          • the NET effect on state, classified create/update/delete by resolving the changed
+            entities at each endpoint (the same technique as :meth:`diff_commits`). Net, not the sum
+            of each commit's own stats: an entity created and then renamed upstream arrived once, and
+            telling the user "2 changes" for it would be a lie.
+
+        The full field-level diff is deliberately NOT computed here — the client fetches it from the
+        existing ``diff`` endpoint on main with these same seqs, which already handles the fork-CoW
+        and inherited-entity cases."""
+        rows = (await s.execute(
+            select(CommitORM.id, CommitORM.actor)
+            .where(CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                   CommitORM.commit_seq > from_seq, CommitORM.commit_seq <= to_seq)
+            .order_by(CommitORM.commit_seq)
+        )).all()
+        commit_ids = [r[0] for r in rows]
+        contributors = list(dict.fromkeys([r[1] for r in rows if r[1]]))   # distinct, order-stable
+
+        stats = {"create": 0, "update": 0, "delete": 0}
+        changed = await self._changed_in_window(s, graph_id, main_id, from_seq, to_seq)
+        if changed:
+            before = await self._values_at(s, graph_id, main_id, changed, from_seq)
+            after = await self._values_at(s, graph_id, main_id, changed, to_seq)
+            for eid in changed:
+                was, now = before.get(eid), after.get(eid)
+                if was is None and now is not None:
+                    stats["create"] += 1
+                elif was is not None and now is None:
+                    stats["delete"] += 1
+                elif was is not None and now is not None and was != now:
+                    stats["update"] += 1
+        return {
+            # The window is a range of MAIN's commit_seqs, and commit_seq is per-BRANCH — so the
+            # branch it applies to has to travel with it. Without this the client has to source the
+            # main branch id from somewhere else, and the one place it lives (branchStore, populated
+            # by the canvas's BranchSwitcher) is empty when a reviewer pulls from the Reviews inbox,
+            # where no canvas is mounted. Self-describing payload; no client state required.
+            "branch_id": main_id,
+            "commit_ids": commit_ids,
+            "commit_count": len(commit_ids),
+            "contributors": contributors,
+            "stats": stats,
+            "from_seq": from_seq,
+            "to_seq": to_seq,
+        }
 
     async def abandon_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
@@ -1399,6 +1595,7 @@ class GraphVersioningService:
             if fork is None or not fork.fork_parent_graph_id:
                 raise ValueError("source graph is not a fork")
             fork_main = await self._main_branch_id(s, source_graph_id)
+            await self._assert_no_live_pr(s, fork_main)
             merged, conflicts, _theirs = await self._compute_fork_merge(s, fork, {})
             revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
             pr = MergeRequestORM(
@@ -1595,6 +1792,34 @@ class GraphVersioningService:
                 return squash.id
         return await self._retry_seq(f"merge_pr {pr_id}", _once)
 
+    # ---- the one-live-PR-per-branch invariant ----------------------------- #
+    async def _live_prs_for_branch(self, s, branch_id: str) -> List[MergeRequestORM]:
+        """Every non-terminal PR raised from ``branch_id``, newest first.
+
+        Returns a list rather than one row on purpose: the partial unique index guarantees at most
+        one going forward, but databases that predate it may still hold duplicates, and the squash
+        path must resolve *all* of them or it would leave exactly the zombie rows this work exists
+        to remove."""
+        rows = await s.execute(
+            select(MergeRequestORM)
+            .where(MergeRequestORM.source_branch_id == branch_id,
+                   MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
+            .order_by(MergeRequestORM.created_at.desc())
+        )
+        return list(rows.scalars())
+
+    async def _assert_no_live_pr(self, s, branch_id: str) -> None:
+        """Reject a second PR from a branch that already has a live one (:class:`PullRequestExists`).
+
+        The partial unique index ``uq_mr_live_source_branch`` is the real enforcement — it closes the
+        race two concurrent openers would otherwise win together. This check exists so the *common*
+        case produces a useful error carrying the existing ``pr_id``, instead of an opaque
+        IntegrityError, letting the UI offer "view the review that already exists"."""
+        existing = await self._live_prs_for_branch(s, branch_id)
+        if existing:
+            pr = existing[0]
+            raise PullRequestExists(pr.id, branch_id, pr.title)
+
     # ---- draft → main merge request (reviewed publish) ------------------- #
     @staticmethod
     def _is_draft_mr(pr: MergeRequestORM) -> bool:
@@ -1619,6 +1844,7 @@ class GraphVersioningService:
             if draft.kind == "main":
                 raise ValueError("cannot open a merge request for main")
             self._require_open(draft)
+            await self._assert_no_live_pr(s, branch_id)
             main_id = await self._main_branch_id(s, graph_id)
             _merged, conflicts, _theirs = await self._compute_merge(
                 s, graph_id, graph, draft, main_id, {}
@@ -3596,13 +3822,22 @@ class GraphVersioningService:
 
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
         # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
-        # Merge on this so reviewers pull latest first (mirrors the merge_mr/publish gate). Fork
-        # PRs aren't gated, so behind stays null for them. (``s.get`` is identity-mapped, so
-        # listing many PRs on one graph doesn't re-query the head.)
+        # Merge on this so reviewers pull latest first. Fork PRs aren't gated, so behind stays
+        # null for them. (``s.get`` is identity-mapped, so listing many PRs on one graph doesn't
+        # re-query the head.)
+        #
+        # Read the base from the LIVE source branch, never from ``pr.base_commit_seq``: that column
+        # is frozen at PR-creation time, but ``rebase_draft`` advances the BRANCH's base and does
+        # not touch the PR row. Reading the frozen value made a pulled draft report behind forever
+        # — and since the FE swaps Merge for "Pull latest" on that flag, the PR could never be
+        # merged (re-pulling short-circuits as already_up_to_date). This now mirrors the gate
+        # merge_mr actually enforces (it reads draft.base_commit_seq), so UI and server agree.
         behind = behind_by = None
         if self._is_draft_mr(pr):
             graph = await s.get(GraphORM, pr.target_graph_id)
-            behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - (pr.base_commit_seq or 0))
+            src = await s.get(BranchORM, pr.source_branch_id)
+            base = (src.base_commit_seq if src else pr.base_commit_seq) or 0
+            behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
             behind = behind_by > 0
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
@@ -3615,7 +3850,7 @@ class GraphVersioningService:
             "reviewers": pr.reviewers, "approved_by": pr.approved_by,
             "approval_status": pr.approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
-            "merged_at": pr.merged_at, "merged_by": pr.merged_by,
+            "merged_at": pr.merged_at, "merged_by": pr.merged_by, "merged_via": pr.merged_via,
             "closed_at": pr.closed_at, "closed_by": pr.closed_by,
         }
 

@@ -18,7 +18,7 @@
  * The cleanup is idempotent and safe to call even when no workspace is
  * active — all operations no-op when their target is empty.
  */
-import { getQueryClient } from '@/main'
+import { getQueryClient } from '@/lib/queryClient'
 import { useSchemaStore } from '@/store/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'

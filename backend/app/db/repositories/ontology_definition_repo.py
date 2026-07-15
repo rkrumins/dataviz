@@ -559,6 +559,9 @@ async def has_data_sources(session: AsyncSession, ontology_id: str) -> bool:
     result = await session.execute(
         select(WorkspaceDataSourceORM.id)
         .where(WorkspaceDataSourceORM.ontology_id == ontology_id)
+        # Tombstones must not count as references, or a deleted data source
+        # would block this ontology from ever being deleted.
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
@@ -579,6 +582,7 @@ async def get_assignments(session: AsyncSession, ontology_id: str) -> list:
         )
         .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id)
         .where(WorkspaceDataSourceORM.ontology_id == ontology_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .order_by(WorkspaceORM.name, WorkspaceDataSourceORM.label)
     )
     return [

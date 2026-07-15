@@ -321,26 +321,6 @@ def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[s
     return host, port
 
 
-def _redact_redis_url(url: str) -> str:
-    """Strip embedded credentials from a Redis URL for safe logging.
-
-    ``redis://:password@host:6379/1`` → ``redis://***@host:6379/1``.
-    Best-effort: unparseable input returns the literal ``redis://***``
-    so a malformed URL never leaks raw chars into the log.
-    """
-    try:
-        from urllib.parse import urlparse, urlunparse
-        parsed = urlparse(url)
-        if parsed.password is None and parsed.username is None:
-            return url
-        netloc = parsed.hostname or ""
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        return urlunparse(parsed._replace(netloc=f"***@{netloc}"))
-    except Exception:
-        return "redis://***"
-
-
 def _compute_searchable_text(
     display_name: Optional[str],
     qualified_name: Optional[str],
@@ -597,6 +577,9 @@ class FalkorDBProvider(GraphDataProvider):
         cache_redis_url: Optional[str] = None,
         auth_enabled: bool = True,
         tls_enabled: bool = False,
+        provider_id: Optional[str] = None,
+        extra_config: Optional[dict] = None,
+        credentials: Optional[dict] = None,
     ):
         # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
         # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
@@ -617,8 +600,22 @@ class FalkorDBProvider(GraphDataProvider):
         self._connection_config = connection_config
         # Per-provider dedicated cache Redis URL (carries a possible password,
         # so it travels via the encrypted credentials blob, not extra_config).
-        # Overrides the process-wide CACHE_REDIS_URL env when set.
+        # Deprecated alias — folded into ``self._credentials["cache_redis_url"]``
+        # below so ``build_cache_client`` resolves it the same way as a
+        # provider row's own encrypted ``cache_redis_url`` credential.
         self._cache_redis_url = cache_redis_url
+        # Identity + raw config for the CACHE role's central resolver
+        # (``build_cache_client``): the provider's own
+        # ``extra_config.cacheConnection`` (non-secret topology/TLS) and its
+        # decrypted credentials (cache_username/cache_password/... plus the
+        # legacy cache_redis_url alias). Never the FalkorDB graph credentials
+        # — the cache resolves its own auth, never inherits the graph's.
+        self._provider_id = provider_id
+        self._extra_config = extra_config
+        merged_credentials = dict(credentials or {})
+        if cache_redis_url and "cache_redis_url" not in merged_credentials:
+            merged_credentials["cache_redis_url"] = cache_redis_url
+        self._credentials = merged_credentials
         self._conn_cfg = None  # populated by _ensure_connected (FalkorDBConnConfig)
         # Failover state: a monotonic generation bumped on each client
         # rebuild, plus a lock so concurrent MOVED/connection errors
@@ -638,11 +635,11 @@ class FalkorDBProvider(GraphDataProvider):
         # default true). When auth is DISABLED for this provider, null the
         # FalkorDB graph credentials at this single chokepoint so NOTHING
         # downstream sends AUTH — the graph pool kwargs, preflight's AUTH-
-        # before-PING, load_connection_config(), and the cache-Redis fallback
-        # (which inherits cfg.username/password) all read these fields. This
-        # prevents credential leakage / NOAUTH storms against an
-        # unauthenticated FalkorDB. A dedicated cache_redis_url keeps its own
-        # embedded auth (separate server) and is intentionally NOT gated.
+        # before-PING, and load_connection_config() all read these fields.
+        # This prevents credential leakage / NOAUTH storms against an
+        # unauthenticated FalkorDB. The cache Redis resolves its OWN auth via
+        # ``self._credentials`` (never these fields) and is intentionally
+        # NOT gated by this flag.
         self._auth_enabled = auth_enabled
         self._username = username if auth_enabled else None
         self._password = password if auth_enabled else None
@@ -883,6 +880,7 @@ class FalkorDBProvider(GraphDataProvider):
             host=self._host, port=self._port,
             username=self._username, password=self._password,
             tls_enabled=self._tls_enabled,
+            credentials=self._credentials,
         )
         # Probe the node that actually SERVES this graph, never just an entry
         # point. A Sentinel daemon answers PONG while the master it watches is
@@ -998,6 +996,7 @@ class FalkorDBProvider(GraphDataProvider):
                 host=self._host, port=self._port,
                 username=self._username, password=self._password,
                 tls_enabled=self._tls_enabled,
+                credentials=self._credentials,
             )
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
@@ -1019,16 +1018,17 @@ class FalkorDBProvider(GraphDataProvider):
                 pool_kwargs=_graph_pool_kwargs,
             )
             # Redis for non-graph ops (caching, materialization tracking,
-            # ancestor chains, stats). When a cache Redis URL is set, these
-            # go to a DEDICATED Redis instance — fully decoupled from
-            # FalkorDB so a graph outage doesn't take out caching/state.
-            # When unset, falls back to the FalkorDB instance (dev compat).
-            # The per-provider URL (encrypted credential) wins over the
-            # process-wide CACHE_REDIS_URL env — important in cluster mode,
-            # where each provider needs its own dedicated cache.
+            # ancestor chains, stats). Resolved centrally via the CACHE role
+            # (``build_cache_client``): the provider's own
+            # ``extra_config.cacheConnection`` + encrypted cache_* credentials
+            # win, else the global ``REDIS_CACHE_*`` endpoint, else the legacy
+            # ``CACHE_REDIS_URL`` env. ALWAYS a DEDICATED endpoint with its OWN
+            # auth and its OWN TLS — never inherited from FalkorDB (that
+            # inheritance used to silently produce "no TLS" or "system trust
+            # store" depending on the cache URL's scheme). ``None`` means no
+            # cache is configured anywhere → cache DISABLED; the cache is never
+            # co-located on the FalkorDB instance (ADR-020).
             from backend.common.adapters import TimeoutRedis
-            cache_redis_url = self._cache_redis_url or os.getenv("CACHE_REDIS_URL")
-            redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
             redis_op_timeout = float(os.getenv("FALKORDB_REDIS_OP_TIMEOUT", "3"))
             # P2.3 — cache Redis is a BEST-EFFORT dependency. Wrapped in
             # its own try/except so an unreachable cache Redis sets
@@ -1039,47 +1039,24 @@ class FalkorDBProvider(GraphDataProvider):
             # FalkorDB availability even when FalkorDB itself is healthy.
             self._redis_available = True
             try:
-                if cache_redis_url:
-                    # CACHE_REDIS_URL embeds its own auth/scheme — a separate
-                    # instance with possibly separate credentials. A rediss://
-                    # URL also picks up the connection's CA/client-cert (mTLS).
-                    logger.info(
-                        "FalkorDB provider using dedicated cache Redis %s "
-                        "(decoupled from graph host %s:%s).",
-                        _redact_redis_url(cache_redis_url), self._host, self._port,
-                    )
-                else:
-                    # Cache Redis falls back to the FalkorDB topology — same
-                    # nodes, same auth/TLS. Dev-compat only: in production
-                    # CACHE_REDIS_URL SHOULD be set to a separate Redis. Mode-
-                    # aware via the connection factory: standalone/sentinel
-                    # build a single client; cluster builds a dedicated
-                    # RedisCluster cache client (the cache ops are single-key /
-                    # single-hash, so cluster-safe).
-                    logger.warning(
-                        "CACHE_REDIS_URL is not set; FalkorDB provider's "
-                        "ancestor/URN caches will share the FalkorDB instance "
-                        "(%s). A FalkorDB outage will also disable caching. "
-                        "Set CACHE_REDIS_URL to a dedicated Redis in "
-                        "production.", self._conn_cfg.describe(),
-                    )
-                _redis_pool_kwargs: dict = {
-                    "max_connections": redis_pool_size,
-                    "socket_connect_timeout": 2.0,
-                    "socket_timeout": socket_timeout,
-                    "decode_responses": True,
-                }
                 _raw_redis = build_cache_client(
-                    self._conn_cfg,
-                    cache_url=cache_redis_url,
-                    pool_kwargs=_redis_pool_kwargs,
+                    provider_id=self._provider_id or "env",
+                    extra_config=self._extra_config,
+                    credentials=self._credentials,
                 )
                 self._redis_pool = None
                 # Wrap in TimeoutRedis — every async call and pipeline.execute()
                 # automatically gets an asyncio.wait_for() deadline. No call-site
                 # wrapping needed. See backend/common/adapters/timeout_redis.py.
                 if _raw_redis is None:
-                    # Cluster mode without a dedicated cache Redis → degrade.
+                    # No cache endpoint configured anywhere → degrade.
+                    logger.warning(
+                        "FalkorDB provider %r: no cache Redis configured — "
+                        "ancestor/URN caches disabled (DEGRADED, graph queries "
+                        "unaffected). Configure REDIS_CACHE_* / "
+                        "extra_config.cacheConnection to enable caching.",
+                        self._graph_name,
+                    )
                     self._redis = None
                     self._redis_available = False
                 else:

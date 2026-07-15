@@ -72,6 +72,13 @@ spec:
                   key: MANAGEMENT_DB_URL
             - name: CORS_ALLOWED_ORIGINS
               value: "https://synodic.example.com"
+          volumeMounts:
+            - name: redis-streams-certs
+              mountPath: /certs/streams
+              readOnly: true
+            - name: redis-cache-certs
+              mountPath: /certs/cache
+              readOnly: true
           resources:
             requests:
               cpu: 250m
@@ -101,3 +108,12 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+      volumes:
+        - name: redis-streams-certs
+          secret:
+            secretName: redis-streams-certs
+            optional: true
+        - name: redis-cache-certs
+          secret:
+            secretName: redis-cache-certs
+            optional: true

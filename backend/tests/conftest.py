@@ -24,6 +24,7 @@ os.environ.setdefault(
 # ---------------------------------------------------------------------------
 # Imports
 # ---------------------------------------------------------------------------
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -41,6 +42,8 @@ from backend.app.db.engine import Base, get_db_session, get_readonly_db_session
 from backend.app.db import models as _models  # noqa: F401 — register ORM models
 from backend.app.db.repositories import user_repo as _user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
+from backend.app.db.seed_feature_registry import SEED_FLAGS_CONFIG
+from backend.app.services.feature_flags import feature_flags
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -129,6 +132,38 @@ def db_engine() -> AsyncEngine:
         dbapi_conn.execute("ATTACH DATABASE ':memory:' AS aggregation")
 
     return engine
+
+
+@pytest.fixture(autouse=True)
+def _feature_flags_at_their_defaults():
+    """Every test starts with every flag at its shipped default, resolved from memory.
+
+    Two problems, one fixture.
+
+    LEAKAGE. The flag cache is a process-wide singleton with a 30-second TTL, and it does not
+    know that each test gets a brand-new database. A suite that reads or PATCHes a flag leaves
+    its values resident, so the NEXT test — whose `feature_flags` table is empty — gets answered
+    from the previous suite's memory. Harmless while nothing on a request path read a flag; the
+    moment views and semantic layers started honouring the admin's toggles, `test_api_views`
+    began failing with a 403 from a flag no test in it had ever set, and passing in isolation.
+
+    THE REAL ENGINE. Gates resolve flags through `is_enabled_self_session`, which by design opens
+    its OWN session when the cache is cold — it exists for call sites with no request session. It
+    therefore ignores the session this fixture set injects and connects to the REAL engine, which
+    in the container is Postgres. A cold-cache gate check opens a live asyncpg connection on the
+    current event loop; pytest-asyncio gives the next test a different loop; the connection
+    outlives its loop and the next test dies in teardown with a 500 that has nothing to do with
+    what it was testing.
+
+    Priming the cache fixes both: the flags are the seeded defaults, they are the same for every
+    test, and no gate ever reaches for a database. A test that wants a different value sets it in
+    the cache (see `test_feature_gates.py::_prime`), which is also how a gate would see it in
+    production — via the cache, not via a row.
+    """
+    feature_flags._cache = dict(SEED_FLAGS_CONFIG)
+    feature_flags._cache_ts = time.monotonic()
+    yield
+    feature_flags.invalidate()
 
 
 @pytest.fixture()

@@ -34,6 +34,7 @@ import {
   type ProviderUpdateRequest,
   type SchemaDiscoveryResult,
 } from '@/services/providerService'
+import { fetchRedisConfig } from '@/services/redisConfigService'
 import { useToast } from '@/components/ui/toast'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
 import { DataHubLogo, FalkorDBLogo, Neo4jLogo, SpannerLogo } from './ProviderLogos'
@@ -67,14 +68,42 @@ type FalkorDBMode = 'standalone' | 'sentinel' | 'cluster'
 // falkordbConnection node shape (also accepted as "host:port" / {host,port}).
 type HostPort = [string, number]
 
+// Dedicated cache Redis connection — structured topology + TLS (rides
+// extra_config.cacheConnection, non-secret) plus its own ACL user/password
+// (rides credentials, Fernet-encrypted, never echoed back). Cluster mode is
+// not offered here: the cache uses SCAN + multi-key DEL and a non-zero DB
+// index, neither of which works on a Redis Cluster (the backend 422s
+// cacheConnection.mode: "cluster").
+interface CacheConnectionState {
+  enabled: boolean
+  mode: 'standalone' | 'sentinel'
+  host: string
+  port: number
+  db: number
+  username: string
+  password: string
+  sentinelMasterName: string
+  sentinelNodes: HostPort[]
+  tlsEnabled: boolean
+  tlsCaCertPath: string
+  tlsCertPath: string
+  tlsKeyPath: string
+  tlsVerifyMode: 'required' | 'optional' | 'none'
+  tlsCheckHostname: boolean
+  // Set when editing a provider whose credentials still hold the legacy
+  // cache_redis_url (detected via the redis-config dashboard's
+  // legacyProviders list — GET /providers never returns credentials).
+  // Renders the panel read-only with a "Convert to structured config" action.
+  legacyUrlPresent: boolean
+}
+
 interface FalkorDBConnectionState {
   mode: FalkorDBMode
   clusterStartupNodes: HostPort[]
   sentinelMasterName: string
   sentinelNodes: HostPort[]
-  // Dedicated cache Redis URL (write-only secret — blank on edit). May embed
-  // a password, so it travels via credentials, not extra_config.
-  cacheRedisUrl: string
+  // Dedicated cache for this provider — structured panel (see CacheConnectionState).
+  cache: CacheConnectionState
   // Advanced knobs kept as strings for the inputs; parsed on submit.
   socketTimeout: string
   graphPoolSize: string
@@ -172,12 +201,31 @@ const DEFAULT_SPANNER_STATE: SpannerFormState = {
   useEmulator: false,
 }
 
+const DEFAULT_CACHE_CONNECTION: CacheConnectionState = {
+  enabled: false,
+  mode: 'standalone',
+  host: '',
+  port: 6379,
+  db: 0,
+  username: '',
+  password: '',
+  sentinelMasterName: '',
+  sentinelNodes: [],
+  tlsEnabled: false,
+  tlsCaCertPath: '',
+  tlsCertPath: '',
+  tlsKeyPath: '',
+  tlsVerifyMode: 'required',
+  tlsCheckHostname: true,
+  legacyUrlPresent: false,
+}
+
 const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
   mode: 'standalone',
   clusterStartupNodes: [],
   sentinelMasterName: '',
   sentinelNodes: [],
-  cacheRedisUrl: '',
+  cache: { ...DEFAULT_CACHE_CONNECTION },
   socketTimeout: '',
   graphPoolSize: '',
   tlsCaCertPath: '',
@@ -240,12 +288,41 @@ function cleanNodes(nodes: HostPort[]): HostPort[] {
     .map((n): HostPort => [n[0].trim(), Number(n[1]) || 0])
 }
 
+// Parse a pasted legacy `redis://[user]:[password]@host:port/db` URL into
+// structured cache fields for the "Convert to structured config" action.
+// Returns null on anything that isn't a valid redis(s):// URL.
+function parseLegacyCacheUrl(raw: string): Partial<CacheConnectionState> | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'redis:' && url.protocol !== 'rediss:') return null
+  const dbSegment = url.pathname.replace(/^\//, '')
+  const db = dbSegment ? Number(dbSegment) : 0
+  return {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : 6379,
+    db: Number.isFinite(db) ? db : 0,
+    username: decodeURIComponent(url.username || ''),
+    password: decodeURIComponent(url.password || ''),
+    tlsEnabled: url.protocol === 'rediss:',
+  }
+}
+
 function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
   const extra = provider?.extraConfig ?? {}
   const isSpannerProvider = provider?.providerType === 'spanner'
   const isFalkorDBProvider = provider?.providerType === 'falkordb'
   const fdbConn = (isFalkorDBProvider && extra.falkordbConnection) || {}
+  // cacheConnection is a TOP-LEVEL extra_config key (sibling of
+  // falkordbConnection, not nested inside it) — matches the backend
+  // validator, which reads extra_config.get("cacheConnection") directly.
+  const cacheConn = (isFalkorDBProvider && extra.cacheConnection) || {}
 
   return {
     providerType: provider?.providerType ?? '',
@@ -282,9 +359,28 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
           clusterStartupNodes: hydrateNodes(fdbConn.cluster?.startupNodes),
           sentinelMasterName: fdbConn.sentinel?.masterName ?? '',
           sentinelNodes: hydrateNodes(fdbConn.sentinel?.nodes),
-          // Cache Redis URL is a write-only secret (carried in credentials,
-          // never echoed back) — blank on edit, like the password.
-          cacheRedisUrl: '',
+          // Non-secret topology hydrates from extra_config.cacheConnection;
+          // username/password are write-only secrets (never echoed back) —
+          // blank on edit, like the main password. legacyUrlPresent is
+          // detected asynchronously post-mount (see the redis-config effect).
+          cache: {
+            enabled: Boolean(extra.cacheConnection),
+            mode: (cacheConn.mode as CacheConnectionState['mode']) ?? 'standalone',
+            host: cacheConn.host ?? '',
+            port: cacheConn.port ?? 6379,
+            db: cacheConn.db ?? 0,
+            username: '',
+            password: '',
+            sentinelMasterName: cacheConn.sentinel?.masterName ?? '',
+            sentinelNodes: hydrateNodes(cacheConn.sentinel?.nodes),
+            tlsEnabled: cacheConn.tls?.enabled ?? false,
+            tlsCaCertPath: cacheConn.tls?.caCertPath ?? '',
+            tlsCertPath: cacheConn.tls?.certPath ?? '',
+            tlsKeyPath: cacheConn.tls?.keyPath ?? '',
+            tlsVerifyMode: (cacheConn.tls?.verifyMode as CacheConnectionState['tlsVerifyMode']) ?? 'required',
+            tlsCheckHostname: cacheConn.tls?.checkHostname ?? true,
+            legacyUrlPresent: false,
+          },
           socketTimeout: fdbConn.socketTimeout != null ? String(fdbConn.socketTimeout) : '',
           graphPoolSize: fdbConn.graphPoolSize != null ? String(fdbConn.graphPoolSize) : '',
           tlsCaCertPath: fdbConn.tls?.caCertPath ?? '',
@@ -353,13 +449,46 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
     if (conn.mode || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
       out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
     }
+
+    // Dedicated cache: non-secret topology + TLS paths ONLY. Emitted as a
+    // TOP-LEVEL extra_config.cacheConnection key (sibling of falkordbConnection,
+    // not nested inside it) — the backend validator keys off
+    // extra_config.get("cacheConnection"). Username/password NEVER go here
+    // (see buildCredentials) — they ride credentials, Fernet-encrypted.
+    const cache = fc.cache
+    if (cache.enabled && !cache.legacyUrlPresent) {
+      const cacheConn: Record<string, unknown> = { mode: cache.mode }
+      if (cache.host.trim()) cacheConn.host = cache.host.trim()
+      if (cache.port) cacheConn.port = cache.port
+      if (cache.db) cacheConn.db = cache.db
+      if (cache.mode === 'sentinel') {
+        cacheConn.sentinel = {
+          masterName: cache.sentinelMasterName.trim(),
+          nodes: cleanNodes(cache.sentinelNodes),
+        }
+      }
+      if (cache.tlsEnabled) {
+        const cacheTls: Record<string, unknown> = {
+          enabled: true,
+          verifyMode: cache.tlsVerifyMode,
+          checkHostname: cache.tlsCheckHostname,
+        }
+        if (cache.tlsCaCertPath.trim()) cacheTls.caCertPath = cache.tlsCaCertPath.trim()
+        if (cache.tlsCertPath.trim()) cacheTls.certPath = cache.tlsCertPath.trim()
+        if (cache.tlsKeyPath.trim()) cacheTls.keyPath = cache.tlsKeyPath.trim()
+        cacheConn.tls = cacheTls
+      }
+      out.cacheConnection = cacheConn
+    }
   }
 
   return Object.keys(out).length > 0 ? out : undefined
 }
 
 // Build the credentials payload, shared by the test, create, and update
-// paths so each carries the same secrets (incl. FalkorDB's cache_redis_url).
+// paths so each carries the same secrets (incl. FalkorDB's dedicated-cache
+// ACL user/password — never the legacy cache_redis_url, which new saves no
+// longer emit; see the "Convert to structured config" flow for that path).
 function buildCredentials(formData: ProviderOnboardingFormData) {
   if (isSpanner(formData.providerType)) {
     return formData.spanner?.serviceAccountJson || formData.spanner?.projectId
@@ -369,15 +498,23 @@ function buildCredentials(formData: ProviderOnboardingFormData) {
         }
       : undefined
   }
-  const cacheRedisUrl =
-    formData.providerType === 'falkordb'
-      ? formData.falkordbConnection?.cacheRedisUrl?.trim() || undefined
-      : undefined
-  if (!formData.username && !formData.password && !cacheRedisUrl) return undefined
+  const cache =
+    formData.providerType === 'falkordb' ? formData.falkordbConnection?.cache : undefined
+  const cacheActive = Boolean(cache?.enabled && !cache.legacyUrlPresent)
+  const cacheUsername = cacheActive ? cache?.username.trim() || undefined : undefined
+  const cachePassword = cacheActive ? cache?.password || undefined : undefined
+  // Sentinel discovery authenticates with the same ACL user as the resolved
+  // master — this panel doesn't expose a separate sentinel-daemon credential.
+  const cacheSentinelUsername = cacheActive && cache?.mode === 'sentinel' ? cacheUsername : undefined
+  const cacheSentinelPassword = cacheActive && cache?.mode === 'sentinel' ? cachePassword : undefined
+  if (!formData.username && !formData.password && !cacheUsername && !cachePassword) return undefined
   return {
     username: formData.username || undefined,
     password: formData.password || undefined,
-    cache_redis_url: cacheRedisUrl,
+    cache_username: cacheUsername,
+    cache_password: cachePassword,
+    cache_sentinel_username: cacheSentinelUsername,
+    cache_sentinel_password: cacheSentinelPassword,
   }
 }
 
@@ -507,6 +644,9 @@ export function ProviderOnboardingWizard({
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [createdProvider, setCreatedProvider] = useState<ProviderResponse | null>(null)
   const [connectionResult, setConnectionResult] = useState<ConnectionTestResult | null>(null)
+  // Scratch input for the legacy-cache "Convert to structured config" action
+  // (holds the pasted redis:// URL only until it's parsed — not persisted).
+  const [legacyCacheUrlInput, setLegacyCacheUrlInput] = useState('')
   const [connectivityCheck, setConnectivityCheck] = useState<ConnectivityCheck>({
     state: 'idle',
     fingerprint: null,
@@ -631,6 +771,43 @@ export function ProviderOnboardingWizard({
     })
     setPreviousSteps([])
     setCurrentStep(mode === 'edit' ? 'connection' : 'type')
+    setLegacyCacheUrlInput('')
+  }, [isOpen, mode, provider])
+
+  // Detect a legacy dedicated-cache Redis URL on the credentials blob. GET
+  // /providers never returns credentials (Fernet-encrypted, write-only), so
+  // this reads the redis-config dashboard's legacyProviders list instead —
+  // the one place that surfaces "this provider id still has cache_redis_url
+  // set" without exposing the secret itself.
+  useEffect(() => {
+    if (!isOpen || mode !== 'edit' || provider?.providerType !== 'falkordb' || !provider?.id) return
+    let cancelled = false
+    const providerId = provider.id
+
+    fetchRedisConfig()
+      .then((cfg) => {
+        if (cancelled) return
+        const cacheRole = cfg.roles.find((role) => role.role === 'cache')
+        const isLegacy = cacheRole?.legacyProviders?.some((p) => p.providerId === providerId) ?? false
+        if (!isLegacy) return
+        setFormData((previous) => {
+          const base = previous.falkordbConnection ?? DEFAULT_FALKORDB_CONNECTION
+          const next = {
+            ...previous,
+            falkordbConnection: {
+              ...base,
+              cache: { ...base.cache, legacyUrlPresent: true, enabled: true },
+            },
+          }
+          initialStateRef.current = next
+          return next
+        })
+      })
+      .catch(() => undefined)
+
+    return () => {
+      cancelled = true
+    }
   }, [isOpen, mode, provider])
 
   useEffect(() => {
@@ -663,14 +840,30 @@ export function ProviderOnboardingWizard({
     }))
   }, [])
 
-  // Repeatable host:port row editor for sentinel/cluster node lists.
-  const renderNodeRows = (
-    nodesKey: 'clusterStartupNodes' | 'sentinelNodes',
+  const updateCache = useCallback((updates: Partial<CacheConnectionState>) => {
+    setFormData((previous) => {
+      const base = previous.falkordbConnection ?? DEFAULT_FALKORDB_CONNECTION
+      return {
+        ...previous,
+        falkordbConnection: { ...base, cache: { ...base.cache, ...updates } },
+      }
+    })
+  }, [])
+
+  const handleConvertLegacyCacheUrl = useCallback(() => {
+    const parsed = parseLegacyCacheUrl(legacyCacheUrlInput)
+    if (!parsed) return
+    updateCache({ ...parsed, legacyUrlPresent: false, enabled: true })
+    setLegacyCacheUrlInput('')
+  }, [legacyCacheUrlInput, updateCache])
+
+  // Repeatable host:port row editor, shared by FalkorDB's own cluster/sentinel
+  // node lists and the dedicated cache's sentinel node list.
+  const renderHostPortRows = (
+    nodes: HostPort[],
+    setNodes: (next: HostPort[]) => void,
     defaultPort: number,
   ) => {
-    const nodes = formData.falkordbConnection?.[nodesKey] ?? []
-    const setNodes = (next: HostPort[]) =>
-      updateFalkorConn({ [nodesKey]: next } as Partial<FalkorDBConnectionState>)
     return (
       <div className="space-y-2">
         {nodes.map((node, idx) => (
@@ -711,6 +904,17 @@ export function ProviderOnboardingWizard({
         </button>
       </div>
     )
+  }
+
+  // FalkorDB's own cluster/sentinel node lists, bound via updateFalkorConn.
+  const renderNodeRows = (
+    nodesKey: 'clusterStartupNodes' | 'sentinelNodes',
+    defaultPort: number,
+  ) => {
+    const nodes = formData.falkordbConnection?.[nodesKey] ?? []
+    const setNodes = (next: HostPort[]) =>
+      updateFalkorConn({ [nodesKey]: next } as Partial<FalkorDBConnectionState>)
+    return renderHostPortRows(nodes, setNodes, defaultPort)
   }
 
   const goNext = useCallback(() => {
@@ -834,6 +1038,15 @@ export function ProviderOnboardingWizard({
 
     try {
       if (mode === 'edit' && provider) {
+        // A "Convert to structured config" click this session flips
+        // cache.legacyUrlPresent true -> false; credentialsClear is the only
+        // way to actually remove the superseded secret from the stored blob
+        // (an omitted/undefined credential field just leaves the old value
+        // in place — see provider_repo.update_provider's merge semantics).
+        const legacyCacheConverted = Boolean(
+          initialStateRef.current?.falkordbConnection?.cache.legacyUrlPresent &&
+          !formData.falkordbConnection?.cache.legacyUrlPresent,
+        )
         const req: ProviderUpdateRequest = {
           name: formData.name.trim(),
           host: formData.host || undefined,
@@ -841,6 +1054,7 @@ export function ProviderOnboardingWizard({
           tlsEnabled: formData.tlsEnabled,
           credentials: buildCredentials(formData),
           extraConfig: buildExtraConfig(formData),
+          ...(legacyCacheConverted ? { credentialsClear: ['cache_redis_url'] } : {}),
         }
         const updated = await providerService.update(provider.id, req)
         await onUpdated?.(updated)
@@ -1157,6 +1371,20 @@ export function ProviderOnboardingWizard({
                     </p>
                   </div>
 
+                  {formData.falkordbConnection?.mode !== 'standalone' && (
+                    <div className="flex items-start gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2">
+                      <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                      <p className="text-[11px] leading-relaxed text-ink-secondary">
+                        The <span className="font-medium text-ink">Username / Password</span> above are
+                        the graph credentials for {formData.falkordbConnection?.mode === 'cluster' ? 'every cluster node' : 'the master and its replicas'}.
+                        {formData.falkordbConnection?.mode === 'cluster'
+                          ? ' A Redis Cluster shares one credential across all shards — there is no per-node password.'
+                          : ' Sentinel data-plane auth reuses these; the sentinel daemons only need their own auth if you enable it.'}
+                        {' '}Leave them blank for an unauthenticated instance.
+                      </p>
+                    </div>
+                  )}
+
                   {formData.falkordbConnection?.mode === 'cluster' && (
                     <div>
                       <label className="mb-1.5 block text-xs font-medium text-ink">
@@ -1190,27 +1418,9 @@ export function ProviderOnboardingWizard({
                     </>
                   )}
 
-                  <div>
-                    <label className="mb-1.5 block text-xs font-medium text-ink">
-                      Dedicated cache Redis URL <span className="text-ink-muted">(optional)</span>
-                    </label>
-                    <input
-                      type="password"
-                      value={formData.falkordbConnection?.cacheRedisUrl ?? ''}
-                      onChange={(event) => updateFalkorConn({ cacheRedisUrl: event.target.value })}
-                      placeholder={
-                        mode === 'edit'
-                          ? 'unchanged — enter to replace'
-                          : 'redis://:password@cache-host:6379/0'
-                      }
-                      className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                    />
-                    <p className="mt-1 text-[11px] leading-tight text-ink-muted">
-                      Recommended in cluster mode (the ancestor/idempotency cache needs a dedicated
-                      Redis). Stored encrypted; leave blank to keep the current value.
-                    </p>
-                  </div>
-
+                  {/* Provider cache lives in its own full-width section below the two
+                      columns (see "Provider cache") so this column stays focused on the
+                      graph connection + topology. */}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="mb-1.5 block text-xs font-medium text-ink">
@@ -1361,6 +1571,258 @@ export function ProviderOnboardingWizard({
           )}
         </div>
       </div>
+
+      {formData.providerType === 'falkordb' && (
+                  <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
+                    {/* What the cache is for + the best-effort promise */}
+                    <div className="flex items-start gap-2.5">
+                      <Zap className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-ink">Read cache</p>
+                        <p className="mt-0.5 text-xs leading-relaxed text-ink-muted">
+                          This provider caches computed graph reads (ancestor chains, labels, stats) so
+                          repeat reads are instant. The cache is best-effort — if it&rsquo;s ever
+                          unavailable, reads are recomputed and nothing breaks.
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center justify-between border-t border-glass-border/70 pt-3">
+                      <div className="pr-3">
+                        <p className="text-sm font-medium text-ink">Use a dedicated cache for this provider</p>
+                        <p className="text-xs text-ink-muted">
+                          Give this provider its own cache Redis — own host, credentials and TLS,
+                          insulated from changes to the global cache. Recommended when the graph runs
+                          in Redis Cluster mode.
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={formData.falkordbConnection?.cache.enabled ?? false}
+                        disabled={formData.falkordbConnection?.cache.legacyUrlPresent ?? false}
+                        onChange={(event) => updateCache({ enabled: event.target.checked })}
+                        className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                      />
+                    </label>
+
+                    {/* DEFAULT — say plainly what happens when the box is left unchecked */}
+                    {!(formData.falkordbConnection?.cache.enabled ?? false) && (
+                      <div className="flex items-start gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2.5">
+                        <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                        <p className="text-[11px] leading-relaxed text-ink-secondary">
+                          <span className="font-semibold text-ink">Using the shared cache.</span>{' '}
+                          Left unchecked, this provider uses the platform&rsquo;s global cache Redis —
+                          configured centrally under{' '}
+                          <span className="font-medium text-indigo-600 dark:text-indigo-400">Admin › Redis</span>{' '}
+                          and shared with every other provider. Nothing more to set up here. If no
+                          global cache is configured there, the provider simply runs without a cache
+                          (reads are recomputed on demand — still fully functional, just not cached).
+                        </p>
+                      </div>
+                    )}
+
+                    {formData.falkordbConnection?.cache.enabled && (
+                      formData.falkordbConnection.cache.legacyUrlPresent ? (
+                        <div className="space-y-2 rounded-lg border border-amber-500/20 bg-amber-500/8 p-3">
+                          <p className="text-[11px] leading-tight text-amber-700 dark:text-amber-300">
+                            This provider still uses the legacy dedicated-cache Redis URL (write-only,
+                            hidden). Paste it below to convert it into structured fields.
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              type="password"
+                              value={legacyCacheUrlInput}
+                              onChange={(event) => setLegacyCacheUrlInput(event.target.value)}
+                              placeholder="redis://:password@cache-host:6379/0"
+                              className="flex-1 rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleConvertLegacyCacheUrl}
+                              disabled={!legacyCacheUrlInput.trim()}
+                              className="whitespace-nowrap rounded-lg bg-indigo-500/10 px-3 py-2 text-xs font-semibold text-indigo-600 transition-colors hover:bg-indigo-500/20 disabled:opacity-50 dark:text-indigo-400"
+                            >
+                              Convert to structured config
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div>
+                            <label className="mb-1.5 block text-xs font-medium text-ink">Cache mode</label>
+                            <select
+                              value={formData.falkordbConnection.cache.mode}
+                              onChange={(event) =>
+                                updateCache({ mode: event.target.value as CacheConnectionState['mode'] })
+                              }
+                              className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                            >
+                              <option value="standalone">Standalone (single host)</option>
+                              <option value="sentinel">Redis Sentinel (HA)</option>
+                            </select>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3">
+                            <div className="col-span-2">
+                              <label className="mb-1.5 block text-xs font-medium text-ink">Cache host</label>
+                              <input
+                                value={formData.falkordbConnection.cache.host}
+                                onChange={(event) => updateCache({ host: event.target.value })}
+                                placeholder="cache-host"
+                                className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1.5 block text-xs font-medium text-ink">Cache port</label>
+                              <input
+                                type="number"
+                                value={formData.falkordbConnection.cache.port}
+                                onChange={(event) => updateCache({ port: Number(event.target.value) })}
+                                placeholder="cache-port"
+                                className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3">
+                            <div>
+                              <label className="mb-1.5 block text-xs font-medium text-ink">DB index</label>
+                              <input
+                                type="number"
+                                value={formData.falkordbConnection.cache.db}
+                                onChange={(event) => updateCache({ db: Number(event.target.value) })}
+                                placeholder="cache-db"
+                                className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1.5 block text-xs font-medium text-ink">Cache username</label>
+                              <input
+                                value={formData.falkordbConnection.cache.username}
+                                onChange={(event) => updateCache({ username: event.target.value })}
+                                placeholder="cache-user"
+                                className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1.5 block text-xs font-medium text-ink">Cache password</label>
+                              <input
+                                type="password"
+                                value={formData.falkordbConnection.cache.password}
+                                onChange={(event) => updateCache({ password: event.target.value })}
+                                placeholder={mode === 'edit' ? 'unchanged — enter to replace' : 'cache-password'}
+                                className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            </div>
+                          </div>
+
+                          {formData.falkordbConnection.cache.mode === 'sentinel' && (
+                            <>
+                              <div>
+                                <label className="mb-1.5 block text-xs font-medium text-ink">
+                                  Cache sentinel master name
+                                </label>
+                                <input
+                                  value={formData.falkordbConnection.cache.sentinelMasterName}
+                                  onChange={(event) => updateCache({ sentinelMasterName: event.target.value })}
+                                  placeholder="mymaster"
+                                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                />
+                              </div>
+                              <div>
+                                <label className="mb-1.5 block text-xs font-medium text-ink">
+                                  Cache sentinel nodes
+                                </label>
+                                {renderHostPortRows(
+                                  formData.falkordbConnection.cache.sentinelNodes,
+                                  (next) => updateCache({ sentinelNodes: next }),
+                                  26379,
+                                )}
+                              </div>
+                            </>
+                          )}
+
+                          <label className="flex items-center justify-between rounded-lg border border-glass-border bg-black/5 px-3 py-2 dark:bg-white/5">
+                            <p className="text-xs font-medium text-ink">Use TLS for the dedicated cache</p>
+                            <input
+                              type="checkbox"
+                              checked={formData.falkordbConnection.cache.tlsEnabled}
+                              onChange={(event) => updateCache({ tlsEnabled: event.target.checked })}
+                              className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                            />
+                          </label>
+
+                          {formData.falkordbConnection.cache.tlsEnabled && (
+                            <div className="space-y-3 rounded-lg border border-glass-border bg-black/5 p-3 dark:bg-white/5">
+                              <div>
+                                <label className="mb-1.5 block text-xs font-medium text-ink">
+                                  Cache CA certificate path <span className="text-ink-muted">(optional)</span>
+                                </label>
+                                <input
+                                  value={formData.falkordbConnection.cache.tlsCaCertPath}
+                                  onChange={(event) => updateCache({ tlsCaCertPath: event.target.value })}
+                                  placeholder="/certs/cache/ca.crt"
+                                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                                    Cache client cert path <span className="text-ink-muted">(mTLS)</span>
+                                  </label>
+                                  <input
+                                    value={formData.falkordbConnection.cache.tlsCertPath}
+                                    onChange={(event) => updateCache({ tlsCertPath: event.target.value })}
+                                    placeholder="/certs/cache/client.crt"
+                                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                                    Cache client key path <span className="text-ink-muted">(mTLS)</span>
+                                  </label>
+                                  <input
+                                    value={formData.falkordbConnection.cache.tlsKeyPath}
+                                    onChange={(event) => updateCache({ tlsKeyPath: event.target.value })}
+                                    placeholder="/certs/cache/client.key"
+                                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                  />
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="mb-1.5 block text-xs font-medium text-ink">Cache verify mode</label>
+                                  <select
+                                    value={formData.falkordbConnection.cache.tlsVerifyMode}
+                                    onChange={(event) =>
+                                      updateCache({
+                                        tlsVerifyMode: event.target.value as CacheConnectionState['tlsVerifyMode'],
+                                      })
+                                    }
+                                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                  >
+                                    <option value="required">Required (verify server)</option>
+                                    <option value="optional">Optional</option>
+                                    <option value="none">None (self-signed)</option>
+                                  </select>
+                                </div>
+                                <label className="flex items-end gap-2 pb-2 text-xs text-ink">
+                                  <input
+                                    type="checkbox"
+                                    checked={formData.falkordbConnection.cache.tlsCheckHostname}
+                                    onChange={(event) => updateCache({ tlsCheckHostname: event.target.checked })}
+                                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                                  />
+                                  Check hostname
+                                </label>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    )}
+                  </div>
+      )}
     </div>
   )
 

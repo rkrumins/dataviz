@@ -20,10 +20,9 @@ vi.mock('@/store/schema', () => ({
 }))
 
 // ensureDraftOpen invalidates the versioning query caches through @/main's
-// getQueryClient (dynamic import) — stub it, since importing the real module
-// mounts the app (same precedent as useRevealNode.test.ts).
+// getQueryClient (dynamic import) — stub it so the invalidation is observable.
 const invalidateQueries = vi.fn()
-vi.mock('@/main', () => ({
+vi.mock('@/lib/queryClient', () => ({
   getQueryClient: () => ({ invalidateQueries }),
 }))
 

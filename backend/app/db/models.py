@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import relationship
 
@@ -221,13 +222,26 @@ class FeatureDefinitionORM(Base):
     category_id = Column(Text, nullable=False)  # references feature_categories.id
     type = Column(Text, nullable=False)  # "boolean" | "string[]"
     default_value = Column(Text, nullable=False)  # JSON: true | false | ["graph",...]
+    # RETIRED. Declared true on two flags, served to the frontend, and honoured by absolutely
+    # nothing — the same decorative-field bug as `implemented`, in the same table. Nothing reads or
+    # writes it now; the column stays only because dropping it is a migration with no payoff. Do not
+    # revive it: per-user opt-outs on a deployment-wide governance switch is a different feature,
+    # and it would need building, not un-commenting.
     user_overridable = Column(Boolean, nullable=False, default=False)
     options = Column(Text, nullable=True)  # JSON: [{"id","label"},...] for string[]
     help_url = Column(Text, nullable=True)
     admin_hint = Column(Text, nullable=True)
+    # "What happens if I turn this off?" — the one question an admin must be able to answer
+    # BEFORE flipping a switch that affects everybody. Seeded from app/config/features_seed.py
+    # and editable from the admin UI, like the other prose columns.
+    impact_when_off = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     deprecated = Column(Boolean, nullable=False, default=False)
-    implemented = Column(Boolean, nullable=False, default=False)  # when True, feature is "wired" (no preview badge)
+    # DERIVED FROM CODE — reconciled from app/config/feature_wiring.py on every startup, and NOT
+    # editable over the API. It records whether the flag is actually wired (a server gate and/or
+    # a UI surface); an admin ticking a box cannot make a gate exist, and while they could, this
+    # column claimed four features were in a state they were not.
+    implemented = Column(Boolean, nullable=False, default=False)
 
 
 # ------------------------------------------------------------------ #
@@ -245,6 +259,42 @@ class FeatureRegistryMetaORM(Base):
 
     __table_args__ = (
         CheckConstraint("id = 1", name="feature_registry_meta_single_row"),
+    )
+
+
+# ------------------------------------------------------------------ #
+# feature_flag_changes  (who turned it off, and when)                #
+# ------------------------------------------------------------------ #
+
+class FeatureFlagChangeORM(Base):
+    """Every change to a feature flag, and who made it.
+
+    The Features page could tell you a flag was off. It could not tell you WHO turned it off, WHEN,
+    or what it was before — the config row carries a value and a version and nothing else. On a
+    surface where several admins can each silently remove a capability from every user of the
+    deployment, "someone did this at some point" is not an answer to the only question anyone asks
+    when a user reports that something has stopped working.
+
+    ``actor_name`` is DENORMALISED on purpose. A foreign key to ``users`` would either forbid
+    deleting a user who once flipped a switch, or take the history with them when they left — and
+    an audit trail that disappears when the person does is not an audit trail. The name is a
+    snapshot of who they were at the moment they acted, which is exactly what history means.
+    """
+    __tablename__ = "feature_flag_changes"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ffc_{uuid.uuid4().hex[:12]}")
+    feature_key = Column(Text, nullable=False)
+    old_value = Column(Text, nullable=True)   # JSON; null when the key had no stored value yet
+    new_value = Column(Text, nullable=False)  # JSON
+    actor_id = Column(Text, nullable=True)    # logical reference — no FK, see the docstring
+    actor_name = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # The two reads this table exists for: "what happened to THIS flag" (newest first), and
+        # "what happened recently" across all of them.
+        Index("idx_ffc_key_created", "feature_key", "created_at"),
+        Index("idx_ffc_created", "created_at"),
     )
 
 
@@ -562,8 +612,29 @@ class WorkspaceDataSourceORM(Base):
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
-        UniqueConstraint("catalog_item_id", name="uq_ds_catalog_item"),
+        # Uniqueness is scoped to LIVE rows. A soft-deleted data source still occupies every
+        # unique constraint it was in, and uq_ds_catalog_item is GLOBAL — so a plain constraint
+        # would mean deleting a data source locks its catalog item out of every workspace for the
+        # whole 30-day grace period. The undo window would silently be a lockout window.
+        # (Partial unique indexes permit many NULLs, exactly as the constraints did.)
+        # See alembic 20260714_1200_ds_soft_delete.
+        #
+        # `sqlite_where` as well as `postgresql_where`, and that is not belt-and-braces: the
+        # dialect kwargs are dialect-SPECIFIC, so a bare `postgresql_where` is SILENTLY DROPPED
+        # on SQLite — which is what the repo tests run on. The index would come out as a plain
+        # UNIQUE, the tombstone would squat on it again, and the lockout bug would be live in
+        # exactly the place we test for it. Both dialects support partial indexes; say so twice.
+        Index("uq_ds_ws_prov_graph_live", "workspace_id", "provider_id", "graph_name",
+              unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+        Index("uq_ds_catalog_item_live", "catalog_item_id",
+              unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+        Index("idx_ds_ws_live", "workspace_id",
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
         Index("idx_ds_catalog_item", "catalog_item_id"),

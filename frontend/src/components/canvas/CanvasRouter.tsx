@@ -24,7 +24,6 @@ import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeature } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { BranchBehindBanner } from '@/features/versioning/components/BranchBehindBanner'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
@@ -152,18 +151,14 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     >
     <ReactFlowProvider>
     <div className={cn("relative w-full h-full flex flex-col", className)}>
+      {/* The "you're behind Published" banner lives INSIDE CanvasVersioningBar (PullBeforeMergeBanner),
+          which now reads the same polled freshness signal BranchBehindBanner used to own. There were
+          two banners saying the same thing — one polled and thin, one derived and rich — and both
+          could render at once for the same draft. */}
       {versioningEnabled && activeView?.workspaceId && (
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}
-        />
-      )}
-      {versioningEnabled && activeView?.workspaceId && (
-        <BranchBehindBanner
-          wsId={activeView.workspaceId}
-          dataSourceId={activeView.dataSourceId ?? null}
-          viewId={activeView.id ?? null}
-          className="mx-4 mt-2"
         />
       )}
       <RestoredDraftBanner

@@ -57,6 +57,11 @@ if "FALKORDB_GRAPH_POOL_SIZE" not in os.environ:
     os.environ["FALKORDB_GRAPH_POOL_SIZE"] = "4"
 if "FALKORDB_REDIS_POOL_SIZE" not in os.environ:
     os.environ["FALKORDB_REDIS_POOL_SIZE"] = "4"
+# The provider cache client now sizes its pool from the central CACHE role
+# (REDIS_CACHE_MAX_CONNECTIONS), not FALKORDB_REDIS_POOL_SIZE — mirror the
+# same small-pool default there.
+if "REDIS_CACHE_MAX_CONNECTIONS" not in os.environ:
+    os.environ["REDIS_CACHE_MAX_CONNECTIONS"] = "4"
 
 
 # ── Lifespan ────────────────────────────────────────────────────────

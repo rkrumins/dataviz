@@ -58,7 +58,7 @@ vi.mock('@/store/auth', async (importOriginal) => {
 })
 
 const invalidateQueriesMock = vi.fn(async () => undefined)
-vi.mock('@/main', () => ({
+vi.mock('@/lib/queryClient', () => ({
     getQueryClient: () => ({ invalidateQueries: invalidateQueriesMock }),
 }))
 

@@ -38,7 +38,11 @@ from backend.common.adapters import (
     ProviderLoading,
     ProviderUnavailable,
 )
-from backend.common.interfaces.provider import GraphDataProvider
+from backend.common.interfaces.provider import (
+    GraphDataProvider,
+    ProviderConfigurationError,
+)
+from backend.common.interfaces.preflight import is_auth_reachable_reason
 
 from .state import ProbeOutcome, ProviderState
 
@@ -117,26 +121,40 @@ def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvide
     )
 
 
-def _assert_dedicated_cache_configured() -> None:
-    """WS2.1 decoupling guard. Deployed roles MUST run the provider cache on a
-    DEDICATED Redis, never the FalkorDB instance — a graph outage must not also
-    disable caching, and cache traffic must not contend with graph queries on
-    FalkorDB's single-threaded process. Fail fast at startup when CACHE_REDIS_URL
-    is unset in a WEB / WORKER / CONTROLPLANE role. In DEV a missing URL simply
-    runs cache-disabled (still decoupled — ``build_cache_client`` never
-    co-locates the cache on FalkorDB)."""
-    import os as _os
+def _assert_redis_roles_configured() -> None:
+    """Deployed roles must have every Redis endpoint they use resolvable.
+
+    The old guard only checked the *env* CACHE_REDIS_URL, so a deployment that
+    configured the cache purely per-provider failed to boot. Validate the roles
+    this process actually uses, and fail with the role, the resolved host and
+    what is missing — never a silent cache-off or a silent unauthenticated
+    connect.
+
+    The CACHE role is *not* required globally any more — a deployment may
+    configure it only per provider (extra_config.cacheConnection) — so it is
+    resolved and logged, not enforced. STREAMS is a single fleet-wide
+    coordination endpoint with no per-provider override, so it must resolve.
+    In DEV neither is enforced (still decoupled — ``build_cache_client`` never
+    co-locates the cache on FalkorDB).
+    """
     from backend.app.runtime.role import current_role, SynodicRole
+    from backend.common.adapters.redis_endpoint import (
+        RedisConfigurationError, RedisRole, resolve_redis_config,
+    )
 
     if current_role() == SynodicRole.DEV:
         return
-    if not _os.getenv("CACHE_REDIS_URL"):
-        raise RuntimeError(
-            f"CACHE_REDIS_URL is required in the {current_role().value!r} role: "
-            "the application cache must run on a DEDICATED Redis, not the "
-            "FalkorDB instance. Set CACHE_REDIS_URL (see common-config / "
-            "app-secrets)."
-        )
+    for role in (RedisRole.STREAMS, RedisRole.CACHE):
+        try:
+            cfg = resolve_redis_config(role)
+        except RedisConfigurationError as exc:
+            raise RuntimeError(f"Redis {role.value} endpoint mis-configured: {exc}")
+        if role is RedisRole.STREAMS and not cfg.is_configured:
+            raise RuntimeError(
+                "Redis STREAMS endpoint is not configured. Set REDIS_STREAMS_HOST "
+                "(or REDIS_STREAMS_SENTINEL_MASTER/_NODES, or the legacy REDIS_URL)."
+            )
+        logger.info("providers: redis %s", cfg.describe())
 
 
 class ProviderManager:
@@ -144,7 +162,7 @@ class ProviderManager:
 
     def __init__(self) -> None:
         # WS2.1: enforce operational/graph Redis decoupling at process start.
-        _assert_dedicated_cache_configured()
+        _assert_redis_roles_configured()
         # Workspace-centric cache: (provider_id, graph_name) -> breaker-wrapped provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
@@ -408,6 +426,19 @@ class ProviderManager:
                 reason="graph is starting up (loading dataset into memory)",
                 retry_after_seconds=5,
             )
+        if verdict == "auth":
+            # Reachable, but the graph credentials are missing/wrong. This is a
+            # CONFIGURATION error, not an outage: raising ProviderUnavailable here
+            # would tag it as unreachable with a 30s retry window and (via warmup)
+            # pre-trip the instantiation breaker — so the provider would stay blocked
+            # even after the operator fixes the credentials. ProviderConfigurationError
+            # is a LOGICAL error the circuit breaker ignores, so the moment the
+            # credentials are corrected the next request succeeds.
+            raise ProviderConfigurationError(
+                f"FalkorDB provider {cp} is reachable but its graph credentials are "
+                f"missing or rejected — add/correct the provider's username/password "
+                f"(or disable auth on the instance)."
+            )
         raise ProviderUnavailable(
             provider_name=cp,
             reason="provider unreachable (preflight failed)",
@@ -449,10 +480,17 @@ class ProviderManager:
                     preflight(deadline_s=_REACHABLE_PROBE_DEADLINE_S),
                     timeout=_REACHABLE_PROBE_DEADLINE_S + 1.0,
                 )
+                pf_reason = str(getattr(pf, "reason", ""))
                 if getattr(pf, "ok", False):
                     verdict = "ok"
-                elif "loading" in str(getattr(pf, "reason", "")).lower():
+                elif "loading" in pf_reason.lower():
                     verdict = "loading"
+                elif is_auth_reachable_reason(pf_reason):
+                    # Reachable but missing/wrong graph auth — a config error, not
+                    # an outage. Do NOT let it become verdict "down" (which blocks
+                    # the request as unreachable and, via warmup, pre-trips the
+                    # instantiation breaker).
+                    verdict = "auth"
             except Exception:
                 verdict = "down"
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
@@ -653,16 +691,46 @@ class ProviderManager:
             no socket I/O. Idempotent — calling .open() on an already-open
             breaker is a no-op.
 
-        Schema/auth/config errors should NOT call this — they're caller
-        bugs, not downstream failure (already filtered at the proxy layer
-        via _DEFAULT_IGNORED_EXCEPTIONS in circuit.py).
+        Schema/auth/config errors should NOT count as a downstream failure —
+        they're already filtered at the proxy layer via _DEFAULT_IGNORED_EXCEPTIONS
+        in circuit.py. This method ENFORCES that for reachable-but-misconfigured
+        auth reasons rather than trusting every caller to pre-filter (see below).
         """
+        cache_keys = self._resolve_state_for_provider(provider_id)
+
+        # Reachable-but-misconfigured (missing/wrong graph auth): the instance
+        # ANSWERED, so it is NOT an outage. Counting it toward the pre-trip counter
+        # would open the instantiation breaker with reason=auth_required and block
+        # the provider even after the operator fixes the credentials (until the
+        # breaker resets); storing an ok=False observation would also make the
+        # fast-fail gate short-circuit requests. Record it as REACHABLE (breaker +
+        # gate stay clear) while preserving the reason for status, reset the failure
+        # streak, and never pre-trip. The real connection path surfaces the precise
+        # ProviderConfigurationError (which the circuit breaker ignores).
+        if is_auth_reachable_reason(reason):
+            reachable = (
+                ProbeOutcome.from_warmup(ok=True, reason=reason, elapsed_ms=elapsed_ms)
+                if source == "warmup"
+                else ProbeOutcome.from_traffic(ok=True, reason=reason, elapsed_ms=elapsed_ms)
+            )
+            async with self._state_lock:
+                for cache_key in cache_keys:
+                    state = self._ensure_state(cache_key)
+                    state.last_observation = reachable
+                    state.consecutive_failures = 0
+                    if source == "warmup":
+                        state.last_warmup_at = reachable.observed_at
+            logger.info(
+                "Provider %s reachable but misconfigured (%s) — instantiation "
+                "breaker left closed", provider_id, reason,
+            )
+            return
+
         outcome = (
             ProbeOutcome.from_warmup(ok=False, reason=reason, elapsed_ms=elapsed_ms)
             if source == "warmup"
             else ProbeOutcome.from_traffic(ok=False, reason=reason, elapsed_ms=elapsed_ms)
         )
-        cache_keys = self._resolve_state_for_provider(provider_id)
         pre_trip_targets: List[Tuple[Tuple[str, str], AsyncCircuitBreaker]] = []
 
         async with self._state_lock:
@@ -983,6 +1051,7 @@ class ProviderManager:
         return self._create_provider_instance(
             row.provider_type, row.host, row.port, graph_name,
             row.tls_enabled, credentials, extra_config=merged_extra,
+            provider_id=provider_id,
         )
 
     @staticmethod
@@ -1018,6 +1087,7 @@ class ProviderManager:
         tls_enabled: bool,
         credentials: Optional[dict] = None,
         extra_config: Optional[dict] = None,
+        provider_id: Optional[str] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
@@ -1053,12 +1123,19 @@ class ProviderManager:
                 username=creds.get("username"),
                 password=creds.get("password"),
                 connection_config=_falkor_conn,
-                # Per-provider dedicated cache Redis (encrypted credential).
+                # Per-provider dedicated cache Redis (encrypted credential;
+                # deprecated alias — folded into credentials["cache_redis_url"]).
                 cache_redis_url=creds.get("cache_redis_url"),
                 auth_enabled=_auth_enabled,
                 # Connection-level TLS (the falkordbConnection.tls object adds
                 # CA/client-cert/verify mode). Previously dropped for FalkorDB.
                 tls_enabled=tls_enabled,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials) — resolved centrally by
+                # build_cache_client, never inherited from the graph connection.
+                provider_id=provider_id,
+                extra_config=extra_config,
+                credentials=creds,
             )
 
         elif ptype == "neo4j":
@@ -1069,6 +1146,12 @@ class ProviderManager:
                 password=creds.get("password", ""),
                 database=graph_name or "neo4j",
                 extra_config=extra_config,
+                # The CACHE role's per-provider override (extra_config.cacheConnection
+                # + the decrypted cache_* credentials, including the legacy
+                # extra_config.redisUrl alias) — resolved centrally by
+                # build_neo4j_cache_client, never inherited from the Bolt credentials.
+                provider_id=provider_id,
+                credentials=creds,
             )
 
         elif ptype == "datahub":

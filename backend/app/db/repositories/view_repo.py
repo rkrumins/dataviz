@@ -77,7 +77,9 @@ async def _get_data_source_name(
     if not data_source_id:
         return None
     result = await session.execute(
-        select(WorkspaceDataSourceORM.label).where(WorkspaceDataSourceORM.id == data_source_id)
+        select(WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.id == data_source_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     return result.scalar_one_or_none()
 
@@ -324,6 +326,7 @@ async def _batch_enrich_rows(
         res = await session.execute(
             select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
             .where(WorkspaceDataSourceORM.id.in_(ds_ids))
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
         ds_map = {did: label for did, label in res.all()}
 

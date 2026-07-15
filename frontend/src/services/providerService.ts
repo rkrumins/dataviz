@@ -29,9 +29,16 @@ export interface ProviderCreateRequest {
         // is optional when extraConfig.useEmulator is true.
         project_id?: string
         service_account_json?: string
-        // FalkorDB: dedicated cache Redis URL (may embed a password, so it
-        // travels as an encrypted credential rather than in extraConfig).
+        // FalkorDB legacy dedicated cache Redis URL (deprecated — new saves
+        // no longer emit this; kept for backward-compat parsing only).
         cache_redis_url?: string
+        // FalkorDB dedicated CACHE endpoint credentials (Fernet-encrypted,
+        // never returned). The non-secret half (host/port/db/tls paths)
+        // rides extraConfig.cacheConnection.
+        cache_username?: string
+        cache_password?: string
+        cache_sentinel_username?: string
+        cache_sentinel_password?: string
     }
     tlsEnabled?: boolean
     extraConfig?: Record<string, any>
@@ -49,7 +56,16 @@ export interface ProviderUpdateRequest {
         project_id?: string
         service_account_json?: string
         cache_redis_url?: string
+        cache_username?: string
+        cache_password?: string
+        cache_sentinel_username?: string
+        cache_sentinel_password?: string
     }
+    // Explicitly remove a credential key from the stored blob (an omitted
+    // field just leaves its existing value in place on merge). Used by the
+    // cache "Convert to structured config" flow to drop the superseded
+    // legacy cache_redis_url once its fields have been migrated.
+    credentialsClear?: string[]
     tlsEnabled?: boolean
     isActive?: boolean
     extraConfig?: Record<string, any>

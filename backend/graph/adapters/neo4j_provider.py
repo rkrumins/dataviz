@@ -11,8 +11,10 @@ Key design decisions
 * ``execute_read`` / ``execute_write`` with **async** work functions for
   automatic transient-error retry (Neo4j 5.x async driver requirement).
 * In-memory ``_TTLCache`` and LRU ``_URNLabelCache`` (no Redis requirement).
-* Optional Redis for ancestor-chain caching when ``extra_config.redisUrl``
-  is set; falls back to Cypher on-the-fly when absent.
+* Optional Redis for ancestor-chain caching, resolved via the central CACHE
+  role factory (``build_cache_client``) — ``extra_config.redisUrl`` is a
+  deprecated legacy alias, still honoured. Falls back to Cypher on-the-fly
+  when no cache is configured anywhere.
 * Batched BFS for ``get_trace_lineage`` — one Cypher per depth level.
 * ``discover_schema`` introspects unknown databases and suggests mappings.
 * Idempotent AGGREGATED edge materialization via ``sourceEdgeIds`` tracking.
@@ -84,6 +86,23 @@ def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[
         edgeType=str(rel_type),
         confidence=props.get("confidence"),
         properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+    )
+
+
+def build_neo4j_cache_client(*, provider_id: str, extra_config: dict, credentials: dict):
+    """Neo4j's ancestor cache rides the same CACHE endpoint as every other provider.
+
+    It used to build its own client from extra_config['redisUrl'] with no auth and no
+    TLS. That key is now a legacy alias folded into the credentials blob.
+    """
+    from backend.app.providers.falkordb_connection import build_cache_client
+
+    creds = dict(credentials or {})
+    legacy = (extra_config or {}).get("redisUrl")
+    if legacy and not creds.get("cache_redis_url"):
+        creds["cache_redis_url"] = legacy
+    return build_cache_client(
+        provider_id=provider_id, extra_config=extra_config, credentials=creds,
     )
 
 
@@ -161,7 +180,8 @@ class Neo4jProvider(GraphDataProvider):
       - ``schemaMapping``: property name translations (see SchemaMapping)
       - ``maxConnectionPoolSize``: driver pool size (default 50)
       - ``connectionTimeout``: connection timeout in seconds (default 30)
-      - ``redisUrl``: optional Redis for ancestor-chain caching
+      - ``redisUrl``: deprecated legacy alias for the cache Redis (see
+        ``cache_redis_url`` in ``credentials`` / the central CACHE role config)
     """
 
     def __init__(
@@ -171,12 +191,19 @@ class Neo4jProvider(GraphDataProvider):
         password: str = "",
         database: str = "neo4j",
         extra_config: Optional[Dict[str, Any]] = None,
+        provider_id: Optional[str] = None,
+        credentials: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._uri = uri
         self._username = username
         self._password = password
         self._database = database
         self._extra_config = extra_config or {}
+        # Identity + decrypted credentials for the CACHE role's central resolver
+        # (build_neo4j_cache_client / build_cache_client). Never the Neo4j Bolt
+        # credentials — the cache resolves its own auth.
+        self._provider_id = provider_id
+        self._credentials = credentials or {}
 
         self._driver = None
         self._lock = asyncio.Lock()
@@ -250,7 +277,11 @@ class Neo4jProvider(GraphDataProvider):
         return self._driver
 
     async def _ensure_redis(self):
-        """Lazily create Redis connection if redisUrl is configured.
+        """Lazily create the cache Redis connection via the central CACHE role
+        factory (``build_neo4j_cache_client``) — best-effort: ``None`` means no
+        cache is configured anywhere (no legacy ``redisUrl``, no per-provider
+        ``cacheConnection``, no global CACHE endpoint), and the provider falls
+        back to Cypher, same as before.
 
         Uses double-checked locking to prevent duplicate connections.
         """
@@ -259,18 +290,20 @@ class Neo4jProvider(GraphDataProvider):
         async with self._redis_lock:
             if self._redis is not None:
                 return
-            redis_url = self._extra_config.get("redisUrl")
-            if not redis_url:
-                return
             try:
-                import redis.asyncio as aioredis
                 from backend.common.adapters import TimeoutRedis
                 _redis_op_timeout = float(os.getenv("NEO4J_REDIS_OP_TIMEOUT", "3"))
-                _raw_redis = aioredis.from_url(redis_url, decode_responses=True)
+                _raw_redis = build_neo4j_cache_client(
+                    provider_id=self._provider_id or "",
+                    extra_config=self._extra_config,
+                    credentials=self._credentials,
+                )
+                if _raw_redis is None:
+                    return
                 await _raw_redis.ping()
                 self._redis = TimeoutRedis(_raw_redis, timeout=_redis_op_timeout)
                 self._redis_available = True
-                logger.info("Neo4j provider: Redis connected at %s", redis_url)
+                logger.info("Neo4j provider: cache Redis connected")
             except Exception as e:
                 logger.warning("Neo4j provider: Redis unavailable (%s), using Cypher fallback", e)
                 self._redis = None

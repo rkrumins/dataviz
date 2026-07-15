@@ -126,6 +126,23 @@ export interface VersioningImpact {
 export interface WorkspaceDataSourceImpactResponse {
     views: { id: string; name: string; type: string }[]
     versioning?: VersioningImpact | null
+    /** How long a delete can be undone for. The dialog's register depends on it. */
+    restoreWindowDays: number
+}
+
+/** A data source in the trash. */
+export interface DeletedDataSource {
+    id: string
+    label: string
+    deletedAt: string | null
+    /** A human name, never a user id. */
+    deletedBy: string
+    daysLeft: number
+    restoreWindowDays: number
+    /** The purge has started. There is nothing left to bring back. */
+    purging: boolean
+    /** The ONLY field the UI may act on. Never offer Restore when this is false. */
+    restorable: boolean
 }
 
 export interface ImpactedEntity {
@@ -284,10 +301,27 @@ export const workspaceService = {
         })
     },
 
-    removeDataSource(wsId: string, dsId: string): Promise<void> {
-        return request<void>(`${ADMIN_API}/${wsId}/data-sources/${dsId}`, {
+    /**
+     * Move a data source to the trash. REVERSIBLE — nothing is destroyed, and `restoreDataSource`
+     * puts it and its views back. Pass `permanent` only from the "delete permanently" flow, which
+     * queues the purge and cannot be undone.
+     */
+    removeDataSource(wsId: string, dsId: string, permanent = false): Promise<void> {
+        const q = permanent ? '?permanent=true' : ''
+        return request<void>(`${ADMIN_API}/${wsId}/data-sources/${dsId}${q}`, {
             method: 'DELETE',
         })
+    },
+
+    restoreDataSource(wsId: string, dsId: string): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources/${dsId}/restore`, {
+            method: 'POST',
+        })
+    },
+
+    /** The trash. Obey `restorable` — it is False once the purge has started. */
+    listDeletedDataSources(wsId: string): Promise<DeletedDataSource[]> {
+        return request<DeletedDataSource[]>(`${ADMIN_API}/${wsId}/data-sources/deleted`)
     },
 
     setPrimaryDataSource(wsId: string, dsId: string): Promise<DataSourceResponse> {

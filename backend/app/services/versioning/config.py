@@ -294,6 +294,16 @@ BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(
 # no per-window rescan cost to amortise away.
 PURGE_WINDOW: int = int(os.getenv("GRAPHVER_PURGE_WINDOW", "25000"))
 
+# THE UNDO WINDOW. A deleted data source sits in the trash for this long, fully restorable, and is
+# only then reclaimed. The tombstone's age IS the schedule — there is no scheduler table and no
+# `scheduled_for` column; the reaper simply asks which tombstones are older than this.
+PURGE_GRACE_DAYS: int = int(os.getenv("GRAPHVER_PURGE_GRACE_DAYS", "30"))
+
+# How often the reaper looks. Nothing is time-critical here — a tombstone that expires at 09:00
+# and gets reaped at 09:15 has cost nobody anything — and a slow scan keeps the trash query off
+# the hot path. It is deliberately NOT the 5s job poll.
+REAP_POLL_SECS: int = int(os.getenv("GRAPHVER_REAP_POLL_SECS", "900"))
+
 
 def _selftest() -> None:
     assert PARTITIONS >= 1 and MERKLE_DEPTH >= 1

@@ -34,6 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.feature_gate import require_feature
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
@@ -53,12 +54,33 @@ from backend.app.services.versioning.service import (
     MergeConflict,
     NotUpToDate,
     OntologyViolation,
+    PullRequestExists,
     Viewer,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ── Admin feature flags (Admin → Features) ────────────────────────────────────
+#
+# `graphExportEnabled` closes a real hole. An admin could turn OFF "Export layers"
+# (`semanticLayerExportEnabled`), watch the page go green, and believe their lineage could not
+# leave the product — while the graph DATA itself walked out through the export job and its
+# download, which no flag covered. Locking the schema and leaving the data open is the kind of
+# gap that only looks safe.
+#
+# The DOWNLOAD carries the gate as well as the job. Gating creation alone would stop new exports
+# while an already-queued one stayed collectable: the file leaves anyway, and the admin thinks
+# they shut the door.
+_GATE_GRAPH_EXPORT = require_feature("graphExportEnabled")
+
+# `blankModelsEnabled` is the provenance switch. A hand-drawn model looks exactly like a discovered
+# one on the canvas, and once it's in the estate nobody downstream can tell which is which. Until
+# now the only way to forbid it was to turn version control off entirely — which also took drafts,
+# reviews and history with it, so nobody ever did.
+_GATE_BLANK_MODELS = require_feature("blankModelsEnabled")
 
 # Permission constants (a graph is a data source — reuse its perms).
 _READ = "workspace:datasource:read"
@@ -423,6 +445,12 @@ def _domain_errors():
         raise HTTPException(status_code=409, detail={
             "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
             "message": str(exc)})
+    except PullRequestExists as exc:
+        # Carries the EXISTING prId so the client can route the user to the review that already
+        # covers this branch, rather than dead-ending them on "no".
+        raise HTTPException(status_code=409, detail={
+            "type": "pull_request_exists", "prId": exc.pr_id, "branchId": exc.branch_id,
+            "title": exc.title, "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
@@ -808,6 +836,35 @@ class MergePreviewResponse(_ApiModel):
     changes: Dict[str, int]
 
 
+class IncomingModel(_ApiModel):
+    """What a pull brought in from ``main`` — the upstream commits folded into the draft and their
+    NET effect on state. `branchId` + `fromSeq`/`toSeq` fully identify the window, so the client
+    fetches the full field-level diff from `/diff-window` without needing any state of its own
+    (`commit_seq` is per-branch, so the seqs are meaningless without the branch they belong to)."""
+    branch_id: Optional[str] = Field(default=None, alias="branchId")
+    commit_ids: List[str] = Field(default_factory=list, alias="commitIds")
+    commit_count: int = Field(default=0, alias="commitCount")
+    contributors: List[str] = Field(default_factory=list)
+    stats: Dict[str, int] = Field(default_factory=dict)
+    from_seq: int = Field(default=0, alias="fromSeq")
+    to_seq: int = Field(default=0, alias="toSeq")
+
+
+class RebaseResponse(_ApiModel):
+    """The result of pulling latest into a draft.
+
+    `changes` and `incoming` are DIFFERENT THINGS and were previously conflated (only the former
+    existed): `changes` is how YOUR OWN edits had to be rewritten to sit on the new base — usually
+    nothing — while `incoming` is what actually arrived from Published. Reporting only `changes`
+    is why a pull could never tell the user what it had pulled."""
+    clean: bool
+    conflicts: List[dict] = Field(default_factory=list)
+    changes: Dict[str, int] = Field(default_factory=dict)
+    incoming: Optional[IncomingModel] = None
+    base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+    already_up_to_date: bool = Field(default=False, alias="alreadyUpToDate")
+
+
 class EntityHistoryResponse(_ApiModel):
     entity_id: str = Field(alias="entityId")
     versions: List[dict]
@@ -944,6 +1001,10 @@ class PrResponse(_ApiModel):
     updated_at: str = Field(alias="updatedAt")
     merged_at: Optional[str] = Field(default=None, alias="mergedAt")  # when + who merged
     merged_by: Optional[str] = Field(default=None, alias="mergedBy")
+    # HOW it was merged: "review" (through this PR) or "direct_publish" (a manager published the
+    # source branch straight to main, which lands the same changes and so resolves this PR). The UI
+    # says so plainly rather than passing a bypassed review off as a reviewed merge.
+    merged_via: Optional[str] = Field(default=None, alias="mergedVia")
     closed_at: Optional[str] = Field(default=None, alias="closedAt")  # when + who closed
     closed_by: Optional[str] = Field(default=None, alias="closedBy")
     # id → display name for every actor id this item references (see _attach_user_names).
@@ -1064,6 +1125,10 @@ async def _taken_graph_names(
         select(WorkspaceDataSourceORM.graph_name, WorkspaceDataSourceORM.dedicated_graph_name)
         .where(
             WorkspaceDataSourceORM.provider_id == provider_id,
+            # A tombstone must not reserve its graph name forever. The live
+            # GRAPH.LIST pass below still guards the destructive case: while the
+            # deleted source's key physically exists, the name stays taken.
+            WorkspaceDataSourceORM.deleted_at.is_(None),
             or_(WorkspaceDataSourceORM.graph_name.ilike(like),
                 WorkspaceDataSourceORM.dedicated_graph_name.ilike(like)),
         ))).all()
@@ -1143,6 +1208,7 @@ async def _graph_name_availability(
     ds_taken = (await session.execute(
         select(WorkspaceDataSourceORM.id).where(
             WorkspaceDataSourceORM.provider_id == provider_id,
+            WorkspaceDataSourceORM.deleted_at.is_(None),
             or_(WorkspaceDataSourceORM.graph_name == normalized,
                 WorkspaceDataSourceORM.dedicated_graph_name == normalized),
         ).limit(1))).scalar_one_or_none()
@@ -1180,7 +1246,8 @@ async def check_blank_graph_name(
 
 
 @router.post("/blank-graphs", response_model=BlankGraphResponse,
-             status_code=status.HTTP_201_CREATED)
+             status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(_GATE_BLANK_MODELS)])
 async def create_blank_graph(
     ws_id: str,
     body: CreateBlankGraphRequest,
@@ -1592,7 +1659,7 @@ async def update_branch(
         )
 
 
-@router.post("/graphs/{graph_id}/branches/{branch_id}/rebase")
+@router.post("/graphs/{graph_id}/branches/{branch_id}/rebase", response_model=RebaseResponse)
 async def rebase_draft(
     ws_id: str, graph_id: str, branch_id: str, body: RebaseRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
@@ -1600,8 +1667,14 @@ async def rebase_draft(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Pull the latest ``main`` into a draft ("update branch"). Returns ``{clean, conflicts, changes,
-    baseCommitSeq}``; on ``clean: false`` the client resolves the conflicts and resubmits with
-    ``resolutions``."""
+    incoming, baseCommitSeq, alreadyUpToDate}``; on ``clean: false`` the client resolves the conflicts
+    and resubmits with ``resolutions``.
+
+    NOTE this route had NO response_model, so it returned the service's raw snake_case dict — while
+    the client typed the fields as camelCase. `baseCommitSeq` and `alreadyUpToDate` were therefore
+    always `undefined` on the client, which is why "Pull latest" claimed it had pulled changes even
+    when the draft was already up to date. The model puts the wire back on the camelCase contract
+    every other route here follows."""
     with _domain_errors():
         return await svc.rebase_draft(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, resolutions=body.resolutions,
@@ -1881,6 +1954,26 @@ async def get_diff(
     with _domain_errors():
         return await svc.diff_commits(graph_id=graph_id, branch_id=branch_id,
                                       from_seq=from_seq, to_seq=to_seq, viewer=viewer)
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/diff-window",
+            response_model=DiffVsMainResponse)
+async def get_diff_window(
+    ws_id: str, graph_id: str, branch_id: str,
+    from_seq: int = Query(..., ge=0, alias="fromSeq"),
+    to_seq: int = Query(..., ge=0, alias="toSeq"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """A branch's changes between two seqs with WHOLE-PAYLOAD before/after — the shape the Changes
+    panel renders. `/diff` answers the same question id-keyed, which can count the changes but not
+    show them (no payloads ⇒ the UI can only print raw URNs). Used for "what came in when I pulled":
+    the window is main between the draft's old and new base, and the pull commit records both seqs."""
+    with _domain_errors():
+        return await svc.diff_window(graph_id=graph_id, branch_id=branch_id,
+                                     from_seq=from_seq, to_seq=to_seq, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
@@ -2399,7 +2492,8 @@ class CreateExportResponse(_ApiModel):
     status: str
 
 
-@router.post("/graphs/{graph_id}/exports", response_model=CreateExportResponse, status_code=202)
+@router.post("/graphs/{graph_id}/exports", response_model=CreateExportResponse, status_code=202,
+             dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def create_export(
     ws_id: str, graph_id: str,
     background: BackgroundTasks,
@@ -2456,7 +2550,8 @@ async def get_export(
     return job
 
 
-@router.get("/graphs/{graph_id}/exports/{job_id}/download")
+@router.get("/graphs/{graph_id}/exports/{job_id}/download",
+            dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def download_export(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),

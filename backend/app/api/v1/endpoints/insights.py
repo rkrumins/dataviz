@@ -433,11 +433,18 @@ async def refresh_all_assets(
         asset_names = cached_names
     asset_names = asset_names[: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
 
+    # Bound the fan-out: enqueues are cheap Redis hops, but the endpoint
+    # holds one WEB session for the whole gather, so an unbounded ~200-wide
+    # burst is avoided in favour of a bounded microbatch.
+    sem = asyncio.Semaphore(max(1, resilience.INSIGHTS_REFRESH_ENQUEUE_CONCURRENCY))
+
+    async def _enqueue_one(name: str) -> Optional[str]:
+        async with sem:
+            return await enqueue_discovery_job_force(provider_id, name)
+
     list_job_id = await enqueue_discovery_job_force(provider_id, "")
     asset_job_ids = list(
-        await asyncio.gather(
-            *(enqueue_discovery_job_force(provider_id, n) for n in asset_names)
-        )
+        await asyncio.gather(*(_enqueue_one(n) for n in asset_names))
     )
 
     return {

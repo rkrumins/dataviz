@@ -3,22 +3,37 @@
     {
       "key": "editModeEnabled",
       "name": "Edit mode",
-      "description": "Allow users to edit node properties from views and persist changes to the underlying data.",
+      "description": "Let people change the data itself \u2014 editing node properties from a view and saving those changes back to the source.",
       "category": "editing",
       "type": "boolean",
       "default": true,
-      "userOverridable": true,
       "options": null,
       "helpUrl": null,
-      "adminHint": null,
+      "adminHint": "Turn this off for a read-only deployment \u2014 a demo estate, or a production instance where lineage is owned upstream and must not be edited by hand.",
+      "impactWhenOff": "Views become read-only. The edit controls disappear from the entity drawer and the canvas, and the server refuses any change to a node or edge. Nothing already saved is affected, and everyone can still read, filter and export.",
       "sortOrder": 0,
       "deprecated": false,
-      "implemented": false
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Graph mutation routes \u2014 node/edge create, update and delete"
+      ],
+      "uiSurfaces": [
+        "Edit controls in the entity drawer",
+        "Node/edge editing on the canvas"
+      ],
+      "stillAllowed": [
+        "Reading every view",
+        "Exporting data"
+      ],
+      "dependsOn": []
     },
     {
       "key": "allowedViewModes",
       "name": "View modes",
-      "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Context View, Layered Lineage).",
+      "description": "Which layouts people can choose when they build a new view \u2014 Graph, Hierarchy, Context View, Layered Lineage.",
       "category": "views",
       "type": "string[]",
       "default": [
@@ -27,7 +42,6 @@
         "reference",
         "layered-lineage"
       ],
-      "userOverridable": false,
       "options": [
         {
           "id": "graph",
@@ -47,160 +61,390 @@
         }
       ],
       "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 1,
+      "adminHint": "Narrow this when you want everyone landing on the same kind of view. Clearing it entirely would leave nobody able to build anything, so at least one layout must stay on.",
+      "impactWhenOff": "A layout you remove disappears from the View wizard and the server refuses to create a view in it. Views ALREADY built in that layout keep working and stay editable \u2014 the layout is withdrawn from new work, not deleted.",
+      "sortOrder": 0,
       "deprecated": false,
-      "implemented": false
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST/PUT /views \u2014 refuses a view whose type is not in the list"
+      ],
+      "uiSurfaces": [
+        "Layout picker in the View wizard"
+      ],
+      "stillAllowed": [
+        "Views already built in a removed layout keep working \u2014 the layout is withdrawn from NEW views, not deleted"
+      ],
+      "dependsOn": []
     },
     {
       "key": "signupEnabled",
-      "name": "Signup",
-      "description": "Allow new users to create an account from the login page (self-registration).",
+      "name": "Self-registration",
+      "description": "Let anyone who reaches the login page create their own account.",
       "category": "auth",
       "type": "boolean",
       "default": false,
-      "userOverridable": false,
       "options": null,
       "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 2,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "traceEnabled",
-      "name": "Trace",
-      "description": "Enable lineage trace in graph and context views (trace upstream/downstream from a node).",
-      "category": "lineage",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": true,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 3,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerNonAdminEditing",
-      "name": "Non-admin editing",
-      "description": "Allow non-admin users to create, edit, and publish semantic layers. When disabled, only admins can manage semantic layer definitions.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": false,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": "Enable this to let team members define their own semantic layers without admin intervention. They can still only edit draft layers they created.",
+      "adminHint": "Leave this off unless your instance is deliberately public. Invitations are the normal way in, and they keep working either way.",
+      "impactWhenOff": "Strangers cannot create accounts: the create-account link disappears and the server refuses registration. Invited users can still register, and existing users sign in as normal. This is the door to your instance \u2014 it stays shut unless you open it.",
       "sortOrder": 0,
       "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerExportEnabled",
-      "name": "Export",
-      "description": "Allow users to export semantic layer definitions as JSON files for backup, migration, or sharing between environments.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 1,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerAutoSuggest",
-      "name": "Auto-suggest from graph",
-      "description": "Enable the 'Suggest from Graph' feature that automatically generates semantic layer definitions by analyzing the entity and relationship types in the connected data source.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 2,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerVersionHistory",
-      "name": "Version history & audit trail",
-      "description": "Show the full version history and audit trail for each semantic layer, including who made changes, when, and what was modified.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 3,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerEditMode",
-      "name": "Edit mode",
-      "description": "Allow users to enter edit mode on semantic layer definitions to modify entity types, relationships, hierarchy, and other structural settings.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": "When disabled, semantic layers are read-only for all users. Admins can still publish, clone, and export.",
-      "sortOrder": 4,
-      "deprecated": false,
-      "implemented": false
-    },
-    {
-      "key": "semanticLayerImportEnabled",
-      "name": "Import",
-      "description": "Allow users to import semantic layer definitions from exported JSON files. Supports creating new layers or updating existing ones with change detection and version management.",
-      "category": "semantic_layers",
-      "type": "boolean",
-      "default": true,
-      "userOverridable": false,
-      "options": null,
-      "helpUrl": null,
-      "adminHint": "Disable if you want to restrict semantic layer changes to the UI editor only, preventing bulk imports.",
-      "sortOrder": 5,
-      "deprecated": false,
-      "implemented": false
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "POST /auth/register \u2014 refuses strangers without an invite"
+      ],
+      "uiSurfaces": [
+        "Create-account link on the login page"
+      ],
+      "stillAllowed": [
+        "Invited users can always register",
+        "Everyone can sign in"
+      ],
+      "dependsOn": []
     },
     {
       "key": "versioningEnabled",
       "name": "Version control",
-      "description": "Drafts, reviews, publishing, history and rollback for data sources. When off, all version-control tools are hidden and canvases are view-only. Existing history is kept and stays safe.",
+      "description": "Drafts, reviews, publishing, history and rollback for data sources \u2014 the whole change-management workflow.",
       "category": "lineage",
       "type": "boolean",
       "default": true,
-      "userOverridable": false,
       "options": null,
       "helpUrl": null,
-      "adminHint": "Turning this off hides version control for every user and makes editing unavailable. Background sync of already-versioned data keeps running, and nothing is deleted.",
+      "adminHint": "The widest switch on this page: it withdraws editing as well as versioning, because an edit with nowhere to be reviewed is just an unaudited write.",
+      "impactWhenOff": "Every version-control surface is hidden and canvases become view-only: no drafts, no reviews, no publishing, no blank models. Existing history is KEPT and stays safe, background sync of already-versioned data keeps running, and nothing is deleted \u2014 turning it back on restores everything exactly as it was.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "versioning_gate.py \u2014 every /graph write (drafts, commits, merges, reverts)",
+        "versioned_write_provider.py \u2014 backstop on the write-through path"
+      ],
+      "uiSurfaces": [
+        "Canvas edit mode, drafts, reviews and history",
+        "Import/export menu on the context view",
+        "Blank-model creation",
+        "Version history timeline and PR drawer"
+      ],
+      "stillAllowed": [
+        "Reading every canvas and view",
+        "Existing history is kept \u2014 nothing is deleted",
+        "Background sync of already-versioned data keeps running"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "traceEnabled",
+      "name": "Lineage trace",
+      "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Trace can be expensive on very large graphs. Turning it off is a legitimate way to protect a struggling provider without taking the whole view away.",
+      "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. People can still browse and expand the graph by hand \u2014 they just can't ask it to walk the lineage for them.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/trace \u2014 upstream/downstream lineage traversal"
+      ],
+      "uiSurfaces": [
+        "Trace button in the graph and context view toolbars"
+      ],
+      "stillAllowed": [
+        "Browsing and expanding the graph by hand"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "graphExportEnabled",
+      "name": "Export graph data",
+      "description": "Let people download the lineage data itself \u2014 the nodes and edges of a graph \u2014 as a file they can take away.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "This is the switch that decides whether your lineage can leave the product. Note that 'Export layers' only covers the SCHEMA \u2014 the shape of your estate. This one covers the data. If you are turning one off for confidentiality, you almost certainly want both.",
+      "impactWhenOff": "The export controls disappear and the server refuses both the export job and the download. Everything inside the product is unaffected: people can still read, filter and trace every graph they have access to. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graphs/{id}/exports \u2014 start an export job",
+        "GET /graphs/{id}/exports/{job}/download \u2014 take the file"
+      ],
+      "uiSurfaces": [
+        "Export controls on the canvas and the context-view menu"
+      ],
+      "stillAllowed": [
+        "Reading, filtering and tracing every graph in the product",
+        "Exports already downloaded are not recalled \u2014 this stops NEW ones"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "blankModelsEnabled",
+      "name": "Build lineage from scratch",
+      "description": "Let people create a lineage model by hand, with no data source behind it \u2014 drawing the nodes and edges themselves.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off if your rule is that all lineage must trace back to a real system. A hand-drawn model looks exactly like a discovered one on the canvas, and once it is in the estate nobody downstream can tell which is which.",
+      "impactWhenOff": "Lineage must come from a connected data source. The blank-model option disappears from the View wizard and the server refuses to provision one. Every blank model already built keeps working and stays editable \u2014 this only stops NEW ones.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /blank-graphs \u2014 provision a lineage model with no data source"
+      ],
+      "uiSurfaces": [
+        "Blank-model option in the View wizard",
+        "'Start from scratch' on the canvas empty state"
+      ],
+      "stillAllowed": [
+        "Every blank model already built keeps working and stays editable",
+        "Building views on top of real data sources"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
+      "key": "semanticLayerEditMode",
+      "name": "Edit semantic layers",
+      "description": "Create, change and delete semantic layers \u2014 the entity types, relationships and hierarchy that give a raw graph its meaning.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Freeze the semantic model during a migration or an audit. Because every view resolves through these layers, a careless edit here is felt everywhere at once.",
+      "impactWhenOff": "Semantic layers become read-only for everyone, including admins: the editor opens but cannot save, and the server refuses create, update, delete, new-version and import \u2014 importing is editing, it just arrives as a file. Publishing, cloning and exporting still work, and every existing layer keeps doing its job.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/ontologies \u2014 create",
+        "PUT /admin/ontologies/{id} \u2014 update",
+        "DELETE /admin/ontologies/{id} \u2014 delete",
+        "POST /admin/ontologies/{id}/restore",
+        "POST /admin/ontologies/{id}/new-version",
+        "POST /admin/ontologies/import and /{id}/import \u2014 importing IS editing"
+      ],
+      "uiSurfaces": [
+        "Create / Edit / Delete controls on the semantic layer pages",
+        "The layer editor is read-only"
+      ],
+      "stillAllowed": [
+        "Publishing",
+        "Cloning",
+        "Exporting",
+        "Reading every layer"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "semanticLayerNonAdminEditing",
+      "name": "Let non-admins edit layers",
+      "description": "Allow people who are not platform admins to create and change semantic layers, provided they hold the permission to manage them.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off to make semantic layers an admin-only surface \u2014 worth doing if your layers are shared governance objects and a workspace-level change would ripple into workspaces its author doesn't own. It has no effect while 'Edit semantic layers' is off: that switch stops everyone, admins included.",
+      "impactWhenOff": "Only platform admins can write to a semantic layer. Everyone else keeps read access and their edit controls are hidden \u2014 the server refuses their writes even if they otherwise hold the manage permission. Note this includes your workspace admins and data engineers, who can edit layers today.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every semantic-layer write (create, update, delete, restore, new-version, publish, clone, import) \u2014 a non-admin is refused unless this is on"
+      ],
+      "uiSurfaces": [
+        "Edit controls are hidden from non-admins on the semantic layer pages"
+      ],
+      "stillAllowed": [
+        "Admins can always manage layers",
+        "Everyone can read layers"
+      ],
+      "dependsOn": [
+        "semanticLayerEditMode"
+      ]
+    },
+    {
+      "key": "semanticLayerImportEnabled",
+      "name": "Import layers",
+      "description": "Bring a semantic layer in from an exported JSON file \u2014 as a new layer, or as a new version of an existing one.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off to keep every change to the semantic model going through the editor, where it is reviewable, rather than arriving as a bulk file.",
+      "impactWhenOff": "The Import button disappears and the server refuses uploads. Layers can still be built and edited in the UI, and exporting still works.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/ontologies/import \u2014 import as a new layer",
+        "POST /admin/ontologies/{id}/import \u2014 import into an existing layer"
+      ],
+      "uiSurfaces": [
+        "Import button on the semantic layer pages"
+      ],
+      "stillAllowed": [
+        "Editing layers in the UI editor",
+        "Exporting"
+      ],
+      "dependsOn": [
+        "semanticLayerEditMode"
+      ]
+    },
+    {
+      "key": "semanticLayerExportEnabled",
+      "name": "Export layers",
+      "description": "Download a semantic layer as JSON \u2014 for backup, for review, or to move it to another environment.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A semantic layer describes the shape of your estate. If that shape is itself sensitive, this is the switch that stops it leaving.",
+      "impactWhenOff": "The Export button disappears and the server refuses the download. Reading and editing layers in the UI is unaffected.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "GET /admin/ontologies/{id}/export \u2014 download the definition as JSON"
+      ],
+      "uiSurfaces": [
+        "Export button on the semantic layer pages"
+      ],
+      "stillAllowed": [
+        "Reading and editing layers in the UI"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "semanticLayerAutoSuggest",
+      "name": "Suggest from graph",
+      "description": "Profile a connected data source and score the existing semantic layers against it, so onboarding can recommend the layer that actually fits.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Scoring reads the source's cached profile, not the source itself, so it is cheap. Turn it off only if you want layer choice to be a deliberate human decision every time.",
+      "impactWhenOff": "The suggestion step disappears from the onboarding and data-source wizards, along with the match percentages, and the server refuses to score. People choose a layer from the list by hand \u2014 which, with several similarly-named layers, is genuinely harder.",
       "sortOrder": 4,
       "deprecated": false,
-      "implemented": true
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/ontologies/suggest \u2014 score layers against a graph"
+      ],
+      "uiSurfaces": [
+        "Suggest-from-graph step in the onboarding and data-source wizards",
+        "Match percentages when choosing a layer"
+      ],
+      "stillAllowed": [
+        "Choosing a layer by hand",
+        "Building a layer from scratch"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "semanticLayerVersionHistory",
+      "name": "Layer history & audit",
+      "description": "Show every past version of a semantic layer and the audit trail of who changed what, and when.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "This hides the audit trail from users \u2014 it does not stop it being recorded. If you are turning it off for compliance reasons, check that hiding is what the requirement asks for.",
+      "impactWhenOff": "The history and audit tabs disappear and the server refuses to serve them. Nothing is deleted: every version is still retained, and it all comes back the moment this is switched on again.",
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "GET /admin/ontologies/{id}/versions \u2014 the version list",
+        "GET /admin/ontologies/{id}/audit \u2014 the audit trail"
+      ],
+      "uiSurfaces": [
+        "History and audit tabs on a semantic layer"
+      ],
+      "stillAllowed": [
+        "History is hidden, not deleted \u2014 every version is retained and returns when this is switched back on"
+      ],
+      "dependsOn": []
     },
     {
       "key": "announcementsEnabled",
       "name": "Announcements",
-      "description": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
+      "description": "Show announcement banners to everyone using the product.",
       "category": "notifications",
       "type": "boolean",
       "default": true,
-      "userOverridable": false,
       "options": null,
       "helpUrl": null,
-      "adminHint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
+      "adminHint": "The fastest way to silence every banner at once without going through them one by one.",
+      "impactWhenOff": "Banners stop appearing for everyone \u2014 the server serves no announcements at all. Your individual announcements are HIDDEN, not deactivated: turn this back on and they return exactly as they were.",
       "sortOrder": 0,
       "deprecated": false,
-      "implemented": true
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "GET /announcements \u2014 serves an empty list when off"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Announcements are hidden, not deactivated \u2014 turning this back on restores them"
+      ],
+      "dependsOn": []
     }
   ],
   "categories": [
@@ -210,9 +454,9 @@
       "icon": "Pencil",
       "color": "indigo",
       "sortOrder": 0,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
     },
     {
       "id": "views",
@@ -220,9 +464,9 @@
       "icon": "LayoutTemplate",
       "color": "violet",
       "sortOrder": 1,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
     },
     {
       "id": "auth",
@@ -230,9 +474,9 @@
       "icon": "UserPlus",
       "color": "emerald",
       "sortOrder": 2,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
     },
     {
       "id": "lineage",
@@ -240,16 +484,46 @@
       "icon": "GitBranch",
       "color": "amber",
       "sortOrder": 3,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
+    },
+    {
+      "id": "semantic_layers",
+      "label": "Semantic Layers",
+      "icon": "Layers",
+      "color": "indigo",
+      "sortOrder": 4,
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
+    },
+    {
+      "id": "governance",
+      "label": "Data Governance",
+      "icon": "Shield",
+      "color": "rose",
+      "sortOrder": 5,
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
+    },
+    {
+      "id": "notifications",
+      "label": "Notifications",
+      "icon": "Bell",
+      "color": "slate",
+      "sortOrder": 6,
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
     },
     {
       "id": "display",
       "label": "Display & UI",
       "icon": "Palette",
       "color": "blue",
-      "sortOrder": 4,
+      "sortOrder": 6,
       "preview": true,
       "previewLabel": "Not yet wired",
       "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
@@ -259,7 +533,7 @@
       "label": "Security",
       "icon": "Shield",
       "color": "rose",
-      "sortOrder": 5,
+      "sortOrder": 7,
       "preview": true,
       "previewLabel": "Not yet wired",
       "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
@@ -269,7 +543,7 @@
       "label": "Integrations",
       "icon": "Plug",
       "color": "sky",
-      "sortOrder": 6,
+      "sortOrder": 8,
       "preview": true,
       "previewLabel": "Not yet wired",
       "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
@@ -279,7 +553,7 @@
       "label": "Analytics",
       "icon": "BarChart3",
       "color": "teal",
-      "sortOrder": 7,
+      "sortOrder": 9,
       "preview": true,
       "previewLabel": "Not yet wired",
       "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
@@ -289,7 +563,7 @@
       "label": "Experimental",
       "icon": "FlaskConical",
       "color": "fuchsia",
-      "sortOrder": 8,
+      "sortOrder": 10,
       "preview": true,
       "previewLabel": "Not yet wired",
       "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
@@ -299,30 +573,10 @@
       "label": "Performance",
       "icon": "Zap",
       "color": "orange",
-      "sortOrder": 9,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
-    },
-    {
-      "id": "notifications",
-      "label": "Notifications",
-      "icon": "Bell",
-      "color": "slate",
-      "sortOrder": 10,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
-    },
-    {
-      "id": "semantic_layers",
-      "label": "Semantic Layers",
-      "icon": "Layers",
-      "color": "indigo",
       "sortOrder": 11,
-      "preview": false,
-      "previewLabel": null,
-      "previewFooter": null
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
     },
     {
       "id": "other",
@@ -344,14 +598,16 @@
       "layered-lineage"
     ],
     "signupEnabled": false,
+    "versioningEnabled": true,
     "traceEnabled": true,
-    "semanticLayerNonAdminEditing": false,
+    "graphExportEnabled": true,
+    "blankModelsEnabled": true,
+    "semanticLayerEditMode": true,
+    "semanticLayerNonAdminEditing": true,
+    "semanticLayerImportEnabled": true,
     "semanticLayerExportEnabled": true,
     "semanticLayerAutoSuggest": true,
     "semanticLayerVersionHistory": true,
-    "semanticLayerEditMode": true,
-    "semanticLayerImportEnabled": true,
-    "versioningEnabled": true,
     "announcementsEnabled": true
   },
   "experimentalNotice": {

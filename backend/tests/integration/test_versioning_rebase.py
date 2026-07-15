@@ -77,9 +77,56 @@ async def _run() -> None:
     rc2 = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol",
                                  resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}})
     assert rc2["clean"] is True
-    mr3 = await svc.open_draft_mr(graph_id=gid, branch_id=d3, actor="carol")
-    assert await svc.merge_mr(mr_id=mr3, actor="carol", message="merge z2")
+    # The SAME PR merges — a pull does not stale a PR, so no second one is opened (nor could be:
+    # one live PR per branch). Its diff is computed live from the branch, so the rebase is already
+    # reflected in it, and the pull cleared its behind-gate.
+    assert (await svc.get_pr(mr3a))["behind"] is False
+    assert await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z2")
     assert (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]["A"]["f"] == 99
+
+    # ══ A PULL IS RECORDED. The case that used to write NOTHING: upstream changes that don't touch
+    #    the entities this draft edited. deltas over `own` came out empty, so no commit was written —
+    #    base_commit_seq just moved and the branch history had a silent gap exactly where someone
+    #    else's work arrived. Now a `pull` commit always lands, carrying the upstream commits. ══
+    dP = await _draft(svc, gid, "dan", "feature-p", [_node("P", f=1)])         # dan touches only P
+    up1 = await _draft(svc, gid, "erin", "up-1", [_node("U1", f=1)])           # …others land elsewhere
+    await svc.publish(graph_id=gid, branch_id=up1, actor="erin", message="upstream one")
+    up2 = await _draft(svc, gid, "frank", "up-2", [_node("U2", f=1)])
+    await svc.publish(graph_id=gid, branch_id=up2, actor="frank", message="upstream two")
+
+    log_before = await svc.commit_log(graph_id=gid, branch_id=dP)
+    res = await svc.rebase_draft(graph_id=gid, branch_id=dP, actor="dan")
+    assert res["clean"] is True
+    assert res["changes"] == {"create": 0, "update": 0, "delete": 0}           # dan's OWN edits: untouched…
+    inc = res["incoming"]
+    assert inc["commit_count"] == 2                                            # …but TWO commits came in
+    assert sorted(inc["contributors"]) == ["erin", "frank"]                    # …from these people
+    assert inc["stats"]["create"] == 2                                         # …adding U1 and U2
+
+    log_after = await svc.commit_log(graph_id=gid, branch_id=dP)
+    assert len(log_after) == len(log_before) + 1                               # ← was + 0: the silent gap
+    pull_commit = log_after[0]                                                 # newest first
+    assert pull_commit["kind"] == "pull"
+    assert pull_commit["source_commit_count"] == 2
+    assert pull_commit["stats"]["create"] == 2                                 # what CAME IN, not our rewrite
+    assert pull_commit["stats"]["from_seq"] < pull_commit["stats"]["to_seq"]   # the window to diff main over
+
+    # The drill-down the UI already has (CommitRow → squashed_commits, keyed on source_commit_ids)
+    # works on a pull commit with no new code: it lists the upstream commits that arrived.
+    drill = await svc.squashed_commits(graph_id=gid, commit_id=pull_commit["commit_id"])
+    assert [c["message"] for c in drill] == ["upstream two", "upstream one"]   # newest-first
+
+    # The pull left the draft up to date and its own work intact.
+    assert (await svc.branch_freshness(graph_id=gid, branch_id=dP))["behind"] is False
+    st_p = await svc.materialize_state(graph_id=gid, branch_id=dP)
+    assert st_p["nodes"]["P"]["f"] == 1                                        # dan's edit survived
+    assert "U1" in st_p["nodes"] and "U2" in st_p["nodes"]                     # upstream work is visible
+
+    # A no-op pull stays a no-op — it must not litter history with empty pull commits.
+    res2 = await svc.rebase_draft(graph_id=gid, branch_id=dP, actor="dan")
+    assert res2["already_up_to_date"] is True
+    assert res2["incoming"]["commit_count"] == 0
+    assert len(await svc.commit_log(graph_id=gid, branch_id=dP)) == len(log_after)
 
     await db.dispose_engine()
 

@@ -18,7 +18,7 @@ import signal
 from . import config, db, models
 from .messaging import close_broker_redis
 from .bootstrap_worker import BootstrapRunner
-from .purge_worker import PurgeRunner
+from .purge_worker import PurgeRunner, Reaper
 from .projection import FalkorProjector, make_falkor_graph_factory
 from .service import GraphVersioningService
 from .worker import ProjectionWorker
@@ -95,6 +95,7 @@ async def _amain() -> None:
         # web tier, in resumable windows (see bootstrap_worker).
         bootstrap=BootstrapRunner(graph_factory, consumer=os.getenv("HOSTNAME", "boot-1")),
         purge=PurgeRunner(graph_factory, consumer=os.getenv("HOSTNAME", "purge-1")),
+        reaper=Reaper(),
     )
 
     loop = asyncio.get_running_loop()

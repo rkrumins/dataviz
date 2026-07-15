@@ -335,6 +335,7 @@ async def get_workspace_impact(
     sources = (await session.execute(
         select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
         .where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )).all()
 
     member_count = (await session.execute(

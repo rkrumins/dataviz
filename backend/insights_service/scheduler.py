@@ -177,7 +177,11 @@ async def _tick(config: StatsServiceConfig) -> TickSummary:
                 WorkspaceDataSourceORM.id == DataSourceStatsORM.data_source_id,
                 isouter=True,
             )
+            # Without the deleted_at filter this service keeps polling a deleted
+            # data source forever — hitting the provider, refreshing its stats and
+            # re-materialising its polling config below (resurrection).
             .where(WorkspaceDataSourceORM.is_active.is_(True))
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
         rows = result.all()
         seen = len(rows)

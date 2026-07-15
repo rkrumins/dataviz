@@ -60,6 +60,12 @@ if "FALKORDB_GRAPH_POOL_SIZE" not in os.environ:
     os.environ["FALKORDB_GRAPH_POOL_SIZE"] = str(_concurrency * 4 + 8)
 if "FALKORDB_REDIS_POOL_SIZE" not in os.environ:
     os.environ["FALKORDB_REDIS_POOL_SIZE"] = str(_concurrency * 3 + 8)
+# The provider cache client now sizes its pool from the central CACHE role
+# (REDIS_CACHE_MAX_CONNECTIONS), not FALKORDB_REDIS_POOL_SIZE — mirror the
+# same auto-scale-by-concurrency value there, or a worker under load would
+# silently fall back to the role's fixed default pool size.
+if "REDIS_CACHE_MAX_CONNECTIONS" not in os.environ:
+    os.environ["REDIS_CACHE_MAX_CONNECTIONS"] = str(_concurrency * 3 + 8)
 
 
 class _JobConsumer:

@@ -9,6 +9,7 @@ import asyncio
 import os
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import (
@@ -17,6 +18,7 @@ from backend.app.services.versioning.service import (
     GraphVersioningService,
     MergeConflict,
     NotUpToDate,
+    PullRequestExists,
 )
 
 
@@ -94,13 +96,38 @@ async def _run() -> None:
     assert await svc.merge_mr(mr_id=mrX, actor="alice", message="X")           # main A.f -> 10
     mrY = await svc.open_draft_mr(graph_id=gid, branch_id=dY, actor="alice")
     assert (await svc.get_pr(mrY))["status"] == "conflicts"                     # main advanced under dY
+    assert (await svc.get_pr(mrY))["behind"] is True                            # …and the FE's merge gate is up
     with pytest.raises(NotUpToDate):                                            # behind → forced to pull first
         await svc.merge_mr(mr_id=mrY, actor="alice", message="Y")
     assert (await svc.rebase_draft(graph_id=gid, branch_id=dY, actor="alice"))["clean"] is False  # clash surfaces at the pull
     assert (await svc.rebase_draft(graph_id=gid, branch_id=dY, actor="alice",
             resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}}))["clean"] is True
+    # The pull MUST clear the PR's behind flag. `behind` is read from the LIVE branch base, not the
+    # frozen pr.base_commit_seq — reading the latter left a pulled draft "behind" forever, and the
+    # FE swaps Merge for "Pull latest" on this flag, so the PR became unmergeable through the UI
+    # even though merge_mr (which reads the live base) would have accepted it.
+    pulled = await svc.get_pr(mrY)
+    assert pulled["behind"] is False and pulled["behind_by"] == 0
     assert await svc.merge_mr(mr_id=mrY, actor="alice", message="Y resolved")
     assert (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]["A"]["f"] == 99
+
+    # ══ C2. the two-user race, no conflict: B's PR goes behind when A beats them to the merge, and
+    #        PULLING clears the gate. This is the ordinary "someone merged before me" path — the one
+    #        the deadlock made impossible (behind stayed True forever, so Merge never came back). ══
+    dA = await _draft(svc, gid, "alice", [_node("RA")])
+    dB = await _draft(svc, gid, "bob", [_node("RB")])                           # same base, disjoint entities
+    mrB = await svc.open_draft_mr(graph_id=gid, branch_id=dB, actor="bob")
+    assert (await svc.get_pr(mrB))["behind"] is False                           # nobody has moved main yet
+    mrA = await svc.open_draft_mr(graph_id=gid, branch_id=dA, actor="alice")
+    assert await svc.merge_mr(mr_id=mrA, actor="alice", message="A wins the race")
+    assert (await svc.get_pr(mrB))["behind"] is True                            # main moved under B
+    with pytest.raises(NotUpToDate):
+        await svc.merge_mr(mr_id=mrB, actor="bob", message="B")
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=dB, actor="bob"))["clean"] is True
+    assert (await svc.get_pr(mrB))["behind"] is False                           # ← the deadlock: was True forever
+    assert await svc.merge_mr(mr_id=mrB, actor="bob", message="B after pull")
+    both = await svc.materialize_state(graph_id=gid, branch_id=main)
+    assert "RA" in both["nodes"] and "RB" in both["nodes"]                      # both users' work landed
 
     # ══ D. dispatch: a legacy fork PR still merges through merge_mr ══
     F = await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob")
@@ -109,6 +136,47 @@ async def _run() -> None:
     assert (await svc.get_pr(prF))["source_graph_id"] is None                   # fork PR (not a draft MR)
     assert await svc.merge_mr(mr_id=prF, actor="alice", message="merge fork via mr")
     assert "Z" in (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
+
+    # ══ E. ONE LIVE PR PER BRANCH. A PR's diff is computed live from its source branch, so commits
+    #       made after it was raised are already in it — a second PR would be a duplicate, and
+    #       merging either one strands the other as an unmergeable row. ══
+    dE = await _draft(svc, gid, "alice", [_node("E1")])
+    prE = await svc.open_draft_mr(graph_id=gid, branch_id=dE, actor="alice", title="first")
+    with pytest.raises(PullRequestExists) as ex:                                # the friendly path…
+        await svc.open_draft_mr(graph_id=gid, branch_id=dE, actor="alice", title="second")
+    assert ex.value.pr_id == prE and ex.value.title == "first"                  # …routes to the EXISTING review
+
+    # …and the DB index is the backstop for the race two concurrent openers would otherwise win
+    # together (both pass the service pre-check, both insert). Bypass the service entirely to prove
+    # the constraint itself holds.
+    async with db.get_session_factory()() as s:
+        s.add(models.MergeRequestORM(
+            graph_id=gid, source_graph_id=gid, source_branch_id=dE, target_graph_id=gid,
+            target_branch="main", status="mergeable", actor="mallory",
+        ))
+        with pytest.raises(IntegrityError):
+            await s.flush()
+
+    # A new PR is allowed once the branch's PR is no longer live (closed → the branch is free again).
+    await svc.close_pr(pr_id=prE, actor="alice")
+    prE2 = await svc.open_draft_mr(graph_id=gid, branch_id=dE, actor="alice", title="reopened")
+    assert prE2 != prE
+    assert await svc.merge_mr(mr_id=prE2, actor="alice", message="E")
+    assert "E1" in (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
+    assert (await svc.get_pr(prE2))["merged_via"] == "review"                   # merged THROUGH the review
+
+    # ══ F. NO LIVE PR SURVIVES A SQUASH OF ITS SOURCE BRANCH. A direct `publish` lands exactly the
+    #       changes the open PR proposed, so it RESOLVES that PR (stamped direct_publish, so the
+    #       bypassed review is legible as such). It used to orphan it: a live PR pointing at a
+    #       merged branch, unmergeable but still rendered as actionable, showing an empty diff. ══
+    dF = await _draft(svc, gid, "alice", [_node("F1")])
+    prF2 = await svc.open_draft_mr(graph_id=gid, branch_id=dF, actor="alice", title="bypassed")
+    cidF = await svc.publish(graph_id=gid, branch_id=dF, actor="alice", message="publish over the PR")
+    settled = await svc.get_pr(prF2)
+    assert settled["status"] == "merged"                                        # ← was left live (zombie)
+    assert settled["resulting_commit_id"] == cidF                               # points at the squash that landed it
+    assert settled["merged_via"] == "direct_publish"                            # the review was bypassed — say so
+    assert "F1" in (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
 
     await db.dispose_engine()
 

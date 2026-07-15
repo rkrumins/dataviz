@@ -27,7 +27,11 @@ Config rides the provider record's ``extra_config`` JSON (no migration):
 
 Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_SENTINEL_MASTER``, ``FALKORDB_SENTINEL_NODES``,
-``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port").
+``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"). The
+ENV-configured (unrouted) default instance additionally authenticates via
+``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` / ``FALKORDB_PASSWORD_FILE`` —
+see ``env_conn_config``. Provider rows keep resolving their own credentials
+from the encrypted credentials blob, never from these env vars.
 """
 import asyncio
 import hashlib
@@ -157,6 +161,7 @@ def load_connection_config(
     username: Optional[str],
     password: Optional[str],
     tls_enabled: bool = False,
+    credentials: Optional[dict] = None,
 ) -> FalkorDBConnConfig:
     """Resolve a ``FalkorDBConnConfig`` from explicit provider config and
     env-var fallbacks. An absent/unknown mode resolves to ``standalone`` so
@@ -165,6 +170,13 @@ def load_connection_config(
     ``tls_enabled`` is the provider record's connection-level TLS flag; the
     finer-grained ``falkordbConnection.tls`` object (CA / client cert / key /
     verify mode) layers on top, with ``FALKORDB_TLS_*`` env fallbacks.
+
+    ``credentials`` is the provider's DECRYPTED credentials blob (from
+    ``provider_repo.get_credentials`` / ``connection_repo.get_credentials``),
+    if the caller already has it. It is where sentinel-daemon credentials
+    (``sentinel_username`` / ``sentinel_password``) live now; the old
+    ``explicit["sentinel"]`` plaintext location is still read as a fallback —
+    see the sentinel resolution below.
     """
     cfg = dict(explicit or {})
     mode = (cfg.get("mode") or os.getenv("FALKORDB_MODE") or "standalone").strip().lower()
@@ -184,6 +196,28 @@ def load_connection_config(
         or _as_bool(tls.get("enabled"), False)
         or _as_bool(os.getenv("FALKORDB_TLS_ENABLED"), False)
     )
+    # Sentinel-daemon credentials. These USED to live in
+    # extra_config.falkordbConnection.sentinel — an unencrypted column that the
+    # API returns (ProviderResponse.extra_config). They now come from the
+    # decrypted credentials blob (ConnectionCredentials.sentinel_username /
+    # .sentinel_password); the old plaintext location is still read as a
+    # fallback for one release so existing rows keep working, with a warning
+    # telling the operator to re-save the provider to migrate it.
+    sentinel_username = credentials.get("sentinel_username") if credentials else None
+    sentinel_password = credentials.get("sentinel_password") if credentials else None
+    if sentinel_password is None and sentinel.get("password"):
+        logger.warning(
+            "falkordb_connection: sentinel.password is set in extra_config "
+            "(PLAINTEXT, and returned by the API). Re-save the provider to move "
+            "it into the encrypted credentials blob (sentinel_password)."
+        )
+        sentinel_password = sentinel.get("password")
+    if sentinel_username is None:
+        sentinel_username = sentinel.get("username")
+    sentinel_username = sentinel_username or os.getenv("FALKORDB_SENTINEL_USERNAME")
+    sentinel_password = sentinel_password or _env_secret(
+        "FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE"
+    )
     return FalkorDBConnConfig(
         mode=mode,
         host=host,
@@ -202,12 +236,8 @@ def load_connection_config(
         # default is NO auth to the sentinels — sending AUTH to an unauthenticated
         # sentinel makes redis-py raise, which used to make discover_master fail and
         # take sentinel mode down entirely.
-        sentinel_username=(
-            sentinel.get("username") or os.getenv("FALKORDB_SENTINEL_USERNAME")
-        ),
-        sentinel_password=(
-            sentinel.get("password") or os.getenv("FALKORDB_SENTINEL_PASSWORD")
-        ),
+        sentinel_username=sentinel_username,
+        sentinel_password=sentinel_password,
         sentinel_auth_enabled=_as_bool(
             sentinel.get(
                 "authEnabled", os.getenv("FALKORDB_SENTINEL_AUTH_ENABLED", False),
@@ -251,6 +281,43 @@ def _coerce_int(v: Any) -> Optional[int]:
     except (ValueError, TypeError):
         logger.warning("falkordb_connection: ignoring non-integer graphPoolSize %r", v)
         return None
+
+
+def _read_env_secret_file(path: str, var: str) -> str:
+    """Read a mounted secret file. A missing OR empty/whitespace-only file is a
+    HARD error — silently falling back to 'no password' is exactly how an
+    unauthenticated connect reaches production, whether the file is absent or
+    just empty (mount race, bad rotation).
+
+    Mirrors ``backend.common.adapters.redis_endpoint``'s ``_read_secret_file``
+    rule-for-rule, but independently implemented: FalkorDB's credentials must
+    never share a code path (or a value) with the CACHE/STREAMS Redis roles, so
+    a bug or a future change in one role's secret handling can't silently reach
+    the other. Never includes the secret VALUE in the error — only the env var
+    name and the path.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read().strip()
+    except OSError as exc:
+        raise ProviderConfigurationError(
+            f"{var}={path!r} could not be read: {exc}. Refusing to connect "
+            f"without the credential it names."
+        ) from exc
+    if not content:
+        raise ProviderConfigurationError(
+            f"{var}={path!r} is empty. Refusing to connect without the "
+            f"credential it names."
+        )
+    return content
+
+
+def _env_secret(env_var: str, file_var: str) -> Optional[str]:
+    """``{file_var}`` (a mounted secret file — wins) or plain ``{env_var}``."""
+    path = os.getenv(file_var)
+    if path:
+        return _read_env_secret_file(path, file_var)
+    return os.getenv(env_var)
 
 
 def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
@@ -622,55 +689,35 @@ async def build_graph_client(
 
 
 def build_cache_client(
-    cfg: FalkorDBConnConfig, *, cache_url: Optional[str], pool_kwargs: dict,
+    *, provider_id: str, extra_config: Optional[dict], credentials: Optional[dict],
 ) -> Optional[Any]:
-    """Build the provider's cache Redis on a DEDICATED endpoint — or nothing.
+    """The provider's cache Redis — a DEDICATED endpoint, resolved centrally.
 
-    Only a dedicated ``cache_url`` produces a client:
+    Precedence: the provider's own ``extra_config.cacheConnection`` (+ its encrypted
+    cache_* credentials), else the global ``REDIS_CACHE_*`` endpoint, else the legacy
+    ``CACHE_REDIS_URL``. ``None`` means no cache is configured → cache disabled
+    (best-effort), never co-located on FalkorDB (ADR-020).
 
-    * ``cache_url`` set → a client on that dedicated Redis, with its own
-      host / auth / scheme. A ``rediss://`` URL also picks up the connection's
-      custom CA / client cert / verify mode (shared-PKI assumption) so
-      mutual-TLS caches work, not just system-trust ``rediss://``.
-    * ``cache_url`` unset → ``None`` (cache DISABLED). WS2.1: the provider's
-      cache is NEVER co-located on the FalkorDB instance. FalkorDB hosts the
-      graph and nothing else, so a graph outage cannot also wipe the cache or
-      let cache traffic contend with graph queries on FalkorDB's single-
-      threaded process. Decoupling is structural here, not conventional;
-      deployed roles additionally fail fast at startup when no dedicated cache
-      is configured (see ``ProviderManager``).
+    It no longer takes the FalkorDB ``FalkorDBConnConfig``: it used to derive its TLS
+    from the GRAPH's certs, which produced "no TLS" or "system trust store" depending
+    on the URL scheme. The cache owns its own PKI (ADR-021 follow-up).
     """
-    from redis.asyncio import Redis
-
-    socket_timeout = float(pool_kwargs.get("socket_timeout", 10.0))
-
-    if not cache_url:
-        # No dedicated endpoint → cache off. Do NOT mirror the FalkorDB
-        # topology — that is exactly the coupling this decoupling removes.
-        return None
-
-    extra: dict = {}
-    if cache_url.lower().startswith("rediss://"):
-        # rediss:// already implies ssl=True (from_url sets SSLConnection);
-        # add only the cert/verify kwargs so custom CA / mTLS apply.
-        extra = tls_client_kwargs(cfg.tls_settings())
-        extra.pop("ssl", None)
-    return Redis.from_url(
-        cache_url,
-        max_connections=pool_kwargs.get("max_connections"),
-        socket_connect_timeout=2.0,
-        socket_timeout=socket_timeout,
-        decode_responses=True,
-        **extra,
+    from backend.common.adapters.redis_endpoint import (
+        ProviderCacheOverride, RedisRole, build_redis_client, resolve_redis_config,
     )
 
-
-def build_cache_redis_fallback(
-    cfg: FalkorDBConnConfig, *, pool_kwargs: dict,
-) -> Optional[Any]:
-    """:func:`build_cache_client` with no dedicated URL. Always ``None`` now:
-    the provider cache is never co-located on FalkorDB (WS2.1 decoupling)."""
-    return build_cache_client(cfg, cache_url=None, pool_kwargs=pool_kwargs)
+    override = ProviderCacheOverride(
+        provider_id=provider_id,
+        connection=(extra_config or {}).get("cacheConnection") or {},
+        credentials=credentials or {},
+    )
+    cfg = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
+    if not cfg.is_configured:
+        return None                      # nothing configured anywhere → cache off
+                                         # (is_configured understands sentinel mode,
+                                         #  which has no host — a host-only check
+                                         #  silently disabled a sentinel cache)
+    return build_redis_client(cfg)
 
 
 # ============================================================================
@@ -850,16 +897,22 @@ def env_conn_config() -> FalkorDBConnConfig:
     Resolves ``FALKORDB_MODE`` / ``FALKORDB_SENTINEL_*`` / ``FALKORDB_CLUSTER_NODES``
     exactly like a provider row would — so the env-default (unrouted) graphs a
     deployment still has are reached over the right topology instead of being
-    hard-wired to standalone. The env instance carries no credentials (there are
-    no ``FALKORDB_USERNAME`` / ``_PASSWORD`` vars anywhere in the stack); an
-    authenticated instance must be registered as a provider row.
+    hard-wired to standalone.
+
+    Data-plane credentials: ``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` /
+    ``FALKORDB_PASSWORD_FILE`` (file wins; a missing or empty file is a hard
+    error — never a silent fall-back to an unauthenticated connect). This is
+    the ONLY credential source for this instance; none of the new vars set
+    reproduces the old behaviour exactly (``username=None, password=None``).
+    An authenticated PROVIDER ROW keeps resolving its own credentials from the
+    encrypted credentials blob, unaffected by these env vars.
     """
     return load_connection_config(
         None,
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
-        username=None,
-        password=None,
+        username=os.getenv("FALKORDB_USERNAME"),
+        password=_env_secret("FALKORDB_PASSWORD", "FALKORDB_PASSWORD_FILE"),
     )
 
 

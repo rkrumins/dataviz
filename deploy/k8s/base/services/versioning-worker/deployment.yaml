@@ -56,6 +56,25 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: CREDENTIAL_ENCRYPTION_KEY
+            - name: REDIS_STREAMS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_STREAMS_PASSWORD
+                  optional: true
+            - name: REDIS_CACHE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_CACHE_PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: redis-streams-certs
+              mountPath: /certs/streams
+              readOnly: true
+            - name: redis-cache-certs
+              mountPath: /certs/cache
+              readOnly: true
           resources:
             requests:
               cpu: 500m
@@ -67,3 +86,12 @@ spec:
           # (they would flap and restart-loop). A crash exits the process and
           # the Deployment restarts it; a dedicated liveness endpoint is a
           # follow-up. Projection is idempotent + PEL-recovered on restart.
+      volumes:
+        - name: redis-streams-certs
+          secret:
+            secretName: redis-streams-certs
+            optional: true
+        - name: redis-cache-certs
+          secret:
+            secretName: redis-cache-certs
+            optional: true

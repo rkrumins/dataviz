@@ -6,7 +6,7 @@ from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
-    insights, me, system_status,
+    insights, me, system_status, redis_config,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
     versioning,
@@ -240,6 +240,12 @@ api_router.include_router(
 # single-pane snapshot of every backing service + data-plane lag.
 api_router.include_router(
     system_status.router, prefix="/admin/system", tags=["admin:system-status"],
+    dependencies=[Depends(requires("system:admin"))],
+)
+# Redis config: /api/v1/admin/redis/config + /api/v1/admin/redis/{role}/test —
+# super-admin resolved-config + connection-test surface (mirrors system_status).
+api_router.include_router(
+    redis_config.router, prefix="/admin/redis", tags=["admin:redis"],
     dependencies=[Depends(requires("system:admin"))],
 )
 
