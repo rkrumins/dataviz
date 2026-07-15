@@ -19,11 +19,24 @@ metadata:
   name: common-config
   namespace: synodic
 data:
-  # Memorystore private IPs. Coordination and cache are SEPARATE instances
-  # (incompatible eviction policies — spec §6). DB index still segregates
-  # bus vs cache traffic on each instance.
-  REDIS_URL: "redis://${REDIS_COORD_HOST}:6379/0"
-  CACHE_REDIS_URL: "redis://${REDIS_CACHE_HOST}:6379/1"
+  # Streams (coordination bus) and cache are SEPARATE Memorystore instances,
+  # each with its own AUTH password (app-secrets) and its own TLS CA. Nothing
+  # is shared between the roles.
+  REDIS_STREAMS_HOST: "${REDIS_COORD_HOST}"
+  REDIS_STREAMS_PORT: "6379"
+  REDIS_STREAMS_DB: "0"
+  REDIS_STREAMS_TLS_ENABLED: "${REDIS_STREAMS_TLS_ENABLED}"
+  REDIS_STREAMS_TLS_CA_CERTS: "/certs/streams/ca.crt"
+  REDIS_CACHE_HOST: "${REDIS_CACHE_HOST}"
+  REDIS_CACHE_PORT: "6379"
+  REDIS_CACHE_DB: "1"
+  REDIS_CACHE_TLS_ENABLED: "${REDIS_CACHE_TLS_ENABLED}"
+  REDIS_CACHE_TLS_CA_CERTS: "/certs/cache/ca.crt"
+  # Neutralise the legacy URLs so the merged prod ConfigMap carries no stale
+  # coordinates (the in-cluster redis Service is $patch:deleted here). Empty =
+  # unset to the resolver; the role-prefixed vars above are the only source.
+  REDIS_URL: ""
+  CACHE_REDIS_URL: ""
   # Cloud SQL Managed Connection Pooling runs transaction-mode pooling → the
   # app must not use server-side prepared statements (backend/app/db/engine.py
   # sets asyncpg statement_cache_size=0 when this is 'transaction').

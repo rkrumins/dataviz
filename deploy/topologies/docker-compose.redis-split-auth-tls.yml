@@ -1,0 +1,65 @@
+# Two independent Redis instances proving role independence for the central
+# Redis connection config (backend/common/adapters/redis_endpoint.py): streams
+# and cache each get their OWN password and their OWN CA, so a credential or
+# cert mistake in one role can never authenticate against the other.
+#
+#   ./deploy/topologies/gen-split-certs.sh
+#   docker compose -f deploy/topologies/docker-compose.redis-split-auth-tls.yml up -d
+#
+# Verify role independence from the host:
+#   redis-cli --tls --cacert deploy/topologies/certs-streams/ca.crt -a streams-pw -p 6390 ping
+#   redis-cli --tls --cacert deploy/topologies/certs-cache/ca.crt   -a cache-pw   -p 6391 ping
+#   # wrong password for the cache instance fails; streams is unaffected:
+#   redis-cli --tls --cacert deploy/topologies/certs-cache/ca.crt   -a wrong-pw   -p 6391 ping
+#
+# Point the app at it via role-prefixed env, e.g.:
+#   REDIS_STREAMS_HOST=127.0.0.1 REDIS_STREAMS_PORT=6390 REDIS_STREAMS_PASSWORD=streams-pw \
+#   REDIS_STREAMS_TLS_ENABLED=true REDIS_STREAMS_TLS_CA_CERTS=deploy/topologies/certs-streams/ca.crt \
+#   REDIS_CACHE_HOST=127.0.0.1   REDIS_CACHE_PORT=6391   REDIS_CACHE_PASSWORD=cache-pw \
+#   REDIS_CACHE_TLS_ENABLED=true   REDIS_CACHE_TLS_CA_CERTS=deploy/topologies/certs-cache/ca.crt
+#
+# Tear down: docker compose -f deploy/topologies/docker-compose.redis-split-auth-tls.yml down
+services:
+  redis-streams:
+    image: redis:7-alpine
+    ports:
+      - "6390:6390"
+    command: >-
+      redis-server
+      --requirepass streams-pw
+      --port 0
+      --tls-port 6390
+      --tls-cert-file /certs/server.crt
+      --tls-key-file /certs/server.key
+      --tls-ca-cert-file /certs/ca.crt
+      --tls-auth-clients no
+    volumes:
+      - ./certs-streams:/certs:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cacert", "/certs/ca.crt",
+             "-p", "6390", "-a", "streams-pw", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis-cache:
+    image: redis:7-alpine
+    ports:
+      - "6391:6391"
+    command: >-
+      redis-server
+      --requirepass cache-pw
+      --port 0
+      --tls-port 6391
+      --tls-cert-file /certs/server.crt
+      --tls-key-file /certs/server.key
+      --tls-ca-cert-file /certs/ca.crt
+      --tls-auth-clients no
+    volumes:
+      - ./certs-cache:/certs:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cacert", "/certs/ca.crt",
+             "-p", "6391", "-a", "cache-pw", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

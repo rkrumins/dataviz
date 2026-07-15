@@ -56,6 +56,25 @@ spec:
                   name: app-secrets
                   key: AGGREGATION_INTERNAL_TOKEN
                   optional: true
+            - name: REDIS_STREAMS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_STREAMS_PASSWORD
+                  optional: true
+            - name: REDIS_CACHE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_CACHE_PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: redis-streams-certs
+              mountPath: /certs/streams
+              readOnly: true
+            - name: redis-cache-certs
+              mountPath: /certs/cache
+              readOnly: true
           resources:
             requests:
               cpu: 200m
@@ -85,3 +104,12 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+      volumes:
+        - name: redis-streams-certs
+          secret:
+            secretName: redis-streams-certs
+            optional: true
+        - name: redis-cache-certs
+          secret:
+            secretName: redis-cache-certs
+            optional: true
