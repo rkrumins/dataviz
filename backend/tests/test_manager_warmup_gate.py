@@ -69,6 +69,49 @@ def test_is_recent_unhealthy_false_when_no_observation():
     assert state.is_recent_unhealthy(max_age_s=60.0) is False
 
 
+# ── ProviderState.blocks_reads: ambiguous timeouts require persistence ──
+# The read gate uses blocks_reads (not is_recent_unhealthy) so that ONE marginal
+# probe — a tight-budget preflight false-timing-out a reachable-but-slow
+# cluster/sentinel+auth handshake — cannot black out every read for 60s.
+
+def test_blocks_reads_gates_definitive_down_on_a_single_probe():
+    state = ProviderState(cache_key=("p", "g"))
+    state.last_observation = ProbeOutcome.from_warmup(False, "tcp_refused", 5)
+    state.consecutive_failures = 1
+    assert state.blocks_reads(max_age_s=60.0) is True
+
+
+def test_blocks_reads_ignores_a_single_connect_timeout():
+    state = ProviderState(cache_key=("p", "g"))
+    state.last_observation = ProbeOutcome.from_warmup(False, "connect_timeout", 1500)
+    state.consecutive_failures = 1
+    assert state.blocks_reads(max_age_s=60.0) is False  # one marginal probe: don't gate
+
+
+def test_blocks_reads_gates_a_persistent_connect_timeout():
+    state = ProviderState(cache_key=("p", "g"))
+    state.last_observation = ProbeOutcome.from_warmup(False, "connect_timeout", 1500)
+    state.consecutive_failures = 2
+    assert state.blocks_reads(max_age_s=60.0) is True  # genuinely down: gate
+
+
+def test_blocks_reads_false_for_healthy():
+    state = ProviderState(cache_key=("p", "g"))
+    state.last_observation = ProbeOutcome.from_warmup(True, "ok", 3)
+    assert state.blocks_reads(max_age_s=60.0) is False
+
+
+def test_warmup_probe_budget_is_larger_for_cluster_and_sentinel():
+    from backend.app.providers.warmup import (
+        _probe_budget, PER_PROBE_DEADLINE_S, PER_PROBE_DEADLINE_MULTIHOP_S,
+    )
+    assert PER_PROBE_DEADLINE_MULTIHOP_S > PER_PROBE_DEADLINE_S
+    assert _probe_budget({"extra_config": None})[0] == PER_PROBE_DEADLINE_S
+    for mode in ("cluster", "sentinel"):
+        cfg = {"extra_config": {"falkordbConnection": {"mode": mode}}}
+        assert _probe_budget(cfg)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
+
+
 # ── Integration: get_provider fast-fails on recent unhealthy ─────────
 
 

@@ -67,6 +67,18 @@ class ProbeOutcome:
         )
 
 
+# Probe reasons a tight-budget health probe can produce for a reachable-but-slow
+# provider (not a definitive outage). ``ProviderState.blocks_reads`` requires
+# these to PERSIST before gating reads, so one marginal probe can't black out a
+# provider that is actually serving. tcp_refused / dns_unresolvable / os_error
+# are NOT here — they are unambiguous and gate on a single observation.
+_AMBIGUOUS_PROBE_REASONS: Tuple[str, ...] = (
+    "timeout", "wall_clock", "exceeded", "empty_reply",
+)
+# Consecutive ambiguous failures required before the fast-fail gate blocks reads.
+_READ_GATE_PERSISTENCE: int = 2
+
+
 @dataclass
 class ProviderState:
     """Single source of truth for one ``(provider_id, graph_name)`` pair.
@@ -116,6 +128,30 @@ class ProviderState:
         if obs is None or obs.ok:
             return False
         return (time.monotonic() - obs.observed_at) <= max_age_s
+
+    def blocks_reads(self, *, max_age_s: float = 60.0) -> bool:
+        """Whether the manager's fast-fail gate should reject reads outright.
+
+        Stricter than ``is_recent_unhealthy``. A DEFINITIVE-down reason
+        (tcp_refused / dns_unresolvable / no route) gates on a single recent
+        observation — that provider really is unreachable. But an AMBIGUOUS
+        timeout-class reason (``connect_timeout`` / wall-clock exceeded /
+        empty_reply) gates ONLY when it has PERSISTED across consecutive probes:
+        a probe with a tight budget can false-timeout a reachable-but-slow
+        provider (a cluster/sentinel + auth handshake over a headless service),
+        and a single such miss must NOT black out every read for 60s against a
+        provider that is actually serving. A genuinely-down provider fails every
+        probe, so it still gates after ``_READ_GATE_PERSISTENCE`` observations.
+        """
+        obs = self.last_observation
+        if obs is None or obs.ok:
+            return False
+        if (time.monotonic() - obs.observed_at) > max_age_s:
+            return False
+        reason = (obs.reason or "").lower()
+        if any(a in reason for a in _AMBIGUOUS_PROBE_REASONS):
+            return self.consecutive_failures >= _READ_GATE_PERSISTENCE
+        return True
 
     def is_recent_healthy(self, *, max_age_s: float = 60.0) -> bool:
         """Symmetric predicate — used to decide whether warmup state should
