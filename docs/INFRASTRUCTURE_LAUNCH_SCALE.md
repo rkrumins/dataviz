@@ -138,7 +138,7 @@ Provision **1 TB SSD** (≈27% utilized). The headroom is deliberate: Cloud SQL 
 
 ## 4. Application Tier
 
-Role split per [architecture-when-scaling.md](./architecture-when-scaling.md). All backend pods set the correct `SYNODIC_ROLE` (the WS2.1 guard requires `CACHE_REDIS_URL` in every deployed role; managed cache satisfies it).
+Role split per [architecture-when-scaling.md](./architecture-when-scaling.md). All backend pods set the correct `SYNODIC_ROLE` (the WS2.1 guard is now per-role `resolve_redis_config` validation, requiring a resolved `CACHE` endpoint — `REDIS_CACHE_*` / legacy `CACHE_REDIS_URL` — in every deployed role; managed cache satisfies it).
 
 | Service | Replicas (HPA) | Requests | Limits | Notes |
 | :--- | :--- | :--- | :--- | :--- |
@@ -325,7 +325,7 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUER
 | :--- | :--- | :--- |
 | `FALKORDB_MODE` | `cluster` | Enables cluster client + `MOVED` following |
 | `FALKORDB_CLUSTER_NODES` | 3 shard-0 pod DNS names | Any three seeds; the client discovers the rest |
-| `CACHE_REDIS_URL` | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020) refuses to co-locate on FalkorDB |
+| `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
 | `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory accumulation |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
@@ -373,7 +373,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 
 Phased; each gate verifiable before the next.
 
-1. **Cluster + managed data** → GKE regional (Dataplane V2, Workload Identity), Cloud SQL HA instance + pooler + read replica, both Memorystore instances. *Gate: `deploy.sh deploy production` renders and applies; all pods healthy; the WS2.1 `CACHE_REDIS_URL` guard passes in every role.*
+1. **Cluster + managed data** → GKE regional (Dataplane V2, Workload Identity), Cloud SQL HA instance + pooler + read replica, both Memorystore instances. *Gate: `deploy.sh deploy production` renders and applies; all pods healthy; per-role `resolve_redis_config` validation (WS2.1) passes for both `STREAMS` and `CACHE` in every deployed role.*
 2. **FalkorDB cluster** → tainted node pool, 3 StatefulSets, bootstrap Job, DR CronJob. *Gate: kill a pod and a zone's pods in staging — failover < 1 s, no read errors, `cluster_state: ok`.*
 3. **Connection-budget validation** → load the per-role pool overrides + pooler. *Gate: at 800 req/s synthetic, server-side connections ≤ 70%, zero pool-wait timeouts.*
 4. **Projection under load** → seed the ~300-graph / ~3,000-view corpus; drive concurrent edits + imports. *Gate: projection watermark lag stays within SLO while a bulk import runs; §1.1 read latencies hold at ≤ 65% shard memory.*
@@ -387,7 +387,7 @@ Phased; each gate verifiable before the next.
 `deploy.sh deploy production` renders `overlays/production`, which is wired to use **managed Cloud SQL + Memorystore out of the box** — the operator supplies a handful of private endpoints and nothing else changes.
 
 **What the production overlay does** (`patches/managed-data-tier.yaml`):
-- Points `MANAGEMENT_DB_URL` at Cloud SQL (`@${DB_HOST}`), `REDIS_URL`/`CACHE_REDIS_URL` at the two Memorystore instances.
+- Points `MANAGEMENT_DB_URL` at Cloud SQL (`@${DB_HOST}`), and the role-prefixed `REDIS_STREAMS_*`/`REDIS_CACHE_*` ConfigMap vars at the two Memorystore instances (`REDIS_URL`/`CACHE_REDIS_URL` are neutralised to empty in this overlay — see `managed-data-tier.yaml`).
 - Sets `DB_POOLER_MODE=transaction` (activates the asyncpg `statement_cache_size=0` path for Cloud SQL Managed Connection Pooling — §5.4).
 - **Deletes the in-cluster `postgres` + `redis` StatefulSets/Services** (replaced by managed). FalkorDB stays self-managed on GKE.
 - `GRAPHVER_DB_URL` is left unset → the app falls back to `MANAGEMENT_DB_URL` (single-instance launch; §5.6).
@@ -407,7 +407,7 @@ Phased; each gate verifiable before the next.
 1. **Enable Managed Connection Pooling on the Cloud SQL instance** (transaction mode) — the app-side `DB_POOLER_MODE=transaction` is necessary but not sufficient; the pooler itself is instance config (§5.4).
 2. **FalkorDB is the single base StatefulSet, not the 3-shard Redis Cluster** of §7 — stand that up on the tainted node pool for real read-layer HA/throughput.
 3. **Egress hardening (SSRF):** add a `default-deny-egress` NetworkPolicy + explicit allows to the Cloud SQL / Memorystore / FalkorDB CIDRs and the connection-tester allowlist (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)). Left open here so first deploy connects; tighten once endpoints are known.
-4. **TLS in transit:** enable SSL on Cloud SQL and Memorystore, then switch DSNs to enforce it (`rediss://` + CA for Memorystore; asyncpg `ssl` for Cloud SQL).
+4. **TLS in transit (Cloud SQL):** enable SSL on the Cloud SQL instance, then switch the DSN to enforce it (asyncpg `ssl`). *(Redis TLS is no longer open — per-role `REDIS_{STREAMS,CACHE}_TLS_*` + cert-Secret mounts on `/certs/streams`/`/certs/cache` already ship in the base manifests (ADR-022); flip `REDIS_STREAMS_TLS_ENABLED`/`REDIS_CACHE_TLS_ENABLED=true` and mount the CA to enable it.)*
 
 ---
 
@@ -424,8 +424,8 @@ Phased; each gate verifiable before the next.
 | `SYNODIC_ROLE` | per service | `web` / `controlplane` / `worker` |
 | `AGGREGATION_PROXY_ENABLED` | `viz-service` | `true` (stateless web → control plane) |
 | `AGGREGATION_INTERNAL_TOKEN` | controlplane + clients | set (ADR-019) via `app-secrets` |
-| `CACHE_REDIS_URL` | all graph-touching tiers | `synodic-redis-cache` (managed) |
-| `REDIS_URL` | all backend tiers | `synodic-redis-coord` (managed) |
+| `REDIS_STREAMS_HOST`/`_PORT`/`_DB`/`_PASSWORD`/`_TLS_*` | all backend tiers | `synodic-redis-coord` (managed); legacy `REDIS_URL` still works, role-scoped to `STREAMS` |
+| `REDIS_CACHE_HOST`/`_PORT`/`_DB`/`_PASSWORD`/`_TLS_*` | all graph-touching tiers | `synodic-redis-cache` (managed); legacy `CACHE_REDIS_URL` still works, role-scoped to `CACHE` |
 | `FALKORDB_MODE` / `FALKORDB_CLUSTER_NODES` | web + projection | `cluster` / 3 shard-0 DNS names |
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |

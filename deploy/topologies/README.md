@@ -70,3 +70,15 @@ For a dedicated clustered **cache** (the provider's idempotency/ancestor/stats
 cache, which is cross-slot-safe), point `CACHE_REDIS_URL` at it or run the graph
 in cluster mode without a cache URL — the provider builds a `RedisCluster` cache
 client automatically.
+
+## Split streams/cache, independent auth + TLS
+
+```bash
+./deploy/topologies/gen-split-certs.sh
+docker compose -f deploy/topologies/docker-compose.redis-split-auth-tls.yml up -d
+```
+
+Two independent Redis instances — different passwords, different CAs — proving
+role isolation between the `STREAMS` and `CACHE` roles (`resolve_redis_config` /
+`build_redis_client`, ADR-022): a credential or cert mistake in one role can
+never authenticate against the other.
