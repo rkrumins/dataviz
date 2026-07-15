@@ -71,11 +71,40 @@ def test_load_config_parses_advanced_knobs():
 
 def test_load_config_ignores_bad_knobs():
     cfg = load_connection_config(
-        {"socketTimeout": "abc", "graphPoolSize": "xyz"},
+        {"socketTimeout": "abc", "graphPoolSize": "xyz", "connectTimeout": "nope"},
         host="h", port=1, username=None, password=None,
     )
     assert cfg.socket_timeout is None
     assert cfg.graph_pool_size is None
+    assert cfg.socket_connect_timeout is None
+
+
+def test_per_provider_connect_timeout_reaches_every_kwargs_builder():
+    """connectTimeout lets ONE slow cross-cluster provider raise its dial
+    budget without a fleet-wide env change — and it must reach the raw pools,
+    the high-level cluster/sentinel clients, AND the sentinel daemons alike."""
+    from backend.app.providers.falkordb_connection import (
+        _conn_auth_kwargs,
+        _sentinel_auth_kwargs,
+        build_graph_pool_kwargs,
+        resilient_pool_kwargs,
+    )
+
+    cfg = load_connection_config(
+        {"mode": "sentinel", "connectTimeout": 5,
+         "sentinel": {"masterName": "m", "nodes": [["s1", 26379]]}},
+        host="h", port=1, username=None, password=None,
+    )
+    assert cfg.socket_connect_timeout == 5.0
+    assert build_graph_pool_kwargs(cfg, socket_timeout=10.0)["socket_connect_timeout"] == 5.0
+    assert _conn_auth_kwargs(cfg, 10.0)["socket_connect_timeout"] == 5.0
+    assert _sentinel_auth_kwargs(cfg, 10.0)["socket_connect_timeout"] == 5.0
+    # Default unchanged: no override → the env-tunable global.
+    from backend.app.config import resilience as _res
+    assert (
+        resilient_pool_kwargs(socket_timeout=10.0)["socket_connect_timeout"]
+        == _res.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
+    )
 
 
 # ── credential normalization ────────────────────────────────────────

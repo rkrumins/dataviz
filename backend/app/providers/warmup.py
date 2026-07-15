@@ -90,14 +90,28 @@ PER_PROBE_WALL_CLOCK_MULTIHOP_S: float = _env_float(
 
 def _probe_budget(cfg: "ProviderConfig") -> tuple[float, float]:
     """(deadline_s, wall_clock_s) for one provider's preflight, sized by topology.
-    Sentinel/Cluster get the multi-hop budget (discovery + owner ping + auth)."""
-    mode = (
-        ((cfg.get("extra_config") or {}).get("falkordbConnection") or {}).get("mode")
-        or "standalone"
-    )
+    Sentinel/Cluster get the multi-hop budget (discovery + owner ping + auth).
+
+    A provider may RAISE its own budget via ``falkordbConnection.probeDeadlineS``
+    — a cross-cluster hop with TLS + AUTH can legitimately exceed the fleet
+    default, and without a per-provider knob one slow-but-healthy provider
+    needed a global env change (or kept getting falsely gated as offline).
+    The per-provider value can only extend the topology default, never shrink
+    it below the tested floor.
+    """
+    conn = (cfg.get("extra_config") or {}).get("falkordbConnection") or {}
+    mode = conn.get("mode") or "standalone"
     if str(mode).strip().lower() in ("sentinel", "cluster"):
-        return PER_PROBE_DEADLINE_MULTIHOP_S, PER_PROBE_WALL_CLOCK_MULTIHOP_S
-    return PER_PROBE_DEADLINE_S, PER_PROBE_WALL_CLOCK_S
+        deadline, wall = PER_PROBE_DEADLINE_MULTIHOP_S, PER_PROBE_WALL_CLOCK_MULTIHOP_S
+    else:
+        deadline, wall = PER_PROBE_DEADLINE_S, PER_PROBE_WALL_CLOCK_S
+    try:
+        per_provider = float(conn.get("probeDeadlineS") or 0)
+    except (TypeError, ValueError):
+        per_provider = 0.0
+    if per_provider > deadline:
+        deadline, wall = per_provider, per_provider + 1.0
+    return deadline, wall
 
 # Sleep between consecutive probes. Spreads load when many providers
 # are registered. With 100 providers and 1s interval, full cycle ≈ 100s.

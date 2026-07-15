@@ -926,6 +926,14 @@ class FalkorDBProvider(GraphDataProvider):
         # construction — a health probe must never build a heavyweight client.
         ssl_ctx = build_ssl_context(cfg.tls_settings())
 
+        if cfg.mode == "cluster" and not cfg.cluster_nodes:
+            # Cluster mode with no startup nodes is a CONFIG error connect()
+            # will also raise. Falling through to a standalone ping of
+            # self._host probed the wrong thing entirely — typically localhost
+            # — and reported a verdict about a host nobody will dial.
+            from backend.common.interfaces.preflight import PreflightResult
+            return PreflightResult.failure("cluster_nodes_missing", 0)
+
         if cfg.mode == "cluster" and cfg.cluster_nodes:
             # Do NOT build a RedisCluster to resolve the owning node here.
             # RedisCluster.initialize() connects to EVERY startup node, verifies
@@ -1021,7 +1029,12 @@ class FalkorDBProvider(GraphDataProvider):
         kw: dict = {
             "max_connections": graph_pool_size,
             "decode_responses": True,
-            **resilient_pool_kwargs(socket_timeout=socket_timeout),
+            **resilient_pool_kwargs(
+                socket_timeout=socket_timeout,
+                connect_timeout=(
+                    self._conn_cfg.socket_connect_timeout if self._conn_cfg else None
+                ),
+            ),
         }
         # P1.6 — auth so the pool issues AUTH transparently (else NOAUTH is
         # mis-classified as a network failure and trips a false breaker).

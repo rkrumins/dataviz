@@ -112,6 +112,25 @@ def test_warmup_probe_budget_is_larger_for_cluster_and_sentinel():
         assert _probe_budget(cfg)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
 
 
+def test_warmup_probe_budget_honors_per_provider_probe_deadline():
+    """probeDeadlineS lets one slow cross-cluster provider raise its own probe
+    budget: it may only EXTEND the topology default (wall clock follows at
+    +1s), never shrink below the tested floor; garbage values are ignored."""
+    from backend.app.providers.warmup import (
+        _probe_budget, PER_PROBE_DEADLINE_S, PER_PROBE_DEADLINE_MULTIHOP_S,
+    )
+
+    raised = {"extra_config": {"falkordbConnection": {"probeDeadlineS": 6}}}
+    assert _probe_budget(raised) == (6.0, 7.0)
+    # Cannot shrink below the topology default.
+    tiny = {"extra_config": {"falkordbConnection": {"mode": "cluster",
+                                                    "probeDeadlineS": 0.1}}}
+    assert _probe_budget(tiny)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
+    # Garbage is ignored.
+    bad = {"extra_config": {"falkordbConnection": {"probeDeadlineS": "abc"}}}
+    assert _probe_budget(bad)[0] == PER_PROBE_DEADLINE_S
+
+
 # ── Config change clears the warmup gate ─────────────────────────────
 
 @pytest.mark.asyncio

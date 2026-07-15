@@ -21,13 +21,29 @@ Config rides the provider record's ``extra_config`` JSON (no migration):
 
     "falkordbConnection": {
       "mode": "standalone|sentinel|cluster",
-      "sentinel": {"masterName": "mymaster", "nodes": [["h1", 26379]]},
-      "cluster":  {"startupNodes": [["h1", 6379], ["h2", 6379]]}
+      "sentinel": {"masterName": "mymaster", "nodes": [["h1", 26379]],
+                   "authEnabled": false,
+                   "tls": {"enabled": true, "caCertPath": "..."}},
+      "cluster":  {"startupNodes": [["h1", 6379], ["h2", 6379]]},
+      "tls": {"enabled": true, "caCertPath": "...", "certPath": "...",
+              "keyPath": "...", "verifyMode": "required", "checkHostname": true},
+      "addressRemap": {"10.0.0.5:6379": "edge.example.com:6379"},
+      "socketTimeout": 10, "connectTimeout": 2, "graphPoolSize": 24,
+      "probeDeadlineS": 6, "authEnabled": true
     }
+
+``sentinel.tls`` defaults to the data-plane ``tls`` (absent → inherit; an
+explicit ``enabled: false`` gives a TLS data plane with plaintext sentinel
+daemons). ``addressRemap`` rewrites DISCOVERED addresses (cluster slot map /
+MOVED redirects / sentinel-announced master — typically pod IPs unreachable
+from another cluster) before they are dialed; see ``remap_address``.
+``connectTimeout``/``probeDeadlineS`` raise the dial/probe budgets for a
+single cross-cluster provider without fleet-wide env changes.
 
 Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_SENTINEL_MASTER``, ``FALKORDB_SENTINEL_NODES``,
-``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"). The
+``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"),
+``FALKORDB_SENTINEL_TLS_ENABLED``, ``FALKORDB_ADDRESS_REMAP`` (from=to CSV). The
 ENV-configured (unrouted) default instance additionally authenticates via
 ``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` / ``FALKORDB_PASSWORD_FILE`` —
 see ``env_conn_config``. Provider rows keep resolving their own credentials
@@ -86,9 +102,13 @@ class FalkorDBConnConfig:
     cluster_nodes: List[Tuple[str, int]] = field(default_factory=list)
     # Per-provider advanced knobs (None → fall back to env defaults at the
     # call site). socket_timeout bounds a single Cypher query; graph_pool_size
-    # is the max graph-query connection pool size.
+    # is the max graph-query connection pool size; socket_connect_timeout
+    # (JSON key connectTimeout) bounds the TCP+TLS+AUTH dial — cross-cluster
+    # providers legitimately need more than the 2s global default, and this
+    # lets ONE slow provider get it without a fleet-wide env change.
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
+    socket_connect_timeout: Optional[float] = None
     # Cross-cluster address remap: pairs of ("host[:port]", "host[:port]").
     # Redis announces the addresses IT knows (cluster slot map, sentinel
     # discover-master) — pod IPs that a client in ANOTHER GKE cluster cannot
@@ -422,6 +442,7 @@ def load_connection_config(
         ),
         socket_timeout=_coerce_float(cfg.get("socketTimeout")),
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
+        socket_connect_timeout=_coerce_float(cfg.get("connectTimeout"), "connectTimeout"),
         tls_enabled=tls_on,
         tls_ca_certs=tls_ca,
         tls_certfile=tls_cert,
@@ -431,13 +452,13 @@ def load_connection_config(
     )
 
 
-def _coerce_float(v: Any) -> Optional[float]:
+def _coerce_float(v: Any, name: str = "socketTimeout") -> Optional[float]:
     if v is None or v == "":
         return None
     try:
         return float(v)
     except (ValueError, TypeError):
-        logger.warning("falkordb_connection: ignoring non-numeric socketTimeout %r", v)
+        logger.warning("falkordb_connection: ignoring non-numeric %s %r", name, v)
         return None
 
 
@@ -520,7 +541,11 @@ def normalize_credentials(
     return username, password
 
 
-def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
+def resilient_pool_kwargs(
+    *,
+    socket_timeout: Optional[float] = None,
+    connect_timeout: Optional[float] = None,
+) -> dict:
     """Socket-hygiene kwargs every raw FalkorDB/Redis ``ConnectionPool`` must
     carry. ``socket_timeout`` is a HANG NET for black-holed sockets (a GKE
     node rotation leaves established connections pointing at a dead pod —
@@ -540,8 +565,10 @@ def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
     ``FALKORDB_SOCKET_KEEPALIVE`` / ``FALKORDB_HEALTH_CHECK_INTERVAL``)."""
     if socket_timeout is None:
         socket_timeout = _resilience.FALKORDB_SOCKET_TIMEOUT_SECS
+    if connect_timeout is None:
+        connect_timeout = _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
     return {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": connect_timeout,
         "socket_timeout": socket_timeout,
         "socket_keepalive": _resilience.FALKORDB_SOCKET_KEEPALIVE,
         "health_check_interval": _resilience.FALKORDB_HEALTH_CHECK_INTERVAL_SECS,
@@ -591,7 +618,10 @@ def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
     auth + timeouts + TLS (``ssl=True`` + cert paths when enabled)."""
     cfg = apply_learned_auth(cfg)       # skip AUTH on an instance known to have none
     kw: dict = {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": (
+            cfg.socket_connect_timeout
+            or _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
+        ),
         "socket_timeout": socket_timeout,
         "decode_responses": True,
     }
@@ -810,7 +840,10 @@ def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dic
     the dashboard probes) goes through it.
     """
     kw: dict = {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": (
+            cfg.socket_connect_timeout
+            or _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
+        ),
         "socket_timeout": socket_timeout,
     }
     username = cfg.sentinel_username or (
@@ -1051,7 +1084,10 @@ def build_graph_pool_kwargs(
             or cfg.graph_pool_size
             or int(os.getenv("FALKORDB_POOL_SIZE", "10"))
         ),
-        **resilient_pool_kwargs(socket_timeout=socket_timeout),
+        **resilient_pool_kwargs(
+            socket_timeout=socket_timeout,
+            connect_timeout=cfg.socket_connect_timeout,
+        ),
     }
     # Credentials only when we actually have them: once an instance is learned to
     # be unauthenticated, ``apply_learned_auth`` clears them and they must vanish

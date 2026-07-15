@@ -205,3 +205,19 @@ async def test_sentinel_master_probe_keeps_the_data_plane_identity(monkeypatch):
     assert (seen["host"], seen["port"]) == ("the-master", 6379)
     assert seen["password"] == "graphpass"                 # data-plane auth
     assert seen["ssl_context"] is not None                 # data-plane TLS
+
+
+@pytest.mark.asyncio
+async def test_cluster_mode_without_nodes_is_a_definitive_config_failure(monkeypatch):
+    """mode=cluster with NO startup nodes used to silently fall through to a
+    standalone ping of self._host (typically localhost) — a verdict about a
+    host nobody will dial. It must surface as its own failure reason instead."""
+    async def never(host, port, **kw):
+        raise AssertionError("must not ping anything: the config is incomplete")
+
+    monkeypatch.setattr(pf_mod, "redis_ping_preflight", never)
+    fc = {"mode": "cluster", "cluster": {"startupNodes": []}}
+    p = FalkorDBProvider(host="h", port=6379, graph_name="g", connection_config=fc)
+    r = await p.preflight(deadline_s=2.0)
+    assert not r.ok
+    assert r.reason == "cluster_nodes_missing"
