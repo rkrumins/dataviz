@@ -115,7 +115,8 @@ def _wire(
         async def get(self, orm, _key):
             if orm is DataSourcePollingConfigORM:
                 return polling_config
-            return SimpleNamespace(provider_id="prov1")
+            # deleted_at: the handler skips jobs for tombstoned sources.
+            return SimpleNamespace(provider_id="prov1", deleted_at=None)
 
     @asynccontextmanager
     async def fake_jobs_session():
