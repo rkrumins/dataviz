@@ -103,9 +103,17 @@ def _probe_budget(cfg: "ProviderConfig") -> tuple[float, float]:
 # are registered. With 100 providers and 1s interval, full cycle ≈ 100s.
 INTER_PROBE_INTERVAL_S: float = _env_float("PROVIDER_WARMUP_INTERVAL_S", 1.0)
 
-# Floor on full-cycle duration. With few providers we don't want to
-# hammer them every second; never re-poll faster than this.
+# Floor on full-cycle duration WHEN EVERYTHING IS HEALTHY. With few providers we
+# don't want to hammer them every second; never re-poll faster than this.
 MIN_FULL_CYCLE_S: float = _env_float("PROVIDER_WARMUP_MIN_CYCLE_S", 30.0)
+
+# Floor on full-cycle duration WHILE ANY PROVIDER IS UNHEALTHY (recovery mode).
+# A recovered node must self-heal in seconds, not wait a full healthy cycle —
+# reads stay gated until warmup observes the recovery, so the poll cadence IS the
+# recovery latency. Probes are bounded and hold no DB session, so polling fast
+# during an outage is cheap and is exactly when responsiveness matters. Falls
+# back to MIN_FULL_CYCLE_S automatically once every provider is healthy again.
+RECOVERY_POLL_S: float = _env_float("PROVIDER_WARMUP_RECOVERY_POLL_S", 5.0)
 
 # After a load-providers DB error, sleep this long before retrying.
 DB_ERROR_BACKOFF_S: float = _env_float("PROVIDER_WARMUP_DB_BACKOFF_S", 10.0)
@@ -322,11 +330,18 @@ async def run_provider_warmup_loop(
                     "Provider warmup: on_cycle_complete raised: %s", exc,
                 )
 
-        # 4. Floor on the full cycle duration. If we burned through
-        #    quickly (small deployment), sleep so we never re-poll the
-        #    same host more often than MIN_FULL_CYCLE_S.
+        # 4. Health-aware cycle floor. When every provider is healthy, poll
+        #    slowly (MIN_FULL_CYCLE_S) so we don't hammer them. While ANY
+        #    provider is unhealthy, poll fast (RECOVERY_POLL_S): reads stay
+        #    gated until warmup observes the recovery, so this cadence IS the
+        #    self-heal latency for a node that just came back. Automatically
+        #    relaxes back to the slow cadence once all providers are healthy.
+        any_unhealthy = any(
+            not (cache.get(pid) or {}).get("ok", False) for pid in observed_ids
+        )
+        target_cycle = RECOVERY_POLL_S if any_unhealthy else MIN_FULL_CYCLE_S
         elapsed = time.monotonic() - cycle_start
-        sleep_for = max(0.0, MIN_FULL_CYCLE_S - elapsed)
+        sleep_for = max(0.0, target_cycle - elapsed)
         if sleep_for > 0:
             if await _interruptible_sleep(shutdown_event, sleep_for):
                 return
