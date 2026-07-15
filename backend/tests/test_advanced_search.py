@@ -1331,6 +1331,38 @@ class TestScopeChainSemantics:
         assert cypher.count("MATCH (root") == 1
         assert result["params"]["_scopeRootUrns0"] == ["urn:layerA"]
 
+    def test_scope_match_precedes_candidate_limit(self):
+        """Correctness: the scope MATCH must PRECEDE ``WITH n LIMIT``, so
+        the candidate cap bounds the IN-SCOPE set — not a graph-wide
+        prefix. The old post-filter shape appended the scope MATCH AFTER
+        the cap, which silently dropped in-scope matches whenever a broad
+        predicate filled the cap graph-wide before the scope clamp ran.
+
+        This is the structural proof of the layer-search scale fix: a
+        layer search whose predicate matches thousands of nodes graph-wide
+        but only a handful inside the layer must return all of the handful.
+        """
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                root_urns=["urn:layerA"],
+            ),
+        )
+        cypher = explain_deep_search(_StubScopeProvider(), q)["cypher"]
+        scope_pos = cypher.index("MATCH (root0)")
+        limit_pos = cypher.index("WITH n LIMIT")
+        assert scope_pos < limit_pos, (
+            "scope MATCH must precede the candidate LIMIT so the cap "
+            f"applies to in-scope nodes; got: {cypher}"
+        )
+        # No post-filter scope MATCH survives after the cap.
+        assert "MATCH (root" not in cypher[limit_pos:]
+
 
 # ---------------------------------------------------------------------------
 # Candidate Cypher assembly
@@ -2307,8 +2339,10 @@ class TestHydrateAncestorsBatched:
 class TestScopeRootUrnsCap:
     """Verify the env-tunable cap on ``SearchScope.root_urns``.
 
-    Default is 256; was previously a hardcoded ``max_length=64``. The
-    cap is now enforced by a Pydantic ``model_validator`` that reads
+    Default is 5000 (raised from 256 for layer-scoped search — a large
+    layer routinely has 1000+ top-level entities, and the FE now passes
+    the layer's exact URN set as the authoritative scope). The cap is
+    enforced by a Pydantic ``model_validator`` that reads
     ``DeepSearchSettings.scope_root_urns_cap`` at validation time.
     """
 
@@ -2318,23 +2352,23 @@ class TestScopeRootUrnsCap:
         )
         get_deep_search_settings.cache_clear()
 
-    def test_default_cap_is_256(self, monkeypatch):
-        """At the default 256, exactly 256 URNs validates."""
+    def test_default_cap_is_5000(self, monkeypatch):
+        """At the default 5000, exactly 5000 URNs validates."""
         monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
         self._clear_settings_cache()
         from backend.common.models.search import SearchScope
-        urns = [f"urn:c{i}" for i in range(256)]
+        urns = [f"urn:c{i}" for i in range(5000)]
         scope = SearchScope(viewId="v1", rootUrns=urns)
-        assert len(scope.root_urns) == 256
+        assert len(scope.root_urns) == 5000
 
-    def test_default_cap_rejects_257(self, monkeypatch):
+    def test_default_cap_rejects_5001(self, monkeypatch):
         """One over the default cap raises with the cap value in the msg."""
         monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
         self._clear_settings_cache()
         from backend.common.models.search import SearchScope
         from pydantic import ValidationError as PydanticValidationError
-        urns = [f"urn:c{i}" for i in range(257)]
-        with pytest.raises(PydanticValidationError, match="256"):
+        urns = [f"urn:c{i}" for i in range(5001)]
+        with pytest.raises(PydanticValidationError, match="5000"):
             SearchScope(viewId="v1", rootUrns=urns)
 
     def test_env_override_raises_cap(self, monkeypatch):
