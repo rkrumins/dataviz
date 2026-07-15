@@ -886,7 +886,9 @@ class FalkorDBProvider(GraphDataProvider):
         falling back to the first startup node when discovery fails;
         connect() remains the authoritative topology check.
         """
-        from backend.common.interfaces.preflight import redis_ping_preflight
+        from backend.common.interfaces.preflight import (
+            redis_ping_preflight, is_auth_reachable_reason,
+        )
         from backend.app.providers.falkordb_connection import load_connection_config
         from backend.common.adapters.redis_tls import build_ssl_context
 
@@ -898,13 +900,49 @@ class FalkorDBProvider(GraphDataProvider):
             tls_enabled=self._tls_enabled,
             credentials=self._credentials,
         )
-        # Probe the node that actually SERVES this graph, never just an entry
-        # point. A Sentinel daemon answers PONG while the master it watches is
-        # dead, and a healthy cluster seed masks a dead slot owner — in both cases
-        # warmup would keep reporting the provider healthy (so the recovery
-        # eviction never fires) while every real query fails. Discovery is
-        # deadline-bounded and falls back to the configured entry point when it
-        # can't resolve; connect() remains the authoritative topology check.
+        # Reachability + AUTH probe. It must be CHEAP and deadline-clean by
+        # construction — a health probe must never build a heavyweight client.
+        ssl_ctx = build_ssl_context(cfg.tls_settings())
+
+        if cfg.mode == "cluster" and cfg.cluster_nodes:
+            # Do NOT build a RedisCluster to resolve the owning node here.
+            # RedisCluster.initialize() connects to EVERY startup node, verifies
+            # full slot coverage and RETRIES, and its aclose() blocks our
+            # deadline-cancel — one slow/down node adds ~2s (measured) and under
+            # real network latency this overruns the warmup budget, surfacing as
+            # 'warmup_wall_clock_exceeded'; on discovery-timeout the old code then
+            # pinged cluster_nodes[0], which may itself be the down node
+            # ('connect_timeout'). Owning-node discovery is the CONNECT path's
+            # job (cached in TopologyGraphClients; a dead slot owner is
+            # re-resolved + evicted there). The probe only needs "is the cluster
+            # reachable and are the credentials good?" — a raw AUTH+PING to any
+            # LIVE startup node answers that, deterministically (self._password,
+            # no discovery / no learned-auth strip in the probe path). Try nodes
+            # in order so one down node never fails the probe.
+            nodes = list(cfg.cluster_nodes)
+            per_node = max(0.5, deadline_s / len(nodes))
+            result = None
+            for node_host, node_port in nodes:
+                result = await redis_ping_preflight(
+                    node_host, node_port,
+                    deadline_s=per_node,
+                    username=self._username,
+                    password=self._password,
+                    ssl_context=ssl_ctx,
+                )
+                # ok → reachable. A definitive auth verdict (auth_required /
+                # auth_failed) is the same on every node — the whole cluster
+                # shares ONE credential — so stop rather than retry N nodes.
+                if result.ok or is_auth_reachable_reason(result.reason):
+                    break
+                # else (connect_timeout / refused / dns) this node is down —
+                # try the next one.
+            return result
+
+        # Standalone pings host:port directly. Sentinel resolves the CURRENT
+        # master first (a Sentinel daemon answers PONG while its master is dead);
+        # that discovery is a single lightweight query, deadline-bounded, with a
+        # fallback to the first sentinel node.
         host, port = self._host, self._port
         discover = None
         if cfg.mode == "sentinel" and cfg.sentinel_nodes:
@@ -913,12 +951,6 @@ class FalkorDBProvider(GraphDataProvider):
                 resolve_sentinel_master,
             )
             discover = resolve_sentinel_master(cfg, 1.0)
-        elif cfg.mode == "cluster" and cfg.cluster_nodes:
-            host, port = cfg.cluster_nodes[0]
-            from backend.app.providers.falkordb_connection import (
-                resolve_cluster_node_for_key,
-            )
-            discover = resolve_cluster_node_for_key(cfg, self._graph_name, 1.0)
 
         if discover is not None:
             started = time.monotonic()
@@ -934,7 +966,7 @@ class FalkorDBProvider(GraphDataProvider):
             deadline_s=deadline_s,
             username=self._username,
             password=self._password,
-            ssl_context=build_ssl_context(cfg.tls_settings()),
+            ssl_context=ssl_ctx,
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
