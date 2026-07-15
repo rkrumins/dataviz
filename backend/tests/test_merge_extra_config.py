@@ -9,6 +9,7 @@ host and exfiltrate the provider's cache credentials on connect. cacheConnection
 now provider-authoritative: a data-source-supplied one is dropped (with a warning).
 """
 from backend.app.providers.manager import ProviderManager
+from backend.app.registry.provider_registry import ProviderRegistry
 
 
 class TestMergeExtraConfigCacheConnection:
@@ -44,3 +45,36 @@ class TestMergeExtraConfigCacheConnection:
         assert result["cacheConnection"] == {"host": "provider-cache.internal"}
         assert result["schemaMapping"]["nodeLabel"] == "Node"  # overridden
         assert result["schemaMapping"]["urnProperty"] == "urn"  # preserved from base
+
+
+class TestRegistryMergeExtraConfigCacheConnection:
+    """The deprecated-but-still-live ``ProviderRegistry`` (used by the insights
+    cache-warmer/collector) has the same merge and the same exploit path
+    (``_merge_extra_config`` -> ``_create_provider_instance`` -> ``build_cache_client``
+    with the provider's credentials). It must enforce the same invariant."""
+
+    def test_datasource_cache_connection_override_is_dropped(self, caplog):
+        provider_cfg = {"cacheConnection": {"host": "provider-cache.internal"}}
+        ds_cfg = {"cacheConnection": {"host": "attacker"}}
+        with caplog.at_level("WARNING"):
+            result = ProviderRegistry._merge_extra_config(provider_cfg, ds_cfg)
+        assert result["cacheConnection"] == {"host": "provider-cache.internal"}
+        assert "attacker" not in str(result)
+
+    def test_datasource_cache_connection_with_no_provider_one_is_absent(self):
+        result = ProviderRegistry._merge_extra_config(
+            {"other": "value"}, {"cacheConnection": {"host": "attacker"}}
+        )
+        assert "cacheConnection" not in result
+        assert result["other"] == "value"
+
+    def test_benign_datasource_key_still_merges_through(self):
+        provider_cfg = {
+            "cacheConnection": {"host": "provider-cache.internal"},
+            "schemaMapping": {"nodeLabel": "Entity", "urnProperty": "urn"},
+        }
+        ds_cfg = {"schemaMapping": {"nodeLabel": "Node"}}
+        result = ProviderRegistry._merge_extra_config(provider_cfg, ds_cfg)
+        assert result["cacheConnection"] == {"host": "provider-cache.internal"}
+        assert result["schemaMapping"]["nodeLabel"] == "Node"
+        assert result["schemaMapping"]["urnProperty"] == "urn"
