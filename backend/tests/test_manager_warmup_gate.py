@@ -112,6 +112,38 @@ def test_warmup_probe_budget_is_larger_for_cluster_and_sentinel():
         assert _probe_budget(cfg)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
 
 
+# ── Per-provider warmup cadence: scales to a large fleet ──────────────
+
+def test_provider_is_due_is_health_aware_per_provider():
+    from backend.app.providers.warmup import (
+        _provider_is_due, MIN_FULL_CYCLE_S, RECOVERY_POLL_S,
+    )
+    now = 1000.0
+    cache = {"healthy": {"ok": True}, "down": {"ok": False}}
+    # never probed -> due immediately
+    assert _provider_is_due("new", cache, {}, now) is True
+    # healthy, probed a fast-wake ago -> NOT due (this is the scaling fix)
+    assert _provider_is_due("healthy", cache, {"healthy": now - RECOVERY_POLL_S}, now) is False
+    # healthy, probed a full slow cycle ago -> due
+    assert _provider_is_due("healthy", cache, {"healthy": now - MIN_FULL_CYCLE_S}, now) is True
+    # unhealthy, probed RECOVERY_POLL_S ago -> due (fast self-heal)
+    assert _provider_is_due("down", cache, {"down": now - RECOVERY_POLL_S}, now) is True
+    # unhealthy, probed just now -> not due yet
+    assert _provider_is_due("down", cache, {"down": now - 1.0}, now) is False
+
+
+def test_one_down_provider_does_not_drag_a_healthy_fleet_into_the_fast_lane():
+    """30 healthy + 1 down. On a fast (RECOVERY_POLL_S) wake, ONLY the down one
+    is re-probed — the healthy fleet is skipped. This is why the loop scales."""
+    from backend.app.providers.warmup import _provider_is_due, RECOVERY_POLL_S
+    now = 5000.0
+    cache = {f"h{i}": {"ok": True} for i in range(30)}
+    cache["down"] = {"ok": False}
+    last_probed = {pid: now - RECOVERY_POLL_S for pid in cache}  # all probed one fast wake ago
+    due = [pid for pid in cache if _provider_is_due(pid, cache, last_probed, now)]
+    assert due == ["down"]
+
+
 # ── Integration: get_provider fast-fails on recent unhealthy ─────────
 
 

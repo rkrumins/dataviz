@@ -157,6 +157,33 @@ def _adaptive_interval(provider_count: int) -> float:
     return max(0.05, min(natural, INTER_PROBE_INTERVAL_S))
 
 
+def _provider_is_due(
+    provider_id: str,
+    cache: "MutableMapping[str, dict]",
+    last_probed: dict,
+    now: float,
+) -> bool:
+    """Whether a provider is due for a re-probe under the HEALTH-AWARE
+    PER-PROVIDER cadence — the thing that lets the loop scale to dozens/hundreds
+    of providers:
+
+      - never probed yet            → due now
+      - last observation HEALTHY    → due every MIN_FULL_CYCLE_S
+      - last observation UNHEALTHY  → due every RECOVERY_POLL_S (fast self-heal)
+
+    So while the loop wakes at the fast cadence (because SOMETHING is down), a
+    HEALTHY provider is still skipped until its own slow interval elapses — one
+    down host never drags the whole fleet into the fast lane.
+    """
+    last = last_probed.get(provider_id)
+    if last is None:
+        return True
+    prev = cache.get(provider_id)
+    healthy = bool(prev.get("ok")) if prev else False
+    target = MIN_FULL_CYCLE_S if healthy else RECOVERY_POLL_S
+    return (now - last) >= target
+
+
 # ── Type alias ───────────────────────────────────────────────────────
 
 ProviderConfig = Dict[str, Any]   # {id, provider_type, host, port, tls, creds}
@@ -212,6 +239,14 @@ async def run_provider_warmup_loop(
         PER_PROBE_DEADLINE_S, INTER_PROBE_INTERVAL_S, MIN_FULL_CYCLE_S,
     )
 
+    # Per-provider last-probe time (monotonic), persisted across cycles. Drives
+    # the HEALTH-AWARE PER-PROVIDER cadence: a healthy provider is re-probed
+    # every MIN_FULL_CYCLE_S; an unhealthy one every RECOVERY_POLL_S. This is
+    # what makes the loop scale to dozens/hundreds of providers — a single down
+    # provider fast-heals WITHOUT dragging every healthy provider into the fast
+    # lane (which a global cadence would).
+    last_probed: dict[str, float] = {}
+
     while not shutdown_event.is_set():
         cycle_start = time.monotonic()
 
@@ -248,7 +283,20 @@ async def run_provider_warmup_loop(
         for cfg in valid_providers:
             observed_ids.add(cfg["id"])
 
-        interval = _adaptive_interval(len(valid_providers))
+        # Health-aware PER-PROVIDER cadence: probe a provider only when ITS OWN
+        # interval has elapsed — MIN_FULL_CYCLE_S while healthy, RECOVERY_POLL_S
+        # while unhealthy (or not yet probed). So in a fleet of dozens, a single
+        # down provider fast-heals (5s) without re-probing every HEALTHY provider
+        # in the fast lane. The loop still wakes at the fast tick while anything
+        # is unhealthy (see the cycle-floor below) but only the due — i.e. the
+        # unhealthy — providers are actually probed on those wakes.
+        cycle_now = time.monotonic()
+        due_providers = [
+            cfg for cfg in valid_providers
+            if _provider_is_due(cfg["id"], cache, last_probed, cycle_now)
+        ]
+
+        interval = _adaptive_interval(len(due_providers) or 1)
         sem = asyncio.Semaphore(max(1, WARMUP_CONCURRENCY))
 
         async def _probe_with_dispatch(cfg: ProviderConfig) -> None:
@@ -266,6 +314,7 @@ async def run_provider_warmup_loop(
 
                 entry = await _probe_one(cfg, build_instance)
                 cache[prov_id] = entry
+                last_probed[prov_id] = time.monotonic()
 
                 # P1.3 — dispatch transition callback for the manager
                 # state machine. CRITICAL that we await these in-band so
@@ -301,11 +350,11 @@ async def run_provider_warmup_loop(
                 if await _interruptible_sleep(shutdown_event, interval):
                     return
 
-        # Launch one task per provider; the semaphore caps concurrency.
+        # Launch one task per DUE provider; the semaphore caps concurrency.
         # Using gather (not TaskGroup) so a single misbehaving probe
         # cannot cancel siblings. Each task swallows its own exceptions.
         await asyncio.gather(
-            *[_probe_with_dispatch(cfg) for cfg in valid_providers],
+            *[_probe_with_dispatch(cfg) for cfg in due_providers],
             return_exceptions=True,
         )
 
@@ -317,6 +366,7 @@ async def run_provider_warmup_loop(
         stale = set(cache.keys()) - observed_ids
         for stale_id in stale:
             cache.pop(stale_id, None)
+            last_probed.pop(stale_id, None)
 
         # 4. Cycle heartbeat — let the manager record warmup_last_cycle_at
         #    so /health/deps can surface the loop's liveness (P1.4).
@@ -330,12 +380,14 @@ async def run_provider_warmup_loop(
                     "Provider warmup: on_cycle_complete raised: %s", exc,
                 )
 
-        # 4. Health-aware cycle floor. When every provider is healthy, poll
-        #    slowly (MIN_FULL_CYCLE_S) so we don't hammer them. While ANY
-        #    provider is unhealthy, poll fast (RECOVERY_POLL_S): reads stay
-        #    gated until warmup observes the recovery, so this cadence IS the
-        #    self-heal latency for a node that just came back. Automatically
-        #    relaxes back to the slow cadence once all providers are healthy.
+        # 4. Health-aware WAKE cadence. When every provider is healthy, sleep a
+        #    full MIN_FULL_CYCLE_S. While ANY provider is unhealthy, wake at the
+        #    fast RECOVERY_POLL_S — but the per-provider due-filter above means
+        #    only the UNHEALTHY providers are actually re-probed on those wakes;
+        #    healthy providers stay on their MIN_FULL_CYCLE_S interval. So a down
+        #    provider self-heals in ~RECOVERY_POLL_S regardless of fleet size,
+        #    and a dozens-strong fleet is never hammered because one host is
+        #    down. Relaxes back to the slow wake once all providers are healthy.
         any_unhealthy = any(
             not (cache.get(pid) or {}).get("ok", False) for pid in observed_ids
         )
@@ -612,37 +664,47 @@ async def start_provider_warmup(
 
     async def _list_providers() -> list:
         import json as _json
+        from sqlalchemy import select
+        from backend.app.db.models import ProviderORM
+        from backend.app.db.repositories.connection_repo import _decrypt
 
+        # ONE query for the whole fleet, then decrypt in memory. This used to be
+        # N+1 — a get_credentials() round-trip PER provider — which, at the fast
+        # recovery cadence with dozens of providers, hammered the management DB
+        # pool every few seconds. Decrypt + JSON are CPU-only, so we do them
+        # after releasing the session.
         async with get_provider_probe_session() as session:
-            rows = await _provider_repo.list_providers(session)
-            out = []
-            for row in rows:
-                creds = await _provider_repo.get_credentials(session, row.id)
-                # extra_config carries falkordbConnection (mode + sentinel/cluster
-                # nodes). WITHOUT it every provider is probed as STANDALONE against
-                # its stored host:port — a Sentinel instance gets pinged at whatever
-                # that row happens to name, and a Cluster instance at one seed — so
-                # the probe verdict describes a topology the read path never uses.
-                # That verdict drives record_probe_success/failure (breaker close +
-                # pool eviction), so getting it wrong corrupts recovery itself.
-                try:
-                    extra = _json.loads(row.extra_config) if row.extra_config else None
-                except Exception:
-                    extra = None
-                out.append({
-                    "id": row.id,
-                    "provider_type": (
-                        row.provider_type.value
-                        if hasattr(row.provider_type, "value")
-                        else str(row.provider_type)
-                    ),
-                    "host": row.host,
-                    "port": row.port,
-                    "tls": row.tls_enabled,
-                    "creds": creds,
-                    "extra_config": extra,
-                })
-            return out
+            rows = (await session.execute(select(ProviderORM))).scalars().all()
+
+        out = []
+        for row in rows:
+            try:
+                creds = _decrypt(row.credentials) if row.credentials else {}
+            except Exception:
+                creds = {}
+            # extra_config carries falkordbConnection (mode + sentinel/cluster
+            # nodes). WITHOUT it every provider is probed as STANDALONE against
+            # its stored host:port — a Sentinel instance gets pinged at whatever
+            # that row names, a Cluster at one seed — so the probe verdict would
+            # describe a topology the read path never uses, corrupting recovery.
+            try:
+                extra = _json.loads(row.extra_config) if row.extra_config else None
+            except Exception:
+                extra = None
+            out.append({
+                "id": row.id,
+                "provider_type": (
+                    row.provider_type.value
+                    if hasattr(row.provider_type, "value")
+                    else str(row.provider_type)
+                ),
+                "host": row.host,
+                "port": row.port,
+                "tls": row.tls_enabled,
+                "creds": creds,
+                "extra_config": extra,
+            })
+        return out
 
     def _build_instance(cfg: ProviderConfig):
         return provider_manager._create_provider_instance(
