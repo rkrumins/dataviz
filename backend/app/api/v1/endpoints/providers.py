@@ -316,6 +316,13 @@ async def test_unsaved_provider_connection(
     req: ProviderCreateRequest = Body(...),
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
+    """Test connectivity for a SUBMITTED (unsaved) provider config.
+
+    The counterpart of ``/{provider_id}/test`` (which probes the saved row):
+    this probes exactly the payload it is given, nothing is persisted. It is
+    the correct target for create forms AND for edit forms validating a
+    pending change before saving.
+    """
     # Spanner is a managed gRPC service keyed on project / instance /
     # database (in extra_config). It does NOT use host/port. Reject
     # ambiguous requests so a misconfigured client doesn't silently
@@ -437,6 +444,12 @@ async def test_provider(
     ),
 ):
     """Test connectivity to a registered provider.
+
+    Probes the SAVED row — always the configuration as last persisted. A
+    pending (unsaved) edit is NOT visible here: to validate a candidate
+    config before saving, POST the full payload to ``/test-connection``
+    instead. Edit forms must use that endpoint, or their 'Test' button
+    silently tests the stale saved state.
 
     Phase 2.5 §2.5.2 — short-session pattern: open a session only long
     enough to fetch the provider row + credentials, close it, then

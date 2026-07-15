@@ -112,6 +112,43 @@ def test_warmup_probe_budget_is_larger_for_cluster_and_sentinel():
         assert _probe_budget(cfg)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
 
 
+# ── Config change clears the warmup gate ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_evict_provider_clears_warmup_states(monkeypatch):
+    """PUT /providers/{id} → evict_provider must drop the provider's warmup
+    states: they describe the OLD config, and the fast-fail read gate consults
+    them independently of the (also reset) instantiation breaker — a stale
+    ok=False observation kept rejecting reads for up to 60s AFTER the operator
+    fixed the configuration. Includes states for providers that were probed but
+    never read from (no cached instance)."""
+    mgr = ProviderManager()
+    # Two graphs for the changed provider — one with a cached instance, one
+    # warmup-only — plus an unrelated provider that must be untouched.
+    for key in [("prov_X", "g1"), ("prov_X", "g2"), ("prov_OTHER", "g")]:
+        state = ProviderState(cache_key=key)
+        state.last_observation = ProbeOutcome.from_warmup(
+            ok=False, reason="tcp_refused", elapsed_ms=5,
+        )
+        state.consecutive_failures = 3
+        mgr._provider_states[key] = state
+
+    # No-op the cross-process broadcast and registry invalidation (external).
+    from backend.app.providers import invalidation_bus
+    monkeypatch.setattr(
+        invalidation_bus, "publish_provider_invalidation", AsyncMock(),
+    )
+
+    await mgr.evict_provider("prov_X")
+
+    assert ("prov_X", "g1") not in mgr._provider_states
+    assert ("prov_X", "g2") not in mgr._provider_states
+    # Isolation: the OTHER provider's state survives untouched.
+    other = mgr._provider_states[("prov_OTHER", "g")]
+    assert other.consecutive_failures == 3
+    assert other.blocks_reads(max_age_s=60.0) is True
+
+
 # ── Integration: get_provider fast-fails on recent unhealthy ─────────
 
 
