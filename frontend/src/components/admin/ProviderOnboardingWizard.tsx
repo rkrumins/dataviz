@@ -1371,6 +1371,20 @@ export function ProviderOnboardingWizard({
                     </p>
                   </div>
 
+                  {formData.falkordbConnection?.mode !== 'standalone' && (
+                    <div className="flex items-start gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2">
+                      <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                      <p className="text-[11px] leading-relaxed text-ink-secondary">
+                        The <span className="font-medium text-ink">Username / Password</span> above are
+                        the graph credentials for {formData.falkordbConnection?.mode === 'cluster' ? 'every cluster node' : 'the master and its replicas'}.
+                        {formData.falkordbConnection?.mode === 'cluster'
+                          ? ' A Redis Cluster shares one credential across all shards — there is no per-node password.'
+                          : ' Sentinel data-plane auth reuses these; the sentinel daemons only need their own auth if you enable it.'}
+                        {' '}Leave them blank for an unauthenticated instance.
+                      </p>
+                    </div>
+                  )}
+
                   {formData.falkordbConnection?.mode === 'cluster' && (
                     <div>
                       <label className="mb-1.5 block text-xs font-medium text-ink">
