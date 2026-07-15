@@ -301,7 +301,15 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
         from backend.app.db.repositories.stats_repo import get_data_source_stats
         stored = await get_data_source_stats(session, envelope.data_source_id)
         stored_counts = None
-        if stored is not None and stored.schema_stats and stored.schema_stats != "{}":
+        # An emptied ``graph_schema`` means an ontology change invalidated the
+        # schema facet (see ``invalidate_schema_facet``). Never short-circuit on
+        # unchanged counts in that case — the counts didn't move but the ontology
+        # (containment/lineage edge types) did, so the schema MUST be rebuilt.
+        if (
+            stored is not None
+            and stored.schema_stats and stored.schema_stats != "{}"
+            and stored.graph_schema and stored.graph_schema != "{}"
+        ):
             try:
                 stored_counts = {
                     "nodeCount": stored.node_count,

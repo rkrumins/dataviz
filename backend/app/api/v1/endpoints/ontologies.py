@@ -133,6 +133,32 @@ async def _invalidate_ontology_caches(
         logging.getLogger(__name__).warning(
             "resolved-ontology generation bump failed for %s: %s", ontology_id, exc)
 
+    # Invalidate the PERSISTED schema cache (data_source_stats.graph_schema) for
+    # every data source using this ontology. The bump above only refreshes the
+    # in-memory resolved-ontology cache (live read paths); the frontend reads
+    # containment/lineage edge types from the persisted graph_schema column,
+    # which is written only by the insights deep worker and would otherwise stay
+    # stale after an ontology edit (containment types disappear → Context View
+    # renders flat). Resetting it makes the next /cached-schema read self-heal
+    # via build_synthetic_schema and the next deep poll rebuild it in full.
+    try:
+        from sqlalchemy import select
+        from backend.app.db.models import WorkspaceDataSourceORM
+        from backend.app.db.repositories.stats_repo import invalidate_schema_facet
+        ds_rows = (
+            await session.execute(
+                select(WorkspaceDataSourceORM.id).where(
+                    WorkspaceDataSourceORM.ontology_id == ontology_id
+                )
+            )
+        ).all()
+        for (ds_id,) in ds_rows:
+            await invalidate_schema_facet(session, ds_id)
+    except Exception as exc:  # never block the mutation on cache plumbing
+        import logging
+        logging.getLogger(__name__).warning(
+            "schema-facet invalidation failed for ontology %s: %s", ontology_id, exc)
+
 
 def _reject_case_insensitive_type_dupes(req) -> None:
     """422 if the request DECLARES two entity or relationship type ids that differ only

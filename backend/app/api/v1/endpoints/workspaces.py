@@ -557,6 +557,13 @@ async def update_data_source(
     # doesn't serve stale schema/ontology. Commit first so the worker's
     # session sees the updated row when it picks up the job.
     if schema_invalidating_change:
+        # Reset the persisted graph_schema so the next /cached-schema read
+        # self-heals via build_synthetic_schema (correct containment types)
+        # and the scheduler's deep poll rebuilds it in full. The counts poll
+        # enqueued below never rewrites graph_schema, so without this the
+        # stale schema would keep reading as "fresh".
+        from backend.app.db.repositories.stats_repo import invalidate_schema_facet
+        await invalidate_schema_facet(session, ds_id)
         await session.commit()
         await enqueue_stats_job_safe(ds_id, workspace_id)
         # Ontology (re)assignment / projection changes alter how reads

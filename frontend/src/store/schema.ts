@@ -317,7 +317,13 @@ export const useSchemaStore = create<SchemaState>()(
           })()
           set((state) => {
             const prevSchema = state.schema
-            const nextContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
+            const explicitContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
+            // Fall back to the per-relationship isContainment flags when the
+            // top-level array is empty/absent, so a lossy payload can't silently
+            // disable the hierarchy (see deriveContainmentEdgeTypes).
+            const nextContainment = explicitContainment.length > 0
+              ? explicitContainment
+              : deriveContainmentEdgeTypes(relationshipTypes)
             const nextLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
             // Null (not undefined) when the backend couldn't digest the ontology —
             // the drift check reads null as "skip", and `undefined` would be an
@@ -740,6 +746,21 @@ export function normalizeEdgeType(edge: { data?: { edgeType?: string; relationsh
 export function isContainmentEdgeType(edgeType: string, containmentTypes: string[]): boolean {
   const normalized = edgeType.toUpperCase()
   return containmentTypes.some(t => t.toUpperCase() === normalized)
+}
+
+/**
+ * Derive the containment edge type ids from per-relationship `isContainment`
+ * flags. A schema payload carries containment as TWO redundant signals: the
+ * top-level `containmentEdgeTypes` array AND `relationshipTypes[].isContainment`
+ * (both built from the same ontology). When only the flags survive — e.g. the
+ * `cached-ontology` synthetic fallback, which omits the top-level array — this
+ * keeps the hierarchy working instead of silently rendering flat. Case-folding
+ * is handled downstream by `isContainmentEdgeType`.
+ */
+export function deriveContainmentEdgeTypes(
+  relationshipTypes: Array<{ id: string; isContainment?: boolean }>,
+): string[] {
+  return relationshipTypes.filter(rt => rt.isContainment).map(rt => rt.id)
 }
 
 /** Pure helper: check edge type against a set of lineage types (case-insensitive) */
