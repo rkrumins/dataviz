@@ -640,19 +640,32 @@ class FalkorDBProvider(GraphDataProvider):
         # unauthenticated FalkorDB. The cache Redis resolves its OWN auth via
         # ``self._credentials`` (never these fields) and is intentionally
         # NOT gated by this flag.
-        self._auth_enabled = auth_enabled
-        self._username = username if auth_enabled else None
-        self._password = password if auth_enabled else None
-        # Footgun guard: authentication DISABLED for this provider while a graph
-        # password is actually saved. The password is nulled above, so the graph
-        # connects UNAUTHENTICATED and an auth-required instance (e.g. a
-        # requirepass Redis Cluster) reports "auth_required" even though the
-        # operator believes a credential is configured. Surface it loudly — the
-        # fix is to enable authentication for the provider (or clear the saved
-        # password). authEnabled rides extra_config.falkordbConnection.authEnabled.
-        if not auth_enabled and (password or (credentials or {}).get("password")):
+        # Auth is ON unless EXPLICITLY disabled. ``authEnabled`` rides
+        # extra_config.falkordbConnection.authEnabled and callers pass through
+        # whatever was stored (``.get("authEnabled", True)``), so a null / 0 /
+        # wrong-typed value used to be falsy here and SILENTLY NULL a saved
+        # password — the "auth_required despite a saved credential" footgun the
+        # operator keeps hitting after configuring auth in the UI. Only a real,
+        # explicit false (bool ``False`` or "false"/"0"/"no"/"off") disables
+        # auth; anything else keeps the configured credential. A configured
+        # password against a genuinely UNauthenticated instance is still safe —
+        # preflight treats the "no password set" reply as reachable and the
+        # connect path's auth-negotiation drops the stale credential and
+        # reconnects.
+        auth_off = auth_enabled is False or (
+            isinstance(auth_enabled, str)
+            and auth_enabled.strip().lower() in ("false", "0", "no", "off")
+        )
+        self._auth_enabled = not auth_off
+        self._username = username if self._auth_enabled else None
+        self._password = password if self._auth_enabled else None
+        # Footgun guard: auth EXPLICITLY disabled while a graph password is saved
+        # — the password is nulled above, so the graph connects UNAUTHENTICATED
+        # and an auth-required instance (e.g. a requirepass Redis Cluster)
+        # reports "auth_required". Surface it loudly.
+        if auth_off and (password or (credentials or {}).get("password")):
             logger.warning(
-                "FalkorDB provider %s: authentication is DISABLED "
+                "FalkorDB provider %s: authentication is EXPLICITLY DISABLED "
                 "(falkordbConnection.authEnabled=false) but a graph password is "
                 "saved — connecting UNAUTHENTICATED. An auth-required instance will "
                 "report 'auth_required'. Enable authentication for this provider, "

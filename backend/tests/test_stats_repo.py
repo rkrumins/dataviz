@@ -227,3 +227,48 @@ async def test_touch_top_level_freshness_noop_when_row_missing(db_session: Async
 
     fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
     assert fetched is None
+
+
+# ── invalidate_schema_facet (ontology-change invalidation) ───────────
+
+async def test_invalidate_schema_facet_resets_graph_schema_and_freshness(
+    db_session: AsyncSession,
+):
+    ds_id = await _seed_data_source(db_session)
+    await stats_repo.upsert_data_source_stats(
+        db_session,
+        ds_id=ds_id,
+        node_count=100,
+        edge_count=200,
+        entity_type_counts='{"Table": 100}',
+        edge_type_counts='{"HAS_COLUMN": 200}',
+        schema_stats='{"tables": 10}',
+        ontology_metadata='{"version": 1}',
+        graph_schema='{"containmentEdgeTypes": ["HAS_COLUMN"]}',
+    )
+    # Precondition: a full deep row with a populated schema + freshness marker.
+    seeded = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert seeded.graph_schema != "{}"
+    assert seeded.schema_updated_at is not None
+
+    await stats_repo.invalidate_schema_facet(db_session, ds_id)
+
+    fetched = await stats_repo.get_data_source_stats(db_session, ds_id)
+    # graph_schema reset to the CacheMiss marker → next /cached-schema read
+    # falls to build_synthetic_schema; schema_updated_at cleared → the
+    # scheduler's deep-due check fires and rebuilds it in full.
+    assert fetched.graph_schema == "{}"
+    assert fetched.schema_updated_at is None
+    # Counts facet is untouched.
+    assert fetched.node_count == 100
+    assert fetched.edge_count == 200
+    assert fetched.entity_type_counts == '{"Table": 100}'
+    assert fetched.schema_stats == '{"tables": 10}'
+
+
+async def test_invalidate_schema_facet_noop_when_row_missing(db_session: AsyncSession):
+    # No seeded row — must no-op, not raise or create a phantom row.
+    await stats_repo.invalidate_schema_facet(db_session, "ds_nonexistent")
+
+    fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
+    assert fetched is None

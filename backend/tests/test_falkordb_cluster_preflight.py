@@ -91,3 +91,28 @@ async def test_probe_never_builds_a_rediscluster(monkeypatch):
     p = _cluster_provider([["n1", 6379]])
     r = await p.preflight(deadline_s=3.0)
     assert r.ok  # resolve_cluster_node_for_key was never called (else boom)
+
+
+@pytest.mark.parametrize(
+    "auth_enabled,password_kept",
+    [
+        (True, True),          # explicit on
+        (None, True),          # null / JSON null — must NOT drop the password
+        ("true", True),
+        (0, True),             # weird truthy-ish — keep the credential (safe)
+        (False, False),        # explicit off — honored
+        ("false", False),      # explicit off (string) — honored
+    ],
+)
+def test_only_explicit_false_authEnabled_drops_a_saved_password(auth_enabled, password_kept):
+    """The footgun: a configured graph password must survive a null / absent /
+    weird ``authEnabled``. Before, ``password if auth_enabled else None`` treated
+    a stored ``null`` as falsy and silently dropped the credential, so a provider
+    configured with auth in the UI still probed ``auth_required``. Only an
+    EXPLICIT false may disable auth."""
+    p = FalkorDBProvider(
+        host="h", port=6379, graph_name="g", password="secret",
+        auth_enabled=auth_enabled, credentials={"password": "secret"},
+    )
+    assert (p._password is not None) is password_kept
+    assert p._auth_enabled is password_kept

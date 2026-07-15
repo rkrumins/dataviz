@@ -87,6 +87,31 @@ async def touch_schema_freshness(session: AsyncSession, ds_id: str) -> None:
     await session.flush()
 
 
+async def invalidate_schema_facet(session: AsyncSession, ds_id: str) -> None:
+    """Mark the deep schema facet stale after an ontology change.
+
+    Resets ``graph_schema`` to the empty marker and clears
+    ``schema_updated_at``. Two effects, both intended:
+
+    * ``/cached-schema`` now MISSES on this row (``read_stats_cache``
+      treats ``"{}"`` as a miss) and falls to ``build_synthetic_schema``,
+      which re-resolves the live ontology — so the next read serves the
+      correct containment/lineage edge types immediately.
+    * ``schema_updated_at = NULL`` makes the scheduler's deep-due check
+      (``_is_deep_due``) fire on its next tick, so ``collect_deep``
+      rebuilds the full graph_schema (with instance counts) shortly after.
+
+    Only the schema facet is touched — counts stay intact. No-op when the
+    row doesn't exist yet (its first deep poll will build a fresh schema).
+    """
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    existing.graph_schema = "{}"
+    existing.schema_updated_at = None
+    await session.flush()
+
+
 async def upsert_data_source_stats_counts(
     session: AsyncSession,
     ds_id: str,

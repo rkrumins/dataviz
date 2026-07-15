@@ -26,7 +26,7 @@ import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderStatus } from '@/store/providerStatus'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
-import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType } from '@/store/schema'
+import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType, deriveContainmentEdgeTypes } from '@/store/schema'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react'
 
@@ -62,10 +62,17 @@ export function useViewExecutionContext(): ViewExecutionContextValue | null {
 // ─── Schema Resolution ─────────────────────────────────────────────────────
 
 function resolveSchema(raw: GraphSchema): ResolvedViewSchema {
+  const relationshipTypes = raw.relationshipTypes.map(convertBackendRelationshipType)
+  // Fall back to the per-relationship isContainment flags when the top-level
+  // array is empty/absent (e.g. the cached-ontology synthetic schema), so a
+  // lossy payload can't silently disable parent-child nesting in the canvas.
+  const explicitContainment = raw.containmentEdgeTypes ?? []
   return {
     entityTypes: raw.entityTypes.map(convertBackendEntityType),
-    relationshipTypes: raw.relationshipTypes.map(convertBackendRelationshipType),
-    containmentEdgeTypes: raw.containmentEdgeTypes ?? [],
+    relationshipTypes,
+    containmentEdgeTypes: explicitContainment.length > 0
+      ? explicitContainment
+      : deriveContainmentEdgeTypes(relationshipTypes),
     lineageEdgeTypes: raw.lineageEdgeTypes ?? [],
     rootEntityTypes: raw.rootEntityTypes ?? [],
     ontologyDigest: raw.ontologyDigest ?? null,
