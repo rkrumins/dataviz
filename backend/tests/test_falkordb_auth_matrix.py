@@ -203,6 +203,46 @@ async def test_a_real_outage_still_propagates_as_an_outage():
         await with_auth_negotiation(cfg, attempt)
 
 
+# ── the cluster "no reachable node" wrapper must classify as auth ────
+
+def test_cluster_no_reachable_node_wrapping_the_hello_error_is_auth():
+    """redis-py 8 defaults to RESP3, so an auth cluster with NO configured credential
+    fails every startup node with the HELLO handshake error, and NodesManager.initialize
+    re-raises `RedisClusterException("...at least one reachable node: <cause>") from
+    <cause>`. The wrapper inlines the cause text AND chains it — both must classify as
+    auth_required so it surfaces as a config error, never a retried outage."""
+    from redis.exceptions import RedisClusterException
+
+    wrapped = RedisClusterException(
+        "Redis Cluster cannot be connected. Please provide at least one reachable "
+        f"node: {ERR_HELLO_UNAUTHENTICATED}"
+    )
+    wrapped.__cause__ = ERR_HELLO_UNAUTHENTICATED
+    assert is_auth_required_error(wrapped)
+    assert not is_auth_rejected_error(wrapped)
+
+
+@pytest.mark.asyncio
+async def test_cluster_primary_nodes_surfaces_auth_as_config_error(monkeypatch):
+    """The keyless GRAPH.LIST path (graph name-availability) is now wrapped in
+    with_auth_negotiation, so a cluster with auth but no configured credential yields a
+    clean ProviderConfigurationError instead of the raw RedisClusterException that would
+    trip the operation breaker."""
+    from redis.exceptions import RedisClusterException
+
+    async def _boom(cfg, socket_timeout):
+        exc = RedisClusterException(
+            "Redis Cluster cannot be connected. Please provide at least one reachable "
+            f"node: {ERR_HELLO_UNAUTHENTICATED}"
+        )
+        exc.__cause__ = ERR_HELLO_UNAUTHENTICATED
+        raise exc
+
+    monkeypatch.setattr(fc, "_cluster_primary_nodes_once", _boom)
+    with pytest.raises(ProviderConfigurationError, match="requires authentication"):
+        await fc.cluster_primary_nodes(_cfg(mode="cluster"), 5.0)
+
+
 # ── the learned state reaches every pool builder ─────────────────────
 
 def test_learned_no_auth_strips_credentials_from_every_pool_builder():
