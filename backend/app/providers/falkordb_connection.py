@@ -77,6 +77,12 @@ class FalkorDBConnConfig:
     sentinel_username: Optional[str] = None
     sentinel_password: Optional[str] = None
     sentinel_auth_enabled: bool = False
+    # TLS for the Sentinel DAEMONS themselves. None → inherit the data-plane
+    # TLS settings (a "TLS everywhere" deployment needs no extra config);
+    # an explicit ``sentinel.tls`` object overrides per key, and
+    # ``sentinel.tls.enabled=false`` gives a TLS data plane with plaintext
+    # sentinels. See load_connection_config.
+    sentinel_tls: Optional[TLSSettings] = None
     cluster_nodes: List[Tuple[str, int]] = field(default_factory=list)
     # Per-provider advanced knobs (None → fall back to env defaults at the
     # call site). socket_timeout bounds a single Cypher query; graph_pool_size
@@ -101,6 +107,11 @@ class FalkorDBConnConfig:
             cert_reqs=self.tls_cert_reqs,
             check_hostname=self.tls_check_hostname,
         )
+
+    def sentinel_tls_settings(self) -> TLSSettings:
+        """TLS for connections to the Sentinel daemons: the explicit
+        ``sentinel.tls`` override when configured, else the data-plane settings."""
+        return self.sentinel_tls or self.tls_settings()
 
     def describe(self) -> str:
         if self.mode == "sentinel":
@@ -196,6 +207,42 @@ def load_connection_config(
         or _as_bool(tls.get("enabled"), False)
         or _as_bool(os.getenv("FALKORDB_TLS_ENABLED"), False)
     )
+    tls_ca = tls.get("caCertPath") or os.getenv("FALKORDB_TLS_CA_CERTS")
+    tls_cert = tls.get("certPath") or os.getenv("FALKORDB_TLS_CERTFILE")
+    tls_key = tls.get("keyPath") or os.getenv("FALKORDB_TLS_KEYFILE")
+    tls_reqs = (
+        tls.get("verifyMode") or os.getenv("FALKORDB_TLS_CERT_REQS") or "required"
+    )
+    tls_check = _as_bool(
+        tls.get("checkHostname", os.getenv("FALKORDB_TLS_CHECK_HOSTNAME", True)),
+        True,
+    )
+    # Sentinel-daemon TLS. The daemons are a separate listener that may (or may
+    # not) terminate TLS independently of the data plane. When neither the
+    # ``sentinel.tls`` object nor FALKORDB_SENTINEL_TLS_ENABLED is present the
+    # field stays None and ``sentinel_tls_settings()`` INHERITS the data-plane
+    # settings — a "TLS everywhere" deployment needs no extra config. Explicit
+    # keys override individually (own CA, own verify mode); an explicit
+    # ``enabled: false`` gives a TLS data plane with plaintext sentinels.
+    sentinel_tls_json = sentinel.get("tls") if isinstance(sentinel.get("tls"), dict) else None
+    sentinel_tls_env = os.getenv("FALKORDB_SENTINEL_TLS_ENABLED")
+    sentinel_tls: Optional[TLSSettings] = None
+    if sentinel_tls_json is not None or sentinel_tls_env is not None:
+        st = sentinel_tls_json or {}
+        st_enabled = st.get("enabled")
+        if st_enabled is None:
+            st_enabled = sentinel_tls_env if sentinel_tls_env is not None else tls_on
+        st_check = st.get("checkHostname")
+        sentinel_tls = TLSSettings.from_fields(
+            enabled=_as_bool(st_enabled, tls_on),
+            ca_certs=st.get("caCertPath") or tls_ca,
+            certfile=st.get("certPath") or tls_cert,
+            keyfile=st.get("keyPath") or tls_key,
+            cert_reqs=st.get("verifyMode") or tls_reqs,
+            check_hostname=(
+                _as_bool(st_check, tls_check) if st_check is not None else tls_check
+            ),
+        )
     # Sentinel-daemon credentials. These USED to live in
     # extra_config.falkordbConnection.sentinel — an unencrypted column that the
     # API returns (ProviderResponse.extra_config). They now come from the
@@ -250,22 +297,18 @@ def load_connection_config(
             ),
             False,
         ),
+        sentinel_tls=sentinel_tls,
         cluster_nodes=_parse_nodes(
             cluster.get("startupNodes") or os.getenv("FALKORDB_CLUSTER_NODES")
         ),
         socket_timeout=_coerce_float(cfg.get("socketTimeout")),
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
         tls_enabled=tls_on,
-        tls_ca_certs=(tls.get("caCertPath") or os.getenv("FALKORDB_TLS_CA_CERTS")),
-        tls_certfile=(tls.get("certPath") or os.getenv("FALKORDB_TLS_CERTFILE")),
-        tls_keyfile=(tls.get("keyPath") or os.getenv("FALKORDB_TLS_KEYFILE")),
-        tls_cert_reqs=(
-            tls.get("verifyMode") or os.getenv("FALKORDB_TLS_CERT_REQS") or "required"
-        ),
-        tls_check_hostname=_as_bool(
-            tls.get("checkHostname", os.getenv("FALKORDB_TLS_CHECK_HOSTNAME", True)),
-            True,
-        ),
+        tls_ca_certs=tls_ca,
+        tls_certfile=tls_cert,
+        tls_keyfile=tls_key,
+        tls_cert_reqs=tls_reqs,
+        tls_check_hostname=tls_check,
     )
 
 
@@ -612,6 +655,14 @@ def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dic
     credentials are sent only when explicitly configured (``sentinel.username`` /
     ``sentinel.password``) or when ``sentinel.authEnabled`` opts into reusing the
     data-plane credentials.
+
+    TLS likewise: the daemons listen on their own port, and when that listener
+    terminates TLS these kwargs must carry it or discovery dials the handshake
+    port in PLAINTEXT (garbled reply / timeout → the whole tier reads as down).
+    ``sentinel_tls_settings()`` inherits the data-plane TLS unless a
+    ``sentinel.tls`` override says otherwise. This is the single chokepoint —
+    every sentinel-daemon connection (build_graph_client, resolve_sentinel_master,
+    the dashboard probes) goes through it.
     """
     kw: dict = {
         "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
@@ -627,6 +678,7 @@ def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dic
         kw["username"] = username
     if password:
         kw["password"] = password
+    kw.update(tls_client_kwargs(cfg.sentinel_tls_settings()))
     return kw
 
 
@@ -1190,6 +1242,9 @@ class TopologyGraphClients:
             cfg.sentinel_master,
             tuple(cfg.sentinel_nodes), tuple(cfg.cluster_nodes),
             cfg.tls_enabled,
+            # Frozen dataclass (hashable). Flipping the sentinel-daemon TLS
+            # override must invalidate cached clients like any config change.
+            cfg.sentinel_tls,
         )
 
     def _pool_kwargs(self, cfg: FalkorDBConnConfig) -> dict:
@@ -1356,9 +1411,12 @@ async def resolve_sentinel_master(
             "sentinel.nodes (or FALKORDB_SENTINEL_MASTER / FALKORDB_SENTINEL_NODES)."
         )
     async def _discover(c: FalkorDBConnConfig):
-        sentinel_auth = _sentinel_auth_kwargs(c, socket_timeout)
+        # Only sentinel_kwargs: discovery never opens a data-plane connection,
+        # and spreading the daemon kwargs as connection kwargs too would hand
+        # the DAEMONS' auth/TLS to any master pool built off this object.
         sentinel = Sentinel(
-            c.sentinel_nodes, sentinel_kwargs=sentinel_auth, **sentinel_auth,
+            c.sentinel_nodes,
+            sentinel_kwargs=_sentinel_auth_kwargs(c, socket_timeout),
         )
         host, port = await sentinel.discover_master(c.sentinel_master)
         return host, int(port)

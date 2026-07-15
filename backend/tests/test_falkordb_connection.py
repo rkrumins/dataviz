@@ -249,6 +249,10 @@ def fake_redis_and_falkor(monkeypatch):
             captured["sentinel_nodes"] = nodes
             captured["sentinel_kwargs"] = kwargs
 
+        async def discover_master(self, name):
+            captured["discover_master"] = name
+            return ("discovered-master", 6379)
+
         def master_for(self, name, **kwargs):
             captured["master_for"] = name
             captured["master_for_kwargs"] = kwargs
@@ -422,6 +426,106 @@ async def test_sentinel_auth_enabled_reuses_data_plane_credentials(fake_redis_an
     await build_graph_client(cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0})
     sk = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
     assert sk["password"] == "graphpass"
+
+
+# ── sentinel daemon TLS ─────────────────────────────────────────────
+
+def _sentinel_tls_cfg(sentinel_extra=None, **load_kw):
+    sentinel = {"masterName": "m", "nodes": [["s1", 26379]]}
+    sentinel.update(sentinel_extra or {})
+    return load_connection_config(
+        {"mode": "sentinel", "sentinel": sentinel,
+         "tls": {"enabled": True, "caCertPath": "/certs/data-ca.pem"}},
+        host="h", port=6379, username=None, password=None, **load_kw,
+    )
+
+
+def test_sentinel_tls_inherits_data_plane_by_default():
+    """TLS everywhere (the common GKE shape) needs NO extra config: absent
+    sentinel.tls, the daemons inherit the data-plane TLS settings."""
+    from backend.app.providers.falkordb_connection import _sentinel_auth_kwargs
+
+    cfg = _sentinel_tls_cfg()
+    assert cfg.sentinel_tls is None
+    st = cfg.sentinel_tls_settings()
+    assert st.enabled is True and st.ca_certs == "/certs/data-ca.pem"
+    kw = _sentinel_auth_kwargs(cfg, 10.0)
+    assert kw["ssl"] is True and kw["ssl_ca_certs"] == "/certs/data-ca.pem"
+
+
+def test_sentinel_tls_explicit_disable_gives_plaintext_daemons():
+    """sentinel.tls.enabled=false: TLS data plane, PLAINTEXT sentinels."""
+    from backend.app.providers.falkordb_connection import _sentinel_auth_kwargs
+
+    cfg = _sentinel_tls_cfg({"tls": {"enabled": False}})
+    assert cfg.tls_enabled is True                       # data plane unchanged
+    assert cfg.sentinel_tls_settings().enabled is False
+    kw = _sentinel_auth_kwargs(cfg, 10.0)
+    assert "ssl" not in kw and "ssl_ca_certs" not in kw
+
+
+def test_sentinel_tls_per_key_override_inherits_the_rest():
+    """An explicit sentinel.tls may override single keys (own CA); everything
+    it does not name inherits from the data plane."""
+    cfg = _sentinel_tls_cfg({"tls": {"enabled": True, "caCertPath": "/certs/sentinel-ca.pem"}})
+    st = cfg.sentinel_tls_settings()
+    assert st.ca_certs == "/certs/sentinel-ca.pem"       # overridden
+    assert st.cert_reqs == "required"                    # inherited default
+    # ...and the data plane keeps its own CA.
+    assert cfg.tls_settings().ca_certs == "/certs/data-ca.pem"
+
+
+def test_sentinel_tls_env_fallback(monkeypatch):
+    """FALKORDB_SENTINEL_TLS_ENABLED turns daemon TLS on even when the data
+    plane is plaintext (and the JSON has no sentinel.tls object)."""
+    monkeypatch.setenv("FALKORDB_SENTINEL_TLS_ENABLED", "true")
+    cfg = load_connection_config(
+        {"mode": "sentinel", "sentinel": {"masterName": "m", "nodes": [["s1", 26379]]}},
+        host="h", port=6379, username=None, password=None,
+    )
+    assert cfg.tls_enabled is False
+    assert cfg.sentinel_tls_settings().enabled is True
+
+
+@pytest.mark.asyncio
+async def test_build_graph_client_sentinel_daemons_carry_tls(fake_redis_and_falkor):
+    """THE reported break: TLS-enabled sentinels were dialed PLAINTEXT because
+    the daemon kwargs never carried ssl — discovery failed and the whole tier
+    read as down. Both the daemon connections and the master pool must be TLS."""
+    cfg = _sentinel_tls_cfg()
+    await build_graph_client(cfg, graph_name="g", pool_kwargs={"socket_timeout": 10.0})
+    sk = fake_redis_and_falkor["sentinel_kwargs"]["sentinel_kwargs"]
+    assert sk["ssl"] is True and sk["ssl_ca_certs"] == "/certs/data-ca.pem"
+    mk = fake_redis_and_falkor["master_for_kwargs"]
+    assert mk["ssl"] is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_sentinel_master_uses_only_sentinel_kwargs(fake_redis_and_falkor):
+    """Discovery never opens a data-plane connection: the daemon auth/TLS ride
+    ONLY in sentinel_kwargs, never spread as connection kwargs (a master pool
+    built off the object would inherit the DAEMONS' credentials)."""
+    from backend.app.providers.falkordb_connection import resolve_sentinel_master
+
+    cfg = _sentinel_tls_cfg({"username": "sentineluser", "password": "sentinelpass"})
+    host, port = await resolve_sentinel_master(cfg, 5.0)
+    assert (host, port) == ("discovered-master", 6379)
+    ctor_kwargs = fake_redis_and_falkor["sentinel_kwargs"]
+    inner = ctor_kwargs["sentinel_kwargs"]
+    assert inner["password"] == "sentinelpass" and inner["ssl"] is True
+    # Nothing spread at the top level besides sentinel_kwargs itself.
+    assert set(ctor_kwargs.keys()) == {"sentinel_kwargs"}
+
+
+def test_identity_changes_when_sentinel_tls_changes():
+    from backend.app.providers.falkordb_connection import TopologyGraphClients
+
+    plain = _sentinel_tls_cfg()
+    disabled = _sentinel_tls_cfg({"tls": {"enabled": False}})
+    assert (
+        TopologyGraphClients.identity(plain)
+        != TopologyGraphClients.identity(disabled)
+    )
 
 
 @pytest.mark.asyncio

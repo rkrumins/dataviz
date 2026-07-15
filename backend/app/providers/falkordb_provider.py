@@ -967,11 +967,23 @@ class FalkorDBProvider(GraphDataProvider):
         # fallback to the first sentinel node.
         host, port = self._host, self._port
         discover = None
+        probe_username, probe_password = self._username, self._password
+        probe_ssl = ssl_ctx
         if cfg.mode == "sentinel" and cfg.sentinel_nodes:
             host, port = cfg.sentinel_nodes[0]
             from backend.app.providers.falkordb_connection import (
+                _sentinel_auth_kwargs,
                 resolve_sentinel_master,
             )
+            # The FALLBACK target is a Sentinel DAEMON: its own auth and its own
+            # TLS listener, not the data plane's. Probing it with the graph
+            # password / graph TLS context reported auth_failed or a garbled
+            # handshake against a perfectly healthy tier on any deployment where
+            # the two differ (e.g. TLS data plane + plaintext sentinels).
+            sentinel_kw = _sentinel_auth_kwargs(cfg, 1.0)
+            probe_username = sentinel_kw.get("username")
+            probe_password = sentinel_kw.get("password")
+            probe_ssl = build_ssl_context(cfg.sentinel_tls_settings())
             discover = resolve_sentinel_master(cfg, 1.0)
 
         if discover is not None:
@@ -980,15 +992,19 @@ class FalkorDBProvider(GraphDataProvider):
                 host, port = await asyncio.wait_for(
                     discover, timeout=max(0.5, deadline_s * 0.6),
                 )
+                # Discovery succeeded → the probe target is the MASTER: back to
+                # data-plane credentials and data-plane TLS.
+                probe_username, probe_password = self._username, self._password
+                probe_ssl = ssl_ctx
             except Exception:
                 pass
             deadline_s = max(0.3, deadline_s - (time.monotonic() - started))
         return await redis_ping_preflight(
             host, port,
             deadline_s=deadline_s,
-            username=self._username,
-            password=self._password,
-            ssl_context=ssl_ctx,
+            username=probe_username,
+            password=probe_password,
+            ssl_context=probe_ssl,
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
