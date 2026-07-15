@@ -146,8 +146,12 @@ class _JobConsumer:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.error("XREADGROUP failed: %s (retrying in 2s)", e)
-                await asyncio.sleep(2)
+                # Auth-class errors (rotated/wrong bus password) log an
+                # actionable line and back off long; blips keep the 2s retry.
+                from backend.common.adapters.redis_bus import bus_error_retry_delay
+                await asyncio.sleep(
+                    bus_error_retry_delay(e, logger, what="XREADGROUP")
+                )
                 continue
 
             if not entries:

@@ -73,10 +73,12 @@ class AggregationEventListener:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(
-                    "state-sync XREADGROUP failed: %s (retrying in 2s)", e,
+                # Auth-class errors (rotated/wrong bus password) log an
+                # actionable line and back off long; blips keep the 2s retry.
+                from backend.common.adapters.redis_bus import bus_error_retry_delay
+                await asyncio.sleep(
+                    bus_error_retry_delay(e, logger, what="state-sync XREADGROUP")
                 )
-                await asyncio.sleep(2)
                 continue
 
             if not entries:
