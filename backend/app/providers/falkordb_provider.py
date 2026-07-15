@@ -643,6 +643,22 @@ class FalkorDBProvider(GraphDataProvider):
         self._auth_enabled = auth_enabled
         self._username = username if auth_enabled else None
         self._password = password if auth_enabled else None
+        # Footgun guard: authentication DISABLED for this provider while a graph
+        # password is actually saved. The password is nulled above, so the graph
+        # connects UNAUTHENTICATED and an auth-required instance (e.g. a
+        # requirepass Redis Cluster) reports "auth_required" even though the
+        # operator believes a credential is configured. Surface it loudly — the
+        # fix is to enable authentication for the provider (or clear the saved
+        # password). authEnabled rides extra_config.falkordbConnection.authEnabled.
+        if not auth_enabled and (password or (credentials or {}).get("password")):
+            logger.warning(
+                "FalkorDB provider %s: authentication is DISABLED "
+                "(falkordbConnection.authEnabled=false) but a graph password is "
+                "saved — connecting UNAUTHENTICATED. An auth-required instance will "
+                "report 'auth_required'. Enable authentication for this provider, "
+                "or clear the saved password.",
+                provider_id or f"{self._host}:{port}",
+            )
         # Connection-level TLS toggle (the provider record's tls_enabled, plus
         # the finer falkordbConnection.tls object resolved in _ensure_connected).
         # Applies to the graph (all topologies), preflight, and the cache.

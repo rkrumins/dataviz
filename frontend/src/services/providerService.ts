@@ -150,7 +150,7 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     tcp_refused: "Connection refused — the server at the configured host/port is not reachable. Verify the address and that the database is running.",
     connect_timeout: "Connection timed out — the server did not respond within the budget. Check that the host is accessible from this network.",
     tls_handshake: "TLS/SSL error — could not establish a secure connection. Check certificates and that TLS settings match the server configuration.",
-    auth_required: "This server requires authentication, but no credentials were provided. Add a username and password, then test again.",
+    auth_required: "This server requires authentication, but the connection is sending none. Either no password is saved, or 'Requires authentication' is turned off for this provider (which drops the saved password). Turn authentication on and enter the password (leave the username blank for a password-only / default-user instance), then test again.",
     auth_failed: "Authentication failed — the server rejected the provided credentials. Verify that the username and password are correct.",
     network_unreachable: "Network unreachable — the host is on a network this service cannot route to.",
     empty_reply: "The server accepted the connection but sent no reply — likely a protocol mismatch.",
