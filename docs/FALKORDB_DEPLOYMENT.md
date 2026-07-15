@@ -278,13 +278,24 @@ transient `MOVED` is retried below the breaker and never surfaces.
 
 ### 7.3 Cache Redis in Cluster mode
 
-The provider's ancestor/idempotency cache uses cross-slot SCAN and
-multi-key pipelines, which a single node cannot serve. In Cluster mode
-set **`CACHE_REDIS_URL`** to a dedicated Redis; without it the provider
-runs cache-disabled (correct, slower) and logs a loud warning. In
-`dedicated` projection mode on a cluster, `{graph}_proj` may live on a
-different shard than `{graph}` and is routed through its own owning-node
-client automatically.
+The provider's ancestor/idempotency cache is a **separate role**
+(`RedisRole.CACHE`, configured via `REDIS_CACHE_*` / legacy
+`CACHE_REDIS_URL` — see
+[DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#redis-topology--decoupling)
+and [ADR-022](DECISIONS.md#adr-022-central-role-keyed-redis-config-cachestreams-independent)),
+with its own host, auth, and TLS/mTLS PKI, completely independent of the
+FalkorDB graph connection described above (§7.1–7.2). It uses cross-slot SCAN
+and multi-key pipelines, which a single Cluster node cannot serve, so **Redis
+Cluster is unsupported for the cache role** — `resolve_redis_config` rejects
+it (`RedisConfigurationError`) for the same reasons Cluster is rejected for
+the coordination bus: cross-slot `SCAN`/`DEL`, the bus's cross-slot `XADD`
+pipelining, and a non-zero DB index (Cluster only supports DB 0). Point
+`REDIS_CACHE_*` at a standalone or Sentinel dedicated Redis instead; without a
+configured cache the provider runs cache-disabled (correct, slower) and logs
+a loud warning. **Redis Cluster remains fully supported for FalkorDB itself**
+— this restriction applies only to the cache role. In `dedicated` projection
+mode on a FalkorDB cluster, `{graph}_proj` may live on a different shard than
+`{graph}` and is routed through its own owning-node client automatically.
 
 ### 7.4 Aggregation at scale
 

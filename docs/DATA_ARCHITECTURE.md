@@ -538,6 +538,26 @@ queries on FalkorDB's single-threaded process. `build_cache_client` returns
 nodes, and deployed roles fail fast at startup without a dedicated
 `CACHE_REDIS_URL`.
 
+### Role-prefixed config surface
+
+Each role is configured independently via `REDIS_STREAMS_*` / `REDIS_CACHE_*`
+(host/port/db/username/password/password-file, TLS, Sentinel, pool tuning —
+see [ADR-022](DECISIONS.md#adr-022-central-role-keyed-redis-config-cachestreams-independent)
+for the full var list). This is now the canonical way to configure each role.
+
+Legacy `REDIS_URL` (+ `REDIS_USERNAME`/`_PASSWORD`/`_TLS_*`) and
+`CACHE_REDIS_URL` remain supported as **role-scoped back-compat** —
+`REDIS_URL` maps only to `STREAMS`, `CACHE_REDIS_URL` maps only to `CACHE` —
+and role-prefixed vars win when both are set. The use-case map and runbooks
+below still reference `REDIS_URL` / `CACHE_REDIS_URL` for brevity; read those
+as the `STREAMS` / `CACHE` roles respectively (either the legacy var or its
+`REDIS_STREAMS_*` / `REDIS_CACHE_*` equivalent).
+
+A provider can also override the `CACHE` role entirely for itself via
+`extra_config.cacheConnection` (+ encrypted per-provider credentials) — a
+whole-endpoint override that never inherits the global cache's password or CA
+(ADR-022).
+
 ### Use-case map (everything operational is on the dedicated Redis)
 
 | Use-case | Redis structure | Endpoint | Loss profile |
@@ -568,10 +588,18 @@ nodes, and deployed roles fail fast at startup without a dedicated
 
 ### One instance vs. splitting (the dedicated Redis)
 
-Today Streams + Pub/Sub + Cache share **one** dedicated Redis (one GCP
-MemoryStore in prod; one container locally). A Redis DB index (`db0` bus vs
-`db1` cache) is **namespace-only** — it does *not* isolate CPU (Redis is
-single-threaded), memory, eviction policy, connections, or the failure domain.
+`STREAMS` and `CACHE` are independently configurable roles (see [Role-prefixed
+config surface](#role-prefixed-config-surface) below) — they are never
+required to share an instance. **Dev co-locates the two roles on one Redis**
+via DB indices (`db0` streams, `db1` cache) as a zero-config convenience.
+**Production points them at two separate Memorystore instances**
+(`synodic-redis-coord` / `synodic-redis-cache` — see
+[INFRASTRUCTURE_LAUNCH_SCALE.md §6](INFRASTRUCTURE_LAUNCH_SCALE.md#6-memorystore-for-redis--cache--coordination-never-combined)),
+each with its own host, credential, and TLS/mTLS PKI. A Redis DB index
+(`db0` bus vs `db1` cache) is **namespace-only** — it does *not* isolate CPU
+(Redis is single-threaded), memory, eviction policy, connections, or the
+failure domain, which is exactly why production splits onto two instances
+rather than relying on DB-index separation alone.
 
 The correctness-critical risk of sharing — cache pressure evicting durable data
 — is already handled:
@@ -584,16 +612,24 @@ The correctness-critical risk of sharing — cache pressure evicting durable dat
 - Everything else that's TTL'd (locks, rate-limit, revocation) is loss-tolerant
   by design and evicted only *after* the cache.
 
-So one instance is correct at current scale. The residual coupling is
-*performance/availability* (single-threaded CPU contention; a failover blips
-everything at once), not correctness.
+So a single shared instance is safe for any environment that colocates the two
+roles — dev's default. The residual coupling is *performance/availability*
+(single-threaded CPU contention; a failover blips everything at once), not
+correctness.
 
 ### Runbook — when to split the cache onto a second Redis
 
-`CACHE_REDIS_URL` and `REDIS_URL` are already **two independent config values**
-that resolve to the same instance. Splitting is therefore **deploy-only, no code
-change**: point `CACHE_REDIS_URL` at a second MemoryStore and the cache gets its
-own CPU / memory / eviction / failover domain.
+**Production has already done this** (`synodic-redis-coord` / `synodic-redis-cache`
+— [INFRASTRUCTURE_LAUNCH_SCALE.md §6](INFRASTRUCTURE_LAUNCH_SCALE.md#6-memorystore-for-redis--cache--coordination-never-combined)).
+This runbook is the reference for any other environment (dev, staging, a
+smaller self-hosted deploy) that still colocates the two roles and needs to
+split them.
+
+`REDIS_CACHE_*` and `REDIS_STREAMS_*` (or the legacy `CACHE_REDIS_URL` /
+`REDIS_URL`) are already **two independent config values** that may resolve to
+the same instance. Splitting is therefore **deploy-only, no code change**:
+point the `CACHE` role at a second Redis and it gets its own CPU / memory /
+eviction / failover domain.
 
 **Split when any of these is true:**
 
@@ -620,6 +656,26 @@ own CPU / memory / eviction / failover domain.
 > Note: FalkorDB running in **Cluster or Sentinel** mode is independent of all
 > of the above — that is the *graph* connection (`build_graph_client`), which is
 > unaffected by cache/bus placement.
+
+### Migration notes (behavior deltas from the role-keyed factory, ADR-022)
+
+- **Sentinel daemon auth.** The old bus builder sent the data-plane
+  `REDIS_USERNAME`/`REDIS_PASSWORD` to the Sentinel **daemons** themselves,
+  unconditionally. The factory now gates daemon auth behind
+  `REDIS_{R}_SENTINEL_AUTH_ENABLED` (or explicit
+  `_SENTINEL_USERNAME`/`_SENTINEL_PASSWORD`) — sending a data-plane password to
+  an unauthenticated Sentinel daemon broke `discover_master`, so the new
+  default fixes that. Deployments with authenticated Sentinel daemons must set
+  `REDIS_{R}_SENTINEL_AUTH_ENABLED=true`.
+- **Legacy `rediss://` cache release note.** A deployment that set
+  `CACHE_REDIS_URL=rediss://…` previously inherited the FalkorDB connection's
+  client certificate for the cache's TLS; it now uses system-trust TLS for the
+  cache — correct per the decoupling above, but a behavior delta for that one
+  shape.
+- **Known limitation.** A data source's `extra_config.cacheConnection` can
+  still shallow-override the provider's at the top level
+  (`_merge_extra_config`); secret/cluster smuggling is blocked by validation on
+  both, but the override *precedence* itself remains.
 
 ---
 

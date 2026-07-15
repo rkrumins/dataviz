@@ -575,7 +575,7 @@ graph LR
 **Date:** 2026-07
 **Context:** FalkorDB is a Redis-module process. The provider's ancestor/URN/stats **cache** could be built **on the FalkorDB instance itself**: `build_cache_client`, when no dedicated `CACHE_REDIS_URL` was set, mirrored the FalkorDB topology onto the graph nodes. That coupling meant a FalkorDB outage would also wipe the cache, and cache traffic would contend with graph queries on FalkorDB's single-threaded process.
 
-**Decision:** FalkorDB hosts **only** the graph (`GRAPH.QUERY` + dedicated-mode `{graph}_proj` graphs). All operational Redis (streams, pub/sub, locks, rate-limit, revocation, caches) lives on the **dedicated Redis**. `build_cache_client` now returns `None` (cache **disabled**, best-effort) without a dedicated endpoint — it **never** co-locates on FalkorDB. Deployed roles (`web`/`worker`/`controlplane`) **fail fast at startup** if `CACHE_REDIS_URL` is unset (`ProviderManager._assert_dedicated_cache_configured`); dev degrades gracefully.
+**Decision:** FalkorDB hosts **only** the graph (`GRAPH.QUERY` + dedicated-mode `{graph}_proj` graphs). All operational Redis (streams, pub/sub, locks, rate-limit, revocation, caches) lives on the **dedicated Redis**. `build_cache_client` now returns `None` (cache **disabled**, best-effort) without a dedicated endpoint — it **never** co-locates on FalkorDB. Deployed roles (`web`/`worker`/`controlplane`) **fail fast at startup** if `CACHE_REDIS_URL` is unset (enforced by per-role `resolve_redis_config` validation at startup — see ADR-022); dev degrades gracefully.
 
 **Reasoning:** Decoupling must be a code guarantee, not a convention that depends on remembering an env var. FalkorDB Cluster/Sentinel support is unaffected — only the *cache* client changed; the graph connection path (`build_graph_client` + the standalone/sentinel/cluster factory) is untouched.
 
@@ -612,6 +612,48 @@ See [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#
 
 ---
 
+## ADR-022: Central role-keyed Redis config (cache/streams independent)
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** Non-graph Redis (the coordination bus, the provider cache, token revocation, the health probes) was constructed at **12 separate call sites**, and only **two** of them went through a shared builder. `REDIS_PASSWORD` / `REDIS_TLS_*` were honoured by the job bus but silently **ignored** by token revocation, the health probes, and the provider cache — each built a raw, unauthenticated client of its own. Turning on AUTH authenticated the bus while **breaking auth on every request** the moment revocation or the cache tried to connect.
+
+**Decision:** One resolver + one factory — `resolve_redis_config` / `build_redis_client` in `backend/common/adapters/redis_endpoint.py`. Every non-graph Redis client is built there, with no other construction path. Two **independent** roles, `STREAMS` (the coordination bus) and `CACHE`, each get their own host, ACL/requirepass credential, and TLS/mTLS PKI — **no cross-role inheritance, and nothing inherited from FalkorDB** (ADR-020 remains in force: FalkorDB hosts only the graph).
+
+Config surface per role `R ∈ {STREAMS, CACHE}`:
+- `REDIS_{R}_HOST/_PORT/_DB/_USERNAME/_PASSWORD/_PASSWORD_FILE`
+- `REDIS_{R}_TLS_ENABLED/_TLS_CA_CERTS/_TLS_CERTFILE/_TLS_KEYFILE/_TLS_CERT_REQS/_TLS_CHECK_HOSTNAME`
+- `REDIS_{R}_SENTINEL_MASTER/_NODES/_USERNAME/_PASSWORD/_PASSWORD_FILE/_AUTH_ENABLED`
+- `REDIS_{R}_MAX_CONNECTIONS/_SOCKET_TIMEOUT/_SOCKET_CONNECT_TIMEOUT/_HEALTH_CHECK_INTERVAL`
+
+Secrets resolve from `*_PASSWORD` (env / `secretKeyRef`) or `*_PASSWORD_FILE` (a mounted file, which wins when both are set, and is rotatable without a redeploy; a missing or empty file is a hard startup error). A password is never logged, never returned by an API, and never embedded in a URL.
+
+Legacy back-compat is **role-scoped, not global**: `REDIS_URL` (+ `REDIS_USERNAME`/`_PASSWORD`/`_TLS_*`) maps to `STREAMS` only; `CACHE_REDIS_URL` maps to `CACHE` only; role-prefixed vars win when both are set. Dev/staging stay zero-config on the legacy vars.
+
+**Cluster is rejected for both `STREAMS` and `CACHE`** (`RedisConfigurationError` at startup) for three concrete reasons: `graph_cache` does cross-slot `SCAN` + variadic `DEL`; the job broker pipelines `XADD` to two un-tagged (cross-slot) keys; and both roles use a non-zero DB index, while Cluster only ever supports DB 0. Redis **Cluster remains fully supported for FalkorDB** — a separate role, untouched by this ADR (see ADR-020, ADR-021).
+
+**Per-provider dedicated cache:** a provider's `extra_config.cacheConnection` (non-secret: mode/host/port/db/tls) plus encrypted `credentials` (`cache_username`/`cache_password`/`cache_sentinel_*`) define a whole-endpoint `CACHE` override that **never inherits** the global cache's password or CA. Leaving "dedicated cache" unchecked in the provider wizard means the provider uses the **global** `REDIS_CACHE_*` role.
+
+**Three security fixes landed alongside the resolver:**
+1. Sentinel credentials moved out of the plaintext `extra_config` column into the Fernet-encrypted blob.
+2. `redact_extra_config` masks secrets (recursive, case-insensitive, including URL userinfo) on every Provider/DataSource API response.
+3. A `credentials` update now **merges** into the existing blob (it previously replaced it wholesale, silently wiping untouched secrets); an explicit `credentialsClear` opts into deletion.
+
+Admin visibility: `GET /admin/redis/config` (resolved config + per-field provenance, never a password), `POST /admin/redis/{role}/test`, and the **Admin › System › Redis** page.
+
+**Reasoning:** The root cause was structural, not a missing feature — a shared builder already existed but wasn't mandatory, so a 13th call site could bypass it without anything failing loudly. Making the factory the *only* construction path removes that failure mode entirely. Independent roles with independent credentials and PKI (no inheritance, not even from FalkorDB) means a leaked or rotated cache credential can never authenticate against the bus and vice versa — the exact "AUTH applied to one thing, not another" shape of bug that motivated this ADR.
+
+**Trade-offs:**
+- (+) A single code path honours `REDIS_PASSWORD`/`REDIS_TLS_*` everywhere; the "AUTH breaks half the app" class of bug is now structurally impossible.
+- (+) Per-role rotation: a leaked cache password can be rotated without touching the bus, and `*_PASSWORD_FILE` allows rotation without a redeploy.
+- (+) Cluster's three concrete blockers are enforced at startup, not discovered in production under cross-slot traffic.
+- (-) Two roles to provision, monitor, and rotate instead of one; a deployment that genuinely wants a single instance still configures two role-prefixed var sets pointing at it (this is exactly what dev/staging do — see [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#redis-topology--decoupling)).
+- (-) The per-provider `cacheConnection` override still shallow-merges onto the provider's top-level `extra_config` (`_merge_extra_config`); secret/cluster smuggling is blocked by validation on both sides, but the override *precedence* itself remains a known limitation.
+
+**Verified live** on the standalone/Sentinel × auth-on/off × streams/cache/dedicated-cache matrix, and on a two-instance auth+TLS harness where streams and cache have different passwords and different CAs (`deploy/topologies/docker-compose.redis-split-auth-tls.yml`).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -637,3 +679,4 @@ See [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#
 | 019 | Control-plane internal auth (loop-split descoped) | Accepted | Low |
 | 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |
 | 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |
+| 022 | Central role-keyed Redis config (cache/streams independent) | Accepted | Low |
