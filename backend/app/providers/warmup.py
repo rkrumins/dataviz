@@ -71,6 +71,34 @@ PER_PROBE_DEADLINE_S: float = _env_float("PROVIDER_WARMUP_PROBE_DEADLINE_S", 1.5
 # misbehaves). Should be slightly larger than PER_PROBE_DEADLINE_S.
 PER_PROBE_WALL_CLOCK_S: float = _env_float("PROVIDER_WARMUP_PROBE_WALL_CLOCK_S", 2.0)
 
+# Sentinel / Cluster providers need a LARGER budget: their preflight does two
+# hops — topology discovery (Sentinel discover-master or CLUSTER SLOTS, itself a
+# connect + AUTH handshake) THEN a second connect + AUTH + PING to the resolved
+# master/owning node. With authentication each hop adds an AUTH round-trip, and
+# over a Kubernetes headless service the connects carry real DNS + cross-pod
+# latency. The 1.5s standalone budget false-times-out that legitimate work,
+# recording a spurious ``connect_timeout`` that then GATES every read (the
+# manager's is_recent_unhealthy fast-fail) — a health probe vetoing a reachable
+# provider. Give the multi-hop topologies room so the verdict is accurate.
+PER_PROBE_DEADLINE_MULTIHOP_S: float = _env_float(
+    "PROVIDER_WARMUP_PROBE_DEADLINE_MULTIHOP_S", 4.0,
+)
+PER_PROBE_WALL_CLOCK_MULTIHOP_S: float = _env_float(
+    "PROVIDER_WARMUP_PROBE_WALL_CLOCK_MULTIHOP_S", 5.0,
+)
+
+
+def _probe_budget(cfg: "ProviderConfig") -> tuple[float, float]:
+    """(deadline_s, wall_clock_s) for one provider's preflight, sized by topology.
+    Sentinel/Cluster get the multi-hop budget (discovery + owner ping + auth)."""
+    mode = (
+        ((cfg.get("extra_config") or {}).get("falkordbConnection") or {}).get("mode")
+        or "standalone"
+    )
+    if str(mode).strip().lower() in ("sentinel", "cluster"):
+        return PER_PROBE_DEADLINE_MULTIHOP_S, PER_PROBE_WALL_CLOCK_MULTIHOP_S
+    return PER_PROBE_DEADLINE_S, PER_PROBE_WALL_CLOCK_S
+
 # Sleep between consecutive probes. Spreads load when many providers
 # are registered. With 100 providers and 1s interval, full cycle ≈ 100s.
 INTER_PROBE_INTERVAL_S: float = _env_float("PROVIDER_WARMUP_INTERVAL_S", 1.0)
@@ -343,9 +371,10 @@ async def _probe_one(
             }
 
         try:
+            deadline_s, wall_clock_s = _probe_budget(cfg)
             result = await asyncio.wait_for(
-                preflight(deadline_s=PER_PROBE_DEADLINE_S),
-                timeout=PER_PROBE_WALL_CLOCK_S,
+                preflight(deadline_s=deadline_s),
+                timeout=wall_clock_s,
             )
         except asyncio.TimeoutError:
             return {

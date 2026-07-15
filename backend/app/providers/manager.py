@@ -284,9 +284,9 @@ class ProviderManager:
         # cycle when it gates. After that, we let the slow path run — the
         # observation is too stale to trust over real traffic.
         gate_state = self._provider_states.get(cache_key)
-        if gate_state is not None and gate_state.is_recent_unhealthy(max_age_s=60.0):
+        if gate_state is not None and gate_state.blocks_reads(max_age_s=60.0):
             obs = gate_state.last_observation
-            assert obs is not None  # is_recent_unhealthy guarantees this
+            assert obs is not None  # blocks_reads guarantees this when True
             raise ProviderUnavailable(
                 provider_name=f"{cache_key[0]}:{cache_key[1]}",
                 reason=f"warmup observed unhealthy: {obs.reason}",
