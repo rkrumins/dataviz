@@ -264,10 +264,32 @@ export interface MergePreviewResponse {
 
 /** Result of pulling latest main into a draft (`POST .../rebase`). `clean: false` ⇒
  *  `conflicts` need resolving, then resubmit with `resolutions`. */
+/** What a pull brought in from Published — the upstream commits it folded into the draft, and their
+ *  NET effect on state.
+ *
+ *  `branchId` + `fromSeq`/`toSeq` fully identify the window (commit_seq is PER-BRANCH, so the seqs
+ *  are meaningless without the branch they belong to), which makes this self-describing: a caller can
+ *  fetch the diff with nothing but this object. That matters — the main branch id otherwise lives only
+ *  in `branchStore`, which the canvas populates, and a reviewer pulling from the Reviews inbox has no
+ *  canvas mounted. */
+export interface IncomingChanges {
+  branchId: string | null
+  commitIds: string[]
+  commitCount: number
+  contributors: string[]
+  stats: { create: number; update: number; delete: number }
+  fromSeq: number
+  toSeq: number
+}
+
 export interface RebaseResponse {
   clean: boolean
   conflicts: Array<Record<string, unknown>>
+  /** How YOUR OWN edits had to be rewritten to sit on the new base — usually nothing. */
   changes?: Record<string, number>
+  /** What actually arrived from Published. Distinct from `changes`; conflating the two is why a
+   *  pull could never say what it had pulled. */
+  incoming?: IncomingChanges | null
   baseCommitSeq?: number | null
   alreadyUpToDate?: boolean
 }
@@ -298,6 +320,9 @@ export interface PullRequest {
   updatedAt: string
   mergedAt?: string | null       // when + who merged
   mergedBy?: string | null
+  /** HOW it merged: 'review' (through this PR) or 'direct_publish' (a manager published the source
+   *  branch straight to Published, which lands the same changes and so resolves this PR). */
+  mergedVia?: 'review' | 'direct_publish' | null
   closedAt?: string | null       // when + who closed
   closedBy?: string | null
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
@@ -347,6 +372,22 @@ export class NotUpToDateError extends Error {
   }
 }
 
+/** This branch already has an open review, and a branch may have only one — its new changes are
+ *  already part of that review. Carries `prId` so the caller can route the user TO it rather than
+ *  dead-ending them. (The UI normally prevents this; this is the race backstop.) */
+export class PullRequestExistsError extends Error {
+  prId: string
+  branchId?: string
+  prTitle?: string | null
+  constructor(detail: { prId: string; branchId?: string; title?: string | null; message?: string }) {
+    super(detail.message || 'This branch is already in review.')
+    this.name = 'PullRequestExistsError'
+    this.prId = detail.prId
+    this.branchId = detail.branchId
+    this.prTitle = detail.title ?? null
+  }
+}
+
 // ============================================
 // Fetch helper — JSON + structured domain errors
 // ============================================
@@ -376,6 +417,9 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     }
     if (res.status === 409 && detail?.type === 'not_up_to_date') {
       throw new NotUpToDateError(detail)
+    }
+    if (res.status === 409 && detail?.type === 'pull_request_exists') {
+      throw new PullRequestExistsError(detail)
     }
     if (res.status === 422 && detail?.type === 'graph_name_unavailable') {
       throw new GraphNameUnavailableError(
@@ -815,6 +859,21 @@ export function getDiff(
 ): Promise<DiffResponse> {
   return vfetch<DiffResponse>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff?fromSeq=${fromSeq}&toSeq=${toSeq}`,
+  )
+}
+
+/** A branch's changes between two seqs with whole-payload before/after — the renderable shape
+ *  (`getDiff` is id-keyed: countable, not showable). Backs the "what came in" review after a pull:
+ *  the window is main between the draft's old and new base. */
+export function getDiffWindow(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  fromSeq: number,
+  toSeq: number,
+): Promise<DiffVsMainResponse> {
+  return vfetch<DiffVsMainResponse>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-window?fromSeq=${fromSeq}&toSeq=${toSeq}`,
   )
 }
 

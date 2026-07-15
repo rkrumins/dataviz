@@ -11,12 +11,12 @@
  */
 import { useCallback, useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { ChevronRight, User, Loader2, Layers, MoreHorizontal, History, Undo2 } from 'lucide-react'
+import { ChevronRight, User, Loader2, Layers, MoreHorizontal, History, Undo2, ArrowDownToLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useCommitDiffSummary, useSquashedCommits } from '../hooks/useVersioning'
-import { kindMeta } from '../model/commitKind'
+import { kindMeta, isPullCommit } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
@@ -121,7 +121,14 @@ export function CommitRow({
   const others = contributors.filter((c) => c && c !== commit.actor)
   // How many draft checkpoints this merge/publish squashed — so Main reads as a merge history.
   const squashed = num(commit.source_commit_count)
-  const drilldownable = allowSquashDrilldown && squashed > 1
+  // A `pull` reuses the same source_commit_ids drill-down, but tells a different story: these are
+  // the UPSTREAM commits that arrived, not draft checkpoints someone folded together. Two knock-on
+  // differences: it's meaningful even for a single commit (one teammate's change is worth naming),
+  // and it must be drillable on the DRAFT scope — which is the only place a pull commit ever exists,
+  // and exactly where `allowSquashDrilldown` is false.
+  const isPull = isPullCommit(commit.kind)
+  const drilldownable = isPull ? squashed >= 1 : allowSquashDrilldown && squashed > 1
+  const showProvenance = isPull ? squashed >= 1 : squashed > 1
   const [showSquashed, setShowSquashed] = useState(false)
   // Only fetch the diff once the row is opened (immutable commit → long staleTime).
   const summaryQ = useCommitDiffSummary(wsId, graphId, expanded ? commitId : null)
@@ -207,7 +214,7 @@ export function CommitRow({
           )}
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>
-          {squashed > 1 && (
+          {showProvenance && (
             drilldownable ? (
               <span
                 role="button"
@@ -216,11 +223,21 @@ export function CommitRow({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setShowSquashed((v) => !v) }
                 }}
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 cursor-pointer transition-colors"
-                title="Show the draft commits squashed into this publish"
+                className={cn(
+                  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded cursor-pointer transition-colors',
+                  isPull
+                    ? 'bg-teal-500/10 text-teal-600 dark:text-teal-400 hover:bg-teal-500/20'
+                    : 'bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20',
+                )}
+                title={isPull
+                  ? 'Show the published changes that came into this branch'
+                  : 'Show the draft commits squashed into this publish'}
               >
                 <ChevronRight className={cn('w-3 h-3 transition-transform', showSquashed && 'rotate-90')} />
-                <Layers className="w-3 h-3" /> merged {squashed} commits
+                {isPull ? <ArrowDownToLine className="w-3 h-3" /> : <Layers className="w-3 h-3" />}
+                {isPull
+                  ? `${squashed} from Published`
+                  : `merged ${squashed} commits`}
               </span>
             ) : (
               <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Draft checkpoints squashed into this merge">

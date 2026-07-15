@@ -9,13 +9,12 @@
 #   - Management DB: pre-configured workspace, provider, ontology, admin user
 #
 # Default credentials:
-#   Email:    admin@synodic.local
+#   Email:    admin@nexuslineage.local
 #   Password: admin123
 #
 # Access:
 #   Frontend:  http://localhost:3080
 #   Viz API:   http://localhost:8000/docs
-#   Graph API: http://localhost:8001/docs
 #   FalkorDB:  http://localhost:3000 (browser UI)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -66,26 +65,11 @@ services:
       JWT_SECRET_KEY: quickstart-demo-key
       JWT_ALGORITHM: HS256
       JWT_EXPIRY_MINUTES: "60"
-      ADMIN_EMAIL: admin@synodic.local
+      ADMIN_EMAIL: admin@nexuslineage.local
       ADMIN_PASSWORD: admin123
 
       # CORS — allow the frontend container + local dev
       CORS_ALLOWED_ORIGINS: http://localhost:3080,http://localhost:5173,http://localhost:3000
-    depends_on:
-      falkordb:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # ── Graph Service ───────────────────────────────────────────────────
-  graph-service:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.graph
-    ports:
-      - "8001:8001"
-    environment:
-      FALKORDB_HOST: falkordb
-      FALKORDB_PORT: "6379"
     depends_on:
       falkordb:
         condition: service_healthy
@@ -100,7 +84,5 @@ services:
       - "3080:80"
     depends_on:
       viz-service:
-        condition: service_healthy
-      graph-service:
         condition: service_healthy
     restart: unless-stopped

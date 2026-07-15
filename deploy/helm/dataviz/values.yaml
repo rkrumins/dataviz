@@ -179,12 +179,6 @@ services:
     resources:
       requests: { cpu: 250m, memory: 512Mi }
       limits: { cpu: "1", memory: 1Gi }
-  graph:
-    replicas: 2
-    skipSchemaCheck: false
-    resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: 500m, memory: 512Mi }
   controlplane:
     replicas: 1
     skipSchemaCheck: false

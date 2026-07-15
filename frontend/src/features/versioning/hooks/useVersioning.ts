@@ -8,6 +8,7 @@ import * as api from '@/services/versioningApiService'
 import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
+import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
 
 export const VERSIONING_KEYS = {
   all: ['versioning'] as const,
@@ -186,13 +187,48 @@ export function useMergeRequests(wsId?: string, graphId?: string | null) {
   })
 }
 
-/** One PR's detail (works for draft MRs and fork PRs — the endpoint dispatches). */
+/** The open review for `branchId`, if there is one — at most one can exist (the backend enforces
+ *  "one live PR per source branch"). This is what lets a surface ask "is this branch already in
+ *  review?" instead of blindly offering to raise another PR. `pending` matters: until the list has
+ *  loaded we don't yet know, and callers must not act as though the answer is "no". */
+export function useLivePrForBranch(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  const q = useMergeRequests(wsId, graphId)
+  return {
+    livePr: findLivePrForBranch(q.data, branchId),
+    pending: q.isPending,
+  }
+}
+
+/** One PR's detail (works for draft MRs and fork PRs — the endpoint dispatches).
+ *
+ *  Polled while LIVE only. A PR is a collaborative surface: someone else can merge and move `main`
+ *  while this drawer sits open, which flips the server's `behind` flag — the very thing that gates
+ *  the Merge button. Without a poll the reviewer sits on a stale PR and gets a surprise 409. A
+ *  terminal (merged/closed) PR is immutable, so polling it is pure waste — hence the condition, the
+ *  same shape `useProjectionWatermark` uses. */
 export function useMergeRequest(wsId?: string, prId?: string | null) {
   return useQuery({
     queryKey: VERSIONING_KEYS.mergeRequest(wsId, prId),
     queryFn: () => api.getMergeRequest(wsId!, prId!),
     enabled: !!wsId && !!prId,
     staleTime: 10_000,
+    refetchInterval: (q) => (isTerminalPr(q.state.data?.status) ? false : 20_000),
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** The renderable diff of a branch between two seqs. Used for "what came in when I pulled": the
+ *  window is main between the draft's old and new base. Immutable history → cache it hard. */
+export function useDiffWindow(
+  wsId?: string, graphId?: string | null, branchId?: string | null,
+  fromSeq?: number | null, toSeq?: number | null,
+) {
+  const on = !!wsId && !!graphId && !!branchId && fromSeq != null && toSeq != null && toSeq > fromSeq
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'diffWindow', wsId, graphId, branchId, fromSeq, toSeq],
+    queryFn: () => api.getDiffWindow(wsId!, graphId!, branchId!, fromSeq!, toSeq!),
+    enabled: on,
+    staleTime: Infinity,   // a closed commit window never changes
   })
 }
 
@@ -450,6 +486,18 @@ export function useSaveDraft(wsId: string, graphId: string, branchId: string) {
   })
 }
 
+/** Every cache that describes a PR's *status*. The view/data-source lists and the indicator counts
+ *  are keyed by view/ds — often unknown at the call site — so they go by prefix. Shared by the PR
+ *  review actions and by publish (which now resolves the branch's open PR server-side, so the PR
+ *  lists are stale the moment it succeeds). */
+function invalidatePrScopes(qc: ReturnType<typeof useQueryClient>, wsId: string, graphId?: string | null) {
+  if (graphId) qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'mr'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+}
+
 export function usePublishBranch(wsId: string, graphId: string) {
   const qc = useQueryClient()
   const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
@@ -463,6 +511,9 @@ export function usePublishBranch(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+      // Publishing a branch RESOLVES any open review on it (the squash lands exactly what that
+      // review proposed). Without this the PR lists kept rendering it as open and actionable.
+      invalidatePrScopes(qc, wsId, graphId)
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
@@ -573,13 +624,8 @@ export function useOpenMergeRequest(wsId: string, graphId: string) {
 function useInvalidatePr(wsId: string) {
   const qc = useQueryClient()
   return (prId: string, graphId: string) => {
-    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequest(wsId, prId) })
-    // The view/data-source lists + indicator counts are keyed by view/ds (unknown here),
-    // so refresh them by prefix — a status change moves a PR in/out of the active set.
-    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
-    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
-    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+    invalidatePrScopes(qc, wsId, graphId)
   }
 }
 
@@ -626,6 +672,10 @@ export function useMergeMergeRequest(wsId: string) {
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, v.graphId) })
+      // `resolve` carries mainHeadCommitSeq — the number EVERY other draft's "behind" check is
+      // measured against. It has a 5-minute staleTime, so omitting it here meant that after a merge
+      // no other draft showed as behind for up to five minutes: they looked mergeable and then 409'd.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved

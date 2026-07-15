@@ -57,11 +57,16 @@ erDiagram
 |------|-----------|-----------|
 | `genesis` | `create_graph`, `fork_graph` (fork point) | `main` |
 | `edit` | `apply_ops` (first commit on a branch) | any |
-| `checkpoint` | `checkpoint` / `rebase_draft` | draft |
+| `checkpoint` | `checkpoint` | draft |
+| `pull` | `rebase_draft` — records the upstream commits folded in (§3.7) | draft |
 | `squash_publish` | `publish` / `merge_mr` / `merge_pr` | `main` |
 | `import` | `bulk_ingest` / `enable_versioning` | `main` |
 | `sync` | `sync_ingest` (authoritative re-sync — see [10](10-authoritative-sources-datahub-openmetadata.md)) | `main` |
 | `revert` | `revert_commit` | `main` |
+
+> **`ck_commits_kind` is WIDEN-ONLY.** Never drop a value from the allow-list: a kind already written to
+> a live table makes the constraint unaddable and wedges the whole upgrade chain. `pull` was added by
+> `20260714_1600_pull_kind`, enumerating every prior kind alongside it.
 
 > **Invariant.** Version tables are **append-only**; a commit never rewrites history. "Latest" is
 > resolved through the mutable `entity_heads` pointer, so the high-cardinality tables never churn
@@ -275,11 +280,21 @@ sequenceDiagram
 
 Notable behaviors inside `_apply_draft_squash`:
 
-- **Auto-rebase-when-clean.** If `main` advanced under the draft, publish does **not** hard-block. The
-  merge composes against *current* main (base = main@branch-point, theirs = current main head) and
-  writes `net_delta(current_main, merged)` while advancing the draft's `base_commit_seq` — a conflict-free
-  stale merge rebases-and-squashes in one step (`service.py:697-712`). A genuine clash still raises
-  `MergeConflict`. `NotUpToDate` exists but is used only to drive the UI merge gate, not to block here.
+- **Require-up-to-date (NOT auto-rebase).** If `main` advanced under the draft, publish and `merge_mr`
+  **hard-block** with `NotUpToDate` — the user must pull latest (§3.7) first, so the diff that was
+  reviewed is the diff that lands. Both gates read the draft's *live* `base_commit_seq` under
+  `_lock_graph`, so `main` cannot advance between the check and the squash.
+
+  > **This chapter previously documented the opposite** ("auto-rebase-when-clean; `NotUpToDate` never
+  > blocks here"). That was true once and is not any more. It matters because it puts **pulling on the
+  > critical path** of every "someone merged before me" flow — which is why a pull that recorded nothing
+  > (§3.7) and a PR whose `behind` flag never cleared were such damaging bugs.
+
+- **PR resolution.** A squash of a branch **resolves every live PR raised from it** — status `merged`,
+  `resulting_commit_id` = the squash, and `merged_via` ∈ {`review`, `direct_publish`}. This lives in the
+  shared squash body precisely so *both* entry points get it: a direct `publish` over an open review
+  used to orphan that review, leaving a live PR pointing at a merged branch — unmergeable (it fails
+  `_require_open`) yet still rendered as actionable, with an empty diff.
 - **Attribution.** The squash carries `contributors` (distinct commit actors), `source_branch_id`,
   `source_commit_ids`, and `source_commit_count` (`service.py:744-760`) — this is what powers the "merged
   N commits" drill-down (§3.14).
@@ -296,12 +311,34 @@ Notable behaviors inside `_apply_draft_squash`:
 
 ## 3.7 Pull-latest / rebase
 
-`rebase_draft` (`service.py:828`) is the mirror of the squash, writing the merged result back into the
-**draft**. It short-circuits if `base_commit_seq >= main_head` (`already_up_to_date`), runs the full
-`_compute_merge`, returns `{clean: False, conflicts}` for the user to resolve, and on a clean rebase
-rewrites **only the draft's own edits** to the merged result as a new `checkpoint` commit, advancing
-`base_commit_seq` to the current main head (`service.py:849-880`). Entities the draft never touched come
-from the advanced base automatically. Proof: `test_versioning_rebase.py`.
+`rebase_draft` is the mirror of the squash, writing the merged result back into the **draft**. It
+short-circuits if `base_commit_seq >= main_head` (`already_up_to_date`), runs the full `_compute_merge`,
+returns `{clean: False, conflicts}` for the user to resolve, and on a clean rebase rewrites **only the
+draft's own edits** to the merged result, advancing `base_commit_seq` to the current main head. Entities
+the draft never touched come from the advanced base automatically. It is `_retry_seq`-wrapped like every
+other commit-writing path. Proof: `test_versioning_rebase.py`.
+
+> **A pull is a first-class commit (`kind = "pull"`).** It writes one **always** — even when the draft's
+> own edits needed no rewriting. This is the fix to a real hole: the rebase deltas are computed over
+> `own` (the entities the draft itself touched), so in the *ordinary* case — upstream work that doesn't
+> collide with yours — the delta was empty and **no commit was written at all**. `base_commit_seq` simply
+> moved, and the branch history showed a silent gap exactly where someone else's work arrived.
+>
+> The commit records **what came in**: `source_branch_id` = main, `source_commit_ids` /
+> `source_commit_count` / `contributors` for the upstream commits folded in, and `stats` describing the
+> incoming net change (plus `from_seq`/`to_seq`). Its *version rows* are still only the draft's own
+> rebased edits — a draft must hold nothing but its own changed entities, which `_composed_state`
+> depends on. **The commit row is the record; the version rows are the data.** A pull that rewrote
+> nothing is a commit with no version rows, which is fine (genesis has none either).
+>
+> Because it carries `source_commit_ids`, the existing "merged N commits" drill-down
+> (`squashed_commits`, which is kind-agnostic) renders a pull's provenance with no new code.
+
+`rebase_draft` returns `{clean, conflicts, changes, incoming, base_commit_seq}`. **`changes` and
+`incoming` are different things** and were previously conflated (only `changes` existed): `changes` is
+how *your own* edits had to be rewritten to sit on the new base — usually nothing — while `incoming` is
+what actually arrived from `main`. Reporting only the former is why the UI could never tell the user
+what a pull had pulled.
 
 ---
 
@@ -337,6 +374,35 @@ gates, and squashes into the parent's `main` with the fork's contributors. `merg
 is the unified entry: it dispatches a fork PR to `merge_pr` and a draft→main MR through the shared squash
 body, enforcing the reviewer-approval gate (`ApprovalRequired`) in between (`service.py:1512-1519`). Proof:
 `test_versioning_fork.py`, `test_versioning_pr_gate.py`, `test_versioning_draft_mr.py`.
+
+### Invariant — ONE LIVE PR PER SOURCE BRANCH
+
+A PR points at a source **branch**, and its diff is computed **live from that branch at read time**,
+never snapshotted. Two consequences that are easy to get backwards:
+
+1. **Commits made after a PR is raised are already in it.** You do not open a new PR to carry new work;
+   you just push to the branch. The review updates itself.
+2. **A pull does not stale a PR.** Rebasing the branch is reflected in the PR immediately, and clears its
+   `behind` gate.
+
+Therefore a second PR from the same branch would be a **duplicate of the first, not a new proposal** —
+and merging either marks the branch `merged`, at which point the sibling is unmergeable (it fails
+`_require_open`) while the UI still lists it as actionable. Nothing enforced this: no DB constraint, no
+service check, no UI check.
+
+It is now enforced in three places, and all three are needed:
+
+| Layer | Mechanism | Why |
+|---|---|---|
+| DB | `uq_mr_live_source_branch` — partial unique index on `source_branch_id` `WHERE status NOT IN ('merged','closed')` | The real enforcement. Closes the race where two concurrent openers both pass the service check. |
+| Service | `_assert_no_live_pr` → `PullRequestExists(pr_id)` → **409** `pull_request_exists` | Produces a *useful* error carrying the existing `prId`, instead of an opaque `IntegrityError`. |
+| UI | `CommitDialog` shows the open review and offers **View review** | Turns a dead end into a way forward. |
+
+`behind` / `behind_by` on a PR are computed from the **live source branch's** `base_commit_seq`, *never*
+from the frozen `pr.base_commit_seq` (which records only where the PR started). Reading the frozen value
+left a pulled draft reporting `behind: true` forever — and since the UI swaps Merge for "Pull latest" on
+that flag, the PR **could never be merged**, while `merge_mr`'s own gate (which reads the live value)
+would have accepted it. Regression: `test_versioning_draft_mr.py` §C2.
 
 ---
 

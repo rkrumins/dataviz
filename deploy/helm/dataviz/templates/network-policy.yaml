@@ -89,26 +89,6 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: ingress-graph-service
-  labels:
-    {{- include "dataviz.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: graph-service
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: frontend
-      ports:
-        - { protocol: TCP, port: 8001 }
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
   name: ingress-aggregation-controlplane
   labels:
     {{- include "dataviz.labels" . | nindent 4 }}
@@ -187,9 +167,6 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: stats-service
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: graph-service
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: seed

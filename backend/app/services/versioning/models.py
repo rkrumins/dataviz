@@ -213,6 +213,7 @@ class MergeRequestORM(VersioningBase):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     merged_at = Column(Text, nullable=True)               # when + who merged
     merged_by = Column(Text, nullable=True)
+    merged_via = Column(Text, nullable=True)              # 'review' | 'direct_publish' (see _apply_draft_squash)
     closed_at = Column(Text, nullable=True)               # when + who closed (without merging)
     closed_by = Column(Text, nullable=True)
 
@@ -220,6 +221,16 @@ class MergeRequestORM(VersioningBase):
         Index("ix_mr_graph", "graph_id"),
         Index("ix_mr_source", "source_graph_id"),
         Index("ix_mr_status", "status"),
+        # ONE LIVE PR PER SOURCE BRANCH. A PR points at a branch and its diff is computed live from
+        # that branch, so commits made after it was raised are already in it — a second PR from the
+        # same branch is a duplicate, not a new proposal. Merging either marks the branch `merged`,
+        # stranding the sibling as an unmergeable row the UI still shows as actionable. The service
+        # pre-check (`_assert_no_live_pr`) produces the friendly error; THIS closes the race where
+        # two concurrent opens both pass that check.
+        Index(
+            "uq_mr_live_source_branch", "source_branch_id", unique=True,
+            postgresql_where=text("status NOT IN ('merged','closed')"),
+        ),
         CheckConstraint(
             "status IN ('open','conflicts','mergeable','approved','merged','closed')",
             name="ck_mr_status",
@@ -411,10 +422,12 @@ class CommitORM(VersioningBase):
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
         Index("ix_commits_idem", "graph_id", "idempotency_key"),
         CheckConstraint(
-            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind
-            # (create_all never alters live tables); keep the sets in sync.
+            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind and 'pull' via
+            # 20260714_1600_pull_commit_kind (create_all never alters live tables); keep the sets in
+            # sync. WIDEN-ONLY: never drop a value from this list — a kind already written to a live
+            # table would make the constraint unaddable and wedge alembic.
             "kind IN ('genesis','edit','checkpoint','squash_publish','import',"
-            "'sync','revert','restore')",
+            "'sync','revert','restore','pull')",
             name="ck_commits_kind",
         ),
     )

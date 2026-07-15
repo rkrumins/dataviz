@@ -12,9 +12,9 @@ Prerequisites (NOT managed by this chart):
   2. External Postgres (Cloud SQL), Redis (Memorystore), and FalkorDB
      reachable from the cluster.
 {{- end }}
-  3. The 6 images built from the repo Dockerfiles and pushed to Docker Hub:
+  3. The 5 images built from the repo Dockerfiles and pushed to Docker Hub:
        {{ .Values.image.registry }}/{{ .Values.image.org }}/<name>:{{ .Values.image.tag }}
-     where <name> = viz-service, graph-service, aggregation-controlplane,
+     where <name> = viz-service, aggregation-controlplane,
      aggregation-worker, stats-service, frontend
 {{ if .Values.dbInit.enabled }}
 The pre-install/pre-upgrade db-init Job applied roles + the 'aggregation'

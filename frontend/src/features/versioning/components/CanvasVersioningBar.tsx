@@ -7,7 +7,7 @@
  * On main: just the BranchSwitcher. On a draft: an amber strip with the switcher,
  * the committed change counts (+ unsaved-edit hint), and Review / Publish / Discard.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, PanelRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
@@ -16,7 +16,8 @@ import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
@@ -28,6 +29,7 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
+import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewPrIndicator } from './ViewPrIndicator'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
@@ -90,10 +92,51 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
   // Is the active draft behind main? Drives the toolbar "Pull latest" — derived locally (like the switcher).
-  const branchesQ = useBranches(workspaceId, graphId)
+  // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
+  // viewId) while the switcher fetched the view-scoped one — two cache entries and two requests for
+  // the same data, with `behindMain` derived from the wrong (graph-wide) one.
+  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId)
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
-  const activeBranch = (branchesQ.data ?? []).find((b) => b.branchId === branchId)
-  const behindMain = isDraft && !!activeBranch && (activeBranch.baseCommitSeq ?? 0) < mainHead
+
+  // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate
+  // publishing under you shows up promptly instead of whenever the bar happens to re-render. This
+  // is the signal the (now deleted) BranchBehindBanner existed to provide; folding it in here is
+  // what let the two contradictory banners become one.
+  const freshness = useBranchFreshness(workspaceId, graphId, isDraft ? branchId : null)
+  const behindMain = freshness.data?.behind === true
+
+  // A draft can die under you — you published it, its review was merged (possibly from the Reviews
+  // inbox, with no canvas mounted), a teammate merged the shared draft, someone discarded it. The
+  // server marks the branch merged/abandoned; without this the client kept editing that dead scope.
+  // Deriving liveness from the branches list self-heals every one of those paths at once.
+  const onBranchEvicted = useCallback(
+    ({ status, hadUnsavedEdits }: BranchEviction) => {
+      const merged = status === 'merged'
+      if (hadUnsavedEdits) {
+        // Never silently drop the optimistic canvas — the edits are still in the staged store and
+        // can be re-saved onto a fresh draft, but the user has to know they didn't land.
+        showToast(
+          'warning',
+          merged
+            ? 'This draft was published while you had unsaved edits — they were not included. You’re now on Published; start a new draft to save them.'
+            : 'This draft was discarded while you had unsaved edits — they were not saved. You’re now on Published.',
+        )
+        return
+      }
+      showToast('info', merged
+        ? 'This draft has been published — you’re now on the Published version.'
+        : 'This draft is no longer available — you’re now on the Published version.')
+    },
+    [showToast],
+  )
+  useActiveBranchGuard({
+    enabled: !!graphId,
+    branches: branchesQ.data,
+    listRefreshing: branchesQ.isFetching,
+    currentBranchId: branchId,
+    unsavedCount: uncommitted,
+    onEvict: onBranchEvicted,
+  })
 
   // No data source, or still resolving → render nothing (avoid flicker).
   if (!dataSourceId || (resolve.isLoading && !graphId)) return null
@@ -182,6 +225,9 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
 
   return (
     <>
+      {/* "Your changes are now live" — sits ABOVE the controls: it announces what happened, it isn't
+          something to operate. Survives the navigation back from the Reviews inbox. */}
+      <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />
       <div
         className={cn(
           // flex-wrap + min-w-0: on a narrow canvas the controls wrap to a second line
@@ -267,8 +313,8 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           wsId={workspaceId}
           graphId={graphId}
           branchId={branchId}
-          baseCommitSeq={activeBranch?.baseCommitSeq ?? 0}
-          mainHead={mainHead}
+          baseCommitSeq={freshness.data?.baseCommitSeq ?? 0}
+          mainHead={freshness.data?.mainHeadCommitSeq ?? mainHead}
         />
       )}
 

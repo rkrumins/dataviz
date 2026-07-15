@@ -8,17 +8,20 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2,
+  Undo2, ShieldAlert,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
-import { MergeConflictError, NotUpToDateError, type ResolutionMap } from '@/services/versioningApiService'
+import {
+  MergeConflictError, NotUpToDateError,
+  type IncomingChanges, type ResolutionMap,
+} from '@/services/versioningApiService'
 import {
   useMergeRequest, usePullRequestDiff, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
@@ -27,10 +30,13 @@ import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
+import { IncomingChangesSheet } from '../../versioning/components/IncomingChangesSheet'
 import { ownerName } from '../../versioning/model/branchVocab'
+import { isTerminalPr } from '../../versioning/model/prStatus'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { useBranchStore } from '@/store/branchStore'
+import { usePublishReceiptStore } from '@/store/publishReceiptStore'
 import { useToast } from '@/components/ui/toast'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
@@ -53,10 +59,12 @@ function Section({ icon: Icon, title, right, children }: {
 
 export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const user = useAuthStore((s) => s.user)
   const switchToMain = useBranchStore((s) => s.switchToMain)
+  const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
 
   const prQ = useMergeRequest(wsId, prId)
   const diffQ = usePullRequestDiff(wsId, prId)
@@ -109,13 +117,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [resolverError, setResolverError] = useState<string | null>(null)
   const [needsPull, setNeedsPull] = useState(false)
   const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
+  /** What a pull brought in — reviewed, not just asserted. */
+  const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
   const [dismissing, setDismissing] = useState(false)
   // "Revert this merge" (merged PRs): the merge's squash commit is revertable
   // like any other main revision — the dialog owns the confirm + conflict UX.
   const versioningEnabled = useFeature('versioningEnabled')
   const [reverting, setReverting] = useState(false)
 
-  const terminal = pr?.status === 'merged' || pr?.status === 'closed'
+  const terminal = isTerminalPr(pr?.status)
   const isAuthor = !!user && pr?.actor === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
@@ -130,14 +140,27 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const runMerge = async (resolutions?: ResolutionMap) => {
     if (!pr) return
     try {
-      await merge.mutateAsync({ prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions })
+      const res = await merge.mutateAsync({
+        prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
+      })
       setConflicts(null)
       setResolverError(null)
-      showToast('success', `Merged into ${pr.targetBranch}.`)
-      // Land on the freshly-merged main and close the drawer (mirror CommitDialog) so the canvas
-      // reflects the merge; read-your-writes serves main even before the projection catches up.
+      // The receipt is the confirmation, and it survives the navigation below — a toast would not.
+      setReceipt({
+        commitId: res.commitId, graphId: pr.graphId,
+        counts: changeSet?.counts ?? { added: 0, modified: 0, removed: 0 }, via: 'review',
+      })
+      // Land on the freshly-merged main; read-your-writes serves main even before the projection
+      // catches up. The source branch is now `merged`, so useActiveBranchGuard would evict anyone
+      // sitting on it anyway — this just gets there first for the person who pressed the button.
       switchToMain()
       onClose()
+      // Merging from the workspace Reviews inbox used to be a dead end: the branch store was mutated
+      // with no canvas mounted and no way back to the work. Return to the view the draft came from,
+      // where the receipt banner is waiting.
+      if (pr.originatingViewId && !pathname.startsWith(`/views/${pr.originatingViewId}`)) {
+        navigate(`/views/${pr.originatingViewId}`)
+      }
     } catch (e) {
       if (e instanceof NotUpToDateError) {
         setNeedsPull(true)
@@ -164,12 +187,18 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       { branchId: pr.sourceBranchId, resolutions },
       {
         onSuccess: (res) => {
-          if (res.clean) {
-            setConflicts(null); setResolverError(null); setResolveMode('merge'); setNeedsPull(false)
-            showToast('success', 'Pulled the latest changes — you can merge now.')
-          } else {
+          if (!res.clean) {
             setResolveMode('pull'); setConflicts(res.conflicts)
             setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
+            return
+          }
+          setConflicts(null); setResolverError(null); setResolveMode('merge'); setNeedsPull(false)
+          // A reviewer pulling before merge is taking in work that changes what THIS PR will land —
+          // so show it. Merging blind was the thing that made "someone beat me to it" opaque.
+          if (res.incoming && res.incoming.commitCount > 0) {
+            setIncoming(res.incoming)
+          } else {
+            showToast('info', 'Already up to date — you can merge now.')
           }
         },
         onError: (e) => showToast('error', (e as Error).message),
@@ -182,7 +211,22 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     if (!pr) return [] as Ev[]
     const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${ownerName(pr.actor, pr.userNames)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
     for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${ownerName(a, pr.userNames)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
-    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged by ${ownerName(pr.mergedBy, pr.userNames)}${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.mergedAt ?? pr.updatedAt, tint: 'bg-violet-500' })
+    if (pr.status === 'merged') {
+      // A `direct_publish` merge means someone published the source branch straight to Published,
+      // which lands exactly what this review proposed and so resolves it — but WITHOUT the reviewers
+      // ever seeing it. Say that, rather than presenting a bypassed review as a reviewed merge.
+      const bypassed = pr.mergedVia === 'direct_publish'
+      const who = ownerName(pr.mergedBy, pr.userNames)
+      const sha = pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''
+      evs.push({
+        Icon: bypassed ? ShieldAlert : GitMerge,
+        text: bypassed
+          ? `Published directly by ${who}, bypassing this review${sha}`
+          : `Merged by ${who}${sha}`,
+        time: pr.mergedAt ?? pr.updatedAt,
+        tint: bypassed ? 'bg-amber-500' : 'bg-violet-500',
+      })
+    }
     if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${ownerName(pr.closedBy, pr.userNames)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
     return evs
   }, [pr])
@@ -518,6 +562,16 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             error={resolverError}
             onCancel={() => { setConflicts(null); setResolverError(null); setResolveMode('merge') }}
             onResolve={(resolutions) => (resolveMode === 'pull' ? runPull(resolutions) : runMerge(resolutions))}
+          />
+        )}
+
+        {incoming && pr && (
+          <IncomingChangesSheet
+            wsId={wsId}
+            graphId={pr.graphId}
+            incoming={incoming}
+            userNames={pr.userNames}
+            onClose={() => setIncoming(null)}
           />
         )}
       </motion.aside>
