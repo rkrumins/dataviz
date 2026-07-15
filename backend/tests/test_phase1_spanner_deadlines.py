@@ -160,9 +160,10 @@ def test_seam_write_path_does_not_request_abandon_on_cancel():
     by anyio cancellation. Verified by source inspection — runtime
     timing of the AnyIO non-cancellable path is environment-dependent.
     """
-    src = Path(
-        "/Volumes/ASMT ASM246X Media/univiz/code_bkp/synodic/"
-        "backend/graph/adapters/spanner_async_seam.py"
+    # Repo-relative: the previous absolute path pointed at the original
+    # author's local backup volume and failed on every other machine.
+    src = (
+        Path(__file__).resolve().parents[1] / "graph/adapters/spanner_async_seam.py"
     ).read_text()
     # The seam parameter defaults to read_only=False; verify the
     # default is wired into the inner anyio call as ``abandon_on_cancel
@@ -354,9 +355,8 @@ def test_no_substrate_bypass_in_provider_module():
     route through ``_execute_query`` or ``_execute_write`` so the
     deadline boundary is enforced uniformly.
     """
-    src = Path(
-        "/Volumes/ASMT ASM246X Media/univiz/code_bkp/synodic/"
-        "backend/graph/adapters/spanner_provider.py"
+    src = (
+        Path(__file__).resolve().parents[1] / "graph/adapters/spanner_provider.py"
     ).read_text()
 
     # The deleted ``_execute_gql`` synonym must remain absent.
@@ -384,9 +384,10 @@ def test_no_substrate_bypass_in_provider_module():
 
 
 def test_seam_module_uses_capacity_limiter():
-    src = Path(
-        "/Volumes/ASMT ASM246X Media/univiz/code_bkp/synodic/"
-        "backend/graph/adapters/spanner_async_seam.py"
+    # Repo-relative: the previous absolute path pointed at the original
+    # author's local backup volume and failed on every other machine.
+    src = (
+        Path(__file__).resolve().parents[1] / "graph/adapters/spanner_async_seam.py"
     ).read_text()
     assert "CapacityLimiter" in src, "seam dropped its dedicated limiter"
     assert "abandon_on_cancel" in src, "seam dropped its cancellation contract"

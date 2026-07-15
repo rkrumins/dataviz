@@ -41,10 +41,20 @@ async def workspace_with_datasource(db_session: AsyncSession):
     )
     db_session.add(ws)
     await db_session.flush()
+    # provider_id is NOT NULL since the provider-pinning migration — the
+    # fixture predates it and used to pass None.
+    from backend.app.db.models import ProviderORM
+    db_session.add(ProviderORM(
+        id="prov_contract_test",
+        name="Contract Test Provider",
+        provider_type="falkordb",
+        host="localhost",
+    ))
+    await db_session.flush()
     ds = WorkspaceDataSourceORM(
         id=_DS_ID,
         workspace_id=_WS_ID,
-        provider_id=None,
+        provider_id="prov_contract_test",
         graph_name="test-graph",
         is_active=True,
         is_primary=True,

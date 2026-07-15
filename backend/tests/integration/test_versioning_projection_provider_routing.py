@@ -194,6 +194,9 @@ async def test_resolve_raises_on_lookup_exception(monkeypatch):
         await graph("g1", provider_id="prov_bad")
 
 
+@pytest.mark.integration  # dials the ENV FalkorDB (the client cache's build-time
+# verify PING reaches localhost:6379) — needs a live instance, unlike the
+# stubbed unit tests in this module.
 async def test_resolve_none_provider_still_uses_env_default(monkeypatch):
     # genuinely-unrouted case is UNCHANGED — must not even touch the DB
     graph = falkor_graph_registry.make_registry_graph_factory(

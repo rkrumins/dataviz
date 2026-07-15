@@ -107,14 +107,22 @@ async def test_scrambled_page_rows_sorted_and_cursor_is_page_max(monkeypatch):
     names = [n.display_name for n in result.nodes]
     assert names == ["Alpha", "Beta", "Mango", "Web Analytics"]
     # next_cursor is the page maximum → keyset pagination never skips/overlaps.
-    assert result.next_cursor == "Web Analytics"
-    assert result.next_cursor == max(names)
+    # Cursors are opaque k1: keyset tokens (displayName + urn tiebreaker) since
+    # the duplicate-displayName paging fix; decode to assert the content.
+    from backend.app.providers.falkordb_provider import _decode_keyset_cursor
+    cursor_name, cursor_urn = _decode_keyset_cursor(result.next_cursor)
+    assert cursor_name == "Web Analytics"
+    assert cursor_name == max(names)
+    assert cursor_urn == "urn:3"          # the unique tiebreaker rides along
     # childCount survives the reorder (attached per-node, order-independent).
     by_name = {n.display_name: n.child_count for n in result.nodes}
     assert by_name["Alpha"] == 1 and by_name["Web Analytics"] == 5
     # The Cypher fix: aggregation is re-projected through a WITH before ORDER BY.
     page_cypher = next(c for c in calls if "OPTIONAL MATCH" in c)
-    assert "WITH n, count(child) as childCount ORDER BY toString(n.displayName)" in page_cypher
+    # The keyset ordering now sorts by (displayName, urn) directly — the
+    # load-bearing property is unchanged: aggregation is re-projected through
+    # a WITH before ORDER BY, so the count survives the reorder.
+    assert "WITH n, count(child) as childCount ORDER BY" in page_cypher
 
 
 # ── Provider-level: known_total_count skips the count query ────────

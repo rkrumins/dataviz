@@ -301,13 +301,19 @@ class ContextEngine:
         callers outside the engine (top-level cache serve/compute paths)."""
         return await self._resolve_ontology()
 
-    def _inject_resolved(self, resolved) -> None:
+    def _inject_resolved(self, resolved, *, force_authoritative: bool = False) -> None:
         """Push a resolved ontology's config into the provider (in-memory
         setters only — no I/O). Shared by the full resolution path and the
         process-cache hit path so BOTH honour the eager-configuration
         contract: endpoints that call ``engine.provider.*`` directly must
-        find the provider configured before its first query."""
-        has_real_ontology = bool(
+        find the provider configured before its first query.
+
+        ``force_authoritative`` marks the injection authoritative regardless
+        of resolution_sources — used by the LAST-layer fallback, where an
+        introspection-only (possibly empty) result must still configure the
+        provider: empty-but-configured beats every subsequent call raising
+        ProviderConfigurationError."""
+        has_real_ontology = force_authoritative or bool(
             resolved.resolution_sources
             and any(s in ("assigned", "system_default")
                     for s in resolved.resolution_sources.values())
@@ -485,6 +491,15 @@ class ContextEngine:
                 entity_type_hierarchy=introspected.entity_type_hierarchy if introspected else {},
                 root_entity_types=introspected.root_entity_types if introspected else [],
             )
+            # Push the fallback config to the PROVIDER too — the degraded path
+            # (ontology service down / resolve() raising) otherwise cached and
+            # returned an ontology while leaving the provider's containment/
+            # lineage edge set unconfigured, so every subsequent provider query
+            # (childCount, hierarchy) raised ProviderConfigurationError until a
+            # full resolve succeeded. Authoritative: this is the LAST resolution
+            # layer, so even an empty introspection result must configure the
+            # provider (empty = flat graph, not "unconfigured").
+            self._inject_resolved(fallback, force_authoritative=True)
             self._resolved_ontology_cache = fallback
             self._resolved_ontology_cache_ts = time.monotonic()
             return fallback
