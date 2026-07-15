@@ -504,6 +504,24 @@ def mark_instance_unauthenticated(cfg: FalkorDBConnConfig) -> None:
     _UNAUTHENTICATED_INSTANCES.add(TopologyGraphClients.identity(strip_credentials(cfg)))
 
 
+def unmark_instance_unauthenticated(cfg: FalkorDBConnConfig) -> None:
+    """Forget that an instance is unauthenticated — the symmetric half of the
+    self-heal. Called when a NOAUTH proves auth was (re-)enabled on the server,
+    and on every config invalidation: without it the learned mark outlives the
+    reality it recorded, credentials keep being stripped, and only a process
+    restart recovers."""
+    _UNAUTHENTICATED_INSTANCES.discard(
+        TopologyGraphClients.identity(strip_credentials(cfg))
+    )
+
+
+def is_instance_learned_unauthenticated(cfg: FalkorDBConnConfig) -> bool:
+    return (
+        TopologyGraphClients.identity(strip_credentials(cfg))
+        in _UNAUTHENTICATED_INSTANCES
+    )
+
+
 def apply_learned_auth(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
     """Drop credentials for an instance we've already learned has no auth, so every
     later connection (any mode, any entry point) skips AUTH instead of re-failing."""
@@ -516,17 +534,23 @@ def apply_learned_auth(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
 
 def raise_auth_config_error(cfg: FalkorDBConnConfig, exc: BaseException) -> None:
     """Translate an auth failure into an actionable configuration error (LOGICAL —
-    never trips the circuit breaker, never retried as a transient blip)."""
+    never trips the circuit breaker, never retried as a transient blip).
+
+    ``rejected`` is checked FIRST: the classifiers walk the __cause__/__context__
+    chain, and a retry-with-credentials raised inside an ``except NOAUTH`` block
+    carries both markers (WRONGPASS chained onto NOAUTH). A WRONGPASS anywhere in
+    the chain proves credentials WERE supplied and rejected — reporting it as
+    "no credentials configured" sent the operator chasing the wrong fix."""
+    if is_auth_rejected_error(exc):
+        raise ProviderConfigurationError(
+            f"FalkorDB at {cfg.describe()} rejected the provider's credentials "
+            f"(wrong username/password)."
+        ) from exc
     if is_auth_required_error(exc):
         raise ProviderConfigurationError(
             f"FalkorDB at {cfg.describe()} requires authentication but no credentials "
             f"are configured for this provider — add them to the provider, or disable "
             f"auth on the instance."
-        ) from exc
-    if is_auth_rejected_error(exc):
-        raise ProviderConfigurationError(
-            f"FalkorDB at {cfg.describe()} rejected the provider's credentials "
-            f"(wrong username/password)."
         ) from exc
 
 
@@ -535,10 +559,17 @@ async def with_auth_negotiation(cfg: FalkorDBConnConfig, attempt: Callable[..., 
 
     * instance has no auth but we hold credentials → strip them, remember it for
       every later connection, and retry (a stale password never takes a graph down);
+    * instance HAS auth but the learned-unauth mark stripped our credentials →
+      un-learn, retry once WITH them (auth re-enabled on the server must not
+      dead-end in a false "no credentials configured" until process restart);
     * instance wants credentials we lack, or rejects the ones we have → raise a clear
       ProviderConfigurationError instead of a retried, breaker-tripping "outage".
+
+    At most two ``attempt`` calls per invocation — each branch retries once and
+    maps a second failure to a configuration error, never a loop.
     """
     effective = apply_learned_auth(cfg)
+    stripped_by_learned_mark = effective is not cfg
     try:
         return await attempt(effective)
     except Exception as exc:
@@ -551,6 +582,23 @@ async def with_auth_negotiation(cfg: FalkorDBConnConfig, attempt: Callable[..., 
                 "this.", effective.describe(),
             )
             return await attempt(strip_credentials(effective))
+        if is_auth_required_error(exc) and stripped_by_learned_mark:
+            # NOAUTH on a connection we deliberately sent WITHOUT credentials:
+            # authentication was (re-)enabled on the instance since we learned it
+            # had none. Un-learn and retry once with the configured credentials —
+            # the downstream builders' apply_learned_auth is a no-op after the
+            # discard, so the retry really carries them.
+            unmark_instance_unauthenticated(cfg)
+            logger.warning(
+                "FalkorDB at %s now REQUIRES authentication (it was previously "
+                "observed unauthenticated) — retrying with the configured "
+                "credentials.", cfg.describe(),
+            )
+            try:
+                return await attempt(cfg)
+            except Exception as exc2:
+                raise_auth_config_error(cfg, exc2)
+                raise
         raise_auth_config_error(effective, exc)
         raise
 
@@ -1052,6 +1100,29 @@ class ResilientGraph:
                 self._cfg = strip_credentials(self._cfg)
                 self._graph = await self._clients.resolve_graph(self._cfg, self._name)
                 return await getattr(self._graph, method)(*args, **kwargs)
+            if (
+                is_auth_required_error(exc)
+                and (self._cfg.username or self._cfg.password)
+                and is_instance_learned_unauthenticated(self._cfg)
+            ):
+                # The mirror case: our cached client was built WITHOUT credentials
+                # because of the learned-unauth mark, and the instance now demands
+                # them — auth was re-enabled on the server. Un-learn, rebuild WITH
+                # the credentials this handle still carries, retry once.
+                logger.warning(
+                    "falkordb graph %r: instance now REQUIRES authentication "
+                    "(previously observed unauthenticated) — reconnecting with "
+                    "the configured credentials.", self._name,
+                )
+                unmark_instance_unauthenticated(self._cfg)
+                await self._clients.invalidate(self._cfg, self._name)
+                try:
+                    self._graph = await self._clients.resolve_graph(self._cfg, self._name)
+                    return await getattr(self._graph, method)(*args, **kwargs)
+                except Exception as exc2:
+                    # Credentials genuinely missing/wrong → clean config error.
+                    raise_auth_config_error(self._cfg, exc2)
+                    raise
             if is_auth_error(exc):
                 # NOAUTH / WRONGPASS → configuration error, not a retryable outage.
                 raise_auth_config_error(self._cfg, exc)
@@ -1219,6 +1290,11 @@ class TopologyGraphClients:
         """Drop EVERY client + owner mapping for one instance. Called when a
         provider row changes (host/mode/credentials) — otherwise the projector
         would keep writing to the old instance until the process restarts."""
+        # A config change also invalidates what we LEARNED about the instance's
+        # authentication: the operator may have just enabled auth or rotated the
+        # credentials, and a process-lifetime "no auth here" mark would keep
+        # stripping the new credentials until restart.
+        unmark_instance_unauthenticated(cfg)
         ident = self.identity(cfg)
         keys = [k for k in self._clients if k[0] == ident]
         for k in keys:
