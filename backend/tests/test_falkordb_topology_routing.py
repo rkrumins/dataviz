@@ -139,9 +139,19 @@ def fleet(monkeypatch):
             return {"endpoint": self.db.endpoint, "deleted": self.name}
 
     class FakeFalkorDB:
-        def __init__(self, connection_pool=None):
-            self.pool = connection_pool
-            self.fail_once = False
+        # Instantiated the way production does it: falkordb_over() calls
+        # FalkorDB.__new__ and binds .connection/.flushdb/.execute_command —
+        # __init__ NEVER runs, so state must be class-level or derived from
+        # the bound connection (whose .pool is the ConnectionPool, or the
+        # cluster/sentinel fake exposing the same .pool attribute).
+        fail_once = False
+        connection = None
+
+        @property
+        def pool(self):
+            return getattr(self.connection, "pool", None) or getattr(
+                self.connection, "connection_pool", None
+            )
 
         @property
         def endpoint(self):
@@ -162,6 +172,12 @@ def fleet(monkeypatch):
         def __init__(self):
             host, port = SENTINEL_MASTER["endpoint"]
             self.connection_pool = FakePool(host=host, port=port, role="sentinel-master")
+
+        async def flushdb(self, *args, **kwargs):        # bound by falkordb_over()
+            return True
+
+        async def execute_command(self, *args, **kwargs):
+            return None
 
     class FakeSentinel:
         def __init__(self, nodes, **kwargs):
@@ -184,6 +200,20 @@ def fleet(monkeypatch):
         def __init__(self, startup_nodes=None, **kwargs):
             built["clusters"] += 1
             self.nodes_manager = _NodesManager()
+            # build_cluster_conn enters at the resolved owning node.
+            self._entry = (kwargs.get("host"), kwargs.get("port"))
+
+        @property
+        def pool(self):
+            # Lightweight shim (NOT a FakePool: those are counted by the
+            # pool-scaling assertions) exposing the entry node as endpoint.
+            return types.SimpleNamespace(endpoint=self._entry)
+
+        async def flushdb(self, *args, **kwargs):        # bound by falkordb_over()
+            return True
+
+        async def execute_command(self, *args, **kwargs):
+            return None
 
         async def initialize(self):
             return None
@@ -202,13 +232,28 @@ def fleet(monkeypatch):
             return None
 
     class FakeRedis:
-        """Backs the build-time verify PING (auth negotiation happens there)."""
+        """Backs the build-time verify PING (auth negotiation happens there).
+        falkordb_over() binds .flushdb/.execute_command off the client, so the
+        fake must expose them like the real redis.asyncio.Redis does."""
 
         def __init__(self, connection_pool=None, **kwargs):
             self.pool = connection_pool
 
         async def ping(self):
             return True
+
+        async def flushdb(self, *args, **kwargs):
+            return True
+
+        async def execute_command(self, *args, **kwargs):
+            if args and args[0] == "GRAPH.LIST":
+                # A pinned node client reports only the graph keys ITS node
+                # holds — what the cluster fan-out unions over.
+                host, _port = self.pool.endpoint
+                return [
+                    g.encode() for g, (h, _p) in CLUSTER_OWNERS.items() if h == host
+                ] or [b"gv_sa_1", b"gv_sa_2", b"gv_sa_3"]
+            return None
 
     redis_pkg = types.ModuleType("redis")
     redis_asyncio = types.ModuleType("redis.asyncio")

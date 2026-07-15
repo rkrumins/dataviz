@@ -18,7 +18,12 @@ from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 
 def _provider():
-    return FalkorDBProvider(host="x", graph_name="g")
+    p = FalkorDBProvider(host="x", graph_name="g")
+    # A live handle: the retry path's _ensure_connected() must be the
+    # documented no-op ("redis-py self-heals the pool"), not a real dial of
+    # the fake host — reconnect failure aborts the retry budget by design.
+    p._graph = object()
+    return p
 
 
 @pytest.fixture(autouse=True)

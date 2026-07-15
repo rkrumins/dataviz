@@ -110,13 +110,21 @@ def fake_redis_and_falkor(monkeypatch):
             return [b"g1", "g2"]
 
     class FakeRedis:
-        """Backs the build-time verify PING (auth negotiation happens there)."""
+        """Backs the build-time verify PING (auth negotiation happens there).
+        falkordb_over() binds .flushdb/.execute_command off the client, so the
+        fake must expose them like the real redis.asyncio.Redis does."""
 
         def __init__(self, connection_pool=None, **kwargs):
             self.pool = connection_pool
 
         async def ping(self):
             return True
+
+        async def flushdb(self, *args, **kwargs):
+            return True
+
+        async def execute_command(self, *args, **kwargs):
+            return None
 
     redis_pkg = types.ModuleType("redis")
     redis_asyncio = types.ModuleType("redis.asyncio")
