@@ -8,6 +8,18 @@ data:
   FALKORDB_HOST: "falkordb"
   FALKORDB_PORT: "6379"
   FALKORDB_GRAPH_NAME: "nexus_lineage"
+  # ── FalkorDB topology / TLS knobs (env-default instance) ──────────
+  # Uncomment as needed; provider rows override per-provider via
+  # extra_config.falkordbConnection. The graph AUTH password rides
+  # app-secrets (FALKORDB_PASSWORD), never this ConfigMap.
+  # FALKORDB_MODE: "standalone"              # standalone | sentinel | cluster
+  # FALKORDB_SENTINEL_MASTER: "mymaster"
+  # FALKORDB_SENTINEL_NODES: "s1:26379,s2:26379,s3:26379"
+  # FALKORDB_CLUSTER_NODES: "n1:6379,n2:6379,n3:6379"
+  # FALKORDB_TLS_ENABLED: "true"
+  # FALKORDB_TLS_CA_CERTS: "/certs/falkordb/ca.crt"
+  # FALKORDB_SENTINEL_TLS_ENABLED: "true"    # absent → inherit data-plane TLS
+  # FALKORDB_ADDRESS_REMAP: "announced:6379=reachable:6379"  # cross-cluster
   REDIS_URL: "redis://redis:6379/0"
   # Dedicated cache Redis for the FalkorDB provider's ancestor chain
   # and URN-label caches. Must point at a Redis instance that is NOT

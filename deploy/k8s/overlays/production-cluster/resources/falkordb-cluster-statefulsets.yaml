@@ -104,6 +104,16 @@ spec:
                 --save 3600 1
                 --repl-backlog-size 256mb
                 --repl-diskless-sync yes
+            # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
+            # empty-guarded so unauthenticated shards are unchanged; set
+            # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
+            # --requirepass/--masterauth.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: FALKORDB_PASSWORD
+                  optional: true
           resources:
             # requests ≈ limits — the pod owns its n4-highmem-8 node.
             requests:
@@ -115,8 +125,10 @@ spec:
           readinessProbe:
             # Strict: -LOADING (AOF/RDB replay) and -MASTERDOWN are not
             # PONG, so a replaying or orphaned pod takes no traffic.
+            # grep PONG: redis-cli exits 0 even on a NOAUTH/error reply, so
+            # the bare probe stayed green while every client was rejected.
             exec:
-              command: ["redis-cli", "ping"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
@@ -124,7 +136,7 @@ spec:
             exec:
               # LOADING = alive and replaying — killing it restarts the
               # replay from scratch (see the base StatefulSet's history).
-              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             # RDB load of a full 40 GB shard takes minutes (doc §7.2).
             initialDelaySeconds: 60
             periodSeconds: 10
@@ -221,6 +233,16 @@ spec:
                 --save 3600 1
                 --repl-backlog-size 256mb
                 --repl-diskless-sync yes
+            # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
+            # empty-guarded so unauthenticated shards are unchanged; set
+            # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
+            # --requirepass/--masterauth.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: FALKORDB_PASSWORD
+                  optional: true
           resources:
             requests:
               cpu: "7"
@@ -230,13 +252,13 @@ spec:
               memory: 56Gi
           readinessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 3
@@ -330,6 +352,16 @@ spec:
                 --save 3600 1
                 --repl-backlog-size 256mb
                 --repl-diskless-sync yes
+            # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
+            # empty-guarded so unauthenticated shards are unchanged; set
+            # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
+            # --requirepass/--masterauth.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: FALKORDB_PASSWORD
+                  optional: true
           resources:
             requests:
               cpu: "7"
@@ -339,13 +371,13 @@ spec:
               memory: 56Gi
           readinessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 3

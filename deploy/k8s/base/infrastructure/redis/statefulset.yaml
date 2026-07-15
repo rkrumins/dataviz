@@ -38,6 +38,18 @@ spec:
           ports:
             - containerPort: 6379
               name: redis
+          env:
+            # Probe auth (see the FalkorDB StatefulSet for the full note).
+            # This instance serves the STREAMS (DB 0) and CACHE (DB 1) roles
+            # behind one requirepass, so the streams password is the probe
+            # credential. optional + empty-guarded: no-auth deployments are
+            # unchanged.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_STREAMS_PASSWORD
+                  optional: true
           # Resource asks must allow Redis to actually use the 2 GB
           # maxmemory budget — Kubernetes OOMs the container if it grows
           # past ``limits.memory`` regardless of Redis's own ceiling. The
@@ -52,13 +64,15 @@ spec:
               memory: 2560Mi
           readinessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              # grep PONG: redis-cli exits 0 even on a NOAUTH/error reply.
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              # LOADING = alive and replaying AOF — do not kill mid-replay.
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3

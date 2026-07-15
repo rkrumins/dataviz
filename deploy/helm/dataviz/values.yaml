@@ -61,6 +61,11 @@ secrets:
   jwtSecretKey: "REPLACE_ME"
   adminPassword: "REPLACE_ME"
   credentialEncryptionKey: ""
+  # Store AUTH passwords (empty = servers run without auth). Set together
+  # with --requirepass in stores.*.redisArgs/args — the store probes and the
+  # backend clients both read them from the secret.
+  falkordbPassword: ""
+  redisPassword: ""
   # Admin libpq DSN for the db-init Job (CREATE ROLE/DATABASE needs privileges).
   dbInitDsn: "postgresql://postgres:REPLACE_ME@REPLACE_ME_PG_HOST:5432/postgres"
   # Only used when stores.postgres.enabled (in-cluster Postgres). Keep in
