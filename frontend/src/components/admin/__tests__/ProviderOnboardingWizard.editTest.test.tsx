@@ -73,6 +73,6 @@ describe('ProviderOnboardingWizard edit-mode connectivity test', () => {
     expect(providerService.test).not.toHaveBeenCalled()
     const req = vi.mocked(providerService.testConnection).mock.calls[0][0]
     expect(req.host).toBe('falkordb.other-cluster.svc')
-    expect(req.provider_type ?? req.providerType).toBeTruthy()
+    expect(req.providerType).toBeTruthy()
   })
 })

@@ -10,7 +10,7 @@
  */
 import { authFetch } from './apiClient'
 
-export type RedisRole = 'streams' | 'cache'
+export type RedisRole = 'streams' | 'cache' | 'falkordb'
 
 export interface RedisTlsConfig {
     enabled: boolean
@@ -35,6 +35,18 @@ export interface RedisLegacyProvider {
     name: string
 }
 
+export interface RedisProviderGraph {
+    providerId: string
+    name: string
+    host?: string | null
+    mode?: string | null
+}
+
+export interface RedisAddressRemapEntry {
+    from: string
+    to: string
+}
+
 export interface RedisRoleConfig {
     role: RedisRole
     error: string | null
@@ -48,7 +60,22 @@ export interface RedisRoleConfig {
     username?: string | null
     hasPassword?: boolean
     passwordSource?: string | null
+    /** Sentinel DAEMONS authenticate separately from the data plane. */
+    sentinelUsername?: string | null
+    hasSentinelPassword?: boolean
+    sentinelPasswordSource?: string | null
+    sentinelAuthEnabled?: boolean
+    /** streams/cache only — one automatic redis-py retry after a socket timeout. */
+    retryOnTimeout?: boolean
     tls?: RedisTlsConfig
+    /** falkordb role only — sentinel daemons inherit the data-plane TLS unless overridden. */
+    sentinelTls?: RedisTlsConfig & { inherited?: boolean }
+    /** falkordb role only — cluster seed nodes. */
+    clusterNodes?: string[]
+    /** falkordb role only — cross-cluster announced→reachable rewrites. */
+    addressRemap?: RedisAddressRemapEntry[]
+    /** falkordb role only — falkordb-typed providers (separate instances, not overrides). */
+    providerGraphs?: RedisProviderGraph[]
     /** field name -> where it was resolved from (e.g. host -> "REDIS_CACHE_HOST"). */
     source?: Record<string, string>
     /** cache role only. */
@@ -72,6 +99,8 @@ export interface RedisTestResult {
     ok: boolean
     error: string | null
     latencyMs: number | null
+    /** falkordb test only — probe detail (mode, shardsUp/shardsTotal, master). */
+    detail?: Record<string, unknown>
 }
 
 export function fetchRedisConfig(): Promise<RedisConfigResponse> {

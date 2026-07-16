@@ -33,7 +33,7 @@ import {
 // Kept in one place so the copy reads like a briefing, not scattered labels.
 // ─────────────────────────────────────────────────────────────────────────
 
-type Tint = 'sky' | 'violet'
+type Tint = 'sky' | 'violet' | 'amber'
 
 interface RoleContent {
     label: string
@@ -137,6 +137,60 @@ const ROLE_CONTENT: Record<RedisRole, RoleContent> = {
         ],
         legacyNote: 'Legacy alias: CACHE_REDIS_URL still works and maps here. Per provider, a dedicated cache overrides this default.',
     },
+    falkordb: {
+        label: 'FalkorDB · graph database',
+        tagline: 'The env-default graph endpoint — standalone, Sentinel, or Redis Cluster.',
+        icon: Workflow,
+        tint: 'amber',
+        carries:
+            'Every unrouted (env-default) graph: lineage nodes/edges, aggregation rollups, and ' +
+            'projections. Provider-routed graphs are separate instances configured on their ' +
+            'provider row — listed below, not affected by these variables.',
+        whenDown: {
+            severity: 'serious',
+            headline: 'Graph reads and writes on the env-default instance fail.',
+            detail:
+                'Preflight and the warmup loop mark the affected graphs offline and reads fast-fail ' +
+                'until it recovers; the circuit breaker and retry stack self-heal once the endpoint ' +
+                'answers again. Provider-routed graphs on other instances are unaffected.',
+        },
+        usedBy: ['Web API', 'Aggregation worker', 'Versioning worker / projector', 'Insights / stats'],
+        envGroups: [
+            {
+                title: 'Endpoint / topology', icon: Network, vars: [
+                    ['FALKORDB_HOST', 'hostname (standalone / seed)'],
+                    ['FALKORDB_PORT', 'port (default 6379)'],
+                    ['FALKORDB_MODE', 'standalone | sentinel | cluster'],
+                    ['FALKORDB_SENTINEL_MASTER', 'sentinel: monitored master name'],
+                    ['FALKORDB_SENTINEL_NODES', 'sentinel daemons (h:p,h:p)'],
+                    ['FALKORDB_CLUSTER_NODES', 'cluster seed nodes (h:p,h:p)'],
+                    ['FALKORDB_ADDRESS_REMAP', 'announced→reachable rewrites (from=to,…)'],
+                ],
+            },
+            {
+                title: 'Authentication', icon: KeyRound, vars: [
+                    ['FALKORDB_USERNAME', 'ACL user'],
+                    ['FALKORDB_PASSWORD', 'password (or use the file form)'],
+                    ['FALKORDB_PASSWORD_FILE', 'mounted secret file — re-read on reconnect'],
+                    ['FALKORDB_SENTINEL_USERNAME', 'sentinel-daemon ACL user'],
+                    ['FALKORDB_SENTINEL_PASSWORD', 'sentinel-daemon password'],
+                    ['FALKORDB_SENTINEL_AUTH_ENABLED', 'true → daemons reuse the graph credentials'],
+                ],
+            },
+            {
+                title: 'TLS / mutual TLS', icon: Lock, vars: [
+                    ['FALKORDB_TLS_ENABLED', 'true to require TLS'],
+                    ['FALKORDB_TLS_CA_CERTS', 'CA bundle path'],
+                    ['FALKORDB_TLS_CERTFILE', 'client cert path (mTLS)'],
+                    ['FALKORDB_TLS_KEYFILE', 'client key path (mTLS)'],
+                    ['FALKORDB_SENTINEL_TLS_ENABLED', 'daemon TLS (absent → inherits data-plane)'],
+                ],
+            },
+        ],
+        legacyNote:
+            'This card covers the env-default instance only. Provider-routed graphs carry their own ' +
+            'topology, credentials, TLS and addressRemap on the provider row (Admin → Providers).',
+    },
 }
 
 const TINT: Record<Tint, { text: string; tile: string; ring: string; soft: string }> = {
@@ -151,6 +205,12 @@ const TINT: Record<Tint, { text: string; tile: string; ring: string; soft: strin
         tile: 'from-violet-500 to-indigo-600 shadow-violet-500/20',
         ring: 'border-violet-500/20',
         soft: 'bg-violet-500/5',
+    },
+    amber: {
+        text: 'text-amber-600 dark:text-amber-400',
+        tile: 'from-amber-500 to-orange-600 shadow-amber-500/20',
+        ring: 'border-amber-500/20',
+        soft: 'bg-amber-500/5',
     },
 }
 
@@ -443,8 +503,11 @@ function RoleCard({ role }: { role: RedisRoleConfig }) {
                         {endpoint && <FieldRow label="Endpoint" value={endpoint} source={source.host ?? source.port} />}
                         {role.mode && <FieldRow label="Mode" value={role.mode} source={source.mode} mono={false} />}
                         {role.db != null && <FieldRow label="Database" value={role.db} source={source.db} />}
-                        {role.sentinelMaster && <FieldRow label="Sentinel master" value={role.sentinelMaster} source={source.sentinelMaster} />}
-                        {sentinelNodes.length > 0 && <FieldRow label="Sentinel nodes" value={sentinelNodes.join(', ')} />}
+                        {role.sentinelMaster && <FieldRow label="Sentinel master" value={role.sentinelMaster} source={source.sentinel_master ?? source.sentinelMaster} />}
+                        {sentinelNodes.length > 0 && <FieldRow label="Sentinel nodes" value={sentinelNodes.join(', ')} source={source.sentinel_nodes} />}
+                        {(role.clusterNodes ?? []).length > 0 && (
+                            <FieldRow label="Cluster nodes" value={(role.clusterNodes ?? []).join(', ')} source={source.cluster_nodes} />
+                        )}
                         <div className="my-1 border-t border-glass-border/60" />
                         <FieldRow label="Username" value={role.username || <span className="text-ink-muted">none</span>} source={source.username} />
                         <FieldRow
@@ -455,13 +518,38 @@ function RoleCard({ role }: { role: RedisRoleConfig }) {
                                 : <span className="text-ink-muted">none</span>}
                             source={role.hasPassword ? role.passwordSource : undefined}
                         />
+                        {role.retryOnTimeout != null && (
+                            <FieldRow label="Retry on timeout" value={role.retryOnTimeout ? 'yes (one automatic retry)' : 'no'} source={source.retry_on_timeout} mono={false} />
+                        )}
+                        {role.mode === 'sentinel' && <SentinelAuthRows role={role} source={source} />}
                         <div className="my-1 border-t border-glass-border/60" />
                         <TlsBlock tls={role.tls} />
+                        {role.mode === 'sentinel' && role.sentinelTls && (
+                            role.sentinelTls.inherited ? (
+                                <FieldRow label="Sentinel-daemon TLS" value="inherits the data-plane TLS" mono={false} />
+                            ) : (
+                                <>
+                                    <div className="my-1 border-t border-glass-border/60" />
+                                    <Eyebrow className="mt-1 mb-1">Sentinel-daemon TLS (override)</Eyebrow>
+                                    <TlsBlock tls={role.sentinelTls} />
+                                </>
+                            )
+                        )}
+                        {(role.addressRemap ?? []).length > 0 && (
+                            <>
+                                <div className="my-1 border-t border-glass-border/60" />
+                                <Eyebrow className="mt-1 mb-1">Address remap (cross-cluster)</Eyebrow>
+                                {(role.addressRemap ?? []).map(entry => (
+                                    <FieldRow key={entry.from} label={entry.from} value={`→ ${entry.to}`} source={source.address_remap} />
+                                ))}
+                            </>
+                        )}
                     </div>
                 )}
             </div>
 
             {role.role === 'cache' && <CacheUsageStrip role={role} />}
+            {role.role === 'falkordb' && <FalkorUsageStrip role={role} />}
 
             {/* configuration reference */}
             <div className="mt-4">
@@ -507,6 +595,65 @@ function RoleCard({ role }: { role: RedisRoleConfig }) {
             <div className="flex-1" />
             <TestConnection role={role.role} />
         </section>
+    )
+}
+
+/** Sentinel DAEMONS authenticate separately from the data plane — show what
+ *  they will actually send, so a daemon-auth mismatch is visible here instead
+ *  of surfacing as a whole-tier discovery outage. */
+function SentinelAuthRows({ role, source }: { role: RedisRoleConfig; source: Record<string, string> }) {
+    const daemonAuth = role.sentinelUsername || role.hasSentinelPassword
+        ? 'dedicated credentials'
+        : role.sentinelAuthEnabled
+            ? 'reuses the data-plane credentials'
+            : 'none (unauthenticated daemons)'
+    return (
+        <>
+            <div className="my-1 border-t border-glass-border/60" />
+            <FieldRow label="Sentinel-daemon auth" value={daemonAuth} source={source.sentinel_auth_enabled} mono={false} />
+            {role.sentinelUsername && (
+                <FieldRow label="Sentinel-daemon user" value={role.sentinelUsername} source={source.sentinel_username} />
+            )}
+            {role.hasSentinelPassword && (
+                <FieldRow
+                    label="Sentinel-daemon password"
+                    mono={false}
+                    value={<span className="inline-flex items-center gap-1"><FileKey className="h-3 w-3 text-ink-muted" /><span className="font-mono tracking-tight">••••••••</span></span>}
+                    source={role.sentinelPasswordSource}
+                />
+            )}
+        </>
+    )
+}
+
+/** The falkordb card covers the ENV-DEFAULT instance; provider-routed graphs
+ *  are separate instances configured on their provider rows. */
+function FalkorUsageStrip({ role }: { role: RedisRoleConfig }) {
+    const graphs = role.providerGraphs ?? []
+    if (graphs.length === 0) {
+        return (
+            <div className="mt-3 flex items-center gap-2 rounded-lg border border-glass-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
+                <Boxes className="h-3.5 w-3.5 text-ink-muted" />
+                <p className="text-[11px] text-ink-muted">No provider-routed FalkorDB instances registered — every graph uses this env-default endpoint.</p>
+            </div>
+        )
+    }
+    return (
+        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2">
+            <div className="flex items-center gap-2">
+                <Boxes className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <p className="flex-1 text-[11px] text-ink-secondary">
+                    <span className="font-semibold text-ink">{graphs.length}</span> provider-routed FalkorDB instance{graphs.length === 1 ? '' : 's'} — separate endpoints, configured on the provider page (not by these variables).
+                </p>
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {graphs.map(g => (
+                    <span key={g.providerId} className="rounded-md bg-black/5 px-1.5 py-0.5 font-mono text-[10px] text-ink-secondary dark:bg-white/5">
+                        {g.name}{g.mode && g.mode !== 'standalone' ? ` · ${g.mode}` : ''}
+                    </span>
+                ))}
+            </div>
+        </div>
     )
 }
 

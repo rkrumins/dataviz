@@ -22,6 +22,21 @@ vi.mock('@/services/redisConfigService', () => ({
         providerOverrides: [{ providerId: 'p1', name: 'acme-prod', host: 'acme-cache' }],
         legacyProviders: [{ providerId: 'p2', name: 'legacy-src' }],
       },
+      {
+        role: 'falkordb', error: null, mode: 'sentinel', configured: true,
+        host: 'falkordb.internal', port: 6379,
+        sentinelMaster: 'mymaster', sentinelNodes: ['s1:26379', 's2:26379'],
+        clusterNodes: [],
+        username: null, hasPassword: true, passwordSource: 'FALKORDB_PASSWORD_FILE',
+        sentinelUsername: 'sd-user', hasSentinelPassword: true,
+        sentinelPasswordSource: 'FALKORDB_SENTINEL_PASSWORD', sentinelAuthEnabled: false,
+        tls: { enabled: true, mutual: false, caCertPath: '/certs/falkordb/ca.crt',
+               verifyMode: 'required', checkHostname: true, filesReadable: true },
+        sentinelTls: { inherited: false, enabled: false, mutual: false, filesReadable: null },
+        addressRemap: [{ from: '10.0.0.5:6379', to: 'edge.example.com:6379' }],
+        source: { host: 'FALKORDB_HOST', sentinel_master: 'FALKORDB_SENTINEL_MASTER' },
+        providerGraphs: [{ providerId: 'p3', name: 'prod-graph', host: 'g1', mode: 'cluster' }],
+      },
     ],
     deprecations: { REDIS_URL: false, CACHE_REDIS_URL: false, providersOnLegacyCacheUrl: 1 },
   }),
@@ -44,5 +59,21 @@ describe('AdminRedis', () => {
   it('warns about providers still on the legacy cache URL', async () => {
     render(<AdminRedis />)
     await waitFor(() => expect(screen.getByText(/legacy-src/)).toBeInTheDocument())
+  })
+
+  it('renders the FalkorDB graph role card with sentinel-daemon auth, remap and provider list', async () => {
+    render(<AdminRedis />)
+    await waitFor(() => expect(screen.getAllByText('falkordb.internal:6379').length).toBeGreaterThan(0))
+    // Sentinel-daemon auth is its own visible fact (a daemon-auth mismatch
+    // reads as a whole-tier outage — it must be diagnosable here).
+    expect(screen.getByText('dedicated credentials')).toBeInTheDocument()
+    expect(screen.getByText('sd-user')).toBeInTheDocument()
+    // Cross-cluster remap pairs are shown from→to.
+    expect(screen.getByText('10.0.0.5:6379')).toBeInTheDocument()
+    expect(screen.getByText('→ edge.example.com:6379')).toBeInTheDocument()
+    // Provider-routed instances are listed as SEPARATE endpoints.
+    expect(screen.getByText(/prod-graph/)).toBeInTheDocument()
+    // No secret anywhere.
+    expect(screen.queryByText(/sd-secret|graph-secret/)).not.toBeInTheDocument()
   })
 })
