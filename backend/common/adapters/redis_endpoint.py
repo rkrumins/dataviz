@@ -681,12 +681,16 @@ def build_redis_client(
             "socket_connect_timeout": cfg.socket_connect_timeout,
             **tls_client_kwargs(cfg.tls),
         }
-        s_user = cfg.sentinel_username or (
-            cfg.username if cfg.sentinel_auth_enabled else None
-        )
-        s_pass = cfg.sentinel_password or (
-            cfg.password if cfg.sentinel_auth_enabled else None
-        )
+        # Dedicated daemon credentials win AS A UNIT: a dedicated password-only
+        # daemon (default user + requirepass) must not get the data-plane
+        # username spliced in via a per-field fallback — that mismatched pair
+        # fails AUTH even though both halves are individually valid.
+        if cfg.sentinel_username or cfg.sentinel_password:
+            s_user, s_pass = cfg.sentinel_username, cfg.sentinel_password
+        elif cfg.sentinel_auth_enabled:
+            s_user, s_pass = cfg.username, cfg.password
+        else:
+            s_user = s_pass = None
         if s_user:
             sentinel_kwargs["username"] = s_user
         if s_pass:

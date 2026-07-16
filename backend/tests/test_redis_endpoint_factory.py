@@ -165,6 +165,88 @@ def test_sentinel_daemons_get_no_auth_by_default(monkeypatch):
     assert "password" not in captured["sentinel_kwargs"]
 
 
+@pytest.mark.parametrize("role", [RedisRole.STREAMS, RedisRole.CACHE])
+@pytest.mark.parametrize("auth_enabled", [True, False])
+@pytest.mark.parametrize("dedicated", [True, False])
+def test_sentinel_daemon_auth_matrix(monkeypatch, role, auth_enabled, dedicated):
+    """The full daemon-auth decision table, per role. Exactly three outcomes:
+    dedicated creds win outright; sentinel_auth_enabled=True falls back to the
+    data-plane creds; otherwise the daemon connection carries NO auth at all
+    (an unauthenticated daemon rejects any AUTH and takes discover_master
+    down). One wrong cell here is a whole-tier outage, hence the matrix."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["sentinel_kwargs"] = sentinel_kwargs or {}
+
+        def master_for(self, name, **kw):
+            captured["master_kw"] = kw
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    cfg = RedisEndpointConfig(
+        role=role, mode="sentinel", sentinel_master="m",
+        sentinel_nodes=(("s1", 26379),),
+        username="dp-user", password="dp-pw",
+        sentinel_username="sd-user" if dedicated else None,
+        sentinel_password="sd-pw" if dedicated else None,
+        sentinel_auth_enabled=auth_enabled,
+    )
+    assert build_redis_client(cfg) == "MASTER"
+
+    sk = captured["sentinel_kwargs"]
+    if dedicated:
+        # Dedicated daemon credentials always win — even with the reuse flag on.
+        assert sk["username"] == "sd-user"
+        assert sk["password"] == "sd-pw"
+    elif auth_enabled:
+        assert sk["username"] == "dp-user"
+        assert sk["password"] == "dp-pw"
+    else:
+        assert "username" not in sk
+        assert "password" not in sk
+    # Whatever the daemon outcome, the data-plane connection keeps its own auth.
+    assert captured["master_kw"]["username"] == "dp-user"
+    assert captured["master_kw"]["password"] == "dp-pw"
+    # Daemons have no databases — db must never leak into their kwargs.
+    assert "db" not in sk
+
+
+def test_sentinel_dedicated_password_only_reuses_no_data_plane_username(monkeypatch):
+    """`redis://:pw@…`-style daemons exist too: a dedicated sentinel_password
+    with NO sentinel_username must authenticate as the default user
+    (password-only), not silently pair the data-plane username with the
+    dedicated password."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["sentinel_kwargs"] = sentinel_kwargs or {}
+
+        def master_for(self, name, **kw):
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    for auth_enabled in (False, True):
+        build_redis_client(RedisEndpointConfig(
+            role=RedisRole.STREAMS, mode="sentinel", sentinel_master="m",
+            sentinel_nodes=(("s1", 26379),),
+            username="dp-user", password="dp-pw",
+            sentinel_password="sd-pw",
+            # True is the trap: a per-field fallback would splice dp-user in
+            # next to sd-pw — a mismatched pair the daemon rejects.
+            sentinel_auth_enabled=auth_enabled,
+        ))
+        sk = captured["sentinel_kwargs"]
+        assert sk["password"] == "sd-pw"
+        assert "username" not in sk
+
+
 def test_cluster_mode_config_is_refused_by_the_factory():
     cfg = RedisEndpointConfig(role=RedisRole.CACHE, mode="cluster", host="h")
     with pytest.raises(RedisConfigurationError, match="cluster"):

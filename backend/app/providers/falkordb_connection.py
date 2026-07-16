@@ -846,12 +846,16 @@ def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dic
         ),
         "socket_timeout": socket_timeout,
     }
-    username = cfg.sentinel_username or (
-        cfg.username if cfg.sentinel_auth_enabled else None
-    )
-    password = cfg.sentinel_password or (
-        cfg.password if cfg.sentinel_auth_enabled else None
-    )
+    # Dedicated daemon credentials win AS A UNIT: a dedicated password-only
+    # daemon (default user + requirepass) must not get the data-plane username
+    # spliced in via a per-field fallback — that mismatched pair fails AUTH
+    # even though both halves are individually valid.
+    if cfg.sentinel_username or cfg.sentinel_password:
+        username, password = cfg.sentinel_username, cfg.sentinel_password
+    elif cfg.sentinel_auth_enabled:
+        username, password = cfg.username, cfg.password
+    else:
+        username = password = None
     if username:
         kw["username"] = username
     if password:

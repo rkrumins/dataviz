@@ -476,6 +476,25 @@ async def test_sentinel_auth_enabled_reuses_data_plane_credentials(fake_redis_an
     assert sk["password"] == "graphpass"
 
 
+def test_sentinel_dedicated_password_only_never_pairs_data_plane_username():
+    """Dedicated daemon credentials win AS A UNIT. A password-only daemon
+    (default user + requirepass — the `redis://:pw@…` shape) must NOT get the
+    graph username spliced in by a per-field authEnabled fallback: that
+    mismatched pair fails AUTH and takes discover_master down."""
+    from backend.app.providers.falkordb_connection import _sentinel_auth_kwargs
+
+    for auth_enabled in (False, True):
+        cfg = load_connection_config(
+            {"mode": "sentinel",
+             "sentinel": {"masterName": "m", "nodes": [["s1", 26379]],
+                          "password": "sd-pw", "authEnabled": auth_enabled}},
+            host="h", port=6379, username="graphuser", password="graphpass",
+        )
+        kw = _sentinel_auth_kwargs(cfg, 10.0)
+        assert kw["password"] == "sd-pw"
+        assert "username" not in kw
+
+
 # ── cross-cluster address remap ─────────────────────────────────────
 
 def test_parse_address_remap_json_and_env_forms():
