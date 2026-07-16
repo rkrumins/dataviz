@@ -149,15 +149,18 @@ export const GenericNode = memo(function GenericNode({
 
   // isGhost: use data prop (set by graph loader for placeholder/unknown nodes) rather than hardcoded type check
   const isGhost = entityData.isGhost ?? false
-  const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
+  // Guard entityType like every other read: types not in the schema (custom
+  // graphs — the visual fallback above exists for exactly that) must degrade,
+  // not crash the canvas.
+  const isExpandable = (entityType?.behavior?.expandable ?? false) && ((entityData.childCount ?? 0) > 0)
   // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
-  const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
+  const expansionMode: 'inline' | 'graph' = (entityType?.behavior as any)?.expansionMode ?? 'graph'
   // Add-child affordance is ontology-gated: shown only when this type can
   // contain others. Resolves normally for isPending:'create' ghost nodes.
   // A deletion ghost is READ-ONLY: no add-child / trace toolbar (a deleted entity must not be
   // mutated in place); its toolbar is just Restore.
   const canAddChild = !isGhost && (entityType?.hierarchy?.canContain?.length ?? 0) > 0
-  const canTrace = !isGhost && (entityType?.behavior.traceable ?? false)
+  const canTrace = !isGhost && (entityType?.behavior?.traceable ?? false)
   const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
