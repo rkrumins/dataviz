@@ -8,10 +8,10 @@
  * Keep-merged / Split decisions for multi-variant collisions (reusing the
  * vocab-alignment confirm route, which also bumps the resolution cache).
  */
-import { useMemo, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Database, Loader2, Search, ChevronDown, ChevronRight, GitBranch, Box,
+  Database, Loader2, Search, ChevronDown, ChevronRight, ChevronLeft, GitBranch, Box,
   CheckCircle2, AlertTriangle, User, Bot, SplitSquareHorizontal, Merge,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -19,14 +19,26 @@ import {
   ontologyDefinitionService,
   type OntologySourceMappingRow,
   type SourceMappingEntry,
+  type SourceMappingFilter,
 } from '@/services/ontologyDefinitionService'
 import { confirmVariant } from '@/components/admin/workspace/VocabAlignmentWarning'
 import { useToast } from '@/components/ui/toast'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { formatDate } from '../../lib/ontology-parsers'
+import { FacetChip } from './AdoptionMatchSection'
 
 interface SourceMappingSectionProps {
   ontologyId: string
 }
+
+const PAGE_SIZE = 6
+
+const FILTERS: { key: SourceMappingFilter; label: string; tone: 'neutral' | 'drift' | 'unmapped' | 'muted' }[] = [
+  { key: 'all', label: 'All', tone: 'neutral' },
+  { key: 'pending', label: 'Decision pending', tone: 'unmapped' },
+  { key: 'drift', label: 'Drift', tone: 'drift' },
+  { key: 'unprofiled', label: 'No profile yet', tone: 'muted' },
+]
 
 function observedList(entry: SourceMappingEntry): string[] {
   if (!entry.observed) return []
@@ -36,23 +48,24 @@ function observedList(entry: SourceMappingEntry): string[] {
 export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) {
   const queryClient = useQueryClient()
   const { showToast } = useToast()
-  const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const search = useDebouncedValue(searchInput.trim(), 250)
+  const [filter, setFilter] = useState<SourceMappingFilter>('all')
+  const [offset, setOffset] = useState(0)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [deciding, setDeciding] = useState<string | null>(null)
 
-  const { data: rows, isLoading } = useQuery({
-    queryKey: ['ontology-source-mappings', ontologyId],
-    queryFn: () => ontologyDefinitionService.getSourceMappings(ontologyId),
+  // Any narrowing change resets to the first page.
+  useEffect(() => { setOffset(0) }, [search, filter])
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['ontology-source-mappings', ontologyId, { limit: PAGE_SIZE, offset, search, filter }],
+    queryFn: () => ontologyDefinitionService.getSourceMappings(ontologyId, {
+      limit: PAGE_SIZE, offset, search, filter,
+    }),
+    placeholderData: keepPreviousData,
     staleTime: 60_000,
   })
-
-  const filtered = useMemo(() => {
-    if (!rows) return []
-    const q = search.trim().toLowerCase()
-    if (!q) return rows
-    return rows.filter(r =>
-      r.dataSourceLabel.toLowerCase().includes(q) || r.workspaceName.toLowerCase().includes(q))
-  }, [rows, search])
 
   function toggle(dsId: string) {
     setExpanded(prev => {
@@ -88,9 +101,12 @@ export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) 
     )
   }
 
-  if (!rows || rows.length === 0) return null
+  if (!data || data.facets.all === 0) return null
 
-  const withProfile = filtered.filter(r => r.hasProfile)
+  const from = data.total === 0 ? 0 : offset + 1
+  const to = Math.min(offset + PAGE_SIZE, data.total)
+  const canPrev = offset > 0
+  const canNext = offset + PAGE_SIZE < data.total
 
   return (
     <div className="mt-8">
@@ -100,7 +116,7 @@ export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) 
           Source Vocabulary Mappings
         </h3>
         <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[10px] font-bold text-ink-muted">
-          {rows.length} source{rows.length !== 1 ? 's' : ''}
+          {data.facets.all} source{data.facets.all !== 1 ? 's' : ''}
         </span>
       </div>
       <p className="text-[11px] text-ink-muted mb-3">
@@ -109,32 +125,52 @@ export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) 
         Keep/Split decision — explicit decisions are never overwritten by re-derivation.
       </p>
 
-      {rows.length > 5 && (
-        <div className="relative mb-3 max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60" />
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search sources..."
-            className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors"
-          />
+      {(data.facets.all > PAGE_SIZE || search || filter !== 'all') && (
+        <div className="flex items-center flex-wrap gap-2 mb-3">
+          <div className="relative max-w-xs flex-1 min-w-[180px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+              placeholder="Search sources..."
+              className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors"
+            />
+          </div>
+          <div className="flex items-center flex-wrap gap-1.5">
+            {FILTERS.map(f => (
+              <FacetChip key={f.key} label={f.label} tone={f.tone} count={data.facets[f.key]}
+                active={filter === f.key} onClick={() => setFilter(f.key)} />
+            ))}
+          </div>
         </div>
       )}
 
-      {withProfile.length === 0 && (
+      {data.sources.length === 0 && (
         <div className="border border-dashed border-glass-border rounded-xl py-8 text-center">
           <Database className="w-5 h-5 mx-auto mb-2 text-ink-muted/40" />
           <p className="text-xs text-ink-muted">
-            {search
-              ? 'No sources match your search'
+            {search || filter !== 'all'
+              ? 'No sources match these filters'
               : 'No alignment profiles yet — profiles appear after the first read of each assigned source.'}
           </p>
         </div>
       )}
 
-      <div className="space-y-2">
-        {withProfile.map(row => {
+      <div className={cn('space-y-2 transition-opacity', isFetching && 'opacity-60')}>
+        {data.sources.map(row => {
+          if (!row.hasProfile) {
+            return (
+              <div key={row.dataSourceId} className="rounded-xl border border-dashed border-glass-border px-4 py-3 flex items-center gap-3">
+                <Database className="w-4 h-4 flex-shrink-0 text-ink-muted/50" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-ink truncate">{row.dataSourceLabel}</p>
+                  <p className="text-[10px] text-ink-muted truncate">{row.workspaceName}</p>
+                </div>
+                <span className="text-[10px] text-ink-muted italic">no profile yet — appears after the first read</span>
+              </div>
+            )
+          }
           const isOpen = expanded.has(row.dataSourceId) || row.hasDrift
           const pendingDecisions = row.driftDetails.filter(d => d.needsConfirmation)
           return (
@@ -216,6 +252,28 @@ export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) 
           )
         })}
       </div>
+
+      {/* pagination */}
+      {data.total > 0 && (
+        <div className="flex items-center justify-between mt-3 px-1">
+          <span className="text-[11px] text-ink-muted tabular-nums">
+            Showing <span className="text-ink font-medium">{from}–{to}</span> of {data.total}
+            {data.total !== data.facets.all && <span className="text-ink-muted"> · {data.facets.all} total</span>}
+          </span>
+          {(canPrev || canNext) && (
+            <div className="inline-flex items-center gap-1">
+              <button disabled={!canPrev} onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-glass-border text-[11px] text-ink-muted hover:text-ink hover:border-glass-border/80 disabled:opacity-40 disabled:pointer-events-none transition-colors">
+                <ChevronLeft className="w-3.5 h-3.5" />Prev
+              </button>
+              <button disabled={!canNext} onClick={() => setOffset(o => o + PAGE_SIZE)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-glass-border text-[11px] text-ink-muted hover:text-ink hover:border-glass-border/80 disabled:opacity-40 disabled:pointer-events-none transition-colors">
+                Next<ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

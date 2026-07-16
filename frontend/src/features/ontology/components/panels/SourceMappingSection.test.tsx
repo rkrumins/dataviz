@@ -33,6 +33,18 @@ const ROW = {
   ],
 }
 
+function envelope(rows: (typeof ROW)[], overrides: Record<string, unknown> = {}) {
+  return {
+    ontologyId: 'bp_1',
+    total: rows.length,
+    limit: 6,
+    offset: 0,
+    facets: { all: rows.length, drift: rows.filter(r => r.hasDrift).length, pending: 0, unprofiled: 0 },
+    sources: rows,
+    ...overrides,
+  }
+}
+
 function renderSection() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -43,7 +55,7 @@ function renderSection() {
 }
 
 beforeEach(() => {
-  getSourceMappings.mockReset().mockResolvedValue([ROW])
+  getSourceMappings.mockReset().mockResolvedValue(envelope([ROW]))
   confirmVariant.mockReset().mockResolvedValue(undefined)
 })
 
@@ -72,9 +84,29 @@ describe('SourceMappingSection', () => {
   })
 
   it('renders nothing when the ontology has no assigned sources', async () => {
-    getSourceMappings.mockResolvedValue([])
+    getSourceMappings.mockResolvedValue(envelope([]))
     const { container } = renderSection()
     await waitFor(() => expect(getSourceMappings).toHaveBeenCalled())
     await waitFor(() => expect(container.textContent).not.toContain('Source Vocabulary Mappings'))
+  })
+
+  it('renders unprofiled sources as stub rows and pages past the first page', async () => {
+    const unprofiled = { ...ROW, dataSourceId: 'ds2', dataSourceLabel: 'Cold Source', hasProfile: false, hasDrift: false, driftDetails: [] }
+    getSourceMappings.mockResolvedValue(envelope([ROW, unprofiled], {
+      total: 8,
+      facets: { all: 8, drift: 1, pending: 1, unprofiled: 1 },
+    }))
+    const user = userEvent.setup()
+    renderSection()
+
+    expect(await screen.findByText('Cold Source')).toBeInTheDocument()
+    expect(screen.getByText(/no profile yet/)).toBeInTheDocument()
+    // Facet chips + pagination appear once the fleet exceeds a page
+    expect(screen.getByText('Decision pending')).toBeInTheDocument()
+    expect(screen.getByText(/Showing/)).toBeInTheDocument()
+
+    await user.click(screen.getByText('Next'))
+    await waitFor(() => expect(getSourceMappings).toHaveBeenLastCalledWith('bp_1',
+      expect.objectContaining({ offset: 6 })))
   })
 })
