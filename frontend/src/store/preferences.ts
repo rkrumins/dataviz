@@ -131,6 +131,20 @@ interface PreferencesState {
   subtleCanvasTreeLines: boolean
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
+
+  // Icon picker — recently used Lucide icon names (most recent first).
+  recentIcons: string[]
+  addRecentIcon: (name: string) => void
+
+  // Ontology Schema page sidebar — survives refresh (search stays ephemeral).
+  ontologySidebar: {
+    collapsed: boolean
+    width: number | null
+    groupBy: string
+    statusFilter: string
+    usageFilter: string
+  }
+  setOntologySidebarPrefs: (prefs: Partial<PreferencesState['ontologySidebar']>) => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -243,6 +257,24 @@ export const usePreferencesStore = create<PreferencesState>()(
         showCanvasTypeBadge: true,
         subtleCanvasTreeLines: false,
       }),
+
+      // Icon picker recents
+      recentIcons: [],
+      addRecentIcon: (name) => set((s) => ({
+        recentIcons: [name, ...s.recentIcons.filter(n => n !== name)].slice(0, 12),
+      })),
+
+      // Ontology Schema sidebar
+      ontologySidebar: {
+        collapsed: false,
+        width: null,
+        groupBy: 'flat',
+        statusFilter: 'all',
+        usageFilter: 'all',
+      },
+      setOntologySidebarPrefs: (prefs) => set((s) => ({
+        ontologySidebar: { ...s.ontologySidebar, ...prefs },
+      })),
     }),
     {
       name: 'nexus-preferences',

@@ -33,7 +33,10 @@ export function useOntologyMutations() {
   })
 
   const publish = useMutation({
-    mutationFn: (id: string) => ontologyDefinitionService.publish(id),
+    mutationFn: (arg: string | { id: string; force?: boolean }) =>
+      typeof arg === 'string'
+        ? ontologyDefinitionService.publish(arg)
+        : ontologyDefinitionService.publish(arg.id, arg.force ?? false),
     onSuccess: invalidateAll,
   })
 

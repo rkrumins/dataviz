@@ -15,7 +15,7 @@ from .models import (
     ResolvedOntology,
     ValidationIssue,
 )
-from backend.common.models.graph import GraphSchemaStats, OntologyMetadata
+from backend.common.models.graph import GraphSchemaStats
 from backend.common.models.management import OntologyCreateRequest
 
 
@@ -64,7 +64,6 @@ class OntologyServiceProtocol(Protocol):
     async def suggest_from_introspection(
         self,
         introspected_stats: GraphSchemaStats,
-        introspected_ontology: OntologyMetadata,
         base_ontology_id: Optional[str] = None,
     ) -> OntologyCreateRequest: ...
 

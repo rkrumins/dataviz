@@ -29,9 +29,17 @@ export interface OntologyResolutionResponse {
   hasContainment: boolean;
   hierarchyWarnings: OntologyResolutionHierarchyGap[];
   /** Non-blocking advisories. Currently:
+   *  - ``missing_entity_types`` / ``missing_edge_types``: partial coverage —
+   *    unmapped types are ignored by aggregation and render with fallback styling.
+   *  - ``unclassified_relationships``: edges with no containment/lineage flags.
    *  - ``no_containment_edges``: no relationship is is_containment=true. */
   advisoryWarnings: string[];
+  /** Hard blockers. Only ``no_lineage`` (plus ontology_not_assigned /
+   *  ontology_missing from the data-source-keyed endpoint) block today. */
   blockingReasons: string[];
+  /** Share of introspected types covered by the ontology (0–100);
+   *  null when no introspection snapshot was available. */
+  coveragePercent: number | null;
   fingerprint: string | null;
 }
 

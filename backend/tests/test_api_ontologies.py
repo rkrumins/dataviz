@@ -294,3 +294,102 @@ def test_reconcile_relationship_endpoints_skips_partial_update_without_entity_ty
                           relationship_type_definitions={"FLOWS_TO": {"source_types": ["dataset"]}})
     _reconcile_relationship_endpoints(req)
     assert req.relationship_type_definitions["FLOWS_TO"]["source_types"] == ["dataset"]
+
+
+# ── Publish impact gate (unforced path) ───────────────────────────────
+
+async def test_unforced_publish_blocked_on_breaking_change(test_client: AsyncClient):
+    """Without ?force=true, publishing a draft that removes types still present
+    in the previous published version is blocked with 409 (policy=reject).
+    Regression guard: every other publish test forces, leaving this path untested."""
+    created = await _create_ontology(test_client, "Impact Gate Test")
+    ont_id = created["id"]
+
+    r = await test_client.post(f"/api/v1/admin/ontologies/{ont_id}/publish?force=true")
+    assert r.status_code == 200
+
+    # New version that drops an entity type present in v1
+    r = await test_client.post(f"/api/v1/admin/ontologies/{ont_id}/new-version")
+    assert r.status_code in (200, 201)
+    draft = r.json()
+    entity_defs = dict(draft["entityTypeDefinitions"])
+    removed = next(iter(entity_defs))
+    del entity_defs[removed]
+    r = await test_client.put(
+        f"/api/v1/admin/ontologies/{draft['id']}",
+        json={"entityTypeDefinitions": entity_defs},
+    )
+    assert r.status_code == 200
+
+    # Impact preview says blocked, with the removed type listed
+    r = await test_client.get(f"/api/v1/admin/ontologies/{draft['id']}/impact")
+    assert r.status_code == 200
+    impact = r.json()
+    assert impact["allowed"] is False
+    assert removed in impact["removedEntityTypes"]
+    assert impact["evolutionPolicy"] == "reject"
+
+    # Unforced publish → 409; forced publish → 200
+    r = await test_client.post(f"/api/v1/admin/ontologies/{draft['id']}/publish")
+    assert r.status_code == 409
+
+    r = await test_client.post(f"/api/v1/admin/ontologies/{draft['id']}/publish?force=true")
+    assert r.status_code == 200
+    assert r.json()["isPublished"] is True
+
+
+async def test_first_publish_impact_includes_policy(test_client: AsyncClient):
+    """First publish has no previous version — impact must still carry the
+    evolution policy (the publish dialog renders it)."""
+    created = await _create_ontology(test_client, "First Publish Impact")
+    r = await test_client.get(f"/api/v1/admin/ontologies/{created['id']}/impact")
+    assert r.status_code == 200
+    impact = r.json()
+    assert impact["allowed"] is True
+    assert impact["evolutionPolicy"] == "reject"
+
+
+# ── GET /admin/ontologies/{id}/source-mappings ────────────────────────
+
+async def test_source_mappings_aggregate(test_client: AsyncClient, db_session):
+    """Returns each assigned source's vocabulary-alignment profile (declared →
+    observed spellings + drift), and an empty profile marker for sources
+    without one."""
+    import json as _json
+    from backend.app.db import models as _m
+
+    created = await _create_ontology(test_client, "Mapping Test")
+    ont_id = created["id"]
+
+    db_session.add(_m.WorkspaceORM(id="ws_map", name="Map WS"))
+    db_session.add(_m.ProviderORM(id="prov_map", name="P", provider_type="falkordb"))
+    db_session.add(_m.WorkspaceDataSourceORM(
+        id="ds_map", workspace_id="ws_map", provider_id="prov_map",
+        graph_name="g", ontology_id=ont_id, label="Mapped Source",
+    ))
+    db_session.add(_m.OntologySourceMappingORM(
+        id="osm_1", data_source_id="ds_map", ontology_id=ont_id,
+        entity_type_mappings=_json.dumps({"Server": {"observed": "server", "auto": True}}),
+        relationship_type_mappings=_json.dumps({"HAS": {"observed": "has", "auto": False}}),
+        has_drift=True,
+        drift_details=_json.dumps([{"declared": "HAS", "observed": ["has"], "dimension": "relationship", "kind": "case_variant"}]),
+        last_seen_at="2026-07-16T00:00:00Z",
+    ))
+    await db_session.commit()
+
+    resp = await test_client.get(f"/api/v1/admin/ontologies/{ont_id}/source-mappings")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["dataSourceId"] == "ds_map"
+    assert row["hasProfile"] is True
+    assert row["hasDrift"] is True
+    assert row["relationshipMappings"]["HAS"]["observed"] == "has"
+    assert row["entityMappings"]["Server"]["auto"] is True
+    assert row["driftDetails"][0]["declared"] == "HAS"
+
+
+async def test_source_mappings_unknown_ontology_404(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/admin/ontologies/bp_ghost/source-mappings")
+    assert resp.status_code == 404

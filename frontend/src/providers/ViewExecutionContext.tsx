@@ -59,6 +59,20 @@ export function useViewExecutionContext(): ViewExecutionContextValue | null {
   return useContext(ViewExecCtx)
 }
 
+/**
+ * Provide an explicit, static schema to the view-scoped hooks. Used by
+ * previews (the type editor's live node preview renders a REAL GenericNode
+ * against the unsaved form state) and by tests — never by real views, which
+ * go through ViewExecutionProvider's fetch/gate flow.
+ */
+export function StaticViewSchemaProvider({ schema, children }: { schema: ResolvedViewSchema; children: ReactNode }) {
+  const value = useMemo<ViewExecutionContextValue>(
+    () => ({ schema, workspaceId: '__preview__', dataSourceId: null }),
+    [schema],
+  )
+  return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
+}
+
 // ─── Schema Resolution ─────────────────────────────────────────────────────
 
 function resolveSchema(raw: GraphSchema): ResolvedViewSchema {

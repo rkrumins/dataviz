@@ -10,7 +10,7 @@ import logging
 import uuid
 from typing import Dict, List, Optional
 
-from backend.common.models.graph import GraphSchemaStats, OntologyMetadata
+from backend.common.models.graph import GraphSchemaStats
 from backend.common.models.management import OntologyCreateRequest
 
 from .defaults import (
@@ -102,7 +102,6 @@ class LocalOntologyService:
     async def suggest_from_introspection(
         self,
         introspected_stats: GraphSchemaStats,
-        introspected_ontology: OntologyMetadata,
         base_ontology_id: Optional[str] = None,
     ) -> OntologyCreateRequest:
         base_entity_defs: Dict[str, EntityTypeDefEntry] = {}

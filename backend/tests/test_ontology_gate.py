@@ -65,7 +65,9 @@ def test_full_pass():
     assert report.fingerprint and len(report.fingerprint) == 64
 
 
-def test_missing_entity_type_blocks():
+def test_missing_entity_type_warns_but_resolves():
+    # Partial coverage is advisory: the gap is fully reported (so the UI can
+    # promote the one-click extend) but does NOT block onboarding/aggregation.
     report = check_resolution(**_kwargs(
         entity_type_definitions_raw={"Table": _make_entity(level=1)},
         relationship_type_definitions_raw={
@@ -74,13 +76,14 @@ def test_missing_entity_type_blocks():
         introspected_entity_ids=["Table", "Sensor"],
         introspected_edge_ids=["FLOWS"],
     ))
-    assert report.resolved is False
-    assert "missing_entity_types" in report.blocking_reasons
+    assert report.resolved is True
+    assert "missing_entity_types" in report.advisory_warnings
+    assert "missing_entity_types" not in report.blocking_reasons
     assert "Sensor" in report.missing_entity_types
     assert "Table" not in report.missing_entity_types
 
 
-def test_missing_edge_type_blocks():
+def test_missing_edge_type_warns_but_resolves():
     report = check_resolution(**_kwargs(
         entity_type_definitions_raw={"Table": _make_entity(level=1)},
         relationship_type_definitions_raw={
@@ -89,14 +92,16 @@ def test_missing_edge_type_blocks():
         introspected_entity_ids=["Table"],
         introspected_edge_ids=["FLOWS", "EMITS"],
     ))
-    assert report.resolved is False
-    assert "missing_edge_types" in report.blocking_reasons
+    assert report.resolved is True
+    assert "missing_edge_types" in report.advisory_warnings
+    assert "missing_edge_types" not in report.blocking_reasons
     assert "EMITS" in report.missing_edge_types
 
 
-def test_unclassified_relationship_blocks():
+def test_unclassified_relationship_warns_but_resolves():
     # "DEPENDS_ON" exists in the ontology but neither flag is set —
     # the user never declared whether it's containment or lineage.
+    # Advisory: an unclassified edge is treated as "neither" downstream.
     report = check_resolution(**_kwargs(
         entity_type_definitions_raw={"Table": _make_entity(level=1)},
         relationship_type_definitions_raw={
@@ -106,10 +111,33 @@ def test_unclassified_relationship_blocks():
         introspected_entity_ids=["Table"],
         introspected_edge_ids=["DEPENDS_ON", "FLOWS"],
     ))
-    assert report.resolved is False
-    assert "unclassified_relationships" in report.blocking_reasons
+    assert report.resolved is True
+    assert "unclassified_relationships" in report.advisory_warnings
+    assert "unclassified_relationships" not in report.blocking_reasons
     ids = [g.id for g in report.unclassified_relationships]
     assert ids == ["DEPENDS_ON"]
+
+
+def test_coverage_percent_reflects_partial_overlap():
+    # 3 of 4 introspected types covered → 75%.
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={"Table": _make_entity(level=1), "Job": _make_entity(level=1)},
+        relationship_type_definitions_raw={
+            "FLOWS": _make_relationship(is_containment=False, is_lineage=True),
+        },
+        introspected_entity_ids=["Table", "Job", "Sensor"],
+        introspected_edge_ids=["FLOWS"],
+    ))
+    assert report.coverage_percent == 75.0
+
+
+def test_coverage_percent_none_without_introspection():
+    report = check_resolution(**_kwargs(
+        relationship_type_definitions_raw={
+            "FLOWS": _make_relationship(is_containment=False, is_lineage=True),
+        },
+    ))
+    assert report.coverage_percent is None
 
 
 def test_explicit_false_flags_count_as_classified():

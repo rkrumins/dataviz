@@ -16,7 +16,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Database, Layers, AlertTriangle, ArrowRight, Search,
-  Shield, CheckCircle2, PenLine, Unlink, Sparkles,
+  Shield, CheckCircle2, PenLine, Unlink, Sparkles, Link2,
   GitBranch, ChevronDown, ChevronUp, ChevronRight, X,
   Plus, BookOpen, Eye, HelpCircle, Compass, MoreHorizontal,
   Grid3x3, LayoutList, Network, CircleDot, Check, Trash2,
@@ -100,7 +100,9 @@ interface DeploymentDashboardPanelProps {
   workspaces: WorkspaceResponse[]
   ontologies: OntologyDefinitionResponse[]
   onNavigateToOntology: (ontologyId: string) => void
-  onAssign: (workspaceId: string, dataSourceId: string) => void
+  /** Assign an explicit ontology to a data source (dashboard has no "selected"
+   *  ontology, so rows carry their own picker). */
+  onAssign: (workspaceId: string, dataSourceId: string, ontologyId: string) => void
   onUnassign: (workspaceId: string, dataSourceId: string) => void
   onSuggest: (workspaceId: string, dataSourceId: string) => void
   onCreateDraft?: () => void
@@ -115,6 +117,7 @@ export function DeploymentDashboardPanel({
   workspaces,
   ontologies,
   onNavigateToOntology,
+  onAssign,
   onUnassign,
   onSuggest,
   onCreateDraft,
@@ -827,6 +830,8 @@ export function DeploymentDashboardPanel({
                         isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
                         isAssigning={isAssigning}
                         canSuggest={canSuggest}
+                        ontologies={ontologies}
+                        onAssign={onAssign}
                         onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
                         onNavigateToOntology={onNavigateToOntology}
                         onSuggest={onSuggest}
@@ -859,6 +864,8 @@ export function DeploymentDashboardPanel({
               keyOf={keyOf}
               isAssigning={isAssigning}
               canSuggest={canSuggest}
+              ontologies={ontologies}
+              onAssign={onAssign}
             />
           ))}
         </div>
@@ -1100,6 +1107,7 @@ function CoverageRing({
 // ───────────────────────────────────────────────────────────────────────
 function DataSourceRow({
   entry, isSelected, onToggleSelect, viewCount, isDrift, isAssigning, canSuggest,
+  ontologies, onAssign,
   onRowClick, onNavigateToOntology, onSuggest, onUnassign, onNavigateSchemaTab,
 }: {
   entry: DeploymentEntry
@@ -1109,6 +1117,8 @@ function DataSourceRow({
   isDrift: boolean
   isAssigning: boolean
   canSuggest: boolean
+  ontologies: OntologyDefinitionResponse[]
+  onAssign: (wsId: string, dsId: string, ontologyId: string) => void
   onRowClick: () => void
   onNavigateToOntology: (ontId: string) => void
   onSuggest: (wsId: string, dsId: string) => void
@@ -1257,15 +1267,22 @@ function DataSourceRow({
       </span>
 
       {!entry.ontologyId ? (
-        canSuggest && (
-          <button
-            onClick={e => { e.stopPropagation(); onSuggest(entry.workspaceId, entry.dataSourceId) }}
+        <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+          {canSuggest && (
+            <button
+              onClick={() => onSuggest(entry.workspaceId, entry.dataSourceId)}
+              disabled={isAssigning}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm shadow-indigo-500/20"
+            >
+              <Sparkles className="w-3 h-3" /> Suggest
+            </button>
+          )}
+          <AssignPopover
+            ontologies={ontologies}
             disabled={isAssigning}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20"
-          >
-            <Sparkles className="w-3 h-3" /> Suggest
-          </button>
-        )
+            onPick={ontId => onAssign(entry.workspaceId, entry.dataSourceId, ontId)}
+          />
+        </div>
       ) : (
         <button
           onClick={e => { e.stopPropagation(); onUnassign(entry.workspaceId, entry.dataSourceId) }}
@@ -1275,6 +1292,79 @@ function DataSourceRow({
         >
           <Unlink className="w-3 h-3" />
         </button>
+      )}
+    </div>
+  )
+}
+
+/** Inline ontology picker for unassigned rows — the dashboard has no selected
+ *  ontology, so assignment needs an explicit choice. */
+function AssignPopover({
+  ontologies, disabled, onPick,
+}: { ontologies: OntologyDefinitionResponse[]; disabled: boolean; onPick: (ontologyId: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const candidates = ontologies
+    .filter(o => !o.deletedAt)
+    .filter(o => !query.trim() || o.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => Number(b.isPublished) - Number(a.isPublished) || a.name.localeCompare(b.name))
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        disabled={disabled}
+        className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
+      >
+        <Link2 className="w-3 h-3" /> Assign
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-30 w-64 rounded-xl border border-glass-border bg-canvas-elevated shadow-lg overflow-hidden">
+          {ontologies.length > 5 && (
+            <div className="p-2 border-b border-glass-border/60">
+              <input
+                autoFocus
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Search semantic layers..."
+                className="w-full px-2.5 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-[11px] text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              />
+            </div>
+          )}
+          <div className="max-h-56 overflow-y-auto py-1">
+            {candidates.length === 0 && (
+              <p className="px-3 py-2 text-[11px] text-ink-muted">No semantic layers{query ? ' match' : ' available'}.</p>
+            )}
+            {candidates.map(o => (
+              <button
+                key={o.id}
+                onClick={() => { setOpen(false); setQuery(''); onPick(o.id) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
+              >
+                <span className="text-[11px] font-medium text-ink truncate flex-1">{o.name}</span>
+                <span className={cn(
+                  'px-1.5 py-0.5 rounded-full text-[9px] font-bold border flex-shrink-0',
+                  o.isPublished
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+                )}>
+                  {o.isPublished ? `v${o.version}` : 'draft'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -1305,6 +1395,7 @@ function MenuItem({
 function OntologyGroupCard({
   group, index, viewCounts, driftKeys, selectedKeys, onToggleSelect,
   onNavigateToOntology, onRowClick, onSuggest, onUnassign, onNavigateSchemaTab, keyOf, isAssigning, canSuggest,
+  ontologies, onAssign,
 }: {
   group: {
     ontology: OntologyDefinitionResponse | null
@@ -1324,6 +1415,8 @@ function OntologyGroupCard({
   keyOf: (e: DeploymentEntry) => string
   isAssigning: boolean
   canSuggest: boolean
+  ontologies: OntologyDefinitionResponse[]
+  onAssign: (wsId: string, dsId: string, ontologyId: string) => void
 }) {
   const isUnassigned = group.key === '__unassigned__'
   const ont = group.ontology
@@ -1394,6 +1487,8 @@ function OntologyGroupCard({
             isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
             isAssigning={isAssigning}
             canSuggest={canSuggest}
+            ontologies={ontologies}
+            onAssign={onAssign}
             onRowClick={() => onRowClick(entry.workspaceId, entry.dataSourceId)}
             onNavigateToOntology={onNavigateToOntology}
             onSuggest={onSuggest}
