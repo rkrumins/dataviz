@@ -7894,7 +7894,20 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
-        containment = list(self._get_containment_edge_types())
+        # Introspection must NOT depend on containment having been injected.
+        # ``_resolve_ontology`` calls this method BEFORE ``_inject_resolved`` on a
+        # fresh provider, and ``_get_containment_edge_types`` raises when the set
+        # isn't configured yet. Letting that raise here aborts the whole
+        # introspection (observed vocabulary discovery below), which leaves the
+        # per-source case-alias map empty on the FIRST resolve — so declared
+        # UPPER_SNAKE types get injected verbatim into case-sensitive Cypher and
+        # match nothing (a flat hierarchy on a freshly-onboarded data source).
+        # Containment here is only a classification hint for the observed types;
+        # treat "not configured yet" as empty and let the rest run.
+        try:
+            containment = list(self._get_containment_edge_types())
+        except ProviderConfigurationError:
+            containment = []
         containment_upper = {t.upper() for t in containment}
         
         # 1. Determine Lineage Types
