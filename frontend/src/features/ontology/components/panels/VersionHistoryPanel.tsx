@@ -18,6 +18,7 @@ import { OntologyStatusBadge } from '../OntologyStatusBadge'
 import { VersionDiffDialog } from '../dialogs/VersionDiffDialog'
 import { formatDate } from '../../lib/ontology-parsers'
 import { useToast } from '@/components/ui/toast'
+import { TablePagination } from '@/components/ui/TablePagination'
 
 interface VersionHistoryPanelProps {
   ontology: OntologyDefinitionResponse
@@ -69,9 +70,13 @@ function TypeDiffBadges({ changes }: { changes: OntologyAuditEntry['changes'] })
   )
 }
 
+const AUDIT_PAGE_SIZE = 25
+const VERSIONS_PAGE_SIZE = 10
+
 export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
+  const [auditLimit, setAuditLimit] = useState(AUDIT_PAGE_SIZE)
   const { data: versions, isLoading: versionsLoading } = useOntologyVersions(ontology.id)
-  const { data: auditLog, isLoading: auditLoading } = useOntologyAuditLog(ontology.id)
+  const { data: auditLog, isLoading: auditLoading, isFetching: auditFetching } = useOntologyAuditLog(ontology.id, auditLimit)
   const navigate = useNavigate()
   const access = useSemanticLayerAccess()
   const mutations = useOntologyMutations()
@@ -80,6 +85,10 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
   const [compareTarget, setCompareTarget] = useState<OntologyDefinitionResponse | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<OntologyDefinitionResponse | null>(null)
   const [isRestoring, setIsRestoring] = useState(false)
+  const [versionsPage, setVersionsPage] = useState(0)
+
+  // A full page means there may be more events server-side.
+  const auditMayHaveMore = (auditLog?.length ?? 0) >= auditLimit
 
   // Versions arrive newest-first; the newest version is the new-version source.
   const latestVersion = versions?.[0]
@@ -145,13 +154,21 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
             <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[10px] font-bold text-ink-muted">
               {versions!.length} version{versions!.length !== 1 ? 's' : ''}
             </span>
+            <TablePagination
+              page={versionsPage}
+              pageSize={VERSIONS_PAGE_SIZE}
+              total={versions!.length}
+              onPageChange={setVersionsPage}
+              className="ml-auto"
+            />
           </div>
 
           <div className="relative pl-8">
             <div className="absolute left-[13px] top-3 bottom-3 w-1 rounded-full bg-gradient-to-b from-indigo-300 via-glass-border to-glass-border dark:from-indigo-700 dark:via-glass-border dark:to-glass-border" />
 
             <div className="space-y-3">
-              {versions!.map((v, i) => {
+              {versions!.slice(versionsPage * VERSIONS_PAGE_SIZE, (versionsPage + 1) * VERSIONS_PAGE_SIZE).map((v, pageIdx) => {
+                const i = versionsPage * VERSIONS_PAGE_SIZE + pageIdx
                 const isActive = v.id === ontology.id
                 const entityCount = Object.keys(v.entityTypeDefinitions ?? {}).length
                 const relCount = Object.keys(v.relationshipTypeDefinitions ?? {}).length
@@ -291,7 +308,7 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
               Activity Log
             </h3>
             <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[10px] font-bold text-ink-muted">
-              {auditLog!.length} event{auditLog!.length !== 1 ? 's' : ''}
+              {auditLog!.length}{auditMayHaveMore ? '+' : ''} event{auditLog!.length !== 1 ? 's' : ''}
             </span>
           </div>
 
@@ -340,6 +357,17 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                 )
               })}
             </div>
+
+            {auditMayHaveMore && (
+              <button
+                onClick={() => setAuditLimit(l => l + AUDIT_PAGE_SIZE)}
+                disabled={auditFetching}
+                className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-500 hover:text-indigo-600 hover:bg-indigo-500/[0.06] transition-colors disabled:opacity-50"
+              >
+                {auditFetching ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                Load more events
+              </button>
+            )}
           </div>
         </div>
       )}

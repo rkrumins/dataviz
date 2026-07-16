@@ -68,11 +68,17 @@ export function useOntologyAssignments(id: string | undefined) {
   })
 }
 
-export function useOntologyAuditLog(id: string | undefined) {
+/**
+ * Audit trail, newest-first. `limit` is a grow-only window ("Load more" bumps
+ * it) — the backend caps at 500; refetching from 0 each time keeps this a
+ * plain useQuery (audit reads are cheap) instead of infinite-query plumbing.
+ */
+export function useOntologyAuditLog(id: string | undefined, limit = 25) {
   return useQuery({
-    queryKey: ONTOLOGY_KEYS.audit(id!),
-    queryFn: () => ontologyDefinitionService.auditLog(id!),
+    queryKey: [...ONTOLOGY_KEYS.audit(id!), limit],
+    queryFn: () => ontologyDefinitionService.auditLog(id!, { limit }),
     enabled: !!id,
     staleTime: 30_000,
+    placeholderData: keepPreviousData,
   })
 }

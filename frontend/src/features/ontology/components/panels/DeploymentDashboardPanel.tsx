@@ -28,6 +28,13 @@ import { useDeploymentMatrix } from '../../hooks/useDeploymentMatrix'
 import { useWorkspaceViewCounts } from '../../hooks/useWorkspaceViewCounts'
 import type { DeploymentEntry } from '../../lib/ontology-types'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { TablePagination } from '@/components/ui/TablePagination'
+
+/** Rows shown per expanded group before paging kicks in. */
+const GROUP_PAGE_SIZE = 10
+/** Matrix cell budget — beyond this the matrix slices workspaces and says so. */
+const MATRIX_MAX_CELLS = 400
 import { WORKSPACE_PALETTES } from '@/components/dashboard/dashboard-constants'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -180,9 +187,14 @@ export function DeploymentDashboardPanel({
     return counts
   }, [ontologies])
 
+  // Per-workspace-group page index; narrowing resets all pages.
+  const [groupPages, setGroupPages] = useState<Record<string, number>>({})
+  const debouncedSearch = useDebouncedValue(search, 250)
+  useEffect(() => { setGroupPages({}) }, [debouncedSearch, quickFilters])
+
   // ─── Entry filtering (search + quick filters) ─────────────────────────
   const filteredEntries = useMemo(() => {
-    const q = search.trim().toLowerCase()
+    const q = debouncedSearch.trim().toLowerCase()
     return entries.filter(e => {
       if (q) {
         const hay = `${e.dataSourceLabel} ${e.workspaceName} ${e.ontologyName ?? ''}`.toLowerCase()
@@ -194,7 +206,7 @@ export function DeploymentDashboardPanel({
       if (quickFilters.has('active') && e.workspaceId !== activeWorkspaceId) return false
       return true
     })
-  }, [entries, search, quickFilters, driftKeys, activeWorkspaceId])
+  }, [entries, debouncedSearch, quickFilters, driftKeys, activeWorkspaceId])
 
   // ─── By-Workspace grouping ───────────────────────────────────────────
   const groupedByWorkspace = useMemo(() => {
@@ -812,35 +824,53 @@ export function DeploymentDashboardPanel({
                   </div>
                 )}
 
-                {/* Data source rows */}
-                {!isCollapsed && (
-                  <div className="divide-y divide-glass-border/30">
-                    {wsEntries.length === 0 && (
-                      <div className="px-5 py-6 text-center text-xs text-ink-muted italic">
-                        No data sources configured in this workspace yet.
-                      </div>
-                    )}
-                    {wsEntries.map(entry => (
-                      <DataSourceRow
-                        key={entry.dataSourceId}
-                        entry={entry}
-                        isSelected={selectedKeys.has(keyOf(entry))}
-                        onToggleSelect={() => toggleSelect(entry)}
-                        viewCount={viewCounts.byDataSource[entry.dataSourceId] ?? 0}
-                        isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
-                        isAssigning={isAssigning}
-                        canSuggest={canSuggest}
-                        ontologies={ontologies}
-                        onAssign={onAssign}
-                        onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
-                        onNavigateToOntology={onNavigateToOntology}
-                        onSuggest={onSuggest}
-                        onUnassign={onUnassign}
-                        onNavigateSchemaTab={(ontId, tab) => navigate(`/schema/${ontId}?tab=${tab}`)}
-                      />
-                    ))}
-                  </div>
-                )}
+                {/* Data source rows — paged per group so a 100-source
+                    workspace doesn't mount 100 rows at once */}
+                {!isCollapsed && (() => {
+                  const page = groupPages[workspace.id] ?? 0
+                  const paged = wsEntries.slice(page * GROUP_PAGE_SIZE, (page + 1) * GROUP_PAGE_SIZE)
+                  return (
+                    <div className="divide-y divide-glass-border/30">
+                      {wsEntries.length === 0 && (
+                        <div className="px-5 py-6 text-center text-xs text-ink-muted italic">
+                          No data sources configured in this workspace yet.
+                        </div>
+                      )}
+                      {paged.map(entry => (
+                        <DataSourceRow
+                          key={entry.dataSourceId}
+                          entry={entry}
+                          isSelected={selectedKeys.has(keyOf(entry))}
+                          onToggleSelect={() => toggleSelect(entry)}
+                          viewCount={viewCounts.byDataSource[entry.dataSourceId] ?? 0}
+                          isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
+                          isAssigning={isAssigning}
+                          canSuggest={canSuggest}
+                          ontologies={ontologies}
+                          onAssign={onAssign}
+                          onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
+                          onNavigateToOntology={onNavigateToOntology}
+                          onSuggest={onSuggest}
+                          onUnassign={onUnassign}
+                          onNavigateSchemaTab={(ontId, tab) => navigate(`/schema/${ontId}?tab=${tab}`)}
+                        />
+                      ))}
+                      {wsEntries.length > GROUP_PAGE_SIZE && (
+                        <div className="flex items-center justify-between px-5 py-2">
+                          <span className="text-[11px] text-ink-muted tabular-nums">
+                            Showing {page * GROUP_PAGE_SIZE + 1}–{Math.min((page + 1) * GROUP_PAGE_SIZE, wsEntries.length)} of {wsEntries.length}
+                          </span>
+                          <TablePagination
+                            page={page}
+                            pageSize={GROUP_PAGE_SIZE}
+                            total={wsEntries.length}
+                            onPageChange={p => setGroupPages(s => ({ ...s, [workspace.id]: p }))}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             )
           })}
@@ -1427,6 +1457,8 @@ function OntologyGroupCard({
   const StatusIcon = status ? STATUS_ICON[status] : null
   const versions = [...new Set(group.entries.map(e => e.ontologyVersion).filter(Boolean))]
   const hasDrift = versions.length > 1
+  const [page, setPage] = useState(0)
+  const pagedEntries = group.entries.slice(page * GROUP_PAGE_SIZE, (page + 1) * GROUP_PAGE_SIZE)
 
   return (
     <div
@@ -1477,7 +1509,7 @@ function OntologyGroupCard({
       </div>
 
       <div className="divide-y divide-glass-border/30">
-        {group.entries.map(entry => (
+        {pagedEntries.map(entry => (
           <DataSourceRow
             key={`${entry.workspaceId}:${entry.dataSourceId}`}
             entry={entry}
@@ -1496,6 +1528,19 @@ function OntologyGroupCard({
             onNavigateSchemaTab={onNavigateSchemaTab}
           />
         ))}
+        {group.entries.length > GROUP_PAGE_SIZE && (
+          <div className="flex items-center justify-between px-5 py-2">
+            <span className="text-[11px] text-ink-muted tabular-nums">
+              Showing {page * GROUP_PAGE_SIZE + 1}–{Math.min((page + 1) * GROUP_PAGE_SIZE, group.entries.length)} of {group.entries.length}
+            </span>
+            <TablePagination
+              page={page}
+              pageSize={GROUP_PAGE_SIZE}
+              total={group.entries.length}
+              onPageChange={setPage}
+            />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1532,12 +1577,19 @@ function CoverageMatrix({
     return m
   }, [entries])
 
-  const activeWs = workspaces.filter(w =>
+  const allActiveWs = workspaces.filter(w =>
     entries.some(e => e.workspaceId === w.id),
   )
   const activeOnts = ontologies.filter(o =>
     entries.some(e => e.ontologyId === o.id),
   )
+
+  // The matrix is an at-a-glance view — beyond the cell budget it slices
+  // workspaces (and says so) rather than rendering a quadratic grid.
+  // Use search/quick filters to narrow instead.
+  const maxWsRows = Math.max(1, Math.floor(MATRIX_MAX_CELLS / Math.max(1, activeOnts.length)))
+  const truncated = allActiveWs.length > maxWsRows
+  const activeWs = truncated ? allActiveWs.slice(0, maxWsRows) : allActiveWs
 
   if (activeWs.length === 0 || activeOnts.length === 0) {
     return (
@@ -1551,6 +1603,12 @@ function CoverageMatrix({
 
   return (
     <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-auto">
+      {truncated && (
+        <div className="flex items-center gap-2 px-4 py-2 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-500/[0.06] border-b border-amber-500/15">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          Matrix limited to the first {activeWs.length} of {allActiveWs.length} workspaces — use search or filters above to narrow.
+        </div>
+      )}
       <table className="w-full border-collapse">
         <thead>
           <tr className="bg-canvas-elevated/80">

@@ -198,8 +198,12 @@ export const ontologyDefinitionService = {
         })
     },
 
-    auditLog(id: string): Promise<OntologyAuditEntry[]> {
-        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit`)
+    auditLog(id: string, params: { limit?: number; offset?: number } = {}): Promise<OntologyAuditEntry[]> {
+        const qs = new URLSearchParams()
+        if (params.limit != null) qs.set('limit', String(params.limit))
+        if (params.offset != null) qs.set('offset', String(params.offset))
+        const query = qs.toString()
+        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit${query ? `?${query}` : ''}`)
     },
 
     restore(id: string): Promise<OntologyDefinitionResponse> {

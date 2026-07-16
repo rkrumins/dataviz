@@ -19,6 +19,9 @@ import {
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { FacetChip } from '../panels/AdoptionMatchSection'
+import { TablePagination } from '@/components/ui/TablePagination'
+
+const SECTION_PAGE_SIZE = 10
 
 // ---------------------------------------------------------------------------
 // Tooltip — lightweight hover tooltip (no portal, just CSS positioning)
@@ -85,6 +88,12 @@ export function AssignmentManagerDialog({
   const [confirmRollout, setConfirmRollout] = useState<{ wsId: string; wsName: string; dsCount: number } | null>(null)
   // Replace confirmation state
   const [confirmReplace, setConfirmReplace] = useState<CategorizedDs | null>(null)
+  // Filtering happens on the debounced value so keystrokes don't re-filter
+  // (and, in the Matches tab, don't each fire a server request).
+  const debouncedSearch = useDebouncedValue(search, 250)
+  // Per-section page index (sections paginate independently on large fleets).
+  const [sectionPages, setSectionPages] = useState<Record<string, number>>({})
+  useEffect(() => { setSectionPages({}) }, [debouncedSearch, activeTab])
 
   const ontologyNames = useMemo(() => {
     const m = new Map<string, string>()
@@ -114,8 +123,8 @@ export function AssignmentManagerDialog({
   const totalDs = assignedToThis.length + unassigned.length + assignedToOther.length
 
   const filterList = (list: CategorizedDs[]) => {
-    if (!search.trim()) return list
-    const q = search.toLowerCase()
+    if (!debouncedSearch.trim()) return list
+    const q = debouncedSearch.toLowerCase()
     return list.filter(d => d.dsLabel.toLowerCase().includes(q) || d.wsName.toLowerCase().includes(q))
   }
 
@@ -228,7 +237,6 @@ export function AssignmentManagerDialog({
     emptyMsg: string
     helpText: string
   }) {
-    const grouped = groupByWorkspace(list)
     if (list.length === 0) {
       return (
         <div className="px-4 py-6 text-center">
@@ -237,6 +245,13 @@ export function AssignmentManagerDialog({
         </div>
       )
     }
+
+    // Page the flat list, then group the visible slice by workspace — keeps
+    // the DOM to one page of rows however many sources the fleet has.
+    const page = sectionPages[variant] ?? 0
+    const paged = list.slice(page * SECTION_PAGE_SIZE, (page + 1) * SECTION_PAGE_SIZE)
+    const grouped = groupByWorkspace(paged)
+    const allGrouped = groupByWorkspace(list)
 
     return (
       <div>
@@ -247,9 +262,9 @@ export function AssignmentManagerDialog({
             <HelpCircle className="w-3 h-3 text-ink-muted/40 hover:text-ink-muted cursor-help transition-colors" />
           </Tooltip>
 
-          {variant === 'unassigned' && grouped.length > 0 && (
+          {variant === 'unassigned' && allGrouped.length > 0 && (
             <div className="flex items-center gap-1 ml-auto">
-              {grouped.map(([wsId, { wsName, items }]) => (
+              {allGrouped.map(([wsId, { wsName, items }]) => (
                 <Tooltip key={wsId} text={`Assign "${ontology.name}" to all ${items.length} data source${items.length !== 1 ? 's' : ''} in ${wsName}`}>
                   <button
                     onClick={() => setConfirmRollout({ wsId, wsName, dsCount: items.length })}
@@ -282,6 +297,20 @@ export function AssignmentManagerDialog({
             </div>
           )
         })}
+
+        {list.length > SECTION_PAGE_SIZE && (
+          <div className="flex items-center justify-between px-4 py-2">
+            <span className="text-[11px] text-ink-muted tabular-nums">
+              Showing {page * SECTION_PAGE_SIZE + 1}–{Math.min((page + 1) * SECTION_PAGE_SIZE, list.length)} of {list.length}
+            </span>
+            <TablePagination
+              page={page}
+              pageSize={SECTION_PAGE_SIZE}
+              total={list.length}
+              onPageChange={p => setSectionPages(s => ({ ...s, [variant]: p }))}
+            />
+          </div>
+        )}
       </div>
     )
   }
