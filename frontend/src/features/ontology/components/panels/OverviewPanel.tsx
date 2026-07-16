@@ -49,12 +49,14 @@ interface OverviewPanelProps {
   onFindDataSources?: () => void
 }
 
-function StatCard({ icon: Icon, label, value, accent, onClick }: {
+function StatCard({ icon: Icon, label, value, accent, onClick, sublabel }: {
   icon: React.ComponentType<{ className?: string }>
   label: string
   value: string | number
   accent: string
   onClick?: () => void
+  /** Context line under the label (e.g. which data source the number is about). */
+  sublabel?: string | null
 }) {
   const Wrapper = onClick ? 'button' : 'div'
   return (
@@ -68,9 +70,10 @@ function StatCard({ icon: Icon, label, value, accent, onClick }: {
       <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0', accent)}>
         <Icon className="w-5 h-5" />
       </div>
-      <div>
+      <div className="min-w-0">
         <p className="text-2xl font-bold text-ink tracking-tight leading-none">{value}</p>
         <p className="text-xs text-ink-muted font-medium mt-0.5">{label}</p>
+        {sublabel && <p className="text-[10px] text-ink-muted/70 truncate mt-0.5">{sublabel}</p>}
       </div>
     </Wrapper>
   )
@@ -89,6 +92,14 @@ export function OverviewPanel({
   // Self-contained: fetch graph stats + coverage when workspace context exists
   const [graphStats, setGraphStats] = useState<GraphSchemaStats | null>(null)
   const [coverage, setCoverage] = useState<CoverageState | null>(null)
+
+  // Identity of the evaluation source, so graph-derived numbers (coverage,
+  // node/edge counts) say which data source they're about.
+  const evalWs = workspaces?.find(w => w.id === workspaceId)
+  const evalDs = evalWs?.dataSources?.find(d => d.id === dataSourceId)
+  const evalContextLabel = evalDs
+    ? `${evalDs.label || evalDs.id}${evalWs ? ` · ${evalWs.name}` : ''}`
+    : null
 
   useEffect(() => {
     if (!workspaceId || !dataSourceId) {
@@ -276,6 +287,7 @@ export function OverviewPanel({
             icon={BarChart3}
             label="Coverage"
             value={coverage ? `${Math.round(coverage.coveragePercent)}%` : '—'}
+            sublabel={coverage ? evalContextLabel : null}
             accent="bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500"
             onClick={() => onNavigateTab('coverage')}
           />
@@ -353,6 +365,9 @@ export function OverviewPanel({
                 </div>
               )}
             </div>
+            {graphStats && evalContextLabel && (
+              <p className="text-[10px] text-ink-muted/70 truncate mt-2">from {evalContextLabel}</p>
+            )}
           </button>
         </div>
       </section>

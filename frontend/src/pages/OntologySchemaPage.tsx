@@ -58,6 +58,8 @@ import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPan
 import { VersionHistoryPanel } from '@/features/ontology/components/panels/VersionHistoryPanel'
 import { DeploymentDashboardPanel } from '@/features/ontology/components/panels/DeploymentDashboardPanel'
 import { OntologyAlertBanner, type OntologyAlert } from '@/features/ontology/components/OntologyAlertBanner'
+import { EvalContextBar } from '@/features/ontology/components/EvalContextBar'
+import { DataSourcePicker } from '@/features/ontology/components/DataSourcePicker'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
 import { PageContainer, pageGeometry } from '@/components/layout/PageContainer'
 
@@ -523,6 +525,7 @@ export function OntologySchemaPage() {
     setSearch('')
     setEvalOverrideWsId(null)
     setEvalOverrideDsId(null)
+    setShowEvalPicker(false)
     discardChanges()
   }, [ontologyId])
 
@@ -544,6 +547,8 @@ export function OntologySchemaPage() {
   // User can explicitly override the evaluation target (e.g. from CoveragePanel)
   const [evalOverrideWsId, setEvalOverrideWsId] = useState<string | null>(null)
   const [evalOverrideDsId, setEvalOverrideDsId] = useState<string | null>(null)
+  // Target picker opened from the EvalContextBar's "Change" affordance
+  const [showEvalPicker, setShowEvalPicker] = useState(false)
 
   // Priority: explicit override > auto-selected from deployments > Zustand store
   const evalWorkspaceId = evalOverrideWsId ?? autoEvalTarget?.workspaceId ?? activeWorkspaceId
@@ -1424,6 +1429,38 @@ export function OntologySchemaPage() {
                 </PageContainer>
               </div>
 
+              {/* Evaluation context — which data source the single-target tabs
+                  (overview/schema/coverage) are analyzed against, stated with
+                  full identity: source · graph · workspace · provider (host). */}
+              {(activeTab === 'overview' || activeTab === 'schema' || activeTab === 'coverage') && (
+                <div className="shrink-0">
+                  <PageContainer gutter="shell" className="pt-3 pb-1">
+                    <EvalContextBar
+                      ontologyId={selectedOntology.id}
+                      workspace={evalWorkspace}
+                      dataSource={evalDataSource}
+                      onChangeTarget={() => setShowEvalPicker(v => !v)}
+                    />
+                    {showEvalPicker && (
+                      <div className="mt-2">
+                        <DataSourcePicker
+                          workspaces={workspaces}
+                          selectedWorkspaceId={evalWorkspaceId}
+                          selectedDataSourceId={evalDataSourceId}
+                          ontologies={ontologies}
+                          compact
+                          onSelect={(wsId, dsId) => {
+                            setEvalOverrideWsId(wsId)
+                            setEvalOverrideDsId(dsId)
+                            setShowEvalPicker(false)
+                          }}
+                        />
+                      </div>
+                    )}
+                  </PageContainer>
+                </div>
+              )}
+
               {/* Tab content + editor panel */}
               <div className="flex-1 min-h-0 flex relative">
                 <div className={cn('min-w-0 overflow-y-auto flex-1', editorPanel && 'mr-[440px]')}>
@@ -1554,6 +1591,15 @@ export function OntologySchemaPage() {
 
                       {activeTab === 'health' && (
                         <>
+                          {/* Unlike overview/coverage (single evaluation target),
+                              health always spans every assigned source. */}
+                          <p className="text-xs text-ink-muted mb-4">
+                            Evaluated across all{' '}
+                            <span className="font-semibold text-ink">
+                              {assignmentCountMap.get(selectedOntology.id) ?? 0} assigned data source{(assignmentCountMap.get(selectedOntology.id) ?? 0) !== 1 ? 's' : ''}
+                            </span>
+                            {' '}— not just the single evaluation target used by the Overview and Coverage tabs.
+                          </p>
                           <AdoptionMatchSection ontologyId={selectedOntology.id} />
                           <SourceMappingSection ontologyId={selectedOntology.id} />
                         </>

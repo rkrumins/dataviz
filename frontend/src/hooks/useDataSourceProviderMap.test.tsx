@@ -2,7 +2,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi } from 'vitest'
 
-const canRead = vi.fn(() => true)
+const canRead = vi.fn((_perm: string) => true)
 vi.mock('@/store/auth', () => ({
   useAnyWorkspacePermission: (perm: string) => canRead(perm),
 }))
