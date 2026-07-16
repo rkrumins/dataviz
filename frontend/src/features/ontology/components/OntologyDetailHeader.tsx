@@ -300,11 +300,18 @@ export function OntologyDetailHeader({
                   </DropdownMenu.Item>
                 )}
                 <DropdownMenu.Item
-                  onClick={onValidate}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                  onClick={hasPendingChanges ? undefined : onValidate}
+                  disabled={hasPendingChanges}
+                  title={hasPendingChanges ? 'Save or discard your staged changes first — validation runs against the saved layer.' : undefined}
+                  className={cn(
+                    'flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium outline-none transition-colors',
+                    hasPendingChanges
+                      ? 'text-ink-muted opacity-50 cursor-not-allowed'
+                      : 'text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer',
+                  )}
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Validate
+                  Validate{hasPendingChanges ? ' (save first)' : ''}
                 </DropdownMenu.Item>
                 {/* Clone creates a new draft ontology — manage-only. */}
                 {access.canPublish && (
@@ -404,11 +411,15 @@ export function OntologyDetailHeader({
             </button>
           )}
 
-          {/* Publish — shown for drafts, manage-only. */}
+          {/* Publish — shown for drafts, manage-only. Disabled while dirty:
+              publish runs against the SAVED layer, so publishing with staged
+              edits would silently exclude them. */}
           {access.canPublish && !isImmutable && (
             <button
               onClick={onPublish}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
+              disabled={hasPendingChanges}
+              title={hasPendingChanges ? 'Save or discard your staged changes first — publish runs against the saved layer.' : undefined}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-indigo-500 disabled:hover:to-purple-500"
             >
               <Upload className="w-4 h-4" />
               Publish

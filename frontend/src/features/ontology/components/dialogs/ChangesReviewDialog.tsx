@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { humanizeId } from '../../lib/ontology-parsers'
+import { diffRecords, type DiffItem } from '../../lib/ontology-diff'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -36,82 +37,11 @@ interface ChangesReviewDialogProps {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Diff helpers                                                       */
-/* ------------------------------------------------------------------ */
-
-interface DiffItem {
-  id: string
-  label: string
-  /** For modified items, the list of fields that changed. */
-  changedFields?: string[]
-}
-
-interface DiffResult {
-  added: DiffItem[]
-  modified: DiffItem[]
-  removed: DiffItem[]
-}
-
-/**
- * Compute a simple diff between two Record<string, unknown> maps.
- * - Added:    IDs present in `working` but absent in `server`.
- * - Removed:  IDs present in `server` but absent in `working`.
- * - Modified: IDs present in both but with different JSON representations.
- */
-function diffRecords(
-  server: Record<string, unknown>,
-  working: Record<string, unknown>,
-): DiffResult {
-  const serverIds = new Set(Object.keys(server))
-  const workingIds = new Set(Object.keys(working))
-
-  const added: DiffItem[] = []
-  const removed: DiffItem[] = []
-  const modified: DiffItem[] = []
-
-  // Added — in working but not server
-  for (const id of workingIds) {
-    if (!serverIds.has(id)) {
-      added.push({ id, label: humanizeId(id) })
-    }
-  }
-
-  // Removed — in server but not working
-  for (const id of serverIds) {
-    if (!workingIds.has(id)) {
-      removed.push({ id, label: humanizeId(id) })
-    }
-  }
-
-  // Modified — in both but different
-  for (const id of workingIds) {
-    if (!serverIds.has(id)) continue
-    const serverJson = JSON.stringify(server[id])
-    const workingJson = JSON.stringify(working[id])
-    if (serverJson !== workingJson) {
-      // Identify which top-level fields changed
-      const serverObj = (server[id] ?? {}) as Record<string, unknown>
-      const workingObj = (working[id] ?? {}) as Record<string, unknown>
-      const allKeys = new Set([...Object.keys(serverObj), ...Object.keys(workingObj)])
-      const changedFields: string[] = []
-      for (const key of allKeys) {
-        if (JSON.stringify(serverObj[key]) !== JSON.stringify(workingObj[key])) {
-          changedFields.push(key)
-        }
-      }
-      modified.push({ id, label: humanizeId(id), changedFields })
-    }
-  }
-
-  return { added, modified, removed }
-}
-
-/* ------------------------------------------------------------------ */
 /*  Sub-components                                                     */
 /* ------------------------------------------------------------------ */
 
-/** A single row inside a diff section. */
-function DiffRow({ item }: { item: DiffItem }) {
+/** A single row inside a diff section. (Shared with VersionDiffDialog.) */
+export function DiffRow({ item }: { item: DiffItem }) {
   return (
     <div className="flex items-start gap-2 py-1.5">
       <span className="font-medium text-sm text-ink">{item.label}</span>
@@ -124,8 +54,8 @@ function DiffRow({ item }: { item: DiffItem }) {
   )
 }
 
-/** Collapsible section for a diff category (added / modified / removed). */
-function DiffSection({
+/** Collapsible section for a diff category (added / modified / removed). (Shared with VersionDiffDialog.) */
+export function DiffSection({
   icon: Icon,
   title,
   items,

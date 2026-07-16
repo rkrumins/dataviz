@@ -1,13 +1,16 @@
-import { X, AlertTriangle, Plus, Minus, Lock, Shield } from 'lucide-react'
+import { useState } from 'react'
+import { X, AlertTriangle, Plus, Minus, Lock, Shield, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { usePermission } from '@/store/auth'
 import type { OntologyDefinitionResponse, OntologyImpactResponse } from '@/services/ontologyDefinitionService'
 
 interface PublishConfirmDialogProps {
   ontology: OntologyDefinitionResponse
   impact: OntologyImpactResponse
   isPublishing?: boolean
-  onConfirm: () => void
+  /** `force` is true only via the admin escape hatch when the impact check blocked. */
+  onConfirm: (force?: boolean) => void
   onClose: () => void
 }
 
@@ -53,6 +56,12 @@ export function PublishConfirmDialog({
     impact.removedEntityTypes.length > 0 ||
     impact.addedRelationshipTypes.length > 0 ||
     impact.removedRelationshipTypes.length > 0
+
+  // Admin-gated force-publish escape hatch, only relevant when blocked.
+  const isPlatformAdmin = usePermission('system:admin')
+  const [forceOpen, setForceOpen] = useState(false)
+  const [forceText, setForceText] = useState('')
+  const forceMatch = forceText.trim().toLowerCase() === ontology.name.trim().toLowerCase()
 
   return (
     <>
@@ -138,6 +147,52 @@ export function PublishConfirmDialog({
           </div>
         )}
 
+        {/* Force-publish escape hatch — platform admins only, blocked case only */}
+        {!impact.allowed && isPlatformAdmin && (
+          <div className="mx-6 mb-4">
+            {!forceOpen ? (
+              <button
+                onClick={() => setForceOpen(true)}
+                className="flex items-center gap-1.5 text-xs font-medium text-red-500/80 hover:text-red-500 transition-colors"
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                Force publish anyway (administrator override)…
+              </button>
+            ) : (
+              <div className="rounded-xl border border-red-300/50 dark:border-red-800/50 bg-red-50/50 dark:bg-red-950/20 p-4 space-y-2">
+                <p className="text-xs text-red-700 dark:text-red-400 leading-relaxed">
+                  Force-publishing bypasses breaking-change protection: views and queries
+                  referencing the removed types may break immediately. Type{' '}
+                  <span className="font-mono font-bold">{ontology.name}</span> to confirm.
+                </p>
+                <input
+                  autoFocus
+                  type="text"
+                  value={forceText}
+                  onChange={e => setForceText(e.target.value)}
+                  placeholder={ontology.name}
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-glass-border text-sm text-ink placeholder:text-ink-muted/40 focus:outline-none focus:ring-2 focus:ring-red-500/40 transition-colors"
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => onConfirm(true)}
+                    disabled={!forceMatch || isPublishing}
+                    className={cn(
+                      'flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors',
+                      forceMatch && !isPublishing
+                        ? 'bg-red-500 text-white hover:bg-red-600 shadow-sm shadow-red-500/20'
+                        : 'bg-red-500/20 text-red-400/60 cursor-not-allowed',
+                    )}
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5" />
+                    {isPublishing ? 'Publishing…' : 'Force Publish'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Evolution policy badge */}
         <div className="flex items-center gap-2 mx-6 mb-4">
           <span className="text-xs text-ink-muted">Evolution policy:</span>
@@ -156,7 +211,7 @@ export function PublishConfirmDialog({
             Cancel
           </button>
           <button
-            onClick={onConfirm}
+            onClick={() => onConfirm(false)}
             disabled={!impact.allowed || isPublishing}
             className={cn(
               'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-colors duration-150 shadow-md',

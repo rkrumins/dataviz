@@ -147,17 +147,37 @@ async def _invalidate_ontology_caches(
         from backend.app.db.repositories.stats_repo import invalidate_schema_facet
         ds_rows = (
             await session.execute(
-                select(WorkspaceDataSourceORM.id).where(
+                select(
+                    WorkspaceDataSourceORM.id,
+                    WorkspaceDataSourceORM.workspace_id,
+                ).where(
                     WorkspaceDataSourceORM.ontology_id == ontology_id
                 )
             )
         ).all()
-        for (ds_id,) in ds_rows:
+        for (ds_id, _ws_id) in ds_rows:
             await invalidate_schema_facet(session, ds_id)
     except Exception as exc:  # never block the mutation on cache plumbing
         import logging
         logging.getLogger(__name__).warning(
             "schema-facet invalidation failed for ontology %s: %s", ontology_id, exc)
+        ds_rows = []
+
+    # Bump the hot-read GraphCache generation for the same data sources. The
+    # /children-with-edges and /edges/aggregated responses embed the SERVER-side
+    # containment/lineage split (ContextEngine classifies before caching), so an
+    # ontology edit must unreach those entries too — otherwise canvases keep the
+    # pre-edit grouping for up to the cache TTL (15 min). Known limitation:
+    # draft-branch entries (branch_id != "") are not enumerated here and fall
+    # back to TTL expiry.
+    try:
+        from backend.app.services.graph_cache import invalidate_aggregated_reads
+        for (ds_id, ws_id) in ds_rows:
+            await invalidate_aggregated_reads(ws_id, ds_id)
+    except Exception as exc:  # never block the mutation on cache plumbing
+        import logging
+        logging.getLogger(__name__).warning(
+            "graph-cache generation bump failed for ontology %s: %s", ontology_id, exc)
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:
@@ -843,6 +863,7 @@ async def check_ontology_resolution(
         ],
         advisoryWarnings=report.advisory_warnings,
         blockingReasons=report.blocking_reasons,
+        coveragePercent=report.coverage_percent,
         fingerprint=report.fingerprint,
     )
 
@@ -895,12 +916,14 @@ async def get_ontology_impact(
 
     draft_entities = set(json.loads(draft_row.entity_type_definitions or "{}").keys())
     draft_rels = set(json.loads(draft_row.relationship_type_definitions or "{}").keys())
+    policy = getattr(draft_row, "evolution_policy", "reject") or "reject"
 
     if prev_row is None:
         # First publish — no breaking changes possible
         return {
             "allowed": True,
             "reason": None,
+            "evolutionPolicy": policy,
             "addedEntityTypes": sorted(draft_entities),
             "removedEntityTypes": [],
             "addedRelationshipTypes": sorted(draft_rels),
@@ -913,19 +936,16 @@ async def get_ontology_impact(
     removed_entities = sorted(prev_entities - draft_entities)
     removed_rels = sorted(prev_rels - draft_rels)
     has_breaking = bool(removed_entities or removed_rels)
-
-    policy = getattr(draft_row, "evolution_policy", "reject") or "reject"
     allowed = True
     reason = None
 
     if has_breaking and policy == "reject":
         allowed = False
         reason = (
-            f"Evolution policy is 'reject' and publishing would remove "
-            f"{len(removed_entities)} entity type(s) and "
-            f"{len(removed_rels)} relationship type(s). "
-            "Change the evolution_policy to 'deprecate' or 'migrate', "
-            "or restore the removed types."
+            f"Publishing would remove {len(removed_entities)} entity type(s) and "
+            f"{len(removed_rels)} relationship type(s) still present in the previous "
+            "published version. Restore the removed types, or (administrators) "
+            "force-publish to override breaking-change protection."
         )
 
     return {
@@ -939,6 +959,63 @@ async def get_ontology_impact(
         # EXTENSION POINT: include per-field TypeDiff and affected data sources/views
         # when publish-confirmation UX needs richer blast-radius detail.
     }
+
+
+@router.get("/{ontology_id}/source-mappings")
+async def get_ontology_source_mappings(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
+):
+    """Per-assigned-source vocabulary alignment profiles for this ontology.
+
+    Aggregates the ``ontology_source_mappings`` rows (declared → observed
+    spelling maps, drift flags) across every data source currently assigned
+    to the ontology, so the Schema page's Health tab can render one alias
+    table instead of per-source warnings. Read-only; Keep/Split decisions go
+    through ``POST /{ws}/graph/vocab-alignment/confirm``.
+    """
+    import json
+
+    row = await ontology_definition_repo.get_ontology(session, ontology_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
+
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+
+    assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
+    out = []
+    for a in assignments:
+        mapping = await osm_repo.get_mapping(session, a["dataSourceId"], ontology_id)
+        entity_mappings: dict = {}
+        rel_mappings: dict = {}
+        drift_details: list = []
+        has_drift = False
+        last_seen_at = None
+        if mapping is not None:
+            try:
+                entity_mappings = json.loads(mapping.entity_type_mappings or "{}")
+                rel_mappings = json.loads(mapping.relationship_type_mappings or "{}")
+                drift_details = json.loads(mapping.drift_details) if mapping.drift_details else []
+            except (ValueError, TypeError):
+                pass
+            has_drift = bool(mapping.has_drift)
+            last_seen_at = mapping.last_seen_at
+        out.append({
+            "workspaceId": a["workspaceId"],
+            "workspaceName": a["workspaceName"],
+            "dataSourceId": a["dataSourceId"],
+            "dataSourceLabel": a["dataSourceLabel"],
+            "hasProfile": mapping is not None,
+            "hasDrift": has_drift,
+            "lastSeenAt": last_seen_at,
+            "entityMappings": entity_mappings,
+            "relationshipMappings": rel_mappings,
+            "driftDetails": drift_details,
+        })
+    return out
 
 
 @router.get("/{ontology_id}/assignments")
@@ -1072,19 +1149,8 @@ async def suggest_ontology(
     repo = SQLAlchemyOntologyRepository(session)
     svc = LocalOntologyService(repo)
 
-    # We need OntologyMetadata for the suggest call — build a minimal one from stats
-    from backend.common.models.graph import OntologyMetadata
-    introspected = OntologyMetadata(
-        containmentEdgeTypes=[],
-        lineageEdgeTypes=[],
-        edgeTypeMetadata={},
-        entityTypeHierarchy={},
-        rootEntityTypes=[],
-    )
-
     suggestion = await svc.suggest_from_introspection(
         introspected_stats=stats,
-        introspected_ontology=introspected,
         base_ontology_id=base_ontology_id,
     )
 

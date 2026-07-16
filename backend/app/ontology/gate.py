@@ -6,12 +6,19 @@ Pure, side-effect-free. No DB, no HTTP, no logging side effects. All callers
 same ResolutionReport from the same inputs.
 
 Hard criteria (block aggregation):
+    4. At least one relationship type has is_lineage=true. Without any lineage
+       classification, an aggregation run can produce nothing — this is the
+       one gap that makes the whole pipeline meaningless.
+
+Soft criteria (warn, do not block):
     1. Every introspected entity type has an entry in entity_type_definitions.
     2. Every introspected edge type has an entry in relationship_type_definitions.
     3. Every relationship type has both is_containment and is_lineage set.
-    4. At least one relationship type has is_lineage=true.
-
-Soft criteria (warn, do not block):
+       (1–3 were hard criteria historically; partial coverage is now advisory —
+       unmapped/unclassified types are simply ignored by aggregation and render
+       with fallback styling, so blocking a 90%-covered onboarding on one
+       missing type was disproportionate. The report still carries the full
+       gap detail so the UI can promote the one-click "add missing types" fix.)
     5. Each entity type referenced in the introspected graph has a non-null level.
     6. Each entity type that participates in containment has matching can_contain
        / can_be_contained_by entries.
@@ -60,6 +67,9 @@ class ResolutionReport:
     hierarchy_warnings: List[HierarchyGap] = field(default_factory=list)
     advisory_warnings: List[str] = field(default_factory=list)
     blocking_reasons: List[str] = field(default_factory=list)
+    # Share of introspected types the ontology covers (same math as
+    # resolver.check_coverage); None when no introspection data was available.
+    coverage_percent: Optional[float] = None
     fingerprint: Optional[str] = None
 
 
@@ -148,8 +158,9 @@ def check_resolution(
     )
 
     blocking_reasons: List[str] = []
+    advisory_warnings: List[str] = []
 
-    # Criterion 1 — every introspected entity type defined.
+    # Criterion 1 (advisory) — every introspected entity type defined.
     # Case-insensitive match: graph providers return labels like "Person"
     # while ontologies may key them differently. Same convention as resolver.
     defined_entity_keys = {k.upper() for k in entity_defs}
@@ -157,17 +168,17 @@ def check_resolution(
         {eid for eid in introspected_entity_ids if eid.upper() not in defined_entity_keys}
     )
     if missing_entity_types:
-        blocking_reasons.append("missing_entity_types")
+        advisory_warnings.append("missing_entity_types")
 
-    # Criterion 2 — every introspected edge type defined.
+    # Criterion 2 (advisory) — every introspected edge type defined.
     defined_rel_keys = {k.upper() for k in rel_defs}
     missing_edge_types = sorted(
         {eid for eid in introspected_edge_ids if eid.upper() not in defined_rel_keys}
     )
     if missing_edge_types:
-        blocking_reasons.append("missing_edge_types")
+        advisory_warnings.append("missing_edge_types")
 
-    # Criterion 3 — every relationship explicitly classified.
+    # Criterion 3 (advisory) — every relationship explicitly classified.
     # Only relationships that exist in the introspected graph are required
     # to be classified. Extras in the ontology are fine and won't block
     # the gate. The raw dict is inspected (not the parser-defaulted
@@ -192,7 +203,7 @@ def check_resolution(
             )
         )
     if unclassified:
-        blocking_reasons.append("unclassified_relationships")
+        advisory_warnings.append("unclassified_relationships")
 
     # Criterion 4 — at least one ``is_lineage`` relationship in the
     # ontology. Checked against the FULL ontology (not just the
@@ -211,9 +222,17 @@ def check_resolution(
     # technically run, but the user won't see the cross-tier roll-up
     # they expect.
     has_containment = any(rel_def.is_containment for rel_def in user_rel_defs.values())
-    advisory_warnings: List[str] = []
     if not has_containment:
         advisory_warnings.append("no_containment_edges")
+
+    # Coverage percentage — same math as resolver.check_coverage, computed from
+    # the counts already at hand. None when there is no introspection snapshot
+    # to measure against (stats cache miss).
+    total_introspected = len(set(introspected_entity_ids)) + len(set(introspected_edge_ids))
+    coverage_percent: Optional[float] = None
+    if total_introspected > 0:
+        covered = total_introspected - len(missing_entity_types) - len(missing_edge_types)
+        coverage_percent = round((covered / total_introspected) * 100, 1)
 
     # Soft criteria — hierarchy warnings (advisory, do not affect resolved flag).
     hierarchy_warnings: List[HierarchyGap] = []
@@ -269,6 +288,7 @@ def check_resolution(
         hierarchy_warnings=hierarchy_warnings,
         advisory_warnings=advisory_warnings,
         blocking_reasons=blocking_reasons,
+        coverage_percent=coverage_percent,
         fingerprint=fingerprint,
     )
 
@@ -288,6 +308,7 @@ def report_to_dict(report: ResolutionReport) -> Dict[str, Any]:
         "hierarchy_warnings": [asdict(h) for h in report.hierarchy_warnings],
         "advisory_warnings": report.advisory_warnings,
         "blocking_reasons": report.blocking_reasons,
+        "coverage_percent": report.coverage_percent,
         "fingerprint": report.fingerprint,
     }
 

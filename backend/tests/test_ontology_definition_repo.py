@@ -233,3 +233,154 @@ async def test_get_audit_log(db_session: AsyncSession):
     assert "published" in actions
     # Entries are ordered newest first
     assert log[0].action == "published"
+
+
+# ---------------------------------------------------------------------------
+# _sync_classification — flags are the stored source of truth
+# ---------------------------------------------------------------------------
+
+async def test_create_derives_flat_lists_from_flags(db_session: AsyncSession):
+    """Create persists containment/lineage lists derived from the per-rel flags;
+    legacy list entries with no declared rel def are preserved."""
+    req = _make_create_req(
+        relationship_type_definitions={
+            "HAS_TABLE": {"name": "Has Table", "is_containment": True, "is_lineage": False},
+            "FEEDS": {"name": "Feeds", "is_containment": False, "is_lineage": True},
+        },
+        containment_edge_types=["LEGACY_CONTAINS"],  # undeclared → preserved
+        lineage_edge_types=[],
+    )
+    resp = await ontology_definition_repo.create_ontology(db_session, req)
+    assert set(resp.containment_edge_types) == {"HAS_TABLE", "LEGACY_CONTAINS"}
+    assert resp.lineage_edge_types == ["FEEDS"]
+
+
+async def test_update_cleared_flag_removes_stale_list_entry(db_session: AsyncSession):
+    """Clearing is_containment on a rel def removes it from the persisted flat list
+    even when the client keeps sending the stale list (the historic drift bug)."""
+    created = await ontology_definition_repo.create_ontology(
+        db_session,
+        _make_create_req(
+            relationship_type_definitions={
+                "HAS_TABLE": {"name": "Has Table", "is_containment": True, "is_lineage": False},
+            },
+            containment_edge_types=["HAS_TABLE"],
+            lineage_edge_types=[],
+        ),
+    )
+    updated = await ontology_definition_repo.update_ontology(
+        db_session, created.id,
+        OntologyUpdateRequest(
+            relationship_type_definitions={
+                "HAS_TABLE": {"name": "Has Table", "is_containment": False, "is_lineage": False},
+            },
+            containment_edge_types=["HAS_TABLE"],  # stale — flags win
+        ),
+    )
+    assert updated is not None
+    assert updated.containment_edge_types == []
+
+
+async def test_list_only_update_syncs_flags_onto_stored_defs(db_session: AsyncSession):
+    """A list-only write (hierarchy chip edit / API) flips the stored rel-def flags."""
+    created = await ontology_definition_repo.create_ontology(
+        db_session,
+        _make_create_req(
+            relationship_type_definitions={
+                "LINKS": {"name": "Links", "is_containment": False, "is_lineage": False},
+            },
+            containment_edge_types=[],
+            lineage_edge_types=[],
+        ),
+    )
+    updated = await ontology_definition_repo.update_ontology(
+        db_session, created.id,
+        OntologyUpdateRequest(containment_edge_types=["LINKS"]),
+    )
+    assert updated is not None
+    assert updated.containment_edge_types == ["LINKS"]
+    assert updated.relationship_type_definitions["LINKS"]["is_containment"] is True
+    assert updated.relationship_type_definitions["LINKS"]["is_lineage"] is False
+
+
+async def test_wizard_style_update_without_lists_rederives(db_session: AsyncSession):
+    """rel-defs-only update (wizard classification save) re-derives the persisted lists."""
+    created = await ontology_definition_repo.create_ontology(
+        db_session,
+        _make_create_req(
+            relationship_type_definitions={
+                "FEEDS": {"name": "Feeds", "is_containment": False, "is_lineage": False},
+            },
+            containment_edge_types=[],
+            lineage_edge_types=[],
+        ),
+    )
+    updated = await ontology_definition_repo.update_ontology(
+        db_session, created.id,
+        OntologyUpdateRequest(
+            relationship_type_definitions={
+                "FEEDS": {"name": "Feeds", "is_containment": False, "is_lineage": True},
+            },
+        ),
+    )
+    assert updated is not None
+    assert updated.lineage_edge_types == ["FEEDS"]
+
+
+async def test_invalidate_ontology_caches_bumps_graph_cache(db_session: AsyncSession, monkeypatch):
+    """An ontology content edit must unreach the hot-read GraphCache for every
+    data source on that ontology — /children-with-edges embeds the SERVER-side
+    containment/lineage split, so without the bump canvases keep the pre-edit
+    grouping for up to the cache TTL."""
+    from backend.app.api.v1.endpoints.ontologies import _invalidate_ontology_caches
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    created = await ontology_definition_repo.create_ontology(db_session, _make_create_req())
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_gc", workspace_id="ws_gc", provider_id="prov_gc",
+        graph_name="g", ontology_id=created.id,
+    ))
+    await db_session.flush()
+
+    calls = []
+
+    async def fake_invalidate(workspace_id, data_source_id):
+        calls.append((workspace_id, data_source_id))
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.invalidate_aggregated_reads",
+        fake_invalidate,
+    )
+
+    async def fake_bump_for_ontology(session, ontology_id):
+        return None
+
+    monkeypatch.setattr(
+        "backend.app.services.resolved_ontology_cache.bump_for_ontology",
+        fake_bump_for_ontology,
+    )
+
+    await _invalidate_ontology_caches(db_session, created.id)
+    assert ("ws_gc", "ds_gc") in calls
+
+
+async def test_write_syncs_entity_hierarchy_from_containment_rels(db_session: AsyncSession):
+    """Creating an ontology with a classified containment relationship
+    auto-populates the entities' can_contain/can_be_contained_by (ADD-only)."""
+    req = _make_create_req(
+        entity_type_definitions={
+            "table": {"name": "Table"},
+            "column": {"name": "Column", "hierarchy": {"can_be_contained_by": ["partition"]}},
+        },
+        relationship_type_definitions={
+            "HAS_COLUMN": {"name": "Has Column", "is_containment": True,
+                           "source_types": ["table"], "target_types": ["column"]},
+        },
+        containment_edge_types=[],
+        lineage_edge_types=[],
+    )
+    resp = await ontology_definition_repo.create_ontology(db_session, req)
+    table_hier = resp.entity_type_definitions["table"]["hierarchy"]
+    column_hier = resp.entity_type_definitions["column"]["hierarchy"]
+    assert table_hier["can_contain"] == ["column"]
+    assert set(column_hier["can_be_contained_by"]) == {"partition", "table"}

@@ -184,9 +184,12 @@ export function AssetOnboardingWizard({
                     Object.values(formData.ontologySelections).every(s => s.ontologyId === '')
             case 'schemaReview': {
                 // Every catalog item that has an ontology assigned must
-                // pass the resolution gate. Items without an ontology
-                // (skipped) bypass aggregation entirely so they don't
-                // need to be resolved. Hierarchy warnings stay advisory.
+                // pass the resolution gate. Partial coverage and
+                // unclassified relationships are advisory server-side
+                // (resolved stays true) — only a fatal gap (no lineage
+                // relationship at all) keeps resolved=false. Items
+                // without an ontology (skipped) bypass aggregation
+                // entirely so they don't need to be resolved.
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId)
                 if (required.length === 0) return true
                 return required.every(c => schemaReviewStatus[c.id]?.resolution?.resolved === true)

@@ -516,6 +516,7 @@ def _report_to_response(
         ],
         advisoryWarnings=report.advisory_warnings,
         blockingReasons=report.blocking_reasons,
+        coveragePercent=report.coverage_percent,
         fingerprint=report.fingerprint,
     )
 

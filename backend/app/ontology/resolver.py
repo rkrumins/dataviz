@@ -170,6 +170,63 @@ def derive_flat_lists(
     )
 
 
+def sync_hierarchy_from_relationships(
+    entity_defs_raw: Dict[str, Any],
+    rel_defs_raw: Dict[str, Any],
+) -> Dict[str, Any]:
+    """ADD-only sync of entity ``can_contain`` / ``can_be_contained_by`` from
+    containment relationship endpoints (source = parent, target = child, same
+    semantics the gate's hierarchy warnings check).
+
+    Keeps the two representations of containment — entity-level hierarchy
+    fields and relationship-level ``is_containment`` endpoints — consistent by
+    construction at write time. Never removes user-authored entries; a
+    containment relationship with empty endpoint lists ("any → any")
+    contributes nothing. Returns ``entity_defs_raw`` mutated in place.
+    """
+    if not entity_defs_raw or not rel_defs_raw:
+        return entity_defs_raw
+
+    declared = {str(k).lower(): k for k in entity_defs_raw}
+
+    def _add(entity_key: str, field: str, camel: str, value: str) -> None:
+        edef = entity_defs_raw[entity_key]
+        if not isinstance(edef, dict):
+            return
+        hier = edef.setdefault("hierarchy", {})
+        if not isinstance(hier, dict):
+            return
+        current = hier.get(field, hier.get(camel, []))
+        if not isinstance(current, list):
+            return
+        if not any(str(v).lower() == value.lower() for v in current):
+            current = [*current, value]
+        hier[field] = current
+        hier.pop(camel, None)
+
+    for rdef in rel_defs_raw.values():
+        if not isinstance(rdef, dict):
+            continue
+        if not rdef.get("is_containment", rdef.get("isContainment", False)):
+            continue
+        sources = rdef.get("source_types", rdef.get("sourceTypes", [])) or []
+        targets = rdef.get("target_types", rdef.get("targetTypes", [])) or []
+        if not sources or not targets:
+            continue
+        for src in sources:
+            parent = declared.get(str(src).lower())
+            if not parent:
+                continue
+            for tgt in targets:
+                child = declared.get(str(tgt).lower())
+                if not child:
+                    continue
+                _add(parent, "can_contain", "canContain", child)
+                _add(child, "can_be_contained_by", "canBeContainedBy", parent)
+
+    return entity_defs_raw
+
+
 # ---------------------------------------------------------------------------
 # Merge strategy: base layer + override layer (non-destructive)
 # ---------------------------------------------------------------------------
@@ -498,6 +555,41 @@ def check_coverage(
 # ---------------------------------------------------------------------------
 
 
+# Whole-token vocabularies for classifying a raw edge type by name. Tokens are
+# matched against the underscore/camelCase-split, upper-cased id — never as
+# substrings — so HASH_KEY does not read as containment. Phrases match the full
+# normalized id only.
+_CONTAINMENT_TOKENS = {"HAS", "CONTAINS", "INCLUDES", "PARENT", "CHILD"}
+_CONTAINMENT_PHRASES = {"BELONGS_TO", "PART_OF", "MEMBER_OF", "CONTAINED_IN", "IN"}
+_LINEAGE_TOKENS = {
+    "DERIVES", "DERIVED", "FEEDS", "FLOW", "FLOWS", "PRODUCES", "CONSUMES",
+    "TRANSFORMS", "DEPENDS", "WRITES", "READS", "OUTPUTS",
+    "DOWNSTREAM", "UPSTREAM",
+}
+
+
+def _tokenize_type_id(type_id: str) -> List[str]:
+    import re
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(type_id))
+    return [t for t in re.split(r"[^A-Za-z0-9]+", spaced.upper()) if t]
+
+
+def infer_edge_classification(rel_id: str) -> tuple:
+    """Conservative name-based classification of a raw edge type id.
+
+    Returns ``(is_containment, is_lineage)``. Containment wins when both
+    vocabularies match (e.g. HAS_OUTPUT). Unrecognized names return
+    ``(False, False)`` — still an explicit classification, just "neither".
+    """
+    tokens = _tokenize_type_id(rel_id)
+    normalized = "_".join(tokens)
+    if (set(tokens) & _CONTAINMENT_TOKENS) or normalized in _CONTAINMENT_PHRASES:
+        return True, False
+    if set(tokens) & _LINEAGE_TOKENS:
+        return False, True
+    return False, False
+
+
 def _group_stats_by_casefold(stats: List[Any]) -> Dict[str, List[Any]]:
     """``{casefolded id: [stat, …]}`` preserving first-seen order. A source graph carrying both
     ``has`` and ``HAS`` yields one group — suggesting BOTH would collide with the authoring guard
@@ -597,10 +689,19 @@ def suggest_relationship_defs_from_stats(
         if rid in defaults:
             rdef = _rel_def_from_dict(defaults[rid])
         else:
+            is_cont, is_lin = infer_edge_classification(rid)
             rdef = RelationshipTypeDefEntry(
                 name=_humanize(rid),
                 description=f"Relationship type discovered in graph: {rid}",
+                category="structural" if is_cont else ("flow" if is_lin else "association"),
+                is_containment=is_cont,
+                is_lineage=is_lin,
             )
+            if is_cont or is_lin:
+                rdef.description = _with_note(
+                    rdef.description,
+                    f"classified as {'containment' if is_cont else 'lineage'} from its name — review before publishing",
+                )
         rdef.description = _with_note(rdef.description, _also_seen_note(variants, rid))
         result[rid] = rdef
 

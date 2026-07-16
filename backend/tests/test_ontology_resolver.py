@@ -385,3 +385,131 @@ def test_resolve_ontology_self_consistent_endpoint_constraints():
     assert sorted(ct.source_types) == ["layer", "object"]           # consistent → kept
     assert sorted(ct.target_types) == ["attribute", "object"]
     assert lk.source_types == ["attribute"] and lk.target_types == []  # partial → subset
+
+
+# ---------------------------------------------------------------------------
+# infer_edge_classification — name heuristics for raw/introspected edges
+# ---------------------------------------------------------------------------
+from backend.app.ontology.resolver import infer_edge_classification
+
+
+def test_infer_edge_classification_containment_tokens():
+    assert infer_edge_classification("HAS") == (True, False)
+    assert infer_edge_classification("has_column") == (True, False)
+    assert infer_edge_classification("CONTAINS") == (True, False)
+    assert infer_edge_classification("BELONGS_TO") == (True, False)
+    assert infer_edge_classification("PART_OF") == (True, False)
+    assert infer_edge_classification("parentOf") == (True, False)
+
+
+def test_infer_edge_classification_lineage_tokens():
+    assert infer_edge_classification("FLOWS_TO") == (False, True)
+    assert infer_edge_classification("DERIVES_FROM") == (False, True)
+    assert infer_edge_classification("feeds") == (False, True)
+    assert infer_edge_classification("dataFlow") == (False, True)
+    assert infer_edge_classification("DOWNSTREAM_OF") == (False, True)
+
+
+def test_infer_edge_classification_whole_tokens_only():
+    # Substrings must not match: HASH != HAS, INFORMS != IN.
+    assert infer_edge_classification("HASH_KEY") == (False, False)
+    assert infer_edge_classification("INFORMS") == (False, False)
+    assert infer_edge_classification("RELATES_TO") == (False, False)
+
+
+def test_infer_edge_classification_containment_wins_over_lineage():
+    assert infer_edge_classification("HAS_OUTPUT") == (True, False)
+
+
+def test_suggest_rel_defs_apply_name_heuristics():
+    """Novel edge names (not in system defaults) are classified by name so a
+    suggested ontology isn't dead-on-arrival at the resolution gate."""
+    defs = suggest_relationship_defs_from_stats(
+        [_stat("HAS_TABLE"), _stat("FEEDS"), _stat("RELATES_TO")], base_defaults={})
+    assert defs["HAS_TABLE"].is_containment is True and defs["HAS_TABLE"].is_lineage is False
+    assert defs["HAS_TABLE"].category == "structural"
+    assert defs["FEEDS"].is_lineage is True and defs["FEEDS"].is_containment is False
+    assert defs["FEEDS"].category == "flow"
+    assert defs["RELATES_TO"].is_containment is False and defs["RELATES_TO"].is_lineage is False
+    assert defs["RELATES_TO"].category == "association"
+    assert "review before publishing" in (defs["FEEDS"].description or "")
+
+
+def test_suggested_ontology_with_novel_edges_passes_resolution_gate():
+    """suggest → gate round trip: a graph whose edge vocabulary contains a
+    lineage-looking name must produce an ontology that resolves."""
+    from backend.app.ontology.gate import check_resolution
+    from backend.app.ontology.service import _rel_def_to_dict, _entity_def_to_dict
+
+    ent_defs = suggest_entity_defs_from_stats([_stat("table"), _stat("job")], base_defaults={})
+    rel_defs = suggest_relationship_defs_from_stats(
+        [_stat("HAS_COLUMN"), _stat("FEEDS")], base_defaults={})
+
+    report = check_resolution(
+        ontology_id="bp_test", ontology_version=1, ontology_is_published=False,
+        ontology_revision=0,
+        entity_type_definitions_raw={k: _entity_def_to_dict(v) for k, v in ent_defs.items()},
+        relationship_type_definitions_raw={k: _rel_def_to_dict(v) for k, v in rel_defs.items()},
+        introspected_entity_ids=["table", "job"],
+        introspected_edge_ids=["HAS_COLUMN", "FEEDS"],
+    )
+    assert report.has_lineage is True
+    assert report.has_containment is True
+    assert report.resolved is True
+    assert report.blocking_reasons == []
+
+
+# ---------------------------------------------------------------------------
+# sync_hierarchy_from_relationships — entity hierarchy from containment rels
+# ---------------------------------------------------------------------------
+from backend.app.ontology.resolver import sync_hierarchy_from_relationships
+
+
+def test_sync_hierarchy_adds_missing_entries():
+    ents = {"table": {"name": "Table"}, "column": {"name": "Column"}}
+    rels = {"HAS_COLUMN": {"name": "Has Column", "is_containment": True,
+                           "source_types": ["table"], "target_types": ["column"]}}
+    out = sync_hierarchy_from_relationships(ents, rels)
+    assert out["table"]["hierarchy"]["can_contain"] == ["column"]
+    assert out["column"]["hierarchy"]["can_be_contained_by"] == ["table"]
+
+
+def test_sync_hierarchy_never_removes_user_entries():
+    ents = {
+        "table": {"name": "Table", "hierarchy": {"can_contain": ["partition"]}},
+        "column": {"name": "Column"},
+        "partition": {"name": "Partition"},
+    }
+    rels = {"HAS_COLUMN": {"name": "Has Column", "is_containment": True,
+                           "source_types": ["table"], "target_types": ["column"]}}
+    out = sync_hierarchy_from_relationships(ents, rels)
+    assert set(out["table"]["hierarchy"]["can_contain"]) == {"partition", "column"}
+
+
+def test_sync_hierarchy_ignores_empty_endpoints_and_non_containment():
+    ents = {"table": {"name": "Table"}, "column": {"name": "Column"}}
+    rels = {
+        "HAS": {"name": "Has", "is_containment": True, "source_types": [], "target_types": []},
+        "FLOWS": {"name": "Flows", "is_lineage": True,
+                  "source_types": ["table"], "target_types": ["column"]},
+    }
+    out = sync_hierarchy_from_relationships(ents, rels)
+    assert "hierarchy" not in out["table"] or not out["table"].get("hierarchy", {}).get("can_contain")
+
+
+def test_sync_hierarchy_matches_case_insensitively_and_skips_undeclared():
+    ents = {"Table": {"name": "Table"}, "Column": {"name": "Column"}}
+    rels = {"HAS_COLUMN": {"name": "Has Column", "is_containment": True,
+                           "source_types": ["table"], "target_types": ["column", "ghostType"]}}
+    out = sync_hierarchy_from_relationships(ents, rels)
+    assert out["Table"]["hierarchy"]["can_contain"] == ["Column"]
+    assert out["Column"]["hierarchy"]["can_be_contained_by"] == ["Table"]
+
+
+def test_sync_hierarchy_idempotent():
+    ents = {"table": {"name": "Table"}, "column": {"name": "Column"}}
+    rels = {"HAS_COLUMN": {"name": "Has Column", "is_containment": True,
+                           "source_types": ["table"], "target_types": ["column"]}}
+    once = sync_hierarchy_from_relationships(ents, rels)
+    twice = sync_hierarchy_from_relationships(once, rels)
+    assert twice["table"]["hierarchy"]["can_contain"] == ["column"]

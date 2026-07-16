@@ -205,3 +205,34 @@ def test_stale_generation_store_never_serves_across_bump(fake_redis, no_db):
         return await ont_cache.lookup("ws1", "ds1")
 
     assert _run(_scenario()) is None
+
+
+# ── Write-path cache bumps (regression coverage) ─────────────────────
+
+
+def test_data_source_evict_bumps_generation(monkeypatch):
+    """Deleting a data source must bump the resolved-ontology generation so
+    other pods stop serving its cached resolution. Regression: the bump was
+    called with a stray ``session`` argument, raising a TypeError that the
+    surrounding best-effort except swallowed — the bump silently never ran."""
+    from types import SimpleNamespace
+    from backend.app.api.v1.endpoints import workspaces as ws_ep
+
+    calls = []
+
+    async def fake_bump(workspace_id, data_source_id):
+        calls.append((workspace_id, data_source_id))
+
+    monkeypatch.setattr(
+        "backend.app.services.resolved_ontology_cache.bump_ontology_generation",
+        fake_bump,
+    )
+
+    async def fake_evict(provider_id, graph_name):
+        return None
+
+    monkeypatch.setattr(ws_ep.provider_registry, "evict_data_source", fake_evict)
+
+    ds = SimpleNamespace(id="ds1", provider_id="p1", graph_name="g1")
+    _run(ws_ep._evict(ds, "ws1", session=None))
+    assert calls == [("ws1", "ds1")]

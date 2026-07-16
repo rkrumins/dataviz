@@ -590,7 +590,7 @@ async def _evict(ds, workspace_id: str, session: AsyncSession) -> None:
     # keep serving this source's ontology to pods that never noticed it went away.
     try:
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-        await bump_ontology_generation(session, workspace_id, ds.id)
+        await bump_ontology_generation(workspace_id, ds.id)
     except Exception:                                        # pragma: no cover - cache only
         logger.debug("resolved-ontology cache bump skipped for %s", ds.id, exc_info=True)
 

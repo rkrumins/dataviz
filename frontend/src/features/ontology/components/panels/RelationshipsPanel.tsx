@@ -233,6 +233,8 @@ export function RelationshipsPanel({
   onEdit,
   onNew,
   onDelete,
+  removedTypes,
+  onRestore,
 }: {
   relTypes: RelTypeWithClassifications[]
   edgeStatMap: Map<string, EdgeTypeSummary>
@@ -244,6 +246,9 @@ export function RelationshipsPanel({
   onEdit: (rt: RelTypeWithClassifications) => void
   onNew: () => void
   onDelete: (id: string, name: string) => void
+  /** Types staged for removal — ghost rows with Restore until Save All. */
+  removedTypes?: RelTypeWithClassifications[]
+  onRestore?: (id: string) => void
 }) {
   const [showStagedOnly, setShowStagedOnly] = useState(false)
   const hasChanges = changedIds && changedIds.size > 0
@@ -395,6 +400,37 @@ export function RelationshipsPanel({
               </div>
             </button>
           )}
+        </div>
+      )}
+
+      {/* Types staged for removal — ghost rows, restorable until Save All */}
+      {removedTypes && removedTypes.length > 0 && (
+        <div className="mt-6">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-red-400/80 mb-2">
+            Staged for removal — applied on Save All
+          </p>
+          <div className="space-y-2">
+            {removedTypes.map(rt => (
+              <div
+                key={rt.id}
+                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-dashed border-red-300/40 dark:border-red-800/40 bg-red-50/20 dark:bg-red-950/10 opacity-70"
+              >
+                <LucideIcons.Trash2 className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-ink line-through truncate">{rt.name}</p>
+                  <p className="text-[11px] text-ink-muted font-mono truncate">{rt.id}</p>
+                </div>
+                {onRestore && (
+                  <button
+                    onClick={() => onRestore(rt.id)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                  >
+                    <LucideIcons.Undo2 className="w-3 h-3" /> Restore
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

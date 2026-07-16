@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
+import { useCoverageRanking } from '../../hooks/useCoverageRanking'
 
 // ---------------------------------------------------------------------------
 // Tooltip — lightweight hover tooltip (no portal, just CSS positioning)
@@ -50,9 +51,11 @@ interface AssignmentManagerDialogProps {
   onUnassign: (workspaceId: string, dataSourceId: string) => void
   onRollOutToWorkspace: (workspaceId: string) => void
   onClose: () => void
+  /** Open on a specific tab — 'matches' hosts the coverage-ranked reverse-suggest view. */
+  initialTab?: TabId
 }
 
-type TabId = 'all' | 'assigned' | 'unassigned' | 'other'
+type TabId = 'all' | 'assigned' | 'unassigned' | 'other' | 'matches'
 
 // ---------------------------------------------------------------------------
 // Component
@@ -67,10 +70,11 @@ export function AssignmentManagerDialog({
   onUnassign,
   onRollOutToWorkspace,
   onClose,
+  initialTab,
 }: AssignmentManagerDialogProps) {
   const [search, setSearch] = useState('')
   const [searchFocused, setSearchFocused] = useState(false)
-  const [activeTab, setActiveTab] = useState<TabId>('all')
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? 'all')
   const [collapsedWs, setCollapsedWs] = useState<Set<string>>(new Set())
   const [confirmRollout, setConfirmRollout] = useState<{ wsId: string; wsName: string; dsCount: number } | null>(null)
   // Replace confirmation state
@@ -137,6 +141,7 @@ export function AssignmentManagerDialog({
     { id: 'assigned', label: 'Assigned', count: assignedToThis.length, tooltip: 'Data sources currently using this ontology' },
     { id: 'unassigned', label: 'Unassigned', count: unassigned.length, tooltip: 'Data sources with no ontology — assign to enable features' },
     { id: 'other', label: 'Other Schema', count: assignedToOther.length, tooltip: 'Data sources using a different ontology — replace to switch' },
+    { id: 'matches', label: 'Best Matches', count: totalDs, tooltip: 'Rank every data source by how well this layer covers its graph' },
   ]
 
   // Render a data source row
@@ -400,6 +405,18 @@ export function AssignmentManagerDialog({
               helpText="These data sources use a different ontology. Replace to switch them to this one" />
           )}
 
+          {activeTab === 'matches' && (
+            <MatchesTab
+              ontology={ontology}
+              workspaces={workspaces}
+              search={search}
+              isAssigning={isAssigning}
+              onAssign={onAssign}
+              onReplace={d => setConfirmReplace(d)}
+              ontologyNames={ontologyNames}
+            />
+          )}
+
           {activeTab === 'all' && filteredAssigned.length === 0 && filteredUnassigned.length === 0 && filteredOther.length === 0 && (
             <div className="px-4 py-12 text-center">
               <Database className="w-6 h-6 text-ink-muted/30 mx-auto mb-2" />
@@ -541,5 +558,131 @@ export function AssignmentManagerDialog({
         </>
       )}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Matches tab — coverage-ranked reverse suggest (was FindDataSourcesDialog)
+// ---------------------------------------------------------------------------
+
+function MatchesTab({
+  ontology, workspaces, search, isAssigning, onAssign, onReplace, ontologyNames,
+}: {
+  ontology: OntologyDefinitionResponse
+  workspaces: WorkspaceResponse[]
+  search: string
+  isAssigning: boolean
+  onAssign: (workspaceId: string, dataSourceId: string) => void
+  onReplace: (d: CategorizedDs) => void
+  ontologyNames: Map<string, string>
+}) {
+  const { results, isAnalyzing, doneCount } = useCoverageRanking(ontology.id, workspaces)
+
+  const sorted = [...results].sort((a, b) => {
+    if (a.status === 'error' && b.status !== 'error') return 1
+    if (b.status === 'error' && a.status !== 'error') return -1
+    if (a.status === 'loading' && b.status !== 'loading') return 1
+    if (b.status === 'loading' && a.status !== 'loading') return -1
+    return (b.coveragePercent ?? 0) - (a.coveragePercent ?? 0)
+  })
+
+  const q = search.trim().toLowerCase()
+  const filtered = q
+    ? sorted.filter(r => r.dataSourceLabel.toLowerCase().includes(q) || r.workspaceName.toLowerCase().includes(q))
+    : sorted
+
+  return (
+    <div>
+      {isAnalyzing && (
+        <div className="flex items-center gap-3 px-4 py-2.5 border-b border-glass-border/40 bg-indigo-50/40 dark:bg-indigo-950/20">
+          <Loader2 className="w-3.5 h-3.5 text-indigo-500 animate-spin flex-shrink-0" />
+          <p className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium">
+            Analyzing coverage — {doneCount} of {results.length} data sources…
+          </p>
+          <div className="flex-1 h-1 rounded-full bg-indigo-500/10 ml-2">
+            <div className="h-1 rounded-full bg-indigo-500 transition-all duration-300"
+              style={{ width: results.length > 0 ? `${(doneCount / results.length) * 100}%` : '0%' }} />
+          </div>
+        </div>
+      )}
+
+      {filtered.length === 0 && (
+        <div className="px-4 py-12 text-center">
+          <Database className="w-6 h-6 text-ink-muted/30 mx-auto mb-2" />
+          <p className="text-xs text-ink-muted">{search ? 'No data sources match your search' : 'No data sources available'}</p>
+        </div>
+      )}
+
+      {filtered.map(r => {
+        const isActive = r.currentOntologyId === ontology.id
+        const pct = r.coveragePercent ?? 0
+        const tone = pct >= 80 ? 'text-emerald-500' : pct >= 50 ? 'text-amber-500' : 'text-red-400'
+        return (
+          <div key={`${r.workspaceId}-${r.dataSourceId}`}
+            className="flex items-center gap-3 px-4 py-2.5 border-b border-glass-border/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
+            <div className="w-10 h-10 flex-shrink-0 relative">
+              {r.status === 'loading' ? (
+                <div className="w-10 h-10 rounded-full border-2 border-glass-border flex items-center justify-center">
+                  <Loader2 className="w-3.5 h-3.5 text-ink-muted animate-spin" />
+                </div>
+              ) : r.status === 'error' ? (
+                <div className="w-10 h-10 rounded-full border-2 border-red-200 dark:border-red-800 flex items-center justify-center">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                </div>
+              ) : (
+                <>
+                  <svg className="w-10 h-10 -rotate-90" viewBox="0 0 40 40">
+                    <circle cx="20" cy="20" r="16" fill="none" strokeWidth="4"
+                      className="text-black/5 dark:text-white/5" stroke="currentColor" />
+                    <circle cx="20" cy="20" r="16" fill="none" strokeWidth="4" strokeLinecap="round"
+                      strokeDasharray={`${Math.round(pct * 1.005)} 101`}
+                      className={tone} stroke="currentColor" />
+                  </svg>
+                  <span className={cn('absolute inset-0 flex items-center justify-center text-[9px] font-bold', tone)}>
+                    {Math.round(pct)}%
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-ink truncate">{r.dataSourceLabel}</p>
+              <p className="text-[10px] text-ink-muted truncate">
+                {r.workspaceName}
+                {r.currentOntologyId && !isActive && (
+                  <> · uses {ontologyNames.get(r.currentOntologyId) ?? r.currentOntologyId}</>
+                )}
+              </p>
+            </div>
+
+            {isActive ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                <CheckCircle2 className="w-2.5 h-2.5" /> Active
+              </span>
+            ) : r.status === 'done' ? (
+              r.currentOntologyId ? (
+                <button
+                  onClick={() => onReplace({
+                    wsId: r.workspaceId, wsName: r.workspaceName, dsId: r.dataSourceId,
+                    dsLabel: r.dataSourceLabel,
+                    otherOntologyName: ontologyNames.get(r.currentOntologyId!) ?? r.currentOntologyId!,
+                  })}
+                  disabled={isAssigning}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 transition-colors disabled:opacity-50">
+                  <RefreshCw className="w-3 h-3" /> Replace
+                </button>
+              ) : (
+                <button
+                  onClick={() => onAssign(r.workspaceId, r.dataSourceId)}
+                  disabled={isAssigning}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20 transition-colors disabled:opacity-50">
+                  <ArrowRight className="w-3 h-3" /> Assign
+                </button>
+              )
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
   )
 }

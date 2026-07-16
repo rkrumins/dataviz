@@ -6,25 +6,20 @@
  * into features/ontology/components/.
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { useBlocker } from 'react-router'
+import { useParams, useNavigate, useSearchParams, useBlocker } from 'react-router-dom'
 import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Activity, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
-import {
-  ontologyDefinitionService,
-  type OntologyDefinitionResponse,
-} from '@/services/ontologyDefinitionService'
+import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { fetchSchemaStats, fetchSchemaStatsWithMeta, generateSuggestedName, triggerIntrospectionRefresh } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
-import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
+import type { EntityTypeSummary, EdgeTypeSummary, GraphSchemaStats } from '@/providers/GraphDataProvider'
 
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
@@ -37,17 +32,17 @@ import {
   relSchemaToBackend,
   humanizeId,
 } from '@/features/ontology/lib/ontology-parsers'
-import type { OntologyTab, EditorPanel, RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
+import { DEFAULT_REL_VISUAL, type OntologyTab, type EditorPanel, type RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
 
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
 import { useToast } from '@/components/ui/toast'
 import { CreateOntologyDialog } from '@/features/ontology/components/dialogs/CreateOntologyDialog'
-import { EditDetailsDialog } from '@/features/ontology/components/dialogs/EditDetailsDialog'
 import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
 import { HierarchyPanel } from '@/features/ontology/components/panels/HierarchyPanel'
 import { CoveragePanel } from '@/features/ontology/components/panels/CoveragePanel'
 import { AdoptionMatchSection } from '@/features/ontology/components/panels/AdoptionMatchSection'
+import { SourceMappingSection } from '@/features/ontology/components/panels/SourceMappingSection'
 import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
@@ -55,8 +50,8 @@ import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/Uns
 import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
 import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialog'
 import { SuggestConfirmDialog } from '@/features/ontology/components/dialogs/SuggestConfirmDialog'
-import { FindDataSourcesDialog } from '@/features/ontology/components/dialogs/FindDataSourcesDialog'
 import { ChangesReviewDialog } from '@/features/ontology/components/dialogs/ChangesReviewDialog'
+import { ChangesTray } from '@/features/ontology/components/ChangesTray'
 import { UnassignConfirmDialog } from '@/features/ontology/components/dialogs/UnassignConfirmDialog'
 import { AssignmentManagerDialog } from '@/features/ontology/components/dialogs/AssignmentManagerDialog'
 import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
@@ -219,15 +214,15 @@ export function OntologySchemaPage() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [publishImpact, setPublishImpact] = useState<OntologyImpactResponse | null>(null)
   const [isPublishing, setIsPublishing] = useState(false)
-  const [editDetailsTarget, setEditDetailsTarget] = useState<OntologyDefinitionResponse | null>(null)
   const [validationResult, setValidationResult] = useState<{
     isValid: boolean
-    issues: Array<{ severity: string; message: string }>
+    issues: Array<{ severity: string; message: string; code?: string; affected?: string }>
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
   const [showSuggestDialog, setShowSuggestDialog] = useState(false)
-  const [showFindDsDialog, setShowFindDsDialog] = useState(false)
+  // 'matches' opens the Assignment Manager on its coverage-ranked tab (the old Find Data Sources dialog).
+  const [assignmentManagerTab, setAssignmentManagerTab] = useState<'all' | 'matches'>('all')
   // Pre-seed suggest dialog from dashboard (specific DS context)
   const [suggestPreSeed, setSuggestPreSeed] = useState<{ wsId: string; dsId: string } | null>(null)
   const suggestResponseRef = useRef<import('@/services/ontologyDefinitionService').OntologySuggestResponse | null>(null)
@@ -244,7 +239,6 @@ export function OntologySchemaPage() {
   const [workingContainment, setWorkingContainment] = useState<string[] | null>(null)
   const [workingLineage, setWorkingLineage] = useState<string[] | null>(null)
   const [workingDetails, setWorkingDetails] = useState<{ name: string; description: string; evolutionPolicy: string } | null>(null)
-  const hasStagedChangesRef = useRef(false)
   const [showChangesReview, setShowChangesReview] = useState(false)
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
 
@@ -277,7 +271,8 @@ export function OntologySchemaPage() {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [effectiveRelDefs])
 
-  // Detect pending changes (explicit dirty flag + deep comparison fallback)
+  // Detect pending changes (deep comparison against server state — reverting an
+  // edit back to its original value automatically clears the dirty state)
   const hasDetailChanges = useMemo(() => {
     if (!workingDetails || !selectedOntology) return false
     return workingDetails.name !== selectedOntology.name ||
@@ -288,11 +283,19 @@ export function OntologySchemaPage() {
   const hasPendingChanges = useMemo(() => {
     if (hasDetailChanges) return true
     if (!isInEditMode || !selectedOntology) return false
-    if (hasStagedChangesRef.current) return true
-    if (workingEntityDefs && JSON.stringify(workingEntityDefs) !== JSON.stringify(selectedOntology.entityTypeDefinitions ?? {})) return true
-    if (workingRelDefs && JSON.stringify(workingRelDefs) !== JSON.stringify(selectedOntology.relationshipTypeDefinitions ?? {})) return true
-    if (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology.containmentEdgeTypes ?? [])) return true
-    if (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology.lineageEdgeTypes ?? [])) return true
+    // Key-order-insensitive map compare: staging then reverting a type appends
+    // the key at a different position — that must NOT read as a change.
+    const defsDiffer = (working: Record<string, unknown>, server: Record<string, unknown>) => {
+      const workingKeys = Object.keys(working)
+      if (workingKeys.length !== Object.keys(server).length) return true
+      return workingKeys.some(k => JSON.stringify(working[k]) !== JSON.stringify(server[k]))
+    }
+    const listsDiffer = (working: string[], server: string[]) =>
+      JSON.stringify([...working].sort()) !== JSON.stringify([...server].sort())
+    if (workingEntityDefs && defsDiffer(workingEntityDefs, (selectedOntology.entityTypeDefinitions ?? {}) as Record<string, unknown>)) return true
+    if (workingRelDefs && defsDiffer(workingRelDefs, (selectedOntology.relationshipTypeDefinitions ?? {}) as Record<string, unknown>)) return true
+    if (workingContainment && listsDiffer(workingContainment, selectedOntology.containmentEdgeTypes ?? [])) return true
+    if (workingLineage && listsDiffer(workingLineage, selectedOntology.lineageEdgeTypes ?? [])) return true
     return false
   }, [hasDetailChanges, isInEditMode, selectedOntology, workingEntityDefs, workingRelDefs, workingContainment, workingLineage])
 
@@ -323,16 +326,43 @@ export function OntologySchemaPage() {
     return changed
   }, [isInEditMode, selectedOntology, workingRelDefs])
 
-  const hasEntityChanges = changedEntityIds.size > 0
-  const hasRelChanges = changedRelIds.size > 0 ||
-    (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology?.containmentEdgeTypes ?? [])) ||
-    (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology?.lineageEdgeTypes ?? []))
-  const hasHierarchyChanges = hasEntityChanges // hierarchy changes come from entity reparenting
+  // Types staged for removal (present on the server, absent from the working
+  // copy) — rendered as ghost rows with a Restore affordance until Save All.
+  const removedEntityTypes = useMemo((): EntityTypeSchema[] => {
+    if (!workingEntityDefs || !selectedOntology) return []
+    const serverDefs = (selectedOntology.entityTypeDefinitions as Record<string, Record<string, unknown>>) ?? {}
+    return Object.keys(serverDefs)
+      .filter(id => !(id in workingEntityDefs))
+      .map(id => entityDefToSchema(id, serverDefs[id]))
+  }, [workingEntityDefs, selectedOntology])
 
-  // Graph stat maps — populated when a data source is active and stats are fetched.
-  // Currently empty at page level; CoveragePanel fetches its own stats.
-  const entityStatMap = useMemo((): Map<string, EntityTypeSummary> => new Map(), [])
-  const edgeStatMap = useMemo((): Map<string, EdgeTypeSummary> => new Map(), [])
+  const removedRelTypes = useMemo((): RelTypeWithClassifications[] => {
+    if (!workingRelDefs || !selectedOntology) return []
+    const serverDefs = (selectedOntology.relationshipTypeDefinitions as Record<string, Record<string, unknown>>) ?? {}
+    return Object.keys(serverDefs)
+      .filter(id => !(id in workingRelDefs))
+      .map(id => relDefToSchema(id, serverDefs[id]))
+  }, [workingRelDefs, selectedOntology])
+
+  const hasEntityChanges = changedEntityIds.size > 0
+  const hasContainmentListChanges = !!(workingContainment &&
+    JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology?.containmentEdgeTypes ?? []))
+  const hasRelChanges = changedRelIds.size > 0 ||
+    hasContainmentListChanges ||
+    (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology?.lineageEdgeTypes ?? []))
+  // Hierarchy tab dot: only actual hierarchy edits (reparenting / containment
+  // list), not appearance-only entity changes like icon or color.
+  const hasHierarchyChanges = useMemo(() => {
+    if (hasContainmentListChanges) return true
+    if (!isInEditMode || !selectedOntology || !workingEntityDefs) return false
+    const serverDefs = (selectedOntology.entityTypeDefinitions as Record<string, Record<string, unknown>>) ?? {}
+    const working = workingEntityDefs as Record<string, Record<string, unknown>>
+    const allIds = new Set([...Object.keys(serverDefs), ...Object.keys(working)])
+    for (const id of allIds) {
+      if (JSON.stringify(serverDefs[id]?.hierarchy) !== JSON.stringify(working[id]?.hierarchy)) return true
+    }
+    return false
+  }, [hasContainmentListChanges, isInEditMode, selectedOntology, workingEntityDefs])
 
   const assignmentCountMap = useMemo(() => {
     const m = new Map<string, number>()
@@ -374,7 +404,7 @@ export function OntologySchemaPage() {
         icon: Unlink,
         title: 'This ontology is not assigned to any data source.',
         description: '',
-        action: { label: 'Find Matches', onClick: () => setShowFindDsDialog(true) },
+        action: { label: 'Find Matches', onClick: () => { setAssignmentManagerTab('matches'); setShowAssignmentManager(true) } },
       })
     }
     return alerts
@@ -407,13 +437,15 @@ export function OntologySchemaPage() {
     setWorkingContainment(null)
     setWorkingLineage(null)
     setWorkingDetails(null)
-    hasStagedChangesRef.current = false
     setEditorPanel(null)
     setShowDiscardConfirm(false)
   }
 
-  async function handleSaveAllChanges() {
-    if (!selectedOntology || !hasPendingChanges) return
+  /** Returns true when the save persisted (or there was nothing to save),
+   *  false when it failed — callers like the navigation blocker must not
+   *  proceed with navigation after a failed save. */
+  async function handleSaveAllChanges(): Promise<boolean> {
+    if (!selectedOntology || !hasPendingChanges) return true
     setIsSaving(true)
     try {
       const req: Record<string, unknown> = {}
@@ -430,15 +462,18 @@ export function OntologySchemaPage() {
       if (workingLineage) req.lineageEdgeTypes = workingLineage
       if (workingDetails) {
         req.name = workingDetails.name
-        if (workingDetails.description) req.description = workingDetails.description
+        // Empty string is a valid value — the user cleared the description.
+        req.description = workingDetails.description
         req.evolutionPolicy = workingDetails.evolutionPolicy
       }
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
-      showToast('success', 'All changes saved')
+      showToast('success', 'All changes saved — views on this semantic layer will pick them up automatically')
       doDiscard()
+      return true
     } catch (err: unknown) {
       showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -450,6 +485,8 @@ export function OntologySchemaPage() {
     if (!hasPendingChanges) return
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault()
+      // Chrome requires returnValue to actually show the leave-confirmation.
+      e.returnValue = ''
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
@@ -460,9 +497,8 @@ export function OntologySchemaPage() {
     if (!hasPendingChanges) return false
     // Allow same-path navigation (tab switches, search param changes)
     if (currentLocation.pathname === nextLocation.pathname) return false
-    // Allow navigation within /schema/ (switching between ontologies)
-    if (nextLocation.pathname.startsWith('/schema/') && currentLocation.pathname.startsWith('/schema/')) return true
-    // Block navigation away from schema page
+    // Block everything else — including ontology-to-ontology switches within
+    // /schema/, which would silently drop the working copies.
     return true
   })
 
@@ -513,6 +549,32 @@ export function OntologySchemaPage() {
   const evalWorkspaceId = evalOverrideWsId ?? autoEvalTarget?.workspaceId ?? activeWorkspaceId
   const evalDataSourceId = evalOverrideDsId ?? autoEvalTarget?.dataSourceId ?? activeDataSourceId
 
+  // Graph stat maps — live instance counts per type from the evaluation data
+  // source's cached stats, so the Schema panel can show "N in graph" chips.
+  // Keyed lowercased (the panels look up et.id.toLowerCase()).
+  const [graphStats, setGraphStats] = useState<GraphSchemaStats | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setGraphStats(null)
+    if (!evalWorkspaceId) return
+    fetchSchemaStats(evalWorkspaceId, evalDataSourceId ?? undefined)
+      .then(stats => { if (!cancelled) setGraphStats(stats) })
+      .catch(() => { /* stats are decorative — panels degrade to no counts */ })
+    return () => { cancelled = true }
+  }, [evalWorkspaceId, evalDataSourceId])
+
+  const entityStatMap = useMemo((): Map<string, EntityTypeSummary> => {
+    const m = new Map<string, EntityTypeSummary>()
+    for (const s of graphStats?.entityTypeStats ?? []) m.set(s.id.toLowerCase(), s)
+    return m
+  }, [graphStats])
+  const edgeStatMap = useMemo((): Map<string, EdgeTypeSummary> => {
+    const m = new Map<string, EdgeTypeSummary>()
+    for (const s of graphStats?.edgeTypeStats ?? []) m.set(s.id.toLowerCase(), s)
+    return m
+  }, [graphStats])
+
+
   // Resolved eval context objects for display
   const evalWorkspace = useMemo(
     () => workspaces.find(w => w.id === evalWorkspaceId) ?? null,
@@ -526,18 +588,24 @@ export function OntologySchemaPage() {
   // ── Handlers ───────────────────────────────────────────────────────
 
   /** Assign the current ontology to a specific data source (ontology-centric) */
-  async function handleAssignToDataSource(workspaceId: string, dataSourceId: string) {
-    if (!selectedOntology) return
+  /** Assign an ontology to a data source. Defaults to the currently selected
+   *  ontology; dashboard mode passes an explicit id (no selection there).
+   *  Returns true when the assignment persisted. */
+  async function handleAssignToDataSource(workspaceId: string, dataSourceId: string, ontologyId?: string): Promise<boolean> {
+    const targetOntologyId = ontologyId ?? selectedOntology?.id
+    if (!targetOntologyId) return false
     setIsAssigning(true)
     try {
       await workspaceService.updateDataSource(workspaceId, dataSourceId, {
-        ontologyId: selectedOntology.id,
+        ontologyId: targetOntologyId,
       })
       await loadWorkspaces()
       invalidateGraphSchema()
       showToast('success', 'Schema assigned to data source')
+      return true
     } catch (err: unknown) {
       showToast('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      return false
     } finally {
       setIsAssigning(false)
     }
@@ -653,7 +721,6 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(updatedDefs)
-    hasStagedChangesRef.current = true
     showToast('info', `"${entityType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
@@ -694,29 +761,93 @@ export function OntologySchemaPage() {
     setWorkingRelDefs(updatedRelDefs)
     setWorkingContainment(containment)
     setWorkingLineage(lineage)
-    hasStagedChangesRef.current = true
     showToast('info', `"${relType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
 
+  // Type deletion is STAGED (nothing hits the server until Save All), so no
+  // scary confirm — remove immediately with a one-click Undo, matching the
+  // ontology-level delete-with-undo pattern. Deletion may be the FIRST edit,
+  // so compute the base from the server snapshot when no working copy exists
+  // yet (ensureEditMode's setState hasn't landed within this tick).
   function handleDeleteEntityType(id: string, name: string) {
-    if (!selectedOntology || isLocked || !workingEntityDefs) return
-    if (!window.confirm(`Delete entity type "${name}"?`)) return
-    const defs = { ...workingEntityDefs }
+    if (!selectedOntology || isLocked || !ensureEditMode()) return
+    const base = workingEntityDefs ?? { ...((selectedOntology.entityTypeDefinitions as Record<string, unknown>) ?? {}) }
+    const removedDef = base[id]
+    const defs = { ...base }
     delete defs[id]
     setWorkingEntityDefs(defs)
-    hasStagedChangesRef.current = true
-    showToast('info', `"${name}" removed — save to persist`)
+    showToast('info', `"${name}" removed — save to persist`, {
+      label: 'Undo',
+      onClick: () => setWorkingEntityDefs(prev => ({ ...(prev ?? {}), [id]: removedDef })),
+    })
   }
 
   function handleDeleteRelType(id: string, name: string) {
-    if (!selectedOntology || isLocked || !workingRelDefs) return
-    if (!window.confirm(`Delete relationship type "${name}"?`)) return
-    const defs = { ...workingRelDefs }
+    if (!selectedOntology || isLocked || !ensureEditMode()) return
+    const base = workingRelDefs ?? { ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) }
+    const removedDef = base[id]
+    const defs = { ...base }
     delete defs[id]
     setWorkingRelDefs(defs)
-    hasStagedChangesRef.current = true
-    showToast('info', `"${name}" removed — save to persist`)
+    showToast('info', `"${name}" removed — save to persist`, {
+      label: 'Undo',
+      onClick: () => setWorkingRelDefs(prev => ({ ...(prev ?? {}), [id]: removedDef })),
+    })
+  }
+
+  /** Restore a type staged for removal (ghost row) from the server copy. */
+  function handleRestoreEntityType(id: string) {
+    if (!selectedOntology || !workingEntityDefs) return
+    const serverDef = (selectedOntology.entityTypeDefinitions as Record<string, unknown>)?.[id]
+    if (serverDef === undefined) return
+    setWorkingEntityDefs({ ...workingEntityDefs, [id]: serverDef })
+  }
+
+  function handleRestoreRelType(id: string) {
+    if (!selectedOntology || !workingRelDefs) return
+    const serverDef = (selectedOntology.relationshipTypeDefinitions as Record<string, unknown>)?.[id]
+    if (serverDef === undefined) return
+    setWorkingRelDefs({ ...workingRelDefs, [id]: serverDef })
+  }
+
+  // ── ChangesTray: per-change revert + jump ─────────────────────────
+  /** Revert ONE type back to server state: restore modified/removed, drop added. */
+  function handleRevertEntityChange(id: string) {
+    if (!selectedOntology || !workingEntityDefs) return
+    const serverDef = (selectedOntology.entityTypeDefinitions as Record<string, unknown>)?.[id]
+    const next = { ...workingEntityDefs }
+    if (serverDef === undefined) delete next[id]
+    else next[id] = serverDef
+    setWorkingEntityDefs(next)
+    if (editorPanel?.kind === 'entity' && editorPanel.data?.id === id) setEditorPanel(null)
+  }
+
+  function handleRevertRelChange(id: string) {
+    if (!selectedOntology || !workingRelDefs) return
+    const serverDef = (selectedOntology.relationshipTypeDefinitions as Record<string, unknown>)?.[id]
+    const next = { ...workingRelDefs }
+    if (serverDef === undefined) delete next[id]
+    else next[id] = serverDef
+    setWorkingRelDefs(next)
+    if (editorPanel?.kind === 'rel' && editorPanel.data?.id === id) setEditorPanel(null)
+  }
+
+  function handleRevertClassification() {
+    if (!selectedOntology) return
+    setWorkingContainment([...(selectedOntology.containmentEdgeTypes ?? [])])
+    setWorkingLineage([...(selectedOntology.lineageEdgeTypes ?? [])])
+  }
+
+  function handleJumpToType(scope: 'entity' | 'rel', id: string) {
+    // 'relationships' is a legacy tab id that maps to schema + relationships sub-view.
+    setTab(scope === 'rel' ? 'relationships' : 'schema')
+    if (scope === 'entity') {
+      // Give the tab switch a frame to mount the panel before scrolling.
+      setTimeout(() => {
+        document.getElementById(`entity-type-row-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 150)
+    }
   }
 
   function handleSuggestOntology() {
@@ -881,12 +1012,14 @@ export function OntologySchemaPage() {
     }
   }
 
-  async function handleConfirmPublish() {
+  async function handleConfirmPublish(force = false) {
     if (!selectedOntology) return
     setIsPublishing(true)
     try {
-      await mutations.publish.mutateAsync(selectedOntology.id)
-      showToast('success', 'Published — active for all assigned data sources')
+      await mutations.publish.mutateAsync({ id: selectedOntology.id, force })
+      showToast('success', force
+        ? 'Force-published — breaking-change protection was overridden'
+        : 'Published — active for all assigned data sources')
       setValidationResult(null)
       setPublishImpact(null)
     } catch (err: unknown) {
@@ -899,9 +1032,8 @@ export function OntologySchemaPage() {
   async function handleExport() {
     if (!selectedOntology) return
     try {
-      const res = await fetchWithTimeout(`/api/v1/admin/ontologies/${selectedOntology.id}/export`)
-      if (!res.ok) throw new Error(`Export failed: ${res.statusText}`)
-      const blob = await res.blob()
+      const doc = await ontologyDefinitionService.exportJson(selectedOntology.id)
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -950,20 +1082,6 @@ export function OntologySchemaPage() {
       new_version: `Created new draft v${result.ontology.version} from import`,
     }
     showToast('success', messages[result.status] || result.summary)
-  }
-
-  async function handleSaveOntologyDetails(updates: { name: string; description: string; evolutionPolicy: string }) {
-    if (!selectedOntology) return
-    try {
-      await mutations.update.mutateAsync({
-        id: selectedOntology.id,
-        req: { name: updates.name, description: updates.description || undefined, evolutionPolicy: updates.evolutionPolicy },
-      })
-      setEditDetailsTarget(null)
-      showToast('success', 'Details saved')
-    } catch (err: unknown) {
-      showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    }
   }
 
   async function handleCreateDraft(name: string, prePopulate: boolean) {
@@ -1076,7 +1194,6 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(defs)
-    hasStagedChangesRef.current = true
     const msg = parentId === childId
       ? `"${humanizeId(childId)}" can now contain itself — save to persist`
       : `"${humanizeId(childId)}" also contained under "${humanizeId(parentId)}" — save to persist`
@@ -1108,7 +1225,6 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(defs)
-    hasStagedChangesRef.current = true
     showToast('info', `Removed "${humanizeId(childId)}" from "${humanizeId(parentId)}" — save to persist`)
   }
 
@@ -1133,14 +1249,29 @@ export function OntologySchemaPage() {
     defs[childId] = { ...defs[childId], hierarchy: { ...((defs[childId].hierarchy as Record<string, unknown>) ?? {}), can_be_contained_by: [] } }
 
     setWorkingEntityDefs(defs)
-    hasStagedChangesRef.current = true
     showToast('info', `"${humanizeId(childId)}" is now a root type — save to persist`)
   }
 
   function handleUpdateContainmentEdgeTypes(newList: string[]) {
     if (!selectedOntology || isLocked) return
     setWorkingContainment(newList)
-    hasStagedChangesRef.current = true
+    // Keep the per-relationship is_containment flags in agreement with the list —
+    // the backend treats the flags as the source of truth whenever relationship
+    // definitions are present in the save payload (which the batch save always sends).
+    const baseDefs = workingRelDefs ?? { ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) }
+    const listUpper = new Set(newList.map(t => t.toUpperCase()))
+    const syncedDefs = Object.fromEntries(
+      Object.entries(baseDefs).map(([rid, def]) => {
+        const d = def as Record<string, unknown>
+        if (!d || d.is_system) return [rid, def]
+        const flag = listUpper.has(rid.toUpperCase())
+        if (Boolean(d.is_containment ?? d.isContainment ?? false) === flag) return [rid, def]
+        const next: Record<string, unknown> = { ...d, is_containment: flag }
+        delete next.isContainment
+        return [rid, next]
+      })
+    )
+    setWorkingRelDefs(syncedDefs)
     showToast('info', 'Containment edge types updated — save to persist')
   }
 
@@ -1236,10 +1367,10 @@ export function OntologySchemaPage() {
                 onCreateNewVersion={handleCreateNewVersion}
                 onExport={handleExport}
                 onImport={() => fileInputRef.current?.click()}
-                onEditDetails={() => setEditDetailsTarget(selectedOntology)}
+                onEditDetails={() => setTab('settings')}
                 onDelete={handleDeleteOntology}
-                onFindDataSources={() => setShowFindDsDialog(true)}
-                onOpenAssignments={() => setShowAssignmentManager(true)}
+                onFindDataSources={() => { setAssignmentManagerTab('matches'); setShowAssignmentManager(true) }}
+                onOpenAssignments={() => { setAssignmentManagerTab('all'); setShowAssignmentManager(true) }}
               />
 
               {/* Contextual alerts */}
@@ -1305,6 +1436,26 @@ export function OntologySchemaPage() {
                       transition={{ duration: 0.15, ease: 'easeOut' }}
                       className={cn(pageGeometry({ gutter: 'shell' }), 'py-8')}
                     >
+                      {/* Staged changes tray — persistent running total with per-change revert */}
+                      {hasPendingChanges && (
+                        <ChangesTray
+                          ontology={selectedOntology}
+                          workingEntityDefs={workingEntityDefs}
+                          workingRelDefs={workingRelDefs}
+                          workingContainment={workingContainment}
+                          workingLineage={workingLineage}
+                          workingDetails={workingDetails}
+                          isSaving={isSaving}
+                          onRevertEntity={handleRevertEntityChange}
+                          onRevertRel={handleRevertRelChange}
+                          onRevertClassification={handleRevertClassification}
+                          onRevertDetails={() => setWorkingDetails(null)}
+                          onJumpToType={handleJumpToType}
+                          onReview={() => setShowChangesReview(true)}
+                          onSaveAll={handleSaveAllChanges}
+                        />
+                      )}
+
                       {activeTab === 'overview' && (
                         <OverviewPanel
                           ontology={selectedOntology}
@@ -1314,7 +1465,7 @@ export function OntologySchemaPage() {
                           onNavigateTab={(tab) => setTab(tab)}
                           workspaces={workspaces}
                           onAssignToDataSource={handleAssignToDataSource}
-                          onFindDataSources={() => setShowFindDsDialog(true)}
+                          onFindDataSources={() => { setAssignmentManagerTab('matches'); setShowAssignmentManager(true) }}
                         />
                       )}
 
@@ -1338,6 +1489,10 @@ export function OntologySchemaPage() {
                           onEditRel={rt => { ensureEditMode(); setEditorPanel({ kind: 'rel', data: rt }) }}
                           onNewRel={() => { ensureEditMode(); setEditorPanel({ kind: 'rel' }) }}
                           onDeleteRel={handleDeleteRelType}
+                          removedEntityTypes={removedEntityTypes}
+                          onRestoreEntity={handleRestoreEntityType}
+                          removedRelTypes={removedRelTypes}
+                          onRestoreRel={handleRestoreRelType}
                           hasEntityChanges={hasEntityChanges}
                           hasRelChanges={!!hasRelChanges}
                           initialSubView={rawTab === 'relationships' ? 'relationships' : undefined}
@@ -1388,7 +1543,7 @@ export function OntologySchemaPage() {
                               kind: 'rel',
                               data: {
                                 id: typeId, name, description: '', sourceTypes: [], targetTypes: [],
-                                visual: { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: false, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' },
+                                visual: { ...DEFAULT_REL_VISUAL },
                                 bidirectional: false, showLabel: false, isContainment: false, isLineage: false,
                               },
                             })
@@ -1398,11 +1553,19 @@ export function OntologySchemaPage() {
                       )}
 
                       {activeTab === 'health' && (
-                        <AdoptionMatchSection ontologyId={selectedOntology.id} />
+                        <>
+                          <AdoptionMatchSection ontologyId={selectedOntology.id} />
+                          <SourceMappingSection ontologyId={selectedOntology.id} />
+                        </>
                       )}
 
                       {activeTab === 'usage' && (
-                        <UsagePanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
+                        <UsagePanel
+                          ontology={selectedOntology}
+                          workspaces={workspaces}
+                          ontologies={ontologies}
+                          onManageAssignments={() => { setAssignmentManagerTab('all'); setShowAssignmentManager(true) }}
+                        />
                       )}
 
                       {activeTab === 'history' && access.canSeeHistory && (
@@ -1473,7 +1636,7 @@ export function OntologySchemaPage() {
                           relType={editorPanel.data}
                           availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
                           existingTypeIds={relTypes.map(rt => rt.id)}
-                          readOnly={isLocked}
+                          readOnly={isLocked || !!editorPanel.data?.isSystem}
                           onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
                           onCancel={() => setEditorPanel(null)}
                         />
@@ -1515,14 +1678,6 @@ export function OntologySchemaPage() {
           onCreate={handleCreateDraft}
         />
       )}
-      {editDetailsTarget && (
-        <EditDetailsDialog
-          ontology={editDetailsTarget}
-          onClose={() => setEditDetailsTarget(null)}
-          onSave={handleSaveOntologyDetails}
-        />
-      )}
-
       {/* Delete Confirmation */}
       {showDeleteDialog && selectedOntology && (
         <DeleteConfirmDialog
@@ -1549,11 +1704,17 @@ export function OntologySchemaPage() {
         <UnsavedChangesDialog
           isSaving={isSaving}
           onSave={async () => {
-            await handleSaveAllChanges()
-            blocker.proceed()
+            // Only navigate when the save actually persisted — a failed save
+            // must keep the user (and their working copies) on the page.
+            const saved = await handleSaveAllChanges()
+            if (saved) blocker.proceed()
+            else blocker.reset()
           }}
           onDiscard={() => {
-            discardChanges()
+            // Drop the working copies unconditionally — going through
+            // discardChanges() here would just re-prompt (we KNOW there are
+            // pending changes; the user already chose to discard them).
+            doDiscard()
             blocker.proceed()
           }}
           onCancel={() => blocker.reset()}
@@ -1580,18 +1741,6 @@ export function OntologySchemaPage() {
         />
       )}
 
-      {/* Find Matching Data Sources (reverse suggest) */}
-      {showFindDsDialog && selectedOntology && (
-        <FindDataSourcesDialog
-          ontology={selectedOntology}
-          workspaces={workspaces}
-          ontologies={ontologies}
-          onAssign={handleAssignToDataSource}
-          onClose={() => setShowFindDsDialog(false)}
-          isAssigning={isAssigning}
-        />
-      )}
-
       {/* Import Dialog */}
       {importData && (
         <ImportDialog
@@ -1615,6 +1764,7 @@ export function OntologySchemaPage() {
           onUnassign={requestUnassign}
           onRollOutToWorkspace={handleRollOutToWorkspace}
           onClose={() => setShowAssignmentManager(false)}
+          initialTab={assignmentManagerTab}
         />
       )}
 

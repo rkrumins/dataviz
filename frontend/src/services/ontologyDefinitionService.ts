@@ -177,10 +177,13 @@ export const ontologyDefinitionService = {
         return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
     },
 
-    publish(id: string): Promise<OntologyDefinitionResponse> {
-        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/publish`, {
-            method: 'POST',
-        })
+    /** Publish a draft. `force` overrides the breaking-change block (admin
+     *  escape hatch — the server re-runs the impact check and 409s without it). */
+    publish(id: string, force = false): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(
+            `${ADMIN_API}/${id}/publish${force ? '?force=true' : ''}`,
+            { method: 'POST' },
+        )
     },
 
     clone(id: string): Promise<OntologyDefinitionResponse> {
@@ -297,6 +300,23 @@ export const ontologyDefinitionService = {
             body: JSON.stringify(data),
         })
     },
+
+    /**
+     * Per-assigned-source vocabulary-alignment profiles (declared → observed
+     * spelling maps + drift) for the Health tab's alias table.
+     */
+    getSourceMappings(id: string): Promise<OntologySourceMappingRow[]> {
+        return request<OntologySourceMappingRow[]>(`${ADMIN_API}/${id}/source-mappings`)
+    },
+
+    /**
+     * Export the semantic layer as raw JSON (the /export payload verbatim).
+     * Dedicated method because the shared request() JSON-parses into typed
+     * models — export is a document the caller downloads as-is.
+     */
+    async exportJson(id: string): Promise<Record<string, unknown>> {
+        return request<Record<string, unknown>>(`${ADMIN_API}/${id}/export`)
+    },
 }
 
 export interface OntologyValidationIssue {
@@ -383,6 +403,35 @@ export interface OntologyAdoptionResponse {
 }
 
 /** A single data source assignment returned by getAssignments(). */
+/** One declared-type entry in a source's vocabulary alignment profile. */
+export interface SourceMappingEntry {
+    observed?: string | string[]
+    auto?: boolean
+    needsConfirmation?: boolean
+}
+
+export interface SourceMappingDriftDetail {
+    declared: string
+    observed: string[]
+    dimension: 'entity' | 'relationship'
+    kind: string
+    needsConfirmation?: boolean
+}
+
+/** Per-assigned-source vocabulary-alignment profile (Health tab alias table). */
+export interface OntologySourceMappingRow {
+    workspaceId: string
+    workspaceName: string
+    dataSourceId: string
+    dataSourceLabel: string
+    hasProfile: boolean
+    hasDrift: boolean
+    lastSeenAt: string | null
+    entityMappings: Record<string, SourceMappingEntry>
+    relationshipMappings: Record<string, SourceMappingEntry>
+    driftDetails: SourceMappingDriftDetail[]
+}
+
 export interface OntologyAssignment {
     workspaceId: string
     workspaceName: string

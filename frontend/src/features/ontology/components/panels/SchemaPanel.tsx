@@ -45,6 +45,9 @@ interface SchemaPanelProps {
   onNewEntity: () => void
   onDeleteEntity: (id: string, name: string) => void
   onDismissValidation: () => void
+  /** Types staged for removal — ghost rows with Restore. */
+  removedEntityTypes?: EntityTypeSchema[]
+  onRestoreEntity?: (id: string) => void
 
   // Relationships
   edgeStatMap: Map<string, EdgeTypeSummary>
@@ -52,6 +55,8 @@ interface SchemaPanelProps {
   onEditRel: (rt: RelTypeWithClassifications) => void
   onNewRel: () => void
   onDeleteRel: (id: string, name: string) => void
+  removedRelTypes?: RelTypeWithClassifications[]
+  onRestoreRel?: (id: string) => void
 
   // Change indicators
   hasEntityChanges: boolean
@@ -75,11 +80,15 @@ export function SchemaPanel({
   onNewEntity,
   onDeleteEntity,
   onDismissValidation,
+  removedEntityTypes,
+  onRestoreEntity,
   edgeStatMap,
   changedRelIds,
   onEditRel,
   onNewRel,
   onDeleteRel,
+  removedRelTypes,
+  onRestoreRel,
   hasEntityChanges,
   hasRelChanges,
   initialSubView,
@@ -161,6 +170,8 @@ export function SchemaPanel({
           onNew={onNewEntity}
           onDelete={onDeleteEntity}
           onDismissValidation={onDismissValidation}
+          removedTypes={removedEntityTypes}
+          onRestore={onRestoreEntity}
         />
       )}
 
@@ -176,6 +187,8 @@ export function SchemaPanel({
           onEdit={onEditRel}
           onNew={onNewRel}
           onDelete={onDeleteRel}
+          removedTypes={removedRelTypes}
+          onRestore={onRestoreRel}
         />
       )}
     </div>

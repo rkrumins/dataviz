@@ -3,9 +3,12 @@
  *
  * Per catalog item, runs the ontology-resolution gate against the
  * suggested-or-selected ontology and the source's introspected stats.
- * The user must classify every unclassified relationship as
- * containment / lineage / neither before the wizard can submit.
- * Hierarchy gaps surface as advisory warnings (yellow) but do not block.
+ * Partial coverage (missing types, unclassified relationships) is
+ * ADVISORY: the wizard can proceed — unmapped types are ignored by
+ * aggregation and render with fallback styling — and the one-click
+ * "Add missing types" extend stays the promoted fix. Only a fatal gap
+ * (no lineage relationship at all) blocks, because aggregation would
+ * produce nothing.
  *
  * Published ontologies are immutable — saving classifications creates a
  * new draft version (POST .../new-version) and re-points the wizard
@@ -22,6 +25,7 @@ import {
     type OntologyResolutionRelGap,
 } from '@/services/ontologyResolutionService'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
+import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -63,9 +67,14 @@ const REASON_LABELS: Record<string, string> = {
     missing_entity_types: 'Missing entity types',
     missing_edge_types: 'Missing edge types',
     unclassified_relationships: 'Unclassified relationships',
+    no_containment_edges: 'No containment relationship',
     no_lineage: 'No lineage relationship',
     ontology_not_assigned: 'No ontology assigned',
 }
+
+/** Advisory chips worth surfacing in the summary row (the detailed
+ *  sections below render their own richer treatment). */
+const SUMMARY_ADVISORIES = ['missing_entity_types', 'missing_edge_types', 'unclassified_relationships']
 
 function transformStatsForCheck(raw: any): Record<string, unknown> {
     // ``providerService.getAssetStats`` returns the cache envelope shape
@@ -157,6 +166,11 @@ export function SchemaReviewStep({
 }: Props) {
     const [expanded, setExpanded] = useState<Record<string, boolean>>({})
     const inFlightRef = useRef<Set<string>>(new Set())
+    // The wizard mutates ontologies through the service directly (imperative
+    // multi-step flows), so it must invalidate the react-query caches itself —
+    // otherwise open canvases/views serve stale icons/colors/containment for
+    // up to the schema query's staleTime.
+    const { invalidateAll: invalidateOntologyCaches } = useOntologyMutations()
 
     const itemsWithOntology = useMemo(
         () => catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId),
@@ -311,6 +325,7 @@ export function SchemaReviewStep({
                 entityTypeDefinitions: entityDefs,
                 relationshipTypeDefinitions: relDefs,
             })
+            invalidateOntologyCaches()
             // Re-run the gate against the updated ontology so the
             // unclassifiedRelationships list reflects the newly-added
             // edges and the user can classify them in one go.
@@ -345,7 +360,7 @@ export function SchemaReviewStep({
                 },
             })
         }
-    }, [statusMap, onStatusChange, updateFormData, providerId])
+    }, [statusMap, onStatusChange, updateFormData, providerId, invalidateOntologyCaches])
 
     // ─── Save classifications for one source ─────────────────────────
 
@@ -399,6 +414,7 @@ export function SchemaReviewStep({
             await ontologyDefinitionService.update(workingId, {
                 relationshipTypeDefinitions: relDefs,
             })
+            invalidateOntologyCaches()
 
             // Re-run the gate to refresh resolved/blockingReasons.
             const assetName = item.sourceIdentifier || item.name
@@ -428,9 +444,11 @@ export function SchemaReviewStep({
                 },
             })
         }
-    }, [statusMap, onStatusChange, updateFormData, providerId])
+    }, [statusMap, onStatusChange, updateFormData, providerId, invalidateOntologyCaches])
 
     const allResolved = itemsWithOntology.every(c => statusMap[c.id]?.resolution?.resolved)
+    const anyAdvisories = itemsWithOntology.some(c =>
+        (statusMap[c.id]?.resolution?.advisoryWarnings ?? []).some(w => SUMMARY_ADVISORIES.includes(w)))
 
     // ─── Render ───────────────────────────────────────────────────────
 
@@ -441,9 +459,12 @@ export function SchemaReviewStep({
                     Schema Review
                 </h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                    Confirm every introspected entity and edge type is defined,
-                    and that each relationship is classified as containment
-                    or lineage. Aggregation cannot run until the gate passes.
+                    Review how well each ontology covers its graph. Gaps are
+                    advisory — you can proceed, and unmapped types will simply be
+                    ignored by aggregation and rendered with default styling —
+                    but one-click fixes below get you to full coverage. Only an
+                    ontology with no lineage relationship at all blocks, since
+                    aggregation would produce nothing.
                 </p>
             </div>
 
@@ -459,18 +480,20 @@ export function SchemaReviewStep({
                     const resolution = status?.resolution
                     const ontologyId = formData.ontologySelections[item.id]?.ontologyId || ''
                     const ontologyName = ontologyNames[ontologyId] || ontologyId
-                    const isOpen = expanded[item.id] ?? !resolution?.resolved
-                    const blockingCount = resolution?.blockingReasons.length ?? 0
+                    const advisoryCount = resolution?.advisoryWarnings
+                        ?.filter(w => SUMMARY_ADVISORIES.includes(w)).length ?? 0
+                    const isOpen = expanded[item.id] ?? (!resolution?.resolved || advisoryCount > 0)
+                    const coverage = resolution?.coveragePercent ?? null
 
                     return (
                         <div
                             key={item.id}
                             className={cn(
                                 "rounded-xl border bg-white dark:bg-slate-800/40 shadow-sm",
-                                resolution?.resolved
-                                    ? "border-emerald-500/20"
-                                    : status?.error
-                                        ? "border-red-500/30"
+                                status?.error || resolution?.resolved === false
+                                    ? "border-red-500/30"
+                                    : resolution?.resolved && advisoryCount === 0
+                                        ? "border-emerald-500/20"
                                         : "border-amber-500/25",
                             )}
                         >
@@ -491,20 +514,35 @@ export function SchemaReviewStep({
                                         </span>
                                     </div>
                                 </div>
+                                {coverage !== null && !status?.loading && (
+                                    <span
+                                        className={cn(
+                                            "text-[11px] font-semibold tabular-nums",
+                                            coverage >= 100 ? "text-emerald-500" : coverage >= 70 ? "text-amber-500" : "text-red-400",
+                                        )}
+                                        title="Share of the graph's node and edge types this ontology covers"
+                                    >
+                                        {coverage}% coverage
+                                    </span>
+                                )}
                                 {status?.loading ? (
                                     <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
                                 ) : !resolution ? (
                                     <span className="flex items-center gap-1.5 text-xs text-slate-400">
                                         Evaluating…
                                     </span>
-                                ) : resolution.resolved ? (
-                                    <span className="flex items-center gap-1.5 text-xs text-emerald-500">
-                                        <CheckCircle2 className="w-4 h-4" /> Resolved
+                                ) : !resolution.resolved ? (
+                                    <span className="flex items-center gap-1.5 text-xs text-red-500">
+                                        <AlertTriangle className="w-4 h-4" /> Blocked
+                                    </span>
+                                ) : advisoryCount > 0 ? (
+                                    <span className="flex items-center gap-1.5 text-xs text-amber-500">
+                                        <CheckCircle2 className="w-4 h-4" />
+                                        Ready · {advisoryCount} advisor{advisoryCount !== 1 ? 'ies' : 'y'}
                                     </span>
                                 ) : (
-                                    <span className="flex items-center gap-1.5 text-xs text-amber-500">
-                                        <AlertTriangle className="w-4 h-4" />
-                                        {blockingCount} issue{blockingCount !== 1 ? 's' : ''}
+                                    <span className="flex items-center gap-1.5 text-xs text-emerald-500">
+                                        <CheckCircle2 className="w-4 h-4" /> Resolved
                                     </span>
                                 )}
                             </button>
@@ -517,7 +555,8 @@ export function SchemaReviewStep({
                                         </div>
                                     )}
 
-                                    {resolution && resolution.blockingReasons.length > 0 && (
+                                    {resolution && (resolution.blockingReasons.length > 0 ||
+                                        (resolution.advisoryWarnings ?? []).some(w => SUMMARY_ADVISORIES.includes(w))) && (
                                         <div className="flex flex-wrap gap-1.5">
                                             {resolution.blockingReasons.map((reason, idx) => {
                                                 // Defensive coercion — even though the API
@@ -529,13 +568,23 @@ export function SchemaReviewStep({
                                                     : 'Unknown issue'
                                                 return (
                                                     <span
-                                                        key={key}
-                                                        className="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                                                        key={`blk-${key}`}
+                                                        className="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full bg-red-500/10 text-red-500 border border-red-500/20"
                                                     >
-                                                        {label}
+                                                        Blocking · {label}
                                                     </span>
                                                 )
                                             })}
+                                            {(resolution.advisoryWarnings ?? [])
+                                                .filter(w => SUMMARY_ADVISORIES.includes(w))
+                                                .map(reason => (
+                                                    <span
+                                                        key={`adv-${reason}`}
+                                                        className="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                                                    >
+                                                        {REASON_LABELS[reason] ?? reason}
+                                                    </span>
+                                                ))}
                                         </div>
                                     )}
 
@@ -543,15 +592,19 @@ export function SchemaReviewStep({
                                         (resolution?.missingEdgeTypes?.length ?? 0) > 0) && (
                                         <div className="space-y-2">
                                             {resolution!.missingEntityTypes.length > 0 && (
-                                                <Section title="Missing entity types">
-                                                    <ChipList items={resolution!.missingEntityTypes} tone="red" />
+                                                <Section title="Entity types not in this ontology (advisory)">
+                                                    <ChipList items={resolution!.missingEntityTypes} tone="amber" />
                                                 </Section>
                                             )}
                                             {resolution!.missingEdgeTypes.length > 0 && (
-                                                <Section title="Missing edge types">
-                                                    <ChipList items={resolution!.missingEdgeTypes} tone="red" />
+                                                <Section title="Edge types not in this ontology (advisory)">
+                                                    <ChipList items={resolution!.missingEdgeTypes} tone="amber" />
                                                 </Section>
                                             )}
+                                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                                You can proceed without these — they'll be ignored by aggregation
+                                                and rendered with default styling — or add them in one click:
+                                            </p>
                                             <button
                                                 type="button"
                                                 onClick={() => addMissingTypes(item)}
@@ -656,13 +709,17 @@ export function SchemaReviewStep({
             {itemsWithOntology.length > 0 && (
                 <div className={cn(
                     "px-4 py-3 rounded-lg border text-sm",
-                    allResolved
-                        ? "bg-emerald-500/[0.06] border-emerald-500/20 text-emerald-600 dark:text-emerald-400"
-                        : "bg-amber-500/[0.06] border-amber-500/20 text-amber-500",
+                    !allResolved
+                        ? "bg-red-500/[0.06] border-red-500/20 text-red-500"
+                        : anyAdvisories
+                            ? "bg-amber-500/[0.06] border-amber-500/20 text-amber-600 dark:text-amber-400"
+                            : "bg-emerald-500/[0.06] border-emerald-500/20 text-emerald-600 dark:text-emerald-400",
                 )}>
-                    {allResolved
-                        ? 'All sources resolved — ready to submit.'
-                        : 'Resolve every blocking issue above before continuing.'}
+                    {!allResolved
+                        ? 'A source is blocked: its ontology has no lineage relationship, so aggregation would produce nothing. Classify at least one relationship as Lineage above.'
+                        : anyAdvisories
+                            ? 'Ready to submit. Advisories remain — unmapped or unclassified types will be ignored by aggregation and rendered with default styling. Use the one-click fixes above for full coverage.'
+                            : 'All sources fully resolved — ready to submit.'}
                 </div>
             )}
         </div>
