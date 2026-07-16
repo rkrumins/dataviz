@@ -40,8 +40,8 @@ interface ChangesReviewDialogProps {
 /*  Sub-components                                                     */
 /* ------------------------------------------------------------------ */
 
-/** A single row inside a diff section. */
-function DiffRow({ item }: { item: DiffItem }) {
+/** A single row inside a diff section. (Shared with VersionDiffDialog.) */
+export function DiffRow({ item }: { item: DiffItem }) {
   return (
     <div className="flex items-start gap-2 py-1.5">
       <span className="font-medium text-sm text-ink">{item.label}</span>
@@ -54,8 +54,8 @@ function DiffRow({ item }: { item: DiffItem }) {
   )
 }
 
-/** Collapsible section for a diff category (added / modified / removed). */
-function DiffSection({
+/** Collapsible section for a diff category (added / modified / removed). (Shared with VersionDiffDialog.) */
+export function DiffSection({
   icon: Icon,
   title,
   items,

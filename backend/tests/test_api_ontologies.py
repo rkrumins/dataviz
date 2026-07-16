@@ -347,3 +347,49 @@ async def test_first_publish_impact_includes_policy(test_client: AsyncClient):
     impact = r.json()
     assert impact["allowed"] is True
     assert impact["evolutionPolicy"] == "reject"
+
+
+# ── GET /admin/ontologies/{id}/source-mappings ────────────────────────
+
+async def test_source_mappings_aggregate(test_client: AsyncClient, db_session):
+    """Returns each assigned source's vocabulary-alignment profile (declared →
+    observed spellings + drift), and an empty profile marker for sources
+    without one."""
+    import json as _json
+    from backend.app.db import models as _m
+
+    created = await _create_ontology(test_client, "Mapping Test")
+    ont_id = created["id"]
+
+    db_session.add(_m.WorkspaceORM(id="ws_map", name="Map WS"))
+    db_session.add(_m.ProviderORM(id="prov_map", name="P", provider_type="falkordb"))
+    db_session.add(_m.WorkspaceDataSourceORM(
+        id="ds_map", workspace_id="ws_map", provider_id="prov_map",
+        graph_name="g", ontology_id=ont_id, label="Mapped Source",
+    ))
+    db_session.add(_m.OntologySourceMappingORM(
+        id="osm_1", data_source_id="ds_map", ontology_id=ont_id,
+        entity_type_mappings=_json.dumps({"Server": {"observed": "server", "auto": True}}),
+        relationship_type_mappings=_json.dumps({"HAS": {"observed": "has", "auto": False}}),
+        has_drift=True,
+        drift_details=_json.dumps([{"declared": "HAS", "observed": ["has"], "dimension": "relationship", "kind": "case_variant"}]),
+        last_seen_at="2026-07-16T00:00:00Z",
+    ))
+    await db_session.commit()
+
+    resp = await test_client.get(f"/api/v1/admin/ontologies/{ont_id}/source-mappings")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["dataSourceId"] == "ds_map"
+    assert row["hasProfile"] is True
+    assert row["hasDrift"] is True
+    assert row["relationshipMappings"]["HAS"]["observed"] == "has"
+    assert row["entityMappings"]["Server"]["auto"] is True
+    assert row["driftDetails"][0]["declared"] == "HAS"
+
+
+async def test_source_mappings_unknown_ontology_404(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/admin/ontologies/bp_ghost/source-mappings")
+    assert resp.status_code == 404

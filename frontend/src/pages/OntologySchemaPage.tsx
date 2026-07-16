@@ -42,6 +42,7 @@ import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
 import { HierarchyPanel } from '@/features/ontology/components/panels/HierarchyPanel'
 import { CoveragePanel } from '@/features/ontology/components/panels/CoveragePanel'
 import { AdoptionMatchSection } from '@/features/ontology/components/panels/AdoptionMatchSection'
+import { SourceMappingSection } from '@/features/ontology/components/panels/SourceMappingSection'
 import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
@@ -1533,7 +1534,10 @@ export function OntologySchemaPage() {
                       )}
 
                       {activeTab === 'health' && (
-                        <AdoptionMatchSection ontologyId={selectedOntology.id} />
+                        <>
+                          <AdoptionMatchSection ontologyId={selectedOntology.id} />
+                          <SourceMappingSection ontologyId={selectedOntology.id} />
+                        </>
                       )}
 
                       {activeTab === 'usage' && (

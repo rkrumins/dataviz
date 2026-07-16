@@ -961,6 +961,63 @@ async def get_ontology_impact(
     }
 
 
+@router.get("/{ontology_id}/source-mappings")
+async def get_ontology_source_mappings(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
+):
+    """Per-assigned-source vocabulary alignment profiles for this ontology.
+
+    Aggregates the ``ontology_source_mappings`` rows (declared → observed
+    spelling maps, drift flags) across every data source currently assigned
+    to the ontology, so the Schema page's Health tab can render one alias
+    table instead of per-source warnings. Read-only; Keep/Split decisions go
+    through ``POST /{ws}/graph/vocab-alignment/confirm``.
+    """
+    import json
+
+    row = await ontology_definition_repo.get_ontology(session, ontology_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
+
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+
+    assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
+    out = []
+    for a in assignments:
+        mapping = await osm_repo.get_mapping(session, a["dataSourceId"], ontology_id)
+        entity_mappings: dict = {}
+        rel_mappings: dict = {}
+        drift_details: list = []
+        has_drift = False
+        last_seen_at = None
+        if mapping is not None:
+            try:
+                entity_mappings = json.loads(mapping.entity_type_mappings or "{}")
+                rel_mappings = json.loads(mapping.relationship_type_mappings or "{}")
+                drift_details = json.loads(mapping.drift_details) if mapping.drift_details else []
+            except (ValueError, TypeError):
+                pass
+            has_drift = bool(mapping.has_drift)
+            last_seen_at = mapping.last_seen_at
+        out.append({
+            "workspaceId": a["workspaceId"],
+            "workspaceName": a["workspaceName"],
+            "dataSourceId": a["dataSourceId"],
+            "dataSourceLabel": a["dataSourceLabel"],
+            "hasProfile": mapping is not None,
+            "hasDrift": has_drift,
+            "lastSeenAt": last_seen_at,
+            "entityMappings": entity_mappings,
+            "relationshipMappings": rel_mappings,
+            "driftDetails": drift_details,
+        })
+    return out
+
+
 @router.get("/{ontology_id}/assignments")
 async def get_ontology_assignments(
     ontology_id: str = Path(...),
