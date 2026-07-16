@@ -12,6 +12,9 @@ import {
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { getProviderLogo } from '@/components/admin/ProviderLogos'
 
 interface DataSourcePickerProps {
   workspaces: WorkspaceResponse[]
@@ -68,7 +71,11 @@ export function DataSourcePicker({
   }, [workspaces])
 
   const activeWs = workspaces.find(w => w.id === activeWsId)
-  const lowerSearch = search.toLowerCase()
+  const lowerSearch = useDebouncedValue(search, 250).toLowerCase()
+
+  // Provider identity per data source (empty for users who can't read the
+  // provider registry — the identity line is simply omitted then).
+  const { resolve: resolveProvider } = useDataSourceProviderMap()
 
   const filteredDs = useMemo(() => {
     if (!activeWs) return []
@@ -265,6 +272,9 @@ export function DataSourcePicker({
                   const isOrphan = !ds.ontologyId
                   const label = ds.label || ds.catalogItemId || ds.id
                   const assignedOnt = ds.ontologyId && ontologyMap ? ontologyMap.get(ds.ontologyId) : null
+                  const providerRaw = resolveProvider(ds.id)
+                  const provider = providerRaw && providerRaw.providerType !== 'unknown' ? providerRaw : undefined
+                  const ProviderLogo = provider ? getProviderLogo(provider.providerType) : null
 
                   return (
                     <button
@@ -300,6 +310,17 @@ export function DataSourcePicker({
                         )}>
                           {label}
                         </p>
+
+                        {/* Provider identity — which graph, on which provider */}
+                        {provider && (
+                          <p className="flex items-center gap-1 text-[10px] text-ink-muted truncate mt-0.5">
+                            {ProviderLogo && <ProviderLogo className="w-3 h-3 flex-shrink-0" />}
+                            <span className="font-medium">{provider.providerName}</span>
+                            {(provider.sourceIdentifier ?? ds.graphName) && (
+                              <span className="font-mono"> / {provider.sourceIdentifier ?? ds.graphName}</span>
+                            )}
+                          </p>
+                        )}
 
                         {/* Ontology assignment context */}
                         {assignedOnt ? (

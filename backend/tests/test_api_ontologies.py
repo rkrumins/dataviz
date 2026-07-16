@@ -379,9 +379,10 @@ async def test_source_mappings_aggregate(test_client: AsyncClient, db_session):
 
     resp = await test_client.get(f"/api/v1/admin/ontologies/{ont_id}/source-mappings")
     assert resp.status_code == 200
-    rows = resp.json()
-    assert len(rows) == 1
-    row = rows[0]
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["facets"] == {"all": 1, "drift": 1, "pending": 0, "unprofiled": 0}
+    row = body["sources"][0]
     assert row["dataSourceId"] == "ds_map"
     assert row["hasProfile"] is True
     assert row["hasDrift"] is True
@@ -390,6 +391,146 @@ async def test_source_mappings_aggregate(test_client: AsyncClient, db_session):
     assert row["driftDetails"][0]["declared"] == "HAS"
 
 
+async def test_source_mappings_pagination_and_filters(test_client: AsyncClient, db_session):
+    """One bulk query serves paged, searchable, facet-filtered rows: drifted
+    and decision-pending sources sort first, unprofiled ones are filterable."""
+    import json as _json
+    from backend.app.db import models as _m
+
+    created = await _create_ontology(test_client, "Mapping Scale Test")
+    ont_id = created["id"]
+
+    db_session.add(_m.WorkspaceORM(id="ws_scale", name="Scale WS"))
+    db_session.add(_m.ProviderORM(id="prov_scale", name="P", provider_type="falkordb"))
+    # Three sources: pending decision / clean profile / no profile at all.
+    for i, label in enumerate(["Pending Source", "Clean Source", "Unprofiled Source"]):
+        db_session.add(_m.WorkspaceDataSourceORM(
+            id=f"ds_scale_{i}", workspace_id="ws_scale", provider_id="prov_scale",
+            graph_name=f"g{i}", ontology_id=ont_id, label=label,
+        ))
+    db_session.add(_m.OntologySourceMappingORM(
+        id="osm_s0", data_source_id="ds_scale_0", ontology_id=ont_id,
+        entity_type_mappings="{}",
+        relationship_type_mappings=_json.dumps({"HAS": {"observed": ["has", "Has"], "auto": True, "needsConfirmation": True}}),
+        has_drift=True,
+        drift_details=_json.dumps([{"declared": "HAS", "observed": ["has", "Has"], "dimension": "relationship",
+                                    "kind": "multi_variant", "needsConfirmation": True}]),
+        last_seen_at="2026-07-16T00:00:00Z",
+    ))
+    db_session.add(_m.OntologySourceMappingORM(
+        id="osm_s1", data_source_id="ds_scale_1", ontology_id=ont_id,
+        entity_type_mappings=_json.dumps({"Server": {"observed": "Server", "auto": True}}),
+        relationship_type_mappings="{}", has_drift=False, drift_details="[]",
+        last_seen_at="2026-07-16T00:00:00Z",
+    ))
+    await db_session.commit()
+
+    base = f"/api/v1/admin/ontologies/{ont_id}/source-mappings"
+
+    # Facets over ALL rows; page of 1 sorts the decision-pending source first.
+    body = (await test_client.get(f"{base}?limit=1&offset=0")).json()
+    assert body["total"] == 3
+    assert body["facets"] == {"all": 3, "drift": 1, "pending": 1, "unprofiled": 1}
+    assert len(body["sources"]) == 1
+    assert body["sources"][0]["dataSourceId"] == "ds_scale_0"
+
+    # Offset walks the ranking; facets stay global.
+    body = (await test_client.get(f"{base}?limit=1&offset=2")).json()
+    assert body["sources"][0]["dataSourceLabel"] == "Unprofiled Source"
+
+    # filter=unprofiled narrows total but not facets.
+    body = (await test_client.get(f"{base}?filter=unprofiled")).json()
+    assert body["total"] == 1
+    assert body["sources"][0]["hasProfile"] is False
+    assert body["facets"]["all"] == 3
+
+    # search matches labels case-insensitively.
+    body = (await test_client.get(f"{base}?search=clean")).json()
+    assert body["total"] == 1
+    assert body["sources"][0]["dataSourceId"] == "ds_scale_1"
+
+
 async def test_source_mappings_unknown_ontology_404(test_client: AsyncClient):
     resp = await test_client.get("/api/v1/admin/ontologies/bp_ghost/source-mappings")
+    assert resp.status_code == 404
+
+
+# ── GET /admin/ontologies/{id}/coverage-ranking ───────────────────────
+
+async def test_coverage_ranking_matches_live_coverage_and_sorts(test_client: AsyncClient, db_session):
+    """The ranked endpoint must report the SAME percentage as POST /coverage for
+    the same cached stats (system-type parity), sort best-first with unprofiled
+    last, and facet by assignment category."""
+    import json as _json
+    from backend.app.db import models as _m
+
+    created = await _create_ontology(test_client, "Ranking Test")
+    ont_id = created["id"]
+
+    def _stats(entity_ids, edge_ids):  # full GraphSchemaStats wire shape
+        return {
+            "totalNodes": 10, "totalEdges": 5,
+            "entityTypeStats": [{"id": i, "name": i, "count": 1} for i in entity_ids],
+            "edgeTypeStats": [{"id": i, "name": i, "count": 1} for i in edge_ids],
+        }
+
+    # Database+Table+CONTAINS covered, EXTRA uncovered → 3/4
+    good_stats = _stats(["Database", "Table", "EXTRA"], ["CONTAINS"])
+    # only Table covered → 1/3
+    poor_stats = _stats(["Table", "Mystery"], ["UNKNOWN_EDGE"])
+
+    db_session.add(_m.WorkspaceORM(id="ws_rank", name="Rank WS"))
+    db_session.add(_m.ProviderORM(id="prov_rank", name="P", provider_type="falkordb"))
+    db_session.add(_m.WorkspaceDataSourceORM(
+        id="ds_good", workspace_id="ws_rank", provider_id="prov_rank",
+        graph_name="good", ontology_id=None, label="Good Fit"))
+    db_session.add(_m.WorkspaceDataSourceORM(
+        id="ds_poor", workspace_id="ws_rank", provider_id="prov_rank",
+        graph_name="poor", ontology_id="bp_other", label="Poor Fit"))
+    db_session.add(_m.WorkspaceDataSourceORM(
+        id="ds_cold", workspace_id="ws_rank", provider_id="prov_rank",
+        graph_name="cold", ontology_id=ont_id, label="Never Profiled"))
+    db_session.add(_m.DataSourceStatsORM(
+        data_source_id="ds_good", schema_stats=_json.dumps(good_stats)))
+    db_session.add(_m.DataSourceStatsORM(
+        data_source_id="ds_poor", schema_stats=_json.dumps(poor_stats)))
+    await db_session.commit()
+
+    resp = await test_client.get(f"/api/v1/admin/ontologies/{ont_id}/coverage-ranking")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3
+    assert body["profiledCount"] == 2
+    assert body["facets"] == {"all": 3, "unassigned": 1, "assignedOther": 1, "assignedThis": 1}
+
+    # Best coverage first, unprofiled last.
+    ids = [s["dataSourceId"] for s in body["sources"]]
+    assert ids == ["ds_good", "ds_poor", "ds_cold"]
+    good = body["sources"][0]
+    assert good["profiled"] is True
+    assert good["uncoveredEntityCount"] == 1
+    assert good["currentOntologyId"] is None
+    cold = body["sources"][2]
+    assert cold["profiled"] is False
+    assert cold["coveragePercent"] is None
+    assert cold["currentOntologyId"] == ont_id
+
+    # Parity: same numbers as the live coverage endpoint fed the same stats.
+    live = await test_client.post(
+        f"/api/v1/admin/ontologies/{ont_id}/coverage", json=good_stats)
+    assert live.status_code == 200
+    assert good["coveragePercent"] == live.json()["coveragePercent"]
+    assert good["uncoveredEntityCount"] == len(live.json()["uncoveredEntityTypes"])
+    assert good["uncoveredRelationshipCount"] == len(live.json()["uncoveredRelationshipTypes"])
+
+    # Category filter narrows, facets stay global.
+    body = (await test_client.get(
+        f"/api/v1/admin/ontologies/{ont_id}/coverage-ranking?filter=unassigned")).json()
+    assert body["total"] == 1
+    assert body["sources"][0]["dataSourceId"] == "ds_good"
+    assert body["facets"]["all"] == 3
+
+
+async def test_coverage_ranking_unknown_ontology_404(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/admin/ontologies/bp_ghost/coverage-ranking")
     assert resp.status_code == 404

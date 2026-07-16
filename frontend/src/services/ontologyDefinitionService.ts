@@ -198,8 +198,12 @@ export const ontologyDefinitionService = {
         })
     },
 
-    auditLog(id: string): Promise<OntologyAuditEntry[]> {
-        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit`)
+    auditLog(id: string, params: { limit?: number; offset?: number } = {}): Promise<OntologyAuditEntry[]> {
+        const qs = new URLSearchParams()
+        if (params.limit != null) qs.set('limit', String(params.limit))
+        if (params.offset != null) qs.set('offset', String(params.offset))
+        const query = qs.toString()
+        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit${query ? `?${query}` : ''}`)
     },
 
     restore(id: string): Promise<OntologyDefinitionResponse> {
@@ -303,10 +307,36 @@ export const ontologyDefinitionService = {
 
     /**
      * Per-assigned-source vocabulary-alignment profiles (declared → observed
-     * spelling maps + drift) for the Health tab's alias table.
+     * spelling maps + drift) for the Health tab's alias table. Server-paged:
+     * facet counts cover ALL assignments, `params` narrow + page the rows.
      */
-    getSourceMappings(id: string): Promise<OntologySourceMappingRow[]> {
-        return request<OntologySourceMappingRow[]>(`${ADMIN_API}/${id}/source-mappings`)
+    getSourceMappings(id: string, params: SourceMappingParams = {}): Promise<OntologySourceMappingsResponse> {
+        const qs = new URLSearchParams()
+        if (params.limit != null) qs.set('limit', String(params.limit))
+        if (params.offset != null) qs.set('offset', String(params.offset))
+        if (params.search) qs.set('search', params.search)
+        if (params.filter && params.filter !== 'all') qs.set('filter', params.filter)
+        const query = qs.toString()
+        return request<OntologySourceMappingsResponse>(
+            `${ADMIN_API}/${id}/source-mappings${query ? `?${query}` : ''}`,
+        )
+    },
+
+    /**
+     * Rank ALL data sources by how well this ontology covers their cached
+     * profiled schema — server-side "Best Matches" (one request replaces the
+     * old 2-per-source fan-out). Sorted best coverage first, unprofiled last.
+     */
+    coverageRanking(id: string, params: CoverageRankingParams = {}): Promise<OntologyCoverageRankingResponse> {
+        const qs = new URLSearchParams()
+        if (params.limit != null) qs.set('limit', String(params.limit))
+        if (params.offset != null) qs.set('offset', String(params.offset))
+        if (params.search) qs.set('search', params.search)
+        if (params.filter && params.filter !== 'all') qs.set('filter', params.filter)
+        const query = qs.toString()
+        return request<OntologyCoverageRankingResponse>(
+            `${ADMIN_API}/${id}/coverage-ranking${query ? `?${query}` : ''}`,
+        )
     },
 
     /**
@@ -430,6 +460,59 @@ export interface OntologySourceMappingRow {
     entityMappings: Record<string, SourceMappingEntry>
     relationshipMappings: Record<string, SourceMappingEntry>
     driftDetails: SourceMappingDriftDetail[]
+}
+
+export type SourceMappingFilter = 'all' | 'drift' | 'pending' | 'unprofiled'
+
+export interface SourceMappingParams {
+    limit?: number
+    offset?: number
+    search?: string
+    filter?: SourceMappingFilter
+}
+
+export interface OntologySourceMappingsResponse {
+    ontologyId: string
+    /** Count AFTER search/filter (page count = sources.length). */
+    total: number
+    limit: number
+    offset: number
+    /** Counts over ALL assignments, independent of search/filter. */
+    facets: Record<SourceMappingFilter, number>
+    sources: OntologySourceMappingRow[]
+}
+
+export type CoverageRankingFilter = 'all' | 'unassigned' | 'assigned-other' | 'assigned-this'
+
+export interface CoverageRankingParams {
+    limit?: number
+    offset?: number
+    search?: string
+    filter?: CoverageRankingFilter
+}
+
+/** One candidate source in the server-side Best Matches ranking. */
+export interface CoverageRankingSource {
+    workspaceId: string
+    workspaceName: string
+    dataSourceId: string
+    dataSourceLabel: string
+    currentOntologyId: string | null
+    /** False when the source has no cached profiling stats yet. */
+    profiled: boolean
+    coveragePercent: number | null
+    uncoveredEntityCount: number
+    uncoveredRelationshipCount: number
+}
+
+export interface OntologyCoverageRankingResponse {
+    ontologyId: string
+    total: number
+    limit: number
+    offset: number
+    profiledCount: number
+    facets: { all: number; unassigned: number; assignedOther: number; assignedThis: number }
+    sources: CoverageRankingSource[]
 }
 
 export interface OntologyAssignment {

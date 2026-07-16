@@ -238,3 +238,4 @@ backend/nexus_core.db
 backend/nexus_core.db-wal
 backend/nexus_core.db-shm
 backend/nexus_lineage.db
+node_modules

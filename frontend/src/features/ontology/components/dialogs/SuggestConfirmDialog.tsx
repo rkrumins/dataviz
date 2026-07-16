@@ -19,6 +19,8 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { SchemaStatsFreshness } from '@/features/ontology/lib/ontology-utils'
 import { CoverageRing, MiniBar, MergedVariantsAdvisory } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { DataSourcePicker } from '../DataSourcePicker'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import { getProviderLogo } from '@/components/admin/ProviderLogos'
 
 type Phase = 'confirm' | 'analyzing' | 'recommendations'
 
@@ -107,6 +109,14 @@ export function SuggestConfirmDialog({
   }, [workspaces, pickedWsId, pickedDsId])
 
   const pickedDsLabel = pickedDs?.label || pickedDs?.id || dataSourceLabel
+
+  // Provider identity for the picked source (degrades to nothing for
+  // non-admins — the provider segment is simply omitted).
+  const { resolve: resolveProvider } = useDataSourceProviderMap()
+  const pickedProviderRaw = resolveProvider(pickedDsId)
+  const pickedProvider = pickedProviderRaw && pickedProviderRaw.providerType !== 'unknown' ? pickedProviderRaw : undefined
+  const pickedWsName = pickedWsId ? workspaces.find(w => w.id === pickedWsId)?.name : undefined
+  const PickedProviderLogo = pickedProvider ? getProviderLogo(pickedProvider.providerType) : null
 
   // Derive the current ontology from the PICKED data source, not the page-level prop.
   // This fixes the bug where selecting an unassigned DS still showed "CURRENTLY ASSIGNED"
@@ -406,10 +416,19 @@ export function SuggestConfirmDialog({
             <div className="px-6 pt-5 pb-3">
               <div className="px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500/[0.06] to-purple-500/[0.06] border border-indigo-500/10">
                 <div className="flex items-center gap-1 flex-wrap">
-                  <Database className="w-4 h-4 text-indigo-400 mr-1.5 flex-shrink-0" />
+                  {PickedProviderLogo
+                    ? <PickedProviderLogo className="w-4 h-4 mr-1.5 flex-shrink-0" />
+                    : <Database className="w-4 h-4 text-indigo-400 mr-1.5 flex-shrink-0" />}
                   {pickedDsLabel && (
                     <>
                       <span className="text-xs font-semibold text-ink">{pickedDsLabel}</span>
+                      {pickedWsName && <span className="text-xs text-ink-muted"> in {pickedWsName}</span>}
+                      {pickedProvider && (
+                        <span className="text-xs text-ink-muted">
+                          {' '}on {pickedProvider.providerName}
+                          {pickedProvider.host ? ` (${pickedProvider.host}${pickedProvider.port != null ? `:${pickedProvider.port}` : ''})` : ''}
+                        </span>
+                      )}
                       <span className="text-xs text-ink-muted mx-1">—</span>
                     </>
                   )}

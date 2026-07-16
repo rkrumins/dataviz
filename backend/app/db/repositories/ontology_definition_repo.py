@@ -698,6 +698,39 @@ async def get_assignments(session: AsyncSession, ontology_id: str) -> list:
     ]
 
 
+async def list_all_data_sources(session: AsyncSession) -> list:
+    """
+    Return every (non-deleted) data source across all workspaces with its
+    current ontology assignment — the candidate pool for reverse-suggest
+    ("which sources does this ontology fit?"). One query.
+    Result: dicts with workspaceId, workspaceName, dataSourceId,
+    dataSourceLabel, ontologyId (None when unassigned).
+    """
+    from ..models import WorkspaceDataSourceORM, WorkspaceORM
+    rows = await session.execute(
+        select(
+            WorkspaceDataSourceORM.id.label("data_source_id"),
+            WorkspaceDataSourceORM.label.label("data_source_label"),
+            WorkspaceDataSourceORM.ontology_id.label("ontology_id"),
+            WorkspaceORM.id.label("workspace_id"),
+            WorkspaceORM.name.label("workspace_name"),
+        )
+        .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        .order_by(WorkspaceORM.name, WorkspaceDataSourceORM.label)
+    )
+    return [
+        {
+            "workspaceId": r.workspace_id,
+            "workspaceName": r.workspace_name,
+            "dataSourceId": r.data_source_id,
+            "dataSourceLabel": r.data_source_label or r.data_source_id,
+            "ontologyId": r.ontology_id,
+        }
+        for r in rows.all()
+    ]
+
+
 # ------------------------------------------------------------------ #
 # Import                                                               #
 # ------------------------------------------------------------------ #

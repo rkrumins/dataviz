@@ -28,6 +28,10 @@ export function NodePreview({ entityType }: NodePreviewProps) {
     rootEntityTypes: [],
   }), [entityType])
 
+  // FLAT payload — GenericNode's unwrap heuristic treats a nested `data.data`
+  // as the whole entity payload, so nesting the fields there would strand
+  // `typeId` at the top level and break the type lookup (styling would fall
+  // back and behavior reads would degrade).
   const nodes = useMemo((): Node[] => [{
     id: '__preview__',
     type: 'generic',
@@ -37,8 +41,7 @@ export function NodePreview({ entityType }: NodePreviewProps) {
     data: {
       id: '__preview__',
       typeId: entityType.id,
-      name: entityType.name || 'Example',
-      data: { name: entityType.name ? `Example ${entityType.name}` : 'Example Entity' },
+      name: entityType.name ? `Example ${entityType.name}` : 'Example Entity',
     },
   }], [entityType.id, entityType.name])
 

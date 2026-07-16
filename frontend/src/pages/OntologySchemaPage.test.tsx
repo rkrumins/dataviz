@@ -168,6 +168,8 @@ vi.mock('@/features/ontology/components/dialogs/PublishConfirmDialog', () => ({ 
 vi.mock('@/features/ontology/components/dialogs/ChangesReviewDialog', () => ({ ChangesReviewDialog: () => null }))
 vi.mock('@/components/schema/EntityTypeEditor', () => ({ EntityTypeEditor: () => null }))
 vi.mock('@/components/schema/RelationshipTypeEditor', () => ({ RelationshipTypeEditor: () => null }))
+vi.mock('@/features/ontology/components/EvalContextBar', () => ({ EvalContextBar: () => null }))
+vi.mock('@/features/ontology/components/DataSourcePicker', () => ({ DataSourcePicker: () => null }))
 
 import { OntologySchemaPage } from './OntologySchemaPage'
 

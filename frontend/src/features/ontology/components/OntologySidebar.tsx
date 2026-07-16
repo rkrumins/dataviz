@@ -1,7 +1,9 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { usePreferencesStore } from '@/store/preferences'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -71,6 +73,9 @@ function getStatusKey(o: OntologyDefinitionResponse): Exclude<StatusFilter, 'all
 
 const MIN_WIDTH = 260
 const MAX_WIDTH = 480
+/** Expanded flat list virtualizes only past this many rows. */
+const VIRTUALIZE_THRESHOLD = 40
+
 const DEFAULT_WIDTH = 320
 const COLLAPSED_WIDTH = 52
 
@@ -121,6 +126,7 @@ export function OntologySidebar({
 }: OntologySidebarProps) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search, 250)
   // Filters / layout survive refresh via the persisted preferences store.
   const sidebarPrefs = usePreferencesStore(s => s.ontologySidebar)
   const setSidebarPrefs = usePreferencesStore(s => s.setOntologySidebarPrefs)
@@ -203,12 +209,12 @@ export function OntologySidebar({
     let list = statusFiltered
     if (usageFilter === 'in-use') list = list.filter(o => (assignmentCountMap.get(o.id) ?? 0) > 0)
     else if (usageFilter === 'unassigned') list = list.filter(o => (assignmentCountMap.get(o.id) ?? 0) === 0)
-    if (search) {
-      const q = search.toLowerCase()
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase()
       list = list.filter(o => o.name.toLowerCase().includes(q) || o.description?.toLowerCase().includes(q))
     }
     return list
-  }, [statusFiltered, usageFilter, assignmentCountMap, search])
+  }, [statusFiltered, usageFilter, assignmentCountMap, debouncedSearch])
 
   const { pinnedOntology, restOntologies } = useMemo(() => {
     if (!activeOntologyId || showDeleted) return { pinnedOntology: null, restOntologies: filtered }
@@ -216,6 +222,17 @@ export function OntologySidebar({
     const rest = filtered.filter(o => o.id !== activeOntologyId)
     return { pinnedOntology: pinned, restOntologies: rest }
   }, [filtered, activeOntologyId, showDeleted])
+
+  // Virtualize the flat expanded list only for large fleets — below the
+  // threshold the DOM (and entry animations) stay byte-identical to before.
+  const listScrollRef = useRef<HTMLDivElement>(null)
+  const shouldVirtualize = restOntologies.length > VIRTUALIZE_THRESHOLD
+  const listVirtualizer = useVirtualizer({
+    count: shouldVirtualize ? restOntologies.length : 0,
+    getScrollElement: () => listScrollRef.current,
+    estimateSize: () => 92,
+    overscan: 8,
+  })
 
   // Status counts are scoped to current usage filter (contextual)
   const counts = useMemo(() => {
@@ -755,7 +772,7 @@ export function OntologySidebar({
       </div>
 
       {/* Scrollable list */}
-      <div className="flex-1 overflow-y-auto px-3 pb-3">
+      <div ref={listScrollRef} className="flex-1 overflow-y-auto px-3 pb-3">
         {effectiveLoading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-5 h-5 animate-spin text-ink-muted/40" />
@@ -824,10 +841,26 @@ export function OntologySidebar({
                   </div>
                 )}
 
-                {/* Rest of ontologies */}
-                <div className="space-y-1">
-                  {restOntologies.map(o => renderItem(o))}
-                </div>
+                {/* Rest of ontologies — virtualized past the threshold */}
+                {shouldVirtualize ? (
+                  <div className="relative w-full" style={{ height: listVirtualizer.getTotalSize() }}>
+                    {listVirtualizer.getVirtualItems().map(v => (
+                      <div
+                        key={restOntologies[v.index].id}
+                        data-index={v.index}
+                        ref={listVirtualizer.measureElement}
+                        className="absolute left-0 w-full pb-1"
+                        style={{ top: 0, transform: `translateY(${v.start}px)` }}
+                      >
+                        {renderItem(restOntologies[v.index])}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {restOntologies.map(o => renderItem(o))}
+                  </div>
+                )}
               </>
             )}
 

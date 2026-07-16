@@ -6,13 +6,17 @@
  */
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { Layers, Database, Loader2, Unlink, ExternalLink, ChevronDown, Box, GitBranch, Eye, FileText, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
-import { listViews, type View } from '@/services/viewApiService'
+import { listViews } from '@/services/viewApiService'
 import { useOntologyAssignments } from '../../hooks/useOntologies'
 import { EducationalCallout } from '../EducationalCallout'
+import { TablePagination } from '@/components/ui/TablePagination'
+
+const GROUPS_PAGE_SIZE = 8
 
 interface UsagePanelProps {
   ontology: OntologyDefinitionResponse
@@ -25,56 +29,17 @@ interface UsagePanelProps {
 export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
   const { data: assignments, isLoading } = useOntologyAssignments(ontology.id)
   const navigate = useNavigate()
+  const [page, setPage] = useState(0)
 
-  // Fetch views for all assigned workspaces (not filtered by data source —
-  // views belong to the workspace and use whichever data source is active,
-  // matching how SidebarNav shows all views in the current workspace).
-  const [viewsByWs, setViewsByWs] = useState<Record<string, View[]>>({})
-  const [loadingViews, setLoadingViews] = useState(false)
-
-  useEffect(() => {
-    if (!assignments || assignments.length === 0) {
-      setViewsByWs({})
-      return
-    }
-
-    let cancelled = false
-    setLoadingViews(true)
-
-    // Deduplicate by workspace — multiple data sources in same workspace
-    // should only trigger one fetch
-    const uniqueWorkspaces = [...new Map(
-      assignments.map(a => [a.workspaceId, a])
-    ).values()]
-
-    Promise.all(
-      uniqueWorkspaces.map(async (a) => {
-        try {
-          const { items } = await listViews({ workspaceId: a.workspaceId })
-          return { wsId: a.workspaceId, views: items }
-        } catch {
-          return { wsId: a.workspaceId, views: [] as View[] }
-        }
-      })
-    ).then(results => {
-      if (cancelled) return
-      const map: Record<string, View[]> = {}
-      for (const r of results) map[r.wsId] = r.views
-      setViewsByWs(map)
-      setLoadingViews(false)
-    })
-
-    return () => { cancelled = true }
-  }, [assignments])
-
-  // Group assignments by workspace, include views at workspace level
+  // Group assignments by workspace. Views are fetched lazily PER CARD when
+  // its Views section is expanded (see WorkspaceUsageCard) — no up-front
+  // one-request-per-workspace fan-out.
   const workspaceGroups = useMemo(() => {
     if (!assignments) return []
     const map = new Map<string, {
       workspaceId: string
       workspaceName: string
       dataSources: Array<{ id: string; label: string }>
-      views: View[]
     }>()
     for (const a of assignments) {
       let group = map.get(a.workspaceId)
@@ -83,7 +48,6 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
           workspaceId: a.workspaceId,
           workspaceName: a.workspaceName,
           dataSources: [],
-          views: viewsByWs[a.workspaceId] ?? [],
         }
         map.set(a.workspaceId, group)
       }
@@ -93,12 +57,18 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
       })
     }
     return Array.from(map.values())
-  }, [assignments, viewsByWs])
+  }, [assignments])
 
-  // Build ontology name lookup
+  // Clamp the page if the group list shrinks (e.g. after unassigning).
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(workspaceGroups.length / GROUPS_PAGE_SIZE) - 1)
+    if (page > maxPage) setPage(maxPage)
+  }, [workspaceGroups.length, page])
+
+  const pagedGroups = workspaceGroups.slice(page * GROUPS_PAGE_SIZE, (page + 1) * GROUPS_PAGE_SIZE)
+
   const totalDataSources = assignments?.length ?? 0
   const totalWorkspaces = workspaceGroups.length
-  const totalViews = Object.values(viewsByWs).reduce((sum, views) => sum + views.length, 0)
   const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
   const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
 
@@ -112,7 +82,7 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
       />
 
       {/* Summary stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="border border-glass-border rounded-xl p-4 bg-canvas-elevated/50">
           <div className="flex items-center gap-1.5">
             <Layers className="w-3.5 h-3.5 text-rose-500" />
@@ -126,13 +96,6 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
             <span className="text-2xl font-bold text-ink">{totalDataSources}</span>
           </div>
           <div className="text-[11px] text-ink-muted mt-0.5">Data Sources</div>
-        </div>
-        <div className="border border-glass-border rounded-xl p-4 bg-canvas-elevated/50">
-          <div className="flex items-center gap-1.5">
-            <Eye className="w-3.5 h-3.5 text-indigo-500" />
-            <span className="text-2xl font-bold text-ink">{loadingViews ? '—' : totalViews}</span>
-          </div>
-          <div className="text-[11px] text-ink-muted mt-0.5">Views</div>
         </div>
         <div className="border border-glass-border rounded-xl p-4 bg-canvas-elevated/50">
           <div className="flex items-center gap-1.5">
@@ -158,7 +121,7 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
             Assigned Workspaces, Data Sources &amp; Views
             {assignments && (
               <span className="px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold">
-                {totalWorkspaces} workspace{totalWorkspaces !== 1 ? 's' : ''} · {totalDataSources} source{totalDataSources !== 1 ? 's' : ''} · {loadingViews ? '...' : totalViews} view{totalViews !== 1 ? 's' : ''}
+                {totalWorkspaces} workspace{totalWorkspaces !== 1 ? 's' : ''} · {totalDataSources} source{totalDataSources !== 1 ? 's' : ''}
               </span>
             )}
           </h3>
@@ -190,16 +153,31 @@ export function UsagePanel({ ontology, onManageAssignments }: UsagePanelProps) {
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
-            {workspaceGroups.map((ws) => (
-              <WorkspaceUsageCard
-                key={ws.workspaceId}
-                workspace={ws}
-                loadingViews={loadingViews}
-                onNavigate={(path) => navigate(path)}
+          <>
+            <div className="space-y-3">
+              {pagedGroups.map((ws) => (
+                <WorkspaceUsageCard
+                  key={ws.workspaceId}
+                  workspace={ws}
+                  onNavigate={(path) => navigate(path)}
+                />
+              ))}
+            </div>
+            <div className="flex items-center justify-between mt-3">
+              {workspaceGroups.length > GROUPS_PAGE_SIZE && (
+                <span className="text-[11px] text-ink-muted tabular-nums">
+                  Showing {page * GROUPS_PAGE_SIZE + 1}–{Math.min((page + 1) * GROUPS_PAGE_SIZE, workspaceGroups.length)} of {workspaceGroups.length} workspaces
+                </span>
+              )}
+              <TablePagination
+                page={page}
+                pageSize={GROUPS_PAGE_SIZE}
+                total={workspaceGroups.length}
+                onPageChange={setPage}
+                className="ml-auto"
               />
-            ))}
-          </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -216,15 +194,21 @@ interface WorkspaceUsageCardProps {
     workspaceId: string
     workspaceName: string
     dataSources: Array<{ id: string; label: string }>
-    views: View[]
   }
-  loadingViews: boolean
   onNavigate: (path: string) => void
 }
 
-function WorkspaceUsageCard({ workspace: ws, loadingViews, onNavigate }: WorkspaceUsageCardProps) {
+function WorkspaceUsageCard({ workspace: ws, onNavigate }: WorkspaceUsageCardProps) {
   const [viewsExpanded, setViewsExpanded] = useState(false)
-  const hasViews = ws.views.length > 0
+
+  // Lazy: the workspace's views load only when this section is expanded, so a
+  // fleet of N workspaces costs zero view requests until the user asks.
+  const { data: views, isLoading: loadingViews } = useQuery({
+    queryKey: ['views', 'ws', ws.workspaceId],
+    queryFn: async () => (await listViews({ workspaceId: ws.workspaceId })).items,
+    enabled: viewsExpanded,
+    staleTime: 60_000,
+  })
 
   return (
     <div className="border border-glass-border rounded-xl bg-canvas-elevated/50 overflow-hidden">
@@ -237,11 +221,6 @@ function WorkspaceUsageCard({ workspace: ws, loadingViews, onNavigate }: Workspa
           <div className="text-sm font-semibold text-ink truncate">{ws.workspaceName}</div>
           <div className="text-[10px] text-ink-muted flex items-center gap-2">
             <span>{ws.dataSources.length} data source{ws.dataSources.length !== 1 ? 's' : ''}</span>
-            <span className="opacity-30">·</span>
-            <span className="flex items-center gap-1">
-              <Eye className="w-2.5 h-2.5" />
-              {loadingViews ? '...' : ws.views.length} view{ws.views.length !== 1 ? 's' : ''}
-            </span>
           </div>
         </div>
         <button
@@ -266,46 +245,50 @@ function WorkspaceUsageCard({ workspace: ws, loadingViews, onNavigate }: Workspa
         ))}
       </div>
 
-      {/* Views section */}
-      {(hasViews || loadingViews) && (
-        <div className="border-t border-glass-border/40">
-          <button
-            onClick={() => setViewsExpanded(!viewsExpanded)}
-            className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors"
-          >
-            <ChevronDown className={cn(
-              'w-3 h-3 text-ink-muted/50 flex-shrink-0 transition-transform',
-              !viewsExpanded && '-rotate-90',
-            )} />
-            <Eye className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
-            <span className="text-xs font-medium text-ink-secondary flex-1">Views</span>
-            {loadingViews ? (
-              <Loader2 className="w-3 h-3 text-ink-muted/40 animate-spin flex-shrink-0" />
-            ) : (
-              <span className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 flex-shrink-0">
-                {ws.views.length}
-              </span>
-            )}
-          </button>
-
-          {viewsExpanded && hasViews && (
-            <div className="bg-black/[0.015] dark:bg-white/[0.01] border-t border-glass-border/30">
-              {ws.views.map(view => (
-                <button
-                  key={view.id}
-                  onClick={() => onNavigate(`/views/${view.id}`)}
-                  className="w-full flex items-center gap-2.5 px-4 py-2 pl-10 text-left hover:bg-indigo-500/[0.04] transition-colors group"
-                >
-                  <FileText className="w-3 h-3 text-ink-muted/40 flex-shrink-0 group-hover:text-indigo-500" />
-                  <span className="text-[13px] text-ink-secondary truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{view.name}</span>
-                  <span className="text-[9px] text-ink-muted font-mono ml-auto flex-shrink-0">{view.viewType || 'view'}</span>
-                  <ExternalLink className="w-2.5 h-2.5 text-ink-muted/30 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                </button>
-              ))}
-            </div>
+      {/* Views section — loads on demand */}
+      <div className="border-t border-glass-border/40">
+        <button
+          onClick={() => setViewsExpanded(!viewsExpanded)}
+          className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors"
+        >
+          <ChevronDown className={cn(
+            'w-3 h-3 text-ink-muted/50 flex-shrink-0 transition-transform',
+            !viewsExpanded && '-rotate-90',
+          )} />
+          <Eye className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
+          <span className="text-xs font-medium text-ink-secondary flex-1">Views</span>
+          {viewsExpanded && loadingViews ? (
+            <Loader2 className="w-3 h-3 text-ink-muted/40 animate-spin flex-shrink-0" />
+          ) : views ? (
+            <span className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 flex-shrink-0">
+              {views.length}
+            </span>
+          ) : (
+            <span className="text-[10px] text-ink-muted/60 flex-shrink-0">show</span>
           )}
-        </div>
-      )}
+        </button>
+
+        {viewsExpanded && views && views.length === 0 && (
+          <p className="px-4 pb-3 pl-10 text-[11px] text-ink-muted italic">No views in this workspace yet.</p>
+        )}
+
+        {viewsExpanded && views && views.length > 0 && (
+          <div className="bg-black/[0.015] dark:bg-white/[0.01] border-t border-glass-border/30">
+            {views.map(view => (
+              <button
+                key={view.id}
+                onClick={() => onNavigate(`/views/${view.id}`)}
+                className="w-full flex items-center gap-2.5 px-4 py-2 pl-10 text-left hover:bg-indigo-500/[0.04] transition-colors group"
+              >
+                <FileText className="w-3 h-3 text-ink-muted/40 flex-shrink-0 group-hover:text-indigo-500" />
+                <span className="text-[13px] text-ink-secondary truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{view.name}</span>
+                <span className="text-[9px] text-ink-muted font-mono ml-auto flex-shrink-0">{view.viewType || 'view'}</span>
+                <ExternalLink className="w-2.5 h-2.5 text-ink-muted/30 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

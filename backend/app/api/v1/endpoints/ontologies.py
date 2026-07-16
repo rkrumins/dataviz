@@ -798,6 +798,130 @@ async def get_ontology_adoption(
     }
 
 
+@router.get("/{ontology_id}/coverage-ranking")
+async def get_ontology_coverage_ranking(
+    ontology_id: str = Path(...),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    filter: str = Query("all", pattern="^(all|unassigned|assigned-other|assigned-this)$"),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
+):
+    """Rank ALL data sources (across all workspaces) by how well this ontology
+    covers their CACHED profiled schema — the server-side "Best Matches" that
+    replaces the frontend's 2-requests-per-source fan-out.
+
+    Same skeleton as ``/adoption``: one candidate query + one bulk stats read +
+    pure in-process compute (``resolver.check_coverage`` with system types
+    injected — the exact contract of ``POST /{id}/coverage``, so both surfaces
+    report identical percentages). Facets are computed over ALL candidates;
+    ``search``/``filter`` narrow the set; one page is returned, sorted best
+    coverage first with unprofiled sources last. Sources without cached stats
+    return ``profiled=false`` rather than erroring.
+
+    Scale note: reads cached stats for every source platform-wide per request —
+    fine for 100s of sources; add a candidate cap before fleets reach 1000s.
+    """
+    import json as _json
+
+    from backend.app.db.repositories import stats_repo
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+    from backend.app.ontology.resolver import check_coverage
+
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
+
+    entity_defs = parse_entity_definitions(
+        with_system_entity_types(_json.loads(orm.entity_type_definitions or "{}")))
+    rel_defs = parse_relationship_definitions(
+        with_system_edge_types(_json.loads(orm.relationship_type_definitions or "{}")))
+
+    candidates = await ontology_definition_repo.list_all_data_sources(session)
+    stats_rows = await stats_repo.list_data_source_stats(
+        session, [c["dataSourceId"] for c in candidates])
+    stats_by_ds = {s.data_source_id: s for s in stats_rows}
+
+    records = []
+    profiled_count = 0
+    for c in candidates:
+        st = stats_by_ds.get(c["dataSourceId"])
+        raw = getattr(st, "schema_stats", None) if st else None
+        coverage_percent = None
+        uncovered_entities = uncovered_rels = 0
+        profiled = False
+        if raw:
+            try:
+                schema_stats = _json.loads(raw)
+            except (ValueError, TypeError):
+                schema_stats = {}
+            ent_ids = [s["id"] for s in schema_stats.get("entityTypeStats") or []
+                       if isinstance(s, dict) and s.get("id")]
+            rel_ids = [s["id"] for s in schema_stats.get("edgeTypeStats") or []
+                       if isinstance(s, dict) and s.get("id")]
+            report = check_coverage(entity_defs, rel_defs, ent_ids, rel_ids)
+            profiled = True
+            profiled_count += 1
+            coverage_percent = report.coverage_percent
+            uncovered_entities = len(report.uncovered_entity_types)
+            uncovered_rels = len(report.uncovered_relationship_types)
+        if c["ontologyId"] == ontology_id:
+            category = "assigned-this"
+        elif c["ontologyId"]:
+            category = "assigned-other"
+        else:
+            category = "unassigned"
+        records.append({
+            "wire": {
+                "workspaceId": c["workspaceId"],
+                "workspaceName": c["workspaceName"],
+                "dataSourceId": c["dataSourceId"],
+                "dataSourceLabel": c["dataSourceLabel"],
+                "currentOntologyId": c["ontologyId"],
+                "profiled": profiled,
+                "coveragePercent": coverage_percent,
+                "uncoveredEntityCount": uncovered_entities,
+                "uncoveredRelationshipCount": uncovered_rels,
+            },
+            "category": category,
+            "profiled": profiled,
+            "coverage": coverage_percent,
+            "search": f"{c['dataSourceLabel']} {c['workspaceName']}".lower(),
+        })
+
+    facets = {
+        "all": len(records),
+        "unassigned": sum(1 for r in records if r["category"] == "unassigned"),
+        "assignedOther": sum(1 for r in records if r["category"] == "assigned-other"),
+        "assignedThis": sum(1 for r in records if r["category"] == "assigned-this"),
+    }
+
+    q = search.strip().lower()
+    filtered = [
+        r for r in records
+        if (not q or q in r["search"]) and (filter == "all" or r["category"] == filter)
+    ]
+    # Best coverage first; unprofiled sources sink to the bottom.
+    filtered.sort(key=lambda r: (0 if r["profiled"] else 1,
+                                 -(r["coverage"] if r["coverage"] is not None else 0)))
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+
+    return {
+        "ontologyId": ontology_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "profiledCount": profiled_count,
+        "facets": facets,
+        "sources": [r["wire"] for r in page],
+    }
+
+
 @router.post("/{ontology_id}/resolution-check", response_model=OntologyResolutionResponse)
 async def check_ontology_resolution(
     ontology_id: str = Path(...),
@@ -964,6 +1088,10 @@ async def get_ontology_impact(
 @router.get("/{ontology_id}/source-mappings")
 async def get_ontology_source_mappings(
     ontology_id: str = Path(...),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    filter: str = Query("all", pattern="^(all|drift|pending|unprofiled)$"),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
     _auth=Depends(_REQUIRES_ONTOLOGY_READ),
@@ -975,6 +1103,11 @@ async def get_ontology_source_mappings(
     to the ontology, so the Schema page's Health tab can render one alias
     table instead of per-source warnings. Read-only; Keep/Split decisions go
     through ``POST /{ws}/graph/vocab-alignment/confirm``.
+
+    Browsable at 100s of sources: one assignments query + one bulk mappings
+    query; facet counts are computed over ALL assignments, then ``search`` /
+    ``filter`` narrow the set and only one page of rows (with their mapping
+    JSON) is returned. Sorted decisions-pending first, then drift, then label.
     """
     import json
 
@@ -986,9 +1119,12 @@ async def get_ontology_source_mappings(
     from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
 
     assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
-    out = []
+    mappings = await osm_repo.list_mappings_for_ontology(
+        session, ontology_id, [a["dataSourceId"] for a in assignments])
+
+    records = []
     for a in assignments:
-        mapping = await osm_repo.get_mapping(session, a["dataSourceId"], ontology_id)
+        mapping = mappings.get(a["dataSourceId"])
         entity_mappings: dict = {}
         rel_mappings: dict = {}
         drift_details: list = []
@@ -1003,19 +1139,63 @@ async def get_ontology_source_mappings(
                 pass
             has_drift = bool(mapping.has_drift)
             last_seen_at = mapping.last_seen_at
-        out.append({
-            "workspaceId": a["workspaceId"],
-            "workspaceName": a["workspaceName"],
-            "dataSourceId": a["dataSourceId"],
-            "dataSourceLabel": a["dataSourceLabel"],
-            "hasProfile": mapping is not None,
-            "hasDrift": has_drift,
-            "lastSeenAt": last_seen_at,
-            "entityMappings": entity_mappings,
-            "relationshipMappings": rel_mappings,
-            "driftDetails": drift_details,
+        pending = sum(1 for d in drift_details if isinstance(d, dict) and d.get("needsConfirmation"))
+        records.append({
+            "wire": {
+                "workspaceId": a["workspaceId"],
+                "workspaceName": a["workspaceName"],
+                "dataSourceId": a["dataSourceId"],
+                "dataSourceLabel": a["dataSourceLabel"],
+                "hasProfile": mapping is not None,
+                "hasDrift": has_drift,
+                "lastSeenAt": last_seen_at,
+                "entityMappings": entity_mappings,
+                "relationshipMappings": rel_mappings,
+                "driftDetails": drift_details,
+            },
+            "profiled": mapping is not None,
+            "drift": has_drift,
+            "pending": pending,
+            "search": f"{a['dataSourceLabel']} {a['workspaceName']}".lower(),
+            "label": a["dataSourceLabel"],
         })
-    return out
+
+    # Facet counts over ALL assignments (drive the filter chips, always accurate).
+    facets = {
+        "all": len(records),
+        "drift": sum(1 for r in records if r["drift"]),
+        "pending": sum(1 for r in records if r["pending"] > 0),
+        "unprofiled": sum(1 for r in records if not r["profiled"]),
+    }
+
+    q = search.strip().lower()
+
+    def _keep(r: dict) -> bool:
+        if q and q not in r["search"]:
+            return False
+        if filter == "drift":
+            return bool(r["drift"])
+        if filter == "pending":
+            return r["pending"] > 0
+        if filter == "unprofiled":
+            return not r["profiled"]
+        return True
+
+    filtered = [r for r in records if _keep(r)]
+    # Decision-bearing rows first, then drifted, then alphabetical.
+    filtered.sort(key=lambda r: (-r["pending"], not r["drift"], r["label"].lower()))
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+
+    return {
+        "ontologyId": ontology_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "facets": facets,
+        "sources": [r["wire"] for r in page],
+    }
 
 
 @router.get("/{ontology_id}/assignments")
