@@ -75,6 +75,8 @@ export function useDataSourceProviderMap() {
           providerType: prov?.providerType || 'unknown',
           sourceIdentifier: cat?.sourceIdentifier ?? ds.graphName,
           catalogItemName: cat?.name ?? ds.label,
+          host: prov?.host,
+          port: prov?.port,
         }
       }
     }

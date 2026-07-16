@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listViews, type View } from '@/services/viewApiService'
+import { useDebouncedValue } from './useDebouncedValue'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import { useDashboardData, type TemplateBrief, type OntologyBrief } from './useDashboardData'
 import { scoreCandidates, type FieldSpec } from '@/utils/searchScoring'
@@ -103,15 +104,6 @@ const DATA_SOURCE_FIELDS: FieldSpec<DataSourceWithContext>[] = [
     { get: x => x.dataSource.id, weight: 0.2 },
 ]
 
-/** Tiny inline debounce — no shared util exists in the codebase yet. */
-function useDebouncedValue<T>(value: T, delayMs: number): T {
-    const [debounced, setDebounced] = useState(value)
-    useEffect(() => {
-        const t = setTimeout(() => setDebounced(value), delayMs)
-        return () => clearTimeout(t)
-    }, [value, delayMs])
-    return debounced
-}
 
 /**
  * Unified ranked search across views, workspaces, data sources, templates,
