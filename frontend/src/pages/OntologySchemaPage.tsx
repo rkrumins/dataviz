@@ -1429,17 +1429,27 @@ export function OntologySchemaPage() {
                 </PageContainer>
               </div>
 
-              {/* Evaluation context — which data source the single-target tabs
-                  (overview/schema/coverage) are analyzed against, stated with
-                  full identity: source · graph · workspace · provider (host). */}
+              {/* Evaluation context — the schema's applications (the sources
+                  that USE it), plus which one the single-target tabs
+                  (overview/schema/coverage) are analyzing, with full identity
+                  (graph · workspace · provider · host) and how that target
+                  was chosen (picked / auto-selected / preview fallback). */}
               {(activeTab === 'overview' || activeTab === 'schema' || activeTab === 'coverage') && (
                 <div className="shrink-0">
                   <PageContainer gutter="shell" className="pt-3 pb-1">
                     <EvalContextBar
                       ontologyId={selectedOntology.id}
+                      workspaces={workspaces}
                       workspace={evalWorkspace}
                       dataSource={evalDataSource}
+                      selectionSource={evalOverrideDsId ? 'user' : autoEvalTarget ? 'auto-assigned' : 'workspace-active'}
+                      onSelectTarget={(wsId, dsId) => {
+                        setEvalOverrideWsId(wsId)
+                        setEvalOverrideDsId(dsId)
+                        setShowEvalPicker(false)
+                      }}
                       onChangeTarget={() => setShowEvalPicker(v => !v)}
+                      onManageAssignments={() => { setAssignmentManagerTab('all'); setShowAssignmentManager(true) }}
                     />
                     {showEvalPicker && (
                       <div className="mt-2">
