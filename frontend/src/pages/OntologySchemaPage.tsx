@@ -754,30 +754,39 @@ export function OntologySchemaPage() {
     return triggerIntrospectionRefresh(workspaceId, dataSourceId)
   }
 
-  /** Assign an ontology to the target data source picked in the suggest dialog */
-  async function assignOntologyToTarget(ontologyId: string, targetWsId: string | null, targetDsId: string | null) {
-    if (!targetWsId || !targetDsId) return
+  /** Assign an ontology to the target data source picked in the suggest dialog.
+   *  Returns true only when an assignment actually succeeded; false when there
+   *  was no target to assign to, or the assignment failed. A failure is surfaced
+   *  to the user (rather than swallowed) so callers never claim "assigned" when
+   *  the data source was left pointing at its old ontology. */
+  async function assignOntologyToTarget(ontologyId: string, targetWsId: string | null, targetDsId: string | null): Promise<boolean> {
+    if (!targetWsId || !targetDsId) return false
     try {
       await workspaceService.updateDataSource(targetWsId, targetDsId, { ontologyId })
       await loadWorkspaces()
       invalidateGraphSchema()
-    } catch {
-      // Assignment failure is non-fatal — we still navigate to the ontology
+      return true
+    } catch (err: unknown) {
+      showToast('error', `Could not assign to the data source: ${err instanceof Error ? err.message : 'unknown error'}`)
+      return false
     }
   }
 
   /** User chose "Use This" on an existing match — assign + navigate. */
   async function handleSuggestUseExisting(ontologyId: string, targetWsId: string | null, targetDsId: string | null) {
     setShowSuggestDialog(false)
-    await assignOntologyToTarget(ontologyId, targetWsId, targetDsId)
+    const assigned = await assignOntologyToTarget(ontologyId, targetWsId, targetDsId)
     navigate(schemaUrl(ontologyId))
     const dsLabel = targetDsId
       ? workspaces.flatMap(ws => ws.dataSources ?? []).find(ds => ds.id === targetDsId)?.label || targetDsId
       : null
-    showToast('success', dsLabel
-      ? `Assigned to "${dsLabel}" and navigated to the semantic layer`
-      : 'Navigated to the matching semantic layer',
-    )
+    if (assigned && dsLabel) {
+      showToast('success', `Assigned to "${dsLabel}" and navigated to the semantic layer`)
+    } else if (!targetDsId) {
+      showToast('success', 'Navigated to the matching semantic layer')
+    }
+    // A picked-but-failed assignment already surfaced an error toast above —
+    // don't paper over it with a success message.
   }
 
   /** User chose "Clone & Extend" — clone, assign to target DS, navigate. */
@@ -785,9 +794,11 @@ export function OntologySchemaPage() {
     setShowSuggestDialog(false)
     try {
       const cloned = await mutations.clone.mutateAsync(ontologyId)
-      await assignOntologyToTarget(cloned.id, targetWsId, targetDsId)
+      const assigned = await assignOntologyToTarget(cloned.id, targetWsId, targetDsId)
       navigate(schemaUrl(cloned.id, 'schema'))
-      showToast('success', 'Cloned and assigned — now editing a new draft')
+      showToast('success', assigned
+        ? 'Cloned and assigned — now editing a new draft'
+        : 'Cloned — now editing a new draft')
     } catch (err: unknown) {
       showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -796,7 +807,13 @@ export function OntologySchemaPage() {
   /** User chose "Create New Draft" — create, assign to target DS, navigate. */
   async function handleSuggestCreateDraft(name: string | undefined, targetWsId: string | null, targetDsId: string | null) {
     const response = suggestResponseRef.current
-    if (!response) return
+    if (!response) {
+      // Reached "Create from Graph" without an analysis run (e.g. after "Skip
+      // Analysis"): there is no suggested schema to build from. Tell the user
+      // instead of silently doing nothing.
+      showToast('error', 'Analyze the graph first to create a draft from it.')
+      return
+    }
     setIsSuggesting(true)
     try {
       const finalName = name || generateSuggestedName(
@@ -808,10 +825,12 @@ export function OntologySchemaPage() {
         ...response.suggested,
         name: finalName,
       })
-      await assignOntologyToTarget(created.id, targetWsId, targetDsId)
+      const assigned = await assignOntologyToTarget(created.id, targetWsId, targetDsId)
       setShowSuggestDialog(false)
       navigate(schemaUrl(created.id, 'schema'))
-      showToast('info', 'Draft created and assigned — review types and publish when ready')
+      showToast('info', assigned
+        ? 'Draft created and assigned — review types and publish when ready'
+        : 'Draft created — review types and publish when ready')
     } catch (err: unknown) {
       showToast('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
