@@ -532,6 +532,9 @@ class ProviderResponse(BaseModel):
     # credentials". They carry no value and are safe to return on every path.
     auth_configured: bool = Field(False, alias="authConfigured")
     cache_auth_configured: bool = Field(False, alias="cacheAuthConfigured")
+    # FalkorDB sentinel-DAEMON credentials (sentinel_username/sentinel_password
+    # in the blob) — the daemons authenticate separately from the data plane.
+    sentinel_auth_configured: bool = Field(False, alias="sentinelAuthConfigured")
 
     class Config:
         populate_by_name = True

@@ -39,6 +39,7 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
     # list endpoint.
     auth_configured = False
     cache_auth_configured = False
+    sentinel_auth_configured = False
     try:
         creds = _decrypt(row.credentials) if row.credentials else {}
     except Exception:  # pragma: no cover - defensive: never fail a read on creds
@@ -52,6 +53,9 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
             or creds.get("cache_sentinel_password")
             or creds.get("cache_redis_url")
         )
+        sentinel_auth_configured = bool(
+            creds.get("sentinel_username") or creds.get("sentinel_password")
+        )
     return ProviderResponse(
         id=row.id,
         name=row.name,
@@ -62,6 +66,7 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
         isActive=bool(row.is_active),
         authConfigured=auth_configured,
         cacheAuthConfigured=cache_auth_configured,
+        sentinelAuthConfigured=sentinel_auth_configured,
         # extra_config is an UNENCRYPTED column; rows already in the DB may
         # carry secrets (e.g. the legacy falkordbConnection.sentinel.password
         # location) that the schema validator only blocks going forward. Redact
