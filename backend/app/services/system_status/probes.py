@@ -395,10 +395,32 @@ async def _redis_probe(key: str, label: str, client, budget: float,
                 latency_ms=latency_ms, detail=detail)
 
 
+def _role_config_detail(role) -> dict:
+    """mode/tls/auth-presence for a role's probe detail — lets the dashboard
+    show WHAT was probed (a sentinel master vs a standalone host, TLS or
+    plaintext, authenticated or not), not just that it answered. Best-effort:
+    a config error must never take down the probe itself."""
+    from backend.common.adapters.redis_endpoint import resolve_redis_config
+
+    try:
+        cfg = resolve_redis_config(role)
+        return {
+            "mode": cfg.mode,
+            "tls": cfg.tls.enabled,
+            "authenticated": bool(cfg.password),
+        }
+    except Exception:
+        return {}
+
+
 async def probe_bus_redis() -> dict:
     from backend.app.services.aggregation.redis_client import get_redis
+    from backend.common.adapters.redis_endpoint import RedisRole
 
-    return await _redis_probe("busRedis", "Redis · Bus", get_redis(), _BUDGET_REDIS)
+    return await _redis_probe(
+        "busRedis", "Redis · Bus", get_redis(), _BUDGET_REDIS,
+        extra=_role_config_detail(RedisRole.STREAMS),
+    )
 
 
 async def probe_cache_redis() -> dict:
@@ -418,7 +440,12 @@ async def probe_cache_redis() -> dict:
             detail={"scope": "global"},
         )
 
-    result = await _redis_probe("cacheRedis", "Redis · Cache", client, _BUDGET_REDIS)
+    from backend.common.adapters.redis_endpoint import RedisRole
+
+    result = await _redis_probe(
+        "cacheRedis", "Redis · Cache", client, _BUDGET_REDIS,
+        extra=_role_config_detail(RedisRole.CACHE),
+    )
     result.setdefault("detail", {})["scope"] = "global"
     if result["status"] == "down":
         return result
@@ -521,6 +548,13 @@ async def probe_falkordb() -> dict:
         # path — never a secret value).
         return _svc("falkordb", "FalkorDB", "down", error=_err(exc))
 
+    # WHAT is being probed: TLS/auth-presence for the dashboard (the mode is
+    # stamped per branch below; the standalone branch previously stamped none).
+    graph_conf_detail = {
+        "tls": cfg.tls_enabled,
+        "authenticated": bool(cfg.password),
+    }
+
     if cfg.mode == "sentinel":
         # Probe the MASTER Sentinel currently names, not a Sentinel daemon: a
         # sentinel answers PONG happily while the master it watches is dead, which
@@ -538,13 +572,17 @@ async def probe_falkordb() -> dict:
         )
         result["detail"]["mode"] = "sentinel"
         result["detail"]["master"] = f"{host}:{port}"
+        result["detail"].update(graph_conf_detail)
         return result
 
     if cfg.mode != "cluster":
-        return await _falkor_node_probe(
+        result = await _falkor_node_probe(
             cfg.host, cfg.port, "FalkorDB",
             username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
         )
+        result["detail"]["mode"] = "standalone"
+        result["detail"].update(graph_conf_detail)
+        return result
 
     try:
         async with asyncio.timeout(_BUDGET_FALKOR):
@@ -575,6 +613,7 @@ async def probe_falkordb() -> dict:
     counts = [s["detail"].get("graphCount") for s in up]
     detail = {
         "mode": "cluster",
+        **graph_conf_detail,
         "shardsTotal": len(shards),
         "shardsUp": len(up),
         "graphCount": sum(c for c in counts if c is not None) if counts else None,
