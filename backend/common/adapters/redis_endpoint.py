@@ -130,6 +130,18 @@ class RedisEndpointConfig:
                 user = None
             object.__setattr__(self, user_field, user)
             object.__setattr__(self, pass_field, pw)
+            # Provenance must agree with the normalized VALUE: the resolve
+            # sites record source["password"]="REDIS_..._PASSWORD" before this
+            # runs, so a whitespace-only secret would render on the admin page
+            # as hasPassword=false WITH a passwordSource — a self-contradicting
+            # row. Reset the entry when normalization dropped the value.
+            # Credential fields only: pool knobs rely on key-PRESENCE in
+            # ``source`` (build_bus_redis checks "max_connections" not in src)
+            # and are never touched here.
+            if user is None and self.source.get(user_field, "default") != "default":
+                self.source[user_field] = "default"
+            if pw is None and self.source.get(pass_field, "default") != "default":
+                self.source[pass_field] = "default"
 
     @property
     def is_configured(self) -> bool:
@@ -220,12 +232,29 @@ def _resolve_password(
     return None
 
 
-def _parse_url(url: str) -> Dict[str, Any]:
-    """redis(s)://[user[:pass]@]host[:port][/db] -> field dict."""
+def _parse_url(url: str, *, var: str) -> Dict[str, Any]:
+    """redis(s)://[user[:pass]@]host[:port][/db] -> field dict.
+
+    ``var`` names the config source (env var / provider credential key) for
+    error messages. Errors must NEVER echo the URL or any netloc fragment —
+    the userinfo section may embed a password.
+    """
     p = urlparse(url)
+    try:
+        # urlparse defers port validation to the .port accessor: a
+        # non-numeric port raises ValueError HERE, not at parse time. Left
+        # unguarded (the db-parse below always was guarded) it escaped as a
+        # raw ValueError — a 500 from the admin config endpoint and an
+        # opaque traceback at bus/cache startup.
+        port = int(p.port or 6379)
+    except ValueError as exc:
+        raise RedisConfigurationError(
+            f"{var} contains an invalid port — expected "
+            f"redis(s)://[user[:pass]@]host[:port][/db]. Fix the value of {var}."
+        ) from exc
     out: Dict[str, Any] = {
         "host": p.hostname or "localhost",
-        "port": int(p.port or 6379),
+        "port": port,
         "tls_enabled": p.scheme.lower() == "rediss",
     }
     if p.username:
@@ -341,7 +370,7 @@ def resolve_redis_config(
     legacy_url = os.getenv(legacy_var)
     base: Dict[str, Any] = {}
     if legacy_url:
-        base = _parse_url(legacy_url)
+        base = _parse_url(legacy_url, var=legacy_var)
         for k in base:
             # _parse_url's internal key is "tls_enabled"; the real config field
             # (and the one the Admin page renders source for) is "tls".
@@ -514,7 +543,7 @@ def _resolve_provider_cache(
     origin = f"provider:{ov.provider_id}"
 
     if not conn and legacy_url:
-        f = _parse_url(legacy_url)
+        f = _parse_url(legacy_url, var=f"{origin} cache_redis_url")
         legacy_origin = f"{origin} cache_redis_url (legacy)"
         # Only attribute what the URL actually supplied — _parse_url omits
         # username/password/db entirely when the URL doesn't carry them, so a
