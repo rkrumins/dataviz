@@ -643,14 +643,16 @@ function FalkorUsageStrip({ role }: { role: RedisRoleConfig }) {
             <div className="flex items-center gap-2">
                 <Boxes className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                 <p className="flex-1 text-[11px] text-ink-secondary">
-                    <span className="font-semibold text-ink">{graphs.length}</span> provider-routed FalkorDB instance{graphs.length === 1 ? '' : 's'} — separate endpoints, configured on the provider page (not by these variables).
+                    <span className="font-semibold text-ink">{graphs.length}</span> provider-routed FalkorDB instance{graphs.length === 1 ? '' : 's'} — separate endpoints, configured on the provider page (not by these variables). This card covers only the env-default instance above.
                 </p>
             </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
                 {graphs.map(g => (
-                    <span key={g.providerId} className="rounded-md bg-black/5 px-1.5 py-0.5 font-mono text-[10px] text-ink-secondary dark:bg-white/5">
+                    <a key={g.providerId} href="/ingestion?tab=providers"
+                        className="group inline-flex items-center gap-1 rounded-md bg-black/5 px-1.5 py-0.5 font-mono text-[10px] text-ink-secondary transition-colors hover:bg-amber-500/10 hover:text-ink dark:bg-white/5">
                         {g.name}{g.mode && g.mode !== 'standalone' ? ` · ${g.mode}` : ''}
-                    </span>
+                        <ExternalLink className="h-2.5 w-2.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
+                    </a>
                 ))}
             </div>
         </div>
@@ -885,14 +887,15 @@ export function AdminRedis() {
                     </div>
                     <div>
                         <div className="flex items-center gap-2">
-                            <h1 className="text-3xl font-bold tracking-tight text-ink">Redis</h1>
+                            <h1 className="text-3xl font-bold tracking-tight text-ink">Redis &amp; Graph Store</h1>
                             <span className="mt-1 inline-flex items-center gap-1 rounded-full border border-glass-border bg-canvas-elevated px-2 py-0.5 text-[10px] font-medium text-ink-muted">
                                 <Sparkles className="h-3 w-3" /> Deploy-managed · read-only
                             </span>
                         </div>
                         <p className="mt-1 max-w-2xl text-sm leading-relaxed text-ink-muted">
-                            The two Redis endpoints this platform runs on. See what each is for, where every value was
-                            resolved from, whether it’s reachable, and exactly which providers it touches.
+                            The Redis-protocol endpoints this platform runs on — streams, cache, and the default graph
+                            store. See what each is for, where every value was resolved from, whether it’s reachable,
+                            and exactly which providers it touches.
                         </p>
                     </div>
                 </div>

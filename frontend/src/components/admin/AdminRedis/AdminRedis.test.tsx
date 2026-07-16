@@ -46,6 +46,8 @@ vi.mock('@/services/redisConfigService', () => ({
 describe('AdminRedis', () => {
   it('shows both endpoints as independent, with provenance and no secrets', async () => {
     render(<AdminRedis />)
+    // The page covers all Redis-protocol endpoints incl. the default graph store.
+    expect(screen.getByText('Redis & Graph Store')).toBeInTheDocument()
     // Each endpoint is shown at least once (the cache endpoint appears both on its
     // role card and in the "shared default" provider-impact panel — both meaningful).
     await waitFor(() => expect(screen.getAllByText('mem-coord.gcp:6379').length).toBeGreaterThan(0))
@@ -71,8 +73,10 @@ describe('AdminRedis', () => {
     // Cross-cluster remap pairs are shown from→to.
     expect(screen.getByText('10.0.0.5:6379')).toBeInTheDocument()
     expect(screen.getByText('→ edge.example.com:6379')).toBeInTheDocument()
-    // Provider-routed instances are listed as SEPARATE endpoints.
-    expect(screen.getByText(/prod-graph/)).toBeInTheDocument()
+    // Provider-routed instances are listed as SEPARATE endpoints, each
+    // linking to the provider page where they are actually configured.
+    const chip = screen.getByText(/prod-graph/).closest('a')
+    expect(chip).toHaveAttribute('href', '/ingestion?tab=providers')
     // No secret anywhere.
     expect(screen.queryByText(/sd-secret|graph-secret/)).not.toBeInTheDocument()
   })

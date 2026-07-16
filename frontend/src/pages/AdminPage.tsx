@@ -35,7 +35,7 @@ const adminGroups = [
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
             { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
-            { path: 'redis', label: 'Redis', icon: Database, description: 'Cache & streams endpoints, auth & TLS' },
+            { path: 'redis', label: 'Redis & Graph Store', icon: Database, description: 'Streams, cache & default graph endpoints — auth, TLS, provenance' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
