@@ -357,3 +357,53 @@ async def test_test_connection_returns_failure_payload_for_unreachable_provider(
         "error": "connection refused",
         "providerVersion": None,
     }
+
+
+async def test_test_connection_deadline_extends_with_probe_deadline(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A standalone provider configured for a slow cross-cluster hop raises
+    its Test-button budget via falkordbConnection.probeDeadlineS — the fixed
+    2.0s default must extend, never clip."""
+    seen: dict[str, float] = {}
+
+    class _SlowLinkProvider:
+        async def preflight(self, deadline_s):
+            seen["deadline_s"] = deadline_s
+            from backend.common.interfaces.preflight import PreflightResult
+            return PreflightResult.success("graph.far-cluster:6379", 5)
+
+    monkeypatch.setattr(
+        provider_registry, "_create_provider_instance",
+        lambda *a, **kw: _SlowLinkProvider(),
+    )
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Far Provider",
+            "providerType": "falkordb",
+            "host": "graph.far-cluster",
+            "port": 6379,
+            "tlsEnabled": False,
+            "extraConfig": {"falkordbConnection": {"probeDeadlineS": 6}},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert seen["deadline_s"] == 6.0
+
+    # Without the knob the default stays the fast 2.0s budget.
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Near Provider",
+            "providerType": "falkordb",
+            "host": "graph.local",
+            "port": 6379,
+            "tlsEnabled": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert seen["deadline_s"] == 2.0

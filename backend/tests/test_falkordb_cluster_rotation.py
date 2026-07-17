@@ -267,3 +267,51 @@ async def test_standalone_preflight_unchanged(monkeypatch):
 
     assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
     assert probed["target"][0] == "plainhost"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_preflight_discovery_budget_follows_connect_timeout(monkeypatch):
+    """The discovery socket budget was a literal 1.0s: a healthy sentinel tier
+    >1s RTT away failed discovery, so preflight silently fell back to pinging a
+    DAEMON — a dead master read green. connectTimeout now raises the budget
+    (capped by the preflight deadline)."""
+    p = FalkorDBProvider(host="ignored", graph_name="g")
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379)],
+        socket_connect_timeout=3.0,
+    )
+
+    budgets = {}
+
+    async def fake_discover(cfg, socket_timeout):
+        budgets["discover"] = socket_timeout
+        return ("master-node", 6379)
+
+    monkeypatch.setattr(
+        "backend.app.providers.falkordb_connection.resolve_sentinel_master",
+        fake_discover,
+    )
+
+    async def fake_ping(host, port, **kwargs):
+        return "PREFLIGHT_OK"
+
+    monkeypatch.setattr(
+        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
+    )
+
+    # Deadline is generous → the budget follows connectTimeout.
+    assert await p.preflight(deadline_s=8.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 3.0
+
+    # Deadline is tight → the budget is capped by it, never exceeding it.
+    assert await p.preflight(deadline_s=2.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 2.0
+
+    # No knob → the historical 1.0s floor.
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379)],
+    )
+    assert await p.preflight(deadline_s=8.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 1.0

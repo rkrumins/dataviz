@@ -795,3 +795,55 @@ async def test_build_graph_client_cluster_routes_to_owning_node(fake_redis_and_f
     # PLAINTEXT cluster data plane. RedisCluster needs ssl=True, not a
     # connection_class.
     assert ck["ssl"] is True
+
+
+# ── slow-network knobs: probeDeadlineS + the connect-verify budget ──────
+
+def test_probe_deadline_parses_into_config():
+    cfg = load_connection_config(
+        {"probeDeadlineS": 6}, host="h", port=6379, username=None, password=None,
+    )
+    assert cfg.probe_deadline_s == 6.0
+    bad = load_connection_config(
+        {"probeDeadlineS": "not-a-number"}, host="h", port=6379,
+        username=None, password=None,
+    )
+    assert bad.probe_deadline_s is None                  # warn-and-ignore, like connectTimeout
+
+
+def test_connect_verify_budget_extends_never_shrinks():
+    """The rule behind every fixed probe/verify window: a per-provider knob can
+    only EXTEND the fleet default. The old fixed 3s wall clock killed the
+    verify ping of a provider whose connectTimeout legitimately allowed an
+    8s cross-cluster dial."""
+    from backend.app.providers.falkordb_connection import connect_verify_budget
+
+    def cfg(**conn):
+        return load_connection_config(conn or None, host="h", port=6379,
+                                      username=None, password=None)
+
+    assert connect_verify_budget(cfg(), 3.0) == 3.0                     # defaults: unchanged
+    assert connect_verify_budget(cfg(connectTimeout=8), 3.0) == 9.0     # dial + one ping
+    assert connect_verify_budget(cfg(probeDeadlineS=12), 3.0) == 12.0   # probe deadline wins
+    # Small knobs never SHRINK the default.
+    assert connect_verify_budget(cfg(connectTimeout=0.5, probeDeadlineS=1), 3.0) == 3.0
+
+
+def test_identity_diverges_on_sentinel_daemon_auth_only():
+    """Two providers identical in data plane + master + nodes but differing
+    only in sentinel-DAEMON auth must not collapse onto one cached client —
+    whichever built first would win its daemon credentials for both."""
+    from backend.app.providers.falkordb_connection import TopologyGraphClients
+
+    base = dict(
+        mode="sentinel", sentinel_master="m",
+        sentinel_nodes=[("s1", 26379)], username="u", password="pw",
+    )
+    plain = FalkorDBConnConfig(**base)
+    dedicated = FalkorDBConnConfig(**base, sentinel_password="sd-pw")
+    reuse = FalkorDBConnConfig(**base, sentinel_auth_enabled=True)
+
+    ids = {TopologyGraphClients.identity(c) for c in (plain, dedicated, reuse)}
+    assert len(ids) == 3
+    # The daemon secret rides the identity as a hash, never the value.
+    assert all("sd-pw" not in str(i) for i in ids)

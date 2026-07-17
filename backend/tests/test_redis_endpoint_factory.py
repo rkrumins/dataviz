@@ -305,3 +305,70 @@ def test_cluster_mode_is_refused_regardless_of_case_or_whitespace():
         cfg = RedisEndpointConfig(role=RedisRole.CACHE, mode=raw_mode, host="h")
         with pytest.raises(RedisConfigurationError, match="cluster"):
             build_redis_client(cfg)
+
+
+def test_sentinel_daemon_kwargs_carry_health_check_and_retry(monkeypatch):
+    """Daemon sockets need the same slow-network posture as the data plane:
+    idle health PINGs and one timeout retry on discover_master. They must
+    still NEVER see db or max_connections (no databases; pool cap is a
+    data-plane concern)."""
+    captured = {}
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            captured["sentinel_kwargs"] = sentinel_kwargs or {}
+
+        def master_for(self, name, **kw):
+            return "MASTER"
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    build_redis_client(RedisEndpointConfig(
+        role=RedisRole.STREAMS, mode="sentinel", sentinel_master="m",
+        sentinel_nodes=(("s1", 26379),),
+        health_check_interval=15, retry_on_timeout=True, max_connections=42,
+    ))
+    sk = captured["sentinel_kwargs"]
+    assert sk["health_check_interval"] == 15
+    assert sk["retry_on_timeout"] is True
+    assert "db" not in sk
+    assert "max_connections" not in sk
+
+
+def test_sentinel_master_change_is_followed_at_runtime(monkeypatch):
+    """Runtime failover parity with the FalkorDB path: the factory must hand
+    back Sentinel's managed master_for product — never resolve the master
+    once and pin a plain client to that address, which would hold the DEAD
+    master through a pod rotation."""
+    state = {"master": ("old-master", 6379)}
+
+    class FakeManagedClient:
+        """redis-py's master_for product re-discovers per pooled connection —
+        model that by reading the CURRENT master at op time."""
+        def __init__(self, sentinel):
+            self._sentinel = sentinel
+
+        def current_master(self):
+            return state["master"]
+
+    class FakeSentinel:
+        def __init__(self, nodes, sentinel_kwargs=None, **kw):
+            pass
+
+        def master_for(self, name, **kw):
+            return FakeManagedClient(self)
+
+    import redis.asyncio.sentinel as sentinel_mod
+    monkeypatch.setattr(sentinel_mod, "Sentinel", FakeSentinel)
+
+    client = build_redis_client(RedisEndpointConfig(
+        role=RedisRole.CACHE, mode="sentinel", sentinel_master="m",
+        sentinel_nodes=(("s1", 26379),),
+    ))
+    # The factory returned the MANAGED client (discovery-per-connection),
+    # not an address-pinned plain Redis.
+    assert isinstance(client, FakeManagedClient)
+    assert client.current_master() == ("old-master", 6379)
+    state["master"] = ("promoted-replica", 6379)      # failover
+    assert client.current_master() == ("promoted-replica", 6379)

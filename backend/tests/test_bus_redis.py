@@ -299,3 +299,25 @@ def test_bus_error_retry_delay_and_message(caplog):
     assert auth_records and auth_records[0].levelno == logging.ERROR
     assert "REDIS_STREAMS_PASSWORD" in auth_records[0].getMessage() or \
         "REDIS_STREAMS_PASSWORD" in auth_records[0].message
+
+
+# ── stream_block_ms: XREAD block vs socket_timeout (audit closure) ──────
+
+def test_stream_block_ms_passthrough_at_defaults(monkeypatch):
+    """Default socket_timeout (10s) comfortably fits the 5s block."""
+    from backend.common.adapters.redis_bus import stream_block_ms
+    assert stream_block_ms(5000) == 5000
+
+
+def test_stream_block_ms_clamps_under_tight_socket_timeout(monkeypatch):
+    """socket_timeout ≤ block makes EVERY quiet blocking read raise a spurious
+    TimeoutError — the window must shrink to fit one second inside it."""
+    from backend.common.adapters.redis_bus import stream_block_ms
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "3")
+    assert stream_block_ms(5000) == 2000
+
+
+def test_stream_block_ms_floor_is_one_second(monkeypatch):
+    from backend.common.adapters.redis_bus import stream_block_ms
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "1")
+    assert stream_block_ms(5000) == 1000

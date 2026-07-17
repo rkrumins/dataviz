@@ -736,3 +736,32 @@ def test_real_credentials_keep_their_provenance(monkeypatch):
     s = resolve_redis_config(RedisRole.STREAMS)
     assert s.source["username"] == "REDIS_STREAMS_USERNAME"
     assert s.source["password"] == "REDIS_STREAMS_PASSWORD"
+
+
+# ── rediss:// legacy URL + legacy unprefixed TLS material (audit closure) ──
+
+def test_rediss_legacy_url_keeps_legacy_ca_material(monkeypatch):
+    """REDIS_URL=rediss://… + REDIS_TLS_CA_CERTS is a documented legacy combo.
+    The CA used to be silently dropped (TLS was already enabled by the URL, so
+    the legacy block never ran) — verification then failed against the system
+    trust store: a fail-closed outage on a perfectly configured deployment."""
+    monkeypatch.setenv("REDIS_URL", "rediss://bus.internal:6380/0")
+    monkeypatch.setenv("REDIS_TLS_CA_CERTS", "/certs/private-ca.pem")
+
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.tls.enabled is True
+    assert cfg.tls.ca_certs == "/certs/private-ca.pem"
+    assert cfg.source["tls"] == "REDIS_TLS_* (legacy)"
+
+
+def test_prefixed_tls_material_beats_legacy_on_rediss_url(monkeypatch):
+    """When the prefixed REDIS_STREAMS_TLS_* material exists it supersedes the
+    legacy unprefixed vars — migrating a deployment var-by-var never regresses
+    to the old CA."""
+    monkeypatch.setenv("REDIS_URL", "rediss://bus.internal:6380/0")
+    monkeypatch.setenv("REDIS_TLS_CA_CERTS", "/certs/old-ca.pem")
+    monkeypatch.setenv("REDIS_STREAMS_TLS_CA_CERTS", "/certs/new-ca.pem")
+
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.tls.enabled is True
+    assert cfg.tls.ca_certs == "/certs/new-ca.pem"
