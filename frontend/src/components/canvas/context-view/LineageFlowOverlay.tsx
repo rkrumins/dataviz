@@ -617,8 +617,8 @@ export function LineageFlowOverlay({
       // gutter-centered placement.
       const avgX = horizontal
         ? (bucket.direction === 'left'
-            ? viewportRect.left - containerRect.left + 14
-            : viewportRect.right - containerRect.left - 14)
+            ? viewportRect.left - containerRect.left + 30
+            : viewportRect.right - containerRect.left - 30)
         : bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length
       const avgY = bucket.ys.reduce((a, b) => a + b, 0) / bucket.ys.length
       badges.push({
@@ -1013,8 +1013,17 @@ export function LineageFlowOverlay({
     const gradientKeys = new Set<string>()
     overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
 
-    return { markerColors: Array.from(markerColors), gradientKeys: Array.from(gradientKeys) }
-  }, [visibleEdges, overflowEdges])
+    // Pass-through edges fade at BOTH ends — they enter and exit beyond
+    // the viewport, and the double fade reads as "continues off-screen".
+    const passThroughColors = new Set<string>()
+    passThroughEdges.forEach(e => passThroughColors.add(e.color))
+
+    return {
+      markerColors: Array.from(markerColors),
+      gradientKeys: Array.from(gradientKeys),
+      passThroughColors: Array.from(passThroughColors),
+    }
+  }, [visibleEdges, overflowEdges, passThroughEdges])
 
   // Display names for badge tooltips — id → name over the rendered node
   // hierarchy (children included so partners below collapsed roots still
@@ -1169,6 +1178,20 @@ export function LineageFlowOverlay({
               <linearGradient key={safeId} id={safeId} {...axis}>
                 <stop offset="0%" stopColor={c} stopOpacity="0.35" />
                 <stop offset="70%" stopColor={c} stopOpacity="0.12" />
+                <stop offset="100%" stopColor={c} stopOpacity="0" />
+              </linearGradient>
+            )
+          })}
+
+          {/* Shared pass-through gradients — one per color, fading at both
+              ends along the (predominantly horizontal) travel direction. */}
+          {sharedDefs.passThroughColors.map(c => {
+            const safeId = `pt-${c.replace(/[^a-zA-Z0-9]/g, '')}`
+            return (
+              <linearGradient key={safeId} id={safeId} x1="0" x2="1" y1="0" y2="0">
+                <stop offset="0%" stopColor={c} stopOpacity="0" />
+                <stop offset="15%" stopColor={c} stopOpacity="0.32" />
+                <stop offset="85%" stopColor={c} stopOpacity="0.32" />
                 <stop offset="100%" stopColor={c} stopOpacity="0" />
               </linearGradient>
             )
@@ -1550,10 +1573,9 @@ export function LineageFlowOverlay({
           <g key={pt.id} data-edge-id={pt.id} data-edge-src={pt.source} data-edge-tgt={pt.target}>
             <path
               d={pt.pathD}
-              stroke={pt.color}
-              strokeWidth={1.3}
+              stroke={`url(#pt-${pt.color.replace(/[^a-zA-Z0-9]/g, '')})`}
+              strokeWidth={1.5}
               fill="none"
-              strokeOpacity={0.28}
               strokeDasharray="5 5"
               strokeLinecap="round"
               className="pointer-events-none"
@@ -1589,10 +1611,12 @@ export function LineageFlowOverlay({
             className="absolute pointer-events-none"
             style={{
               left: badge.gutterX,
-              transform: 'translateX(-50%)',
               ...(isHorizontal
-                ? { top: badge.y - 24 }
-                : badge.direction === 'up' ? { top: 52 } : { bottom: 12 }),
+                ? { top: badge.y, transform: 'translate(-50%, -50%)' }
+                : {
+                    transform: 'translateX(-50%)',
+                    ...(badge.direction === 'up' ? { top: 52 } : { bottom: 12 }),
+                  }),
             }}
           >
             <InfoTooltip
@@ -1603,18 +1627,32 @@ export function LineageFlowOverlay({
                     {badge.count} off-screen connection{badge.count === 1 ? '' : 's'}
                   </p>
                   {shown.map((name, j) => (
-                    <p key={j} className="truncate text-ink-muted">{name}</p>
+                    <div key={j} className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: badge.color }}
+                      />
+                      <span className="truncate text-ink-muted">{name}</span>
+                    </div>
                   ))}
-                  {extra > 0 && <p className="text-ink-muted/70">+{extra} more</p>}
-                  <p className="mt-1 text-ink-muted/60 italic">Click to scroll to it</p>
+                  {extra > 0 && <p className="text-ink-muted/70 mt-0.5">+{extra} more</p>}
+                  <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll to it</p>
                 </div>
               }
             >
+              {/* Glass pill — same visual family as the column's
+                  "N above / N below" chips (rounded-full, backdrop blur,
+                  color-tinted glass, soft color glow, scale on hover) so
+                  the off-screen affordances read as one system. */}
               <button
                 type="button"
                 data-canvas-interactive
-                className="pointer-events-auto flex flex-col items-center gap-0.5 cursor-pointer rounded-md px-1 py-0.5 hover:bg-white/[0.06] transition-colors"
-                style={{ color: badge.color }}
+                className="pointer-events-auto flex items-center gap-1 px-2 py-[3px] rounded-full backdrop-blur-md border border-white/10 shadow-md cursor-pointer hover:scale-105 active:scale-95 transition-transform"
+                style={{
+                  color: badge.color,
+                  backgroundColor: `${badge.color}22`,
+                  boxShadow: `0 4px 14px ${badge.color}25`,
+                }}
                 onClick={(e) => {
                   e.stopPropagation()
                   handleBadgeClick(badge)
@@ -1622,7 +1660,8 @@ export function LineageFlowOverlay({
               >
                 {/* Chevron */}
                 <svg
-                  width="14" height="14" viewBox="0 0 14 14" fill="none"
+                  width="12" height="12" viewBox="0 0 14 14" fill="none"
+                  className="flex-shrink-0"
                   style={rotation ? { transform: rotation } : undefined}
                 >
                   <path
@@ -1634,22 +1673,9 @@ export function LineageFlowOverlay({
                   />
                 </svg>
                 {/* Count */}
-                <span
-                  className="text-[10px] font-semibold tabular-nums leading-none"
-                  style={{ opacity: 0.85 }}
-                >
+                <span className="text-[10px] font-semibold tabular-nums leading-none">
                   {badge.count}
                 </span>
-                {/* Accent line */}
-                <div
-                  className="rounded-full"
-                  style={{
-                    width: Math.min(24, 8 + badge.count * 3),
-                    height: 2,
-                    backgroundColor: badge.color,
-                    opacity: 0.4,
-                  }}
-                />
               </button>
             </InfoTooltip>
           </div>
