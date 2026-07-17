@@ -1,12 +1,15 @@
 import { useState, useMemo } from 'react'
-import { motion } from 'framer-motion'
+import { Reorder } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import type { EntityTypeSchema, EntityVisualConfig, EntityFieldDefinition } from '@/types/schema'
 import { cn } from '@/lib/utils'
 import { generateId } from '@/lib/utils'
 import { toEntityTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
+import { IconPicker } from '@/components/ui/IconPicker'
+import { NodePreview } from '@/components/schema/NodePreview'
+import { ColorInput } from '@/components/ui/ColorInput'
 
-// Common Lucide icon names for picker
+// Curated icons surfaced as the "Suggested" row of the full-catalog picker.
 const COMMON_ICONS = [
   'FolderTree', 'Database', 'Table2', 'Columns3', 'Layers',
   'Box', 'Package', 'Workflow', 'GitBranch', 'Network',
@@ -14,14 +17,6 @@ const COMMON_ICONS = [
   'Server', 'Cloud', 'HardDrive', 'Cpu', 'Globe',
   'Users', 'User', 'Building', 'Briefcase', 'FileCode',
   'Code', 'Terminal', 'Settings', 'Wrench', 'Cog',
-]
-
-// Color palette
-const COLOR_PALETTE = [
-  '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6',
-  '#10b981', '#22c55e', '#84cc16', '#eab308', '#f59e0b',
-  '#f97316', '#ef4444', '#ec4899', '#d946ef', '#a855f7',
-  '#64748b', '#6b7280', '#71717a',
 ]
 
 const TAB_DEFS = [
@@ -56,7 +51,10 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
   const isNew = !entityType
 
   const [form, setForm] = useState<EntityTypeSchema>(() => {
-    const base = entityType || createDefaultEntityType()
+    // Present fields in their declared display order (drag-reorder rewrites it).
+    const base = entityType
+      ? { ...entityType, fields: [...entityType.fields].sort((a, b) => a.displayOrder - b.displayOrder) }
+      : createDefaultEntityType()
     // New types derive their node-label id from the name up-front.
     return entityType ? base : { ...base, id: toEntityTypeId(base.name) }
   })
@@ -329,53 +327,25 @@ function VisualTab({ form, updateVisual }: {
 }) {
   return (
     <div className="space-y-5">
-      {/* Live Preview */}
-      <div className="p-5 rounded-2xl bg-gradient-to-br from-black/[0.02] to-black/[0.04] dark:from-white/[0.02] dark:to-white/[0.04] border border-glass-border">
-        <p className="text-[10px] text-ink-muted uppercase tracking-widest font-bold mb-3">Live Preview</p>
-        <div className="flex justify-center py-2">
-          <EntityPreview visual={form.visual} name={form.name} />
-        </div>
+      {/* Live Preview — the REAL canvas node, fed the unsaved form state */}
+      <div className="p-3 rounded-2xl bg-gradient-to-br from-black/[0.02] to-black/[0.04] dark:from-white/[0.02] dark:to-white/[0.04] border border-glass-border">
+        <p className="text-[10px] text-ink-muted uppercase tracking-widest font-bold mb-1 px-2 pt-1">Live Canvas Preview</p>
+        <NodePreview entityType={form} />
       </div>
 
       <Section title="Icon">
-        <div className="grid grid-cols-10 gap-1 p-2 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-glass-border">
-          {COMMON_ICONS.map((iconName) => {
-            const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[iconName]
-            const selected = form.visual.icon === iconName
-            return (
-              <button
-                key={iconName}
-                onClick={() => updateVisual('icon', iconName)}
-                className={cn(
-                  'w-8 h-8 rounded-lg flex items-center justify-center transition-all',
-                  selected
-                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/30 scale-110'
-                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-ink-secondary hover:text-ink',
-                )}
-              >
-                {Icon && <Icon className="w-4 h-4" />}
-              </button>
-            )
-          })}
-        </div>
+        <IconPicker
+          value={form.visual.icon}
+          onChange={name => updateVisual('icon', name)}
+          suggested={COMMON_ICONS}
+        />
       </Section>
 
       <Section title="Color">
-        <div className="flex flex-wrap gap-1.5">
-          {COLOR_PALETTE.map((color) => (
-            <button
-              key={color}
-              onClick={() => updateVisual('color', color)}
-              className={cn(
-                'w-8 h-8 rounded-lg transition-all',
-                form.visual.color === color
-                  ? 'ring-2 ring-offset-2 ring-offset-canvas ring-ink scale-110 shadow-md'
-                  : 'hover:scale-110',
-              )}
-              style={{ backgroundColor: color }}
-            />
-          ))}
-        </div>
+        <ColorInput
+          value={form.visual.color}
+          onChange={color => updateVisual('color', color)}
+        />
       </Section>
 
       <div className="grid grid-cols-2 gap-4">
@@ -449,58 +419,6 @@ function VisualTab({ form, updateVisual }: {
 // Entity Preview
 // ---------------------------------------------------------------------------
 
-function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: string }) {
-  const Icon = ((LucideIcons as any)[visual.icon] || LucideIcons.Box) as React.ComponentType<any>
-
-  const sizeClasses = {
-    xs: 'px-2 py-1.5 min-w-[100px]',
-    sm: 'px-2.5 py-2 min-w-[140px]',
-    md: 'px-3 py-2.5 min-w-[180px]',
-    lg: 'px-4 py-3 min-w-[220px]',
-    xl: 'px-5 py-4 min-w-[280px]',
-  }
-
-  const shapeClasses = {
-    rectangle: 'rounded-md',
-    rounded: 'rounded-xl',
-    pill: 'rounded-full',
-    diamond: 'rounded-lg',
-    hexagon: 'rounded-lg',
-    circle: 'rounded-full',
-  }
-
-  return (
-    <motion.div
-      layout
-      className={cn(
-        'bg-canvas-elevated border-2 shadow-lg',
-        sizeClasses[visual.size],
-        shapeClasses[visual.shape],
-        visual.borderStyle === 'dashed' && 'border-dashed',
-        visual.borderStyle === 'dotted' && 'border-dotted',
-      )}
-      style={{
-        borderColor: visual.color,
-        borderLeftWidth: '4px',
-      }}
-    >
-      <div className="flex items-center gap-2">
-        <div
-          className="w-8 h-8 rounded-lg flex items-center justify-center"
-          style={{ backgroundColor: `${visual.color}15` }}
-        >
-          <Icon className="w-4 h-4" color={visual.color} />
-        </div>
-        <div>
-          <span className="text-2xs font-medium uppercase" style={{ color: visual.color }}>
-            {name || 'Entity'}
-          </span>
-          <p className="text-sm font-medium text-ink">Example Entity</p>
-        </div>
-      </div>
-    </motion.div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Fields Tab
@@ -536,6 +454,14 @@ function FieldsTab({ form, setForm, readOnly }: {
     }))
   }
 
+  // Drag-reorder: rewrite displayOrder sequentially so persisted order matches.
+  const reorderFields = (ordered: EntityFieldDefinition[]) => {
+    setForm((prev) => ({
+      ...prev,
+      fields: ordered.map((f, i) => ({ ...f, displayOrder: i })),
+    }))
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -560,15 +486,17 @@ function FieldsTab({ form, setForm, readOnly }: {
           <p className="text-xs text-ink-muted">No fields defined yet</p>
         </div>
       ) : (
-        <div className="space-y-2">
+        <Reorder.Group axis="y" values={form.fields} onReorder={reorderFields} className="space-y-2">
           {form.fields.map((field) => (
-            <div
+            <Reorder.Item
               key={field.id}
-              className="rounded-xl border border-glass-border bg-canvas hover:border-glass-border-hover transition-all overflow-hidden"
+              value={field}
+              drag={readOnly ? false : 'y'}
+              className="rounded-xl border border-glass-border bg-canvas hover:border-glass-border-hover transition-colors overflow-hidden"
             >
               {/* Field header row */}
               <div className="flex items-center gap-2 px-3 py-2.5">
-                <LucideIcons.GripVertical className="w-3.5 h-3.5 text-ink-muted/40 cursor-grab flex-shrink-0" />
+                <LucideIcons.GripVertical className={cn('w-3.5 h-3.5 text-ink-muted/40 flex-shrink-0', readOnly ? 'opacity-30' : 'cursor-grab active:cursor-grabbing')} />
 
                 <input
                   type="text"
@@ -620,9 +548,9 @@ function FieldsTab({ form, setForm, readOnly }: {
                   </label>
                 ))}
               </div>
-            </div>
+            </Reorder.Item>
           ))}
-        </div>
+        </Reorder.Group>
       )}
     </div>
   )

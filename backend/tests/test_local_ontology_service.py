@@ -33,7 +33,6 @@ from backend.common.models.graph import (
     EntityTypeSummary,
     EdgeTypeSummary,
     GraphSchemaStats,
-    OntologyMetadata,
 )
 
 
@@ -124,16 +123,6 @@ def _make_schema_stats(
         edgeTypeStats=[
             EdgeTypeSummary(id=eid, name=eid, count=5) for eid in edge_ids
         ],
-    )
-
-
-def _make_ontology_metadata() -> OntologyMetadata:
-    return OntologyMetadata(
-        containmentEdgeTypes=["CONTAINS"],
-        lineageEdgeTypes=["TRANSFORMS"],
-        edgeTypeMetadata={},
-        entityTypeHierarchy={},
-        rootEntityTypes=[],
     )
 
 
@@ -272,9 +261,7 @@ class TestSuggestFromIntrospection:
             entity_ids=["dataset", "pipeline"],
             edge_ids=["CONTAINS", "TRANSFORMS"],
         )
-        metadata = _make_ontology_metadata()
-
-        result = await svc.suggest_from_introspection(stats, metadata)
+        result = await svc.suggest_from_introspection(stats)
 
         assert result.name == "Suggested Ontology (from graph introspection)"
         assert result.scope == "workspace"
@@ -299,9 +286,7 @@ class TestSuggestFromIntrospection:
             entity_ids=["dataset", "newType"],
             edge_ids=[],
         )
-        metadata = _make_ontology_metadata()
-
-        result = await svc.suggest_from_introspection(stats, metadata, base_ontology_id="base_1")
+        result = await svc.suggest_from_introspection(stats, base_ontology_id="base_1")
 
         # Both types should be present
         assert "dataset" in result.entity_type_definitions
@@ -313,9 +298,7 @@ class TestSuggestFromIntrospection:
         svc = LocalOntologyService(repository=repo)
 
         stats = _make_schema_stats(entity_ids=["typeA"], edge_ids=[])
-        metadata = _make_ontology_metadata()
-
-        result = await svc.suggest_from_introspection(stats, metadata, base_ontology_id="nonexistent")
+        result = await svc.suggest_from_introspection(stats, base_ontology_id="nonexistent")
         assert "typeA" in result.entity_type_definitions
 
     async def test_suggest_with_empty_stats(self):
@@ -324,9 +307,7 @@ class TestSuggestFromIntrospection:
         svc = LocalOntologyService(repository=repo)
 
         stats = _make_schema_stats(entity_ids=[], edge_ids=[])
-        metadata = _make_ontology_metadata()
-
-        result = await svc.suggest_from_introspection(stats, metadata)
+        result = await svc.suggest_from_introspection(stats)
         assert result.name == "Suggested Ontology (from graph introspection)"
 
 

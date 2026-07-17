@@ -1822,21 +1822,34 @@ class FalkorDBProvider(GraphDataProvider):
         properties = ["urn", "displayName", "qualifiedName", "level"]
 
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+        # Failure accounting: "already indexed" is success (idempotent DDL);
+        # everything else is collected and reported in ONE warning at the end
+        # so a persistently failing CREATE INDEX (unsupported server version,
+        # timeouts) is visible instead of silently swallowed. Still
+        # best-effort — this method never raises; queries work unindexed.
+        failures: list[str] = []
+
+        async def _create_index(cypher: str) -> None:
+            try:
+                # Server-side timeout too — an abandoned DDL statement
+                # must not keep burning FalkorDB CPU after the client
+                # deadline fires.
+                await asyncio.wait_for(
+                    self._graph.query(
+                        cypher, timeout=self._db_timeout_ms(_init_timeout),
+                    ),
+                    timeout=_init_timeout,
+                )
+            except Exception as exc:
+                if "already indexed" in str(exc).lower():
+                    return
+                failures.append(f"{cypher}: {type(exc).__name__}: {exc}")
+
+        total = 0
         for label in labels:
             for prop in properties:
-                try:
-                    # Server-side timeout too — an abandoned DDL statement
-                    # must not keep burning FalkorDB CPU after the client
-                    # deadline fires.
-                    await asyncio.wait_for(
-                        self._graph.query(
-                            f"CREATE INDEX FOR (n:{label}) ON (n.{prop})",
-                            timeout=self._db_timeout_ms(_init_timeout),
-                        ),
-                        timeout=_init_timeout,
-                    )
-                except Exception:
-                    pass
+                total += 1
+                await _create_index(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
 
         # Edge-property indices on :AGGREGATED powering the level-pair
         # fast path used by ``_expand_aggregated_set``. With these in
@@ -1864,15 +1877,17 @@ class FalkorDBProvider(GraphDataProvider):
             "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
         ]
         for index_cypher in aggregated_edge_indices:
-            try:
-                await asyncio.wait_for(
-                    self._graph.query(
-                        index_cypher, timeout=self._db_timeout_ms(_init_timeout),
-                    ),
-                    timeout=_init_timeout,
-                )
-            except Exception:
-                pass  # Older FalkorDB or already exists — ignore
+            total += 1
+            await _create_index(index_cypher)
+
+        if failures:
+            logger.warning(
+                "ensure_indices: %d/%d index statements failed (queries still "
+                "work, unindexed). First failures: %s",
+                len(failures), total, "; ".join(failures[:3]),
+            )
+        else:
+            logger.debug("ensure_indices: %d index statements ensured", total)
 
     @property
     def name(self) -> str:
@@ -7949,7 +7964,20 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
-        containment = list(self._get_containment_edge_types())
+        # Introspection must NOT depend on containment having been injected.
+        # ``_resolve_ontology`` calls this method BEFORE ``_inject_resolved`` on a
+        # fresh provider, and ``_get_containment_edge_types`` raises when the set
+        # isn't configured yet. Letting that raise here aborts the whole
+        # introspection (observed vocabulary discovery below), which leaves the
+        # per-source case-alias map empty on the FIRST resolve — so declared
+        # UPPER_SNAKE types get injected verbatim into case-sensitive Cypher and
+        # match nothing (a flat hierarchy on a freshly-onboarded data source).
+        # Containment here is only a classification hint for the observed types;
+        # treat "not configured yet" as empty and let the rest run.
+        try:
+            containment = list(self._get_containment_edge_types())
+        except ProviderConfigurationError:
+            containment = []
         containment_upper = {t.upper() for t in containment}
         
         # 1. Determine Lineage Types

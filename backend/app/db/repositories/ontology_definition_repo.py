@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import OntologyORM, OntologyAuditLogORM
 from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+from backend.app.ontology.resolver import (
+    derive_flat_lists,
+    parse_relationship_definitions,
+    sync_hierarchy_from_relationships,
+)
 from backend.common.models.management import (
     OntologyCreateRequest,
     OntologyUpdateRequest,
@@ -62,6 +67,97 @@ def _compute_type_diff(
         "addedRelationshipTypes": sorted(new_rels - old_rels),
         "removedRelationshipTypes": sorted(old_rels - new_rels),
     }
+
+
+# ------------------------------------------------------------------ #
+# Classification write hook                                            #
+# ------------------------------------------------------------------ #
+
+def _reconciled_flat_lists(
+    rel_defs_raw: dict,
+    containment_list: Optional[list],
+    lineage_list: Optional[list],
+) -> tuple:
+    """Flat lists re-derived from the per-relationship flags (the source of truth).
+
+    List entries that reference an id with NO relationship definition (legacy
+    vocabulary from pre-rich-definition ontologies) are preserved verbatim so
+    ``resolve_ontology``'s additive union keeps honoring them. Entries for
+    DECLARED ids get their membership strictly from the flags — this is what
+    kills the "cleared is_containment can never leave the persisted list" drift.
+    """
+    rel_defs = parse_relationship_definitions(rel_defs_raw or {})
+    flat = derive_flat_lists({}, rel_defs)
+    declared_upper = {k.upper() for k in rel_defs}
+    containment = list(flat.containment_edge_types)
+    lineage = list(flat.lineage_edge_types)
+    for t in (containment_list or []):
+        if str(t).upper() not in declared_upper and t not in containment:
+            containment.append(t)
+    for t in (lineage_list or []):
+        if str(t).upper() not in declared_upper and t not in lineage:
+            lineage.append(t)
+    return containment, lineage
+
+
+def _sync_classification(req, stored: Optional[OntologyORM] = None) -> None:
+    """Make relationship flags and the flat containment/lineage lists agree
+    before persisting. Mutates ``req`` in place.
+
+    - Request carries relationship definitions → flags win; both lists are
+      re-derived from them (undeclared legacy entries preserved).
+    - Request carries only lists (hierarchy chip edits / list-only API calls)
+      → the lists carry the user's intent: flags on the stored definitions are
+      synced FROM the lists first, then the lists are re-derived.
+    - Metadata-only request → untouched.
+    """
+    rel_defs = req.relationship_type_definitions
+    lists_touched = (
+        req.containment_edge_types is not None or req.lineage_edge_types is not None
+    )
+    if rel_defs is None and stored is not None and lists_touched:
+        stored_defs = json.loads(stored.relationship_type_definitions or "{}")
+        cont = (
+            req.containment_edge_types
+            if req.containment_edge_types is not None
+            else json.loads(stored.containment_edge_types or "[]")
+        )
+        lin = (
+            req.lineage_edge_types
+            if req.lineage_edge_types is not None
+            else json.loads(stored.lineage_edge_types or "[]")
+        )
+        cont_upper = {str(t).upper() for t in cont}
+        lin_upper = {str(t).upper() for t in lin}
+        for rid, rdef in stored_defs.items():
+            if isinstance(rdef, dict):
+                rdef["is_containment"] = rid.upper() in cont_upper
+                rdef["is_lineage"] = rid.upper() in lin_upper
+                rdef.pop("isContainment", None)
+                rdef.pop("isLineage", None)
+        req.relationship_type_definitions = stored_defs
+        rel_defs = stored_defs
+    if rel_defs is None:
+        return
+
+    cont_in = req.containment_edge_types
+    lin_in = req.lineage_edge_types
+    if cont_in is None and stored is not None:
+        cont_in = json.loads(stored.containment_edge_types or "[]")
+    if lin_in is None and stored is not None:
+        lin_in = json.loads(stored.lineage_edge_types or "[]")
+    containment, lineage = _reconciled_flat_lists(rel_defs, cont_in, lin_in)
+    req.containment_edge_types = containment
+    req.lineage_edge_types = lineage
+
+    # Keep entity-level hierarchy fields consistent with relationship-level
+    # containment (ADD-only) — the Hierarchy tab tree walks can_contain /
+    # can_be_contained_by, while classification lives on the relationships;
+    # syncing here makes the stored ontology self-consistent by construction.
+    if req.entity_type_definitions:
+        req.entity_type_definitions = sync_hierarchy_from_relationships(
+            req.entity_type_definitions, rel_defs
+        )
 
 
 async def get_audit_log(
@@ -253,6 +349,7 @@ async def create_ontology(
     session: AsyncSession,
     req: OntologyCreateRequest,
 ) -> OntologyDefinitionResponse:
+    _sync_classification(req)
     row = OntologyORM(
         name=req.name,
         description=req.description,
@@ -311,6 +408,11 @@ async def update_ontology(
     row = await get_ontology_orm(session, ontology_id)
     if not row:
         return None
+
+    # Reconcile flags ↔ flat lists before any content write. Runs after the
+    # metadata-only check inputs are fixed: a metadata-only request stays
+    # metadata-only (the hook leaves it untouched).
+    _sync_classification(req, row)
 
     if row.is_published and not _is_metadata_only(req):
         return await _create_new_version(session, row, req)
@@ -596,6 +698,39 @@ async def get_assignments(session: AsyncSession, ontology_id: str) -> list:
     ]
 
 
+async def list_all_data_sources(session: AsyncSession) -> list:
+    """
+    Return every (non-deleted) data source across all workspaces with its
+    current ontology assignment — the candidate pool for reverse-suggest
+    ("which sources does this ontology fit?"). One query.
+    Result: dicts with workspaceId, workspaceName, dataSourceId,
+    dataSourceLabel, ontologyId (None when unassigned).
+    """
+    from ..models import WorkspaceDataSourceORM, WorkspaceORM
+    rows = await session.execute(
+        select(
+            WorkspaceDataSourceORM.id.label("data_source_id"),
+            WorkspaceDataSourceORM.label.label("data_source_label"),
+            WorkspaceDataSourceORM.ontology_id.label("ontology_id"),
+            WorkspaceORM.id.label("workspace_id"),
+            WorkspaceORM.name.label("workspace_name"),
+        )
+        .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        .order_by(WorkspaceORM.name, WorkspaceDataSourceORM.label)
+    )
+    return [
+        {
+            "workspaceId": r.workspace_id,
+            "workspaceName": r.workspace_name,
+            "dataSourceId": r.data_source_id,
+            "dataSourceLabel": r.data_source_label or r.data_source_id,
+            "ontologyId": r.ontology_id,
+        }
+        for r in rows.all()
+    ]
+
+
 # ------------------------------------------------------------------ #
 # Import                                                               #
 # ------------------------------------------------------------------ #
@@ -744,6 +879,10 @@ async def import_ontology(
     row = await get_ontology_orm(session, target_id)
     if not row:
         raise ValueError(f"Ontology '{target_id}' not found")
+
+    # Reconcile flags ↔ flat lists so the diff below compares (and the write
+    # persists) self-consistent classification.
+    _sync_classification(req)
 
     if row.deleted_at:
         raise ValueError("Cannot import into a deleted semantic layer. Restore it first.")

@@ -11,13 +11,8 @@ import * as LucideIcons from 'lucide-react'
 import type { RelationshipTypeSchema, RelationshipVisualConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
 import { toRelationshipTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
-
-const COLOR_PALETTE = [
-  '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6',
-  '#10b981', '#22c55e', '#84cc16', '#eab308', '#f59e0b',
-  '#f97316', '#ef4444', '#ec4899', '#d946ef', '#a855f7',
-  '#64748b', '#6b7280', '#94a3b8',
-]
+import { DEFAULT_REL_VISUAL } from '@/features/ontology/lib/ontology-types'
+import { ColorInput } from '@/components/ui/ColorInput'
 
 const TAB_DEFS = [
   { id: 'basic' as const, label: 'Identity', icon: LucideIcons.FileText },
@@ -50,15 +45,7 @@ function createDefaultRelType(): RelTypeWithClassifications {
     description: '',
     sourceTypes: [],
     targetTypes: [],
-    visual: {
-      strokeColor: '#6366f1',
-      strokeWidth: 2,
-      strokeStyle: 'solid',
-      animated: true,
-      animationSpeed: 'normal',
-      arrowType: 'arrow',
-      curveType: 'bezier',
-    },
+    visual: { ...DEFAULT_REL_VISUAL },
     bidirectional: false,
     showLabel: false,
     isContainment: false,
@@ -378,26 +365,9 @@ export function RelationshipTypeEditor({
                 </div>
 
                 <Section title="Stroke Color">
-                  <div className="flex flex-wrap gap-1.5 mb-2">
-                    {COLOR_PALETTE.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => updateVisual('strokeColor', c)}
-                        className={cn(
-                          'w-7 h-7 rounded-lg transition-all',
-                          form.visual.strokeColor === c
-                            ? 'ring-2 ring-offset-2 ring-offset-canvas ring-ink scale-110 shadow-md'
-                            : 'hover:scale-110',
-                        )}
-                        style={{ backgroundColor: c }}
-                      />
-                    ))}
-                  </div>
-                  <input
-                    type="color"
+                  <ColorInput
                     value={form.visual.strokeColor}
-                    onChange={(e) => updateVisual('strokeColor', e.target.value)}
-                    className="w-full h-7 rounded-lg cursor-pointer border border-glass-border"
+                    onChange={c => updateVisual('strokeColor', c)}
                   />
                 </Section>
 

@@ -16,6 +16,7 @@
 import { useMemo } from 'react'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import {
+  useSchemaStore,
   useEntityTypes as useGlobalEntityTypes,
   useRelationshipTypes as useGlobalRelationshipTypes,
   useContainmentEdgeTypes as useGlobalContainmentEdgeTypes,
@@ -25,7 +26,7 @@ import {
   isContainmentEdgeType,
   isLineageEdgeType,
 } from '@/store/schema'
-import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+import type { EntityTypeSchema, EntityVisualConfig, RelationshipTypeSchema } from '@/types/schema'
 
 const EMPTY_STRING_ARRAY: string[] = []
 
@@ -87,6 +88,41 @@ export function useViewIsContainmentEdge(): (edgeType: string) => boolean {
 export function useViewIsLineageEdge(): (edgeType: string) => boolean {
   const types = useViewLineageEdgeTypes()
   return (edgeType: string) => isLineageEdgeType(edgeType, types)
+}
+
+/** Entity type definition (by id) for the current view's ontology.
+ *
+ * Inside a view context the lookup is strictly view-scoped so node styling
+ * can never bleed in from a DIFFERENT data source's ontology (the global
+ * store tracks whichever scope last loaded). Outside a view context it
+ * falls back to the global store selector — unchanged behavior. */
+export function useViewEntityType(typeId: string): EntityTypeSchema | undefined {
+  const ctx = useViewExecutionContext()
+  const getGlobal = useSchemaStore((s) => s.getEntityType)
+  return useMemo(() => {
+    if (ctx) {
+      const types = ctx.schema.entityTypes
+      return (
+        types.find((et) => et.id === typeId) ??
+        types.find((et) => et.id.toLowerCase() === typeId.toLowerCase())
+      )
+    }
+    return getGlobal(typeId)
+  }, [ctx, getGlobal, typeId])
+}
+
+/** Visual config for an entity type, view-scoped, with the active view's
+ *  per-type overrides applied (same merge as the global getEntityVisual). */
+export function useViewEntityVisual(typeId: string): EntityVisualConfig | undefined {
+  const ctx = useViewExecutionContext()
+  const entityType = useViewEntityType(typeId)
+  const getGlobalVisual = useSchemaStore((s) => s.getEntityVisual)
+  const override = useSchemaStore((s) => s.getActiveView()?.entityOverrides[typeId])
+  return useMemo(() => {
+    if (!ctx) return getGlobalVisual(typeId)
+    if (!entityType) return undefined
+    return override ? { ...entityType.visual, ...override } : entityType.visual
+  }, [ctx, entityType, getGlobalVisual, override, typeId])
 }
 
 /** Entity type hierarchy map for the current view's ontology. */

@@ -303,7 +303,9 @@ const FILTERS: { key: AdoptionFilter; label: string; tone: 'neutral' | 'ok' | 'd
   { key: 'unprofiled', label: 'Not profiled', tone: 'muted' },
 ]
 
-function FacetChip({ label, count, tone, active, onClick }: {
+/** Filter chip with a facet count. Exported for the Health tab's sibling
+ *  sections (SourceMappingSection) and the assignment Matches tab. */
+export function FacetChip({ label, count, tone, active, onClick }: {
   label: string; count: number; tone: 'neutral' | 'ok' | 'drift' | 'unmapped' | 'muted'
   active: boolean; onClick: () => void
 }) {

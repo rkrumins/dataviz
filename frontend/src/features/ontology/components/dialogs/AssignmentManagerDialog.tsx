@@ -2,16 +2,26 @@
  * AssignmentManagerDialog — full modal for managing ontology-to-data-source
  * assignments with tooltips, replace confirmation, and workspace grouping.
  */
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
   X, Database, Layers, Search, CheckCircle2, AlertTriangle,
-  ArrowRight, Loader2, Unlink, Shield, ChevronDown, ChevronRight,
-  HelpCircle, RefreshCw,
+  ArrowRight, Loader2, Unlink, Shield, ChevronDown, ChevronRight, ChevronLeft,
+  HelpCircle, RefreshCw, Clock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import {
+  ontologyDefinitionService,
+  type OntologyDefinitionResponse,
+  type CoverageRankingFilter,
+} from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { FacetChip } from '../panels/AdoptionMatchSection'
+import { TablePagination } from '@/components/ui/TablePagination'
+
+const SECTION_PAGE_SIZE = 10
 
 // ---------------------------------------------------------------------------
 // Tooltip — lightweight hover tooltip (no portal, just CSS positioning)
@@ -50,9 +60,11 @@ interface AssignmentManagerDialogProps {
   onUnassign: (workspaceId: string, dataSourceId: string) => void
   onRollOutToWorkspace: (workspaceId: string) => void
   onClose: () => void
+  /** Open on a specific tab — 'matches' hosts the coverage-ranked reverse-suggest view. */
+  initialTab?: TabId
 }
 
-type TabId = 'all' | 'assigned' | 'unassigned' | 'other'
+type TabId = 'all' | 'assigned' | 'unassigned' | 'other' | 'matches'
 
 // ---------------------------------------------------------------------------
 // Component
@@ -67,14 +79,21 @@ export function AssignmentManagerDialog({
   onUnassign,
   onRollOutToWorkspace,
   onClose,
+  initialTab,
 }: AssignmentManagerDialogProps) {
   const [search, setSearch] = useState('')
   const [searchFocused, setSearchFocused] = useState(false)
-  const [activeTab, setActiveTab] = useState<TabId>('all')
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? 'all')
   const [collapsedWs, setCollapsedWs] = useState<Set<string>>(new Set())
   const [confirmRollout, setConfirmRollout] = useState<{ wsId: string; wsName: string; dsCount: number } | null>(null)
   // Replace confirmation state
   const [confirmReplace, setConfirmReplace] = useState<CategorizedDs | null>(null)
+  // Filtering happens on the debounced value so keystrokes don't re-filter
+  // (and, in the Matches tab, don't each fire a server request).
+  const debouncedSearch = useDebouncedValue(search, 250)
+  // Per-section page index (sections paginate independently on large fleets).
+  const [sectionPages, setSectionPages] = useState<Record<string, number>>({})
+  useEffect(() => { setSectionPages({}) }, [debouncedSearch, activeTab])
 
   const ontologyNames = useMemo(() => {
     const m = new Map<string, string>()
@@ -104,8 +123,8 @@ export function AssignmentManagerDialog({
   const totalDs = assignedToThis.length + unassigned.length + assignedToOther.length
 
   const filterList = (list: CategorizedDs[]) => {
-    if (!search.trim()) return list
-    const q = search.toLowerCase()
+    if (!debouncedSearch.trim()) return list
+    const q = debouncedSearch.toLowerCase()
     return list.filter(d => d.dsLabel.toLowerCase().includes(q) || d.wsName.toLowerCase().includes(q))
   }
 
@@ -137,6 +156,7 @@ export function AssignmentManagerDialog({
     { id: 'assigned', label: 'Assigned', count: assignedToThis.length, tooltip: 'Data sources currently using this ontology' },
     { id: 'unassigned', label: 'Unassigned', count: unassigned.length, tooltip: 'Data sources with no ontology — assign to enable features' },
     { id: 'other', label: 'Other Schema', count: assignedToOther.length, tooltip: 'Data sources using a different ontology — replace to switch' },
+    { id: 'matches', label: 'Best Matches', count: totalDs, tooltip: 'Rank every data source by how well this layer covers its graph' },
   ]
 
   // Render a data source row
@@ -217,7 +237,6 @@ export function AssignmentManagerDialog({
     emptyMsg: string
     helpText: string
   }) {
-    const grouped = groupByWorkspace(list)
     if (list.length === 0) {
       return (
         <div className="px-4 py-6 text-center">
@@ -226,6 +245,13 @@ export function AssignmentManagerDialog({
         </div>
       )
     }
+
+    // Page the flat list, then group the visible slice by workspace — keeps
+    // the DOM to one page of rows however many sources the fleet has.
+    const page = sectionPages[variant] ?? 0
+    const paged = list.slice(page * SECTION_PAGE_SIZE, (page + 1) * SECTION_PAGE_SIZE)
+    const grouped = groupByWorkspace(paged)
+    const allGrouped = groupByWorkspace(list)
 
     return (
       <div>
@@ -236,9 +262,9 @@ export function AssignmentManagerDialog({
             <HelpCircle className="w-3 h-3 text-ink-muted/40 hover:text-ink-muted cursor-help transition-colors" />
           </Tooltip>
 
-          {variant === 'unassigned' && grouped.length > 0 && (
+          {variant === 'unassigned' && allGrouped.length > 0 && (
             <div className="flex items-center gap-1 ml-auto">
-              {grouped.map(([wsId, { wsName, items }]) => (
+              {allGrouped.map(([wsId, { wsName, items }]) => (
                 <Tooltip key={wsId} text={`Assign "${ontology.name}" to all ${items.length} data source${items.length !== 1 ? 's' : ''} in ${wsName}`}>
                   <button
                     onClick={() => setConfirmRollout({ wsId, wsName, dsCount: items.length })}
@@ -271,6 +297,20 @@ export function AssignmentManagerDialog({
             </div>
           )
         })}
+
+        {list.length > SECTION_PAGE_SIZE && (
+          <div className="flex items-center justify-between px-4 py-2">
+            <span className="text-[11px] text-ink-muted tabular-nums">
+              Showing {page * SECTION_PAGE_SIZE + 1}–{Math.min((page + 1) * SECTION_PAGE_SIZE, list.length)} of {list.length}
+            </span>
+            <TablePagination
+              page={page}
+              pageSize={SECTION_PAGE_SIZE}
+              total={list.length}
+              onPageChange={p => setSectionPages(s => ({ ...s, [variant]: p }))}
+            />
+          </div>
+        )}
       </div>
     )
   }
@@ -398,6 +438,17 @@ export function AssignmentManagerDialog({
             <Section title="Using another schema" list={filteredOther} variant="other"
               icon={Shield} dotColor="bg-amber-500" emptyMsg=""
               helpText="These data sources use a different ontology. Replace to switch them to this one" />
+          )}
+
+          {activeTab === 'matches' && (
+            <MatchesTab
+              ontology={ontology}
+              search={search}
+              isAssigning={isAssigning}
+              onAssign={onAssign}
+              onReplace={d => setConfirmReplace(d)}
+              ontologyNames={ontologyNames}
+            />
           )}
 
           {activeTab === 'all' && filteredAssigned.length === 0 && filteredUnassigned.length === 0 && filteredOther.length === 0 && (
@@ -541,5 +592,185 @@ export function AssignmentManagerDialog({
         </>
       )}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Matches tab — coverage-ranked reverse suggest, served by ONE backend request
+// (GET /{id}/coverage-ranking over cached profiling stats) instead of the old
+// two-requests-per-source client fan-out. Server-paged and facet-filtered.
+// ---------------------------------------------------------------------------
+
+const MATCHES_PAGE_SIZE = 10
+
+const MATCH_FILTERS: { key: CoverageRankingFilter; facet: 'all' | 'unassigned' | 'assignedOther' | 'assignedThis'; label: string; tone: 'neutral' | 'ok' | 'drift' | 'muted' }[] = [
+  { key: 'all', facet: 'all', label: 'All', tone: 'neutral' },
+  { key: 'unassigned', facet: 'unassigned', label: 'Unassigned', tone: 'muted' },
+  { key: 'assigned-other', facet: 'assignedOther', label: 'Other schema', tone: 'drift' },
+  { key: 'assigned-this', facet: 'assignedThis', label: 'Using this', tone: 'ok' },
+]
+
+function MatchesTab({
+  ontology, search, isAssigning, onAssign, onReplace, ontologyNames,
+}: {
+  ontology: OntologyDefinitionResponse
+  search: string
+  isAssigning: boolean
+  onAssign: (workspaceId: string, dataSourceId: string) => void
+  onReplace: (d: CategorizedDs) => void
+  ontologyNames: Map<string, string>
+}) {
+  const debouncedSearch = useDebouncedValue(search.trim(), 250)
+  const [filter, setFilter] = useState<CoverageRankingFilter>('all')
+  const [offset, setOffset] = useState(0)
+
+  useEffect(() => { setOffset(0) }, [debouncedSearch, filter])
+
+  const { data, isLoading, isFetching, error } = useQuery({
+    queryKey: ['ontology', ontology.id, 'coverage-ranking',
+      { limit: MATCHES_PAGE_SIZE, offset, search: debouncedSearch, filter }],
+    queryFn: () => ontologyDefinitionService.coverageRanking(ontology.id, {
+      limit: MATCHES_PAGE_SIZE, offset, search: debouncedSearch, filter,
+    }),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  })
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-12 justify-center text-ink-muted">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        <span className="text-xs">Ranking data sources by coverage…</span>
+      </div>
+    )
+  }
+  if (error || !data) {
+    return (
+      <div className="px-4 py-12 text-center">
+        <AlertTriangle className="w-6 h-6 text-red-400/60 mx-auto mb-2" />
+        <p className="text-xs text-ink-muted">Couldn't rank data sources: {error instanceof Error ? error.message : 'unknown error'}</p>
+      </div>
+    )
+  }
+
+  const from = data.total === 0 ? 0 : offset + 1
+  const to = Math.min(offset + MATCHES_PAGE_SIZE, data.total)
+  const canPrev = offset > 0
+  const canNext = offset + MATCHES_PAGE_SIZE < data.total
+
+  return (
+    <div>
+      {/* facet chips */}
+      <div className="flex items-center flex-wrap gap-1.5 px-4 pt-3 pb-2">
+        {MATCH_FILTERS.map(f => (
+          <FacetChip key={f.key} label={f.label} tone={f.tone} count={data.facets[f.facet]}
+            active={filter === f.key} onClick={() => setFilter(f.key)} />
+        ))}
+        <span className="text-[10px] text-ink-muted ml-auto">
+          ranked from cached profiles · {data.profiledCount} of {data.facets.all} profiled
+        </span>
+      </div>
+
+      {data.sources.length === 0 && (
+        <div className="px-4 py-12 text-center">
+          <Database className="w-6 h-6 text-ink-muted/30 mx-auto mb-2" />
+          <p className="text-xs text-ink-muted">{debouncedSearch || filter !== 'all' ? 'No data sources match these filters' : 'No data sources available'}</p>
+        </div>
+      )}
+
+      <div className={cn('transition-opacity', isFetching && 'opacity-60')}>
+        {data.sources.map(r => {
+          const isActive = r.currentOntologyId === ontology.id
+          const pct = r.coveragePercent ?? 0
+          const tone = pct >= 80 ? 'text-emerald-500' : pct >= 50 ? 'text-amber-500' : 'text-red-400'
+          return (
+            <div key={`${r.workspaceId}-${r.dataSourceId}`}
+              className="flex items-center gap-3 px-4 py-2.5 border-b border-glass-border/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
+              <div className="w-10 h-10 flex-shrink-0 relative">
+                {!r.profiled ? (
+                  <Tooltip text="Not profiled yet — coverage appears after the insights service scans this source">
+                    <div className="w-10 h-10 rounded-full border-2 border-dashed border-glass-border flex items-center justify-center">
+                      <Clock className="w-3.5 h-3.5 text-ink-muted/60" />
+                    </div>
+                  </Tooltip>
+                ) : (
+                  <>
+                    <svg className="w-10 h-10 -rotate-90" viewBox="0 0 40 40">
+                      <circle cx="20" cy="20" r="16" fill="none" strokeWidth="4"
+                        className="text-black/5 dark:text-white/5" stroke="currentColor" />
+                      <circle cx="20" cy="20" r="16" fill="none" strokeWidth="4" strokeLinecap="round"
+                        strokeDasharray={`${Math.round(pct * 1.005)} 101`}
+                        className={tone} stroke="currentColor" />
+                    </svg>
+                    <span className={cn('absolute inset-0 flex items-center justify-center text-[9px] font-bold', tone)}>
+                      {Math.round(pct)}%
+                    </span>
+                  </>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-ink truncate">{r.dataSourceLabel}</p>
+                <p className="text-[10px] text-ink-muted truncate">
+                  {r.workspaceName}
+                  {r.currentOntologyId && !isActive && (
+                    <> · uses {ontologyNames.get(r.currentOntologyId) ?? r.currentOntologyId}</>
+                  )}
+                  {r.profiled && (r.uncoveredEntityCount > 0 || r.uncoveredRelationshipCount > 0) && (
+                    <> · {r.uncoveredEntityCount + r.uncoveredRelationshipCount} uncovered type{r.uncoveredEntityCount + r.uncoveredRelationshipCount !== 1 ? 's' : ''}</>
+                  )}
+                  {!r.profiled && <> · not profiled yet</>}
+                </p>
+              </div>
+
+              {isActive ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                  <CheckCircle2 className="w-2.5 h-2.5" /> Active
+                </span>
+              ) : r.currentOntologyId ? (
+                <button
+                  onClick={() => onReplace({
+                    wsId: r.workspaceId, wsName: r.workspaceName, dsId: r.dataSourceId,
+                    dsLabel: r.dataSourceLabel,
+                    otherOntologyName: ontologyNames.get(r.currentOntologyId!) ?? r.currentOntologyId!,
+                  })}
+                  disabled={isAssigning}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 transition-colors disabled:opacity-50">
+                  <RefreshCw className="w-3 h-3" /> Replace
+                </button>
+              ) : (
+                <button
+                  onClick={() => onAssign(r.workspaceId, r.dataSourceId)}
+                  disabled={isAssigning}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20 transition-colors disabled:opacity-50">
+                  <ArrowRight className="w-3 h-3" /> Assign
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* pagination */}
+      {data.total > 0 && (
+        <div className="flex items-center justify-between px-4 py-2.5">
+          <span className="text-[11px] text-ink-muted tabular-nums">
+            Showing <span className="text-ink font-medium">{from}–{to}</span> of {data.total}
+          </span>
+          {(canPrev || canNext) && (
+            <div className="inline-flex items-center gap-1">
+              <button disabled={!canPrev} onClick={() => setOffset(o => Math.max(0, o - MATCHES_PAGE_SIZE))}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-glass-border text-[11px] text-ink-muted hover:text-ink hover:border-glass-border/80 disabled:opacity-40 disabled:pointer-events-none transition-colors">
+                <ChevronLeft className="w-3.5 h-3.5" />Prev
+              </button>
+              <button disabled={!canNext} onClick={() => setOffset(o => o + MATCHES_PAGE_SIZE)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-glass-border text-[11px] text-ink-muted hover:text-ink hover:border-glass-border/80 disabled:opacity-40 disabled:pointer-events-none transition-colors">
+                Next<ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

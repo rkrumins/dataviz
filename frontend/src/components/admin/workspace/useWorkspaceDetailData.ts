@@ -28,6 +28,8 @@ export interface DataSourceProviderInfo {
   providerType: string   // 'falkordb' | 'neo4j' | 'datahub' | 'mock'
   sourceIdentifier?: string
   catalogItemName?: string
+  host?: string
+  port?: number
 }
 
 export interface UseWorkspaceDetailDataReturn {

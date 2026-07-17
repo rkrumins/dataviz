@@ -34,7 +34,9 @@ async function fetchVocabAlignment(wsId: string, dataSourceId: string): Promise<
   return (await res.json()) as VocabAlignment
 }
 
-async function confirmVariant(
+/** Record a Keep/Split decision for a multi-variant type. Exported for the
+ *  Schema page's Health-tab mapping table, which reuses the same route. */
+export async function confirmVariant(
   wsId: string, dataSourceId: string, declared: string, keepMerged: boolean, dimension: string,
 ): Promise<void> {
   const params = new URLSearchParams({

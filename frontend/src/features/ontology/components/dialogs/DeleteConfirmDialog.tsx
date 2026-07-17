@@ -6,12 +6,12 @@ import { useState, useRef, useEffect } from 'react'
 import { AlertTriangle, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 interface DeleteConfirmDialogProps {
   ontology: OntologyDefinitionResponse
   assignmentCount: number
-  onConfirm: () => void
+  onConfirm: () => void | Promise<void>
   onClose: () => void
 }
 
@@ -30,12 +30,29 @@ export function DeleteConfirmDialog({
     inputRef.current?.focus()
   }, [])
 
-  const blocked = ontology.isSystem || assignmentCount > 0
+  // The passed-in count comes from the client-side workspace store, which can
+  // be stale. Fetch the server's assignment list too and trust whichever says
+  // "in use" — otherwise Delete can be enabled only to 409 on the server.
+  const [serverAssignmentCount, setServerAssignmentCount] = useState<number | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    ontologyDefinitionService.getAssignments(ontology.id)
+      .then(rows => { if (!cancelled) setServerAssignmentCount(rows.length) })
+      .catch(() => { if (!cancelled) setServerAssignmentCount(null) })
+    return () => { cancelled = true }
+  }, [ontology.id])
+
+  const effectiveAssignmentCount = Math.max(assignmentCount, serverAssignmentCount ?? 0)
+  const blocked = ontology.isSystem || effectiveAssignmentCount > 0
 
   async function handleDelete() {
-    if (blocked || !nameMatch) return
+    if (blocked || !nameMatch || isDeleting) return
     setIsDeleting(true)
-    onConfirm()
+    try {
+      await onConfirm()
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   return (
@@ -81,10 +98,10 @@ export function DeleteConfirmDialog({
                   System semantic layers cannot be deleted
                 </li>
               )}
-              {assignmentCount > 0 && (
+              {effectiveAssignmentCount > 0 && (
                 <li className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
                   <div className="w-1 h-1 rounded-full bg-red-500" />
-                  Assigned to {assignmentCount} data source{assignmentCount !== 1 ? 's' : ''} — unassign first
+                  Assigned to {effectiveAssignmentCount} data source{effectiveAssignmentCount !== 1 ? 's' : ''} — unassign first
                 </li>
               )}
             </ul>

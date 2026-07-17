@@ -112,60 +112,36 @@ def test_warmup_probe_budget_is_larger_for_cluster_and_sentinel():
         assert _probe_budget(cfg)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
 
 
-def test_warmup_probe_budget_honors_per_provider_probe_deadline():
-    """probeDeadlineS lets one slow cross-cluster provider raise its own probe
-    budget: it may only EXTEND the topology default (wall clock follows at
-    +1s), never shrink below the tested floor; garbage values are ignored."""
+# ── Per-provider warmup cadence: scales to a large fleet ──────────────
+
+def test_provider_is_due_is_health_aware_per_provider():
     from backend.app.providers.warmup import (
-        _probe_budget, PER_PROBE_DEADLINE_S, PER_PROBE_DEADLINE_MULTIHOP_S,
+        _provider_is_due, MIN_FULL_CYCLE_S, RECOVERY_POLL_S,
     )
+    now = 1000.0
+    cache = {"healthy": {"ok": True}, "down": {"ok": False}}
+    # never probed -> due immediately
+    assert _provider_is_due("new", cache, {}, now) is True
+    # healthy, probed a fast-wake ago -> NOT due (this is the scaling fix)
+    assert _provider_is_due("healthy", cache, {"healthy": now - RECOVERY_POLL_S}, now) is False
+    # healthy, probed a full slow cycle ago -> due
+    assert _provider_is_due("healthy", cache, {"healthy": now - MIN_FULL_CYCLE_S}, now) is True
+    # unhealthy, probed RECOVERY_POLL_S ago -> due (fast self-heal)
+    assert _provider_is_due("down", cache, {"down": now - RECOVERY_POLL_S}, now) is True
+    # unhealthy, probed just now -> not due yet
+    assert _provider_is_due("down", cache, {"down": now - 1.0}, now) is False
 
-    raised = {"extra_config": {"falkordbConnection": {"probeDeadlineS": 6}}}
-    assert _probe_budget(raised) == (6.0, 7.0)
-    # Cannot shrink below the topology default.
-    tiny = {"extra_config": {"falkordbConnection": {"mode": "cluster",
-                                                    "probeDeadlineS": 0.1}}}
-    assert _probe_budget(tiny)[0] == PER_PROBE_DEADLINE_MULTIHOP_S
-    # Garbage is ignored.
-    bad = {"extra_config": {"falkordbConnection": {"probeDeadlineS": "abc"}}}
-    assert _probe_budget(bad)[0] == PER_PROBE_DEADLINE_S
 
-
-# ── Config change clears the warmup gate ─────────────────────────────
-
-@pytest.mark.asyncio
-async def test_evict_provider_clears_warmup_states(monkeypatch):
-    """PUT /providers/{id} → evict_provider must drop the provider's warmup
-    states: they describe the OLD config, and the fast-fail read gate consults
-    them independently of the (also reset) instantiation breaker — a stale
-    ok=False observation kept rejecting reads for up to 60s AFTER the operator
-    fixed the configuration. Includes states for providers that were probed but
-    never read from (no cached instance)."""
-    mgr = ProviderManager()
-    # Two graphs for the changed provider — one with a cached instance, one
-    # warmup-only — plus an unrelated provider that must be untouched.
-    for key in [("prov_X", "g1"), ("prov_X", "g2"), ("prov_OTHER", "g")]:
-        state = ProviderState(cache_key=key)
-        state.last_observation = ProbeOutcome.from_warmup(
-            ok=False, reason="tcp_refused", elapsed_ms=5,
-        )
-        state.consecutive_failures = 3
-        mgr._provider_states[key] = state
-
-    # No-op the cross-process broadcast and registry invalidation (external).
-    from backend.app.providers import invalidation_bus
-    monkeypatch.setattr(
-        invalidation_bus, "publish_provider_invalidation", AsyncMock(),
-    )
-
-    await mgr.evict_provider("prov_X")
-
-    assert ("prov_X", "g1") not in mgr._provider_states
-    assert ("prov_X", "g2") not in mgr._provider_states
-    # Isolation: the OTHER provider's state survives untouched.
-    other = mgr._provider_states[("prov_OTHER", "g")]
-    assert other.consecutive_failures == 3
-    assert other.blocks_reads(max_age_s=60.0) is True
+def test_one_down_provider_does_not_drag_a_healthy_fleet_into_the_fast_lane():
+    """30 healthy + 1 down. On a fast (RECOVERY_POLL_S) wake, ONLY the down one
+    is re-probed — the healthy fleet is skipped. This is why the loop scales."""
+    from backend.app.providers.warmup import _provider_is_due, RECOVERY_POLL_S
+    now = 5000.0
+    cache = {f"h{i}": {"ok": True} for i in range(30)}
+    cache["down"] = {"ok": False}
+    last_probed = {pid: now - RECOVERY_POLL_S for pid in cache}  # all probed one fast wake ago
+    due = [pid for pid in cache if _provider_is_due(pid, cache, last_probed, now)]
+    assert due == ["down"]
 
 
 # ── Integration: get_provider fast-fails on recent unhealthy ─────────

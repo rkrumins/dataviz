@@ -2,14 +2,23 @@
  * VersionHistoryPanel — version timeline + audit trail for an ontology.
  * Shows version entries alongside lifecycle events (create, update, publish,
  * delete, restore, clone) with actor info, timestamps, and change diffs.
+ * Older versions can be COMPARED with the current one and RESTORED as a new
+ * draft (composition of new-version + update — nothing is overwritten).
  */
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Loader2, Clock, CheckCircle2, ArrowRight, Box, GitBranch, User, Plus, Minus, Upload, Trash2, RotateCcw, Copy, PenLine } from 'lucide-react'
+import { Loader2, Clock, CheckCircle2, ArrowRight, Box, GitBranch, User, Plus, Minus, Upload, Trash2, RotateCcw, Copy, PenLine, GitCompareArrows } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { OntologyDefinitionResponse, OntologyAuditEntry } from '@/services/ontologyDefinitionService'
+import { ontologyDefinitionService, type OntologyDefinitionResponse, type OntologyAuditEntry } from '@/services/ontologyDefinitionService'
 import { useOntologyVersions, useOntologyAuditLog } from '../../hooks/useOntologies'
+import { useOntologyMutations } from '../../hooks/useOntologyMutations'
+import { useSemanticLayerAccess } from '../../lib/useSemanticLayerAccess'
+import { restoreVersionAsDraft } from '../../lib/restoreVersion'
 import { OntologyStatusBadge } from '../OntologyStatusBadge'
+import { VersionDiffDialog } from '../dialogs/VersionDiffDialog'
 import { formatDate } from '../../lib/ontology-parsers'
+import { useToast } from '@/components/ui/toast'
+import { TablePagination } from '@/components/ui/TablePagination'
 
 interface VersionHistoryPanelProps {
   ontology: OntologyDefinitionResponse
@@ -61,10 +70,48 @@ function TypeDiffBadges({ changes }: { changes: OntologyAuditEntry['changes'] })
   )
 }
 
+const AUDIT_PAGE_SIZE = 25
+const VERSIONS_PAGE_SIZE = 10
+
 export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
+  const [auditLimit, setAuditLimit] = useState(AUDIT_PAGE_SIZE)
   const { data: versions, isLoading: versionsLoading } = useOntologyVersions(ontology.id)
-  const { data: auditLog, isLoading: auditLoading } = useOntologyAuditLog(ontology.id)
+  const { data: auditLog, isLoading: auditLoading, isFetching: auditFetching } = useOntologyAuditLog(ontology.id, auditLimit)
   const navigate = useNavigate()
+  const access = useSemanticLayerAccess()
+  const mutations = useOntologyMutations()
+  const { showToast } = useToast()
+
+  const [compareTarget, setCompareTarget] = useState<OntologyDefinitionResponse | null>(null)
+  const [restoreTarget, setRestoreTarget] = useState<OntologyDefinitionResponse | null>(null)
+  const [isRestoring, setIsRestoring] = useState(false)
+  const [versionsPage, setVersionsPage] = useState(0)
+
+  // A full page means there may be more events server-side.
+  const auditMayHaveMore = (auditLog?.length ?? 0) >= auditLimit
+
+  // Versions arrive newest-first; the newest version is the new-version source.
+  const latestVersion = versions?.[0]
+
+  async function confirmRestore() {
+    if (!restoreTarget || !latestVersion || isRestoring) return
+    setIsRestoring(true)
+    try {
+      const draft = await restoreVersionAsDraft(restoreTarget, latestVersion.id, {
+        createNewVersion: id => mutations.createNewVersion.mutateAsync(id),
+        update: (id, req) => mutations.update.mutateAsync({ id, req }),
+        listVersions: id => ontologyDefinitionService.listVersions(id),
+      })
+      showToast('success', `v${restoreTarget.version}'s content restored into draft v${draft.version}`)
+      setRestoreTarget(null)
+      setCompareTarget(null)
+      navigate(`/schema/${draft.id}`)
+    } catch (err) {
+      showToast('error', `Restore failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      setIsRestoring(false)
+    }
+  }
 
   const isLoading = versionsLoading || auditLoading
 
@@ -107,13 +154,21 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
             <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[10px] font-bold text-ink-muted">
               {versions!.length} version{versions!.length !== 1 ? 's' : ''}
             </span>
+            <TablePagination
+              page={versionsPage}
+              pageSize={VERSIONS_PAGE_SIZE}
+              total={versions!.length}
+              onPageChange={setVersionsPage}
+              className="ml-auto"
+            />
           </div>
 
           <div className="relative pl-8">
             <div className="absolute left-[13px] top-3 bottom-3 w-1 rounded-full bg-gradient-to-b from-indigo-300 via-glass-border to-glass-border dark:from-indigo-700 dark:via-glass-border dark:to-glass-border" />
 
             <div className="space-y-3">
-              {versions!.map((v, i) => {
+              {versions!.slice(versionsPage * VERSIONS_PAGE_SIZE, (versionsPage + 1) * VERSIONS_PAGE_SIZE).map((v, pageIdx) => {
+                const i = versionsPage * VERSIONS_PAGE_SIZE + pageIdx
                 const isActive = v.id === ontology.id
                 const entityCount = Object.keys(v.entityTypeDefinitions ?? {}).length
                 const relCount = Object.keys(v.relationshipTypeDefinitions ?? {}).length
@@ -214,9 +269,28 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                       )}
                     </div>
 
-                    {!isActive && (
-                      <ArrowRight className="w-4 h-4 text-ink-muted/30 flex-shrink-0 mt-1" />
-                    )}
+                    {/* Version actions */}
+                    <div className="flex items-center gap-1 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
+                      {!isActive && (
+                        <button
+                          onClick={() => setCompareTarget(v)}
+                          title={`Compare v${ontology.version} with v${v.version}`}
+                          className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-ink-muted hover:text-indigo-600 hover:bg-indigo-500/[0.06] transition-colors"
+                        >
+                          <GitCompareArrows className="w-3 h-3" /> Compare
+                        </button>
+                      )}
+                      {access.canEdit && v.id !== latestVersion?.id && (
+                        <button
+                          onClick={() => setRestoreTarget(v)}
+                          title={`Restore v${v.version}'s content as a new draft`}
+                          className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-ink-muted hover:text-amber-600 hover:bg-amber-500/[0.06] transition-colors"
+                        >
+                          <RotateCcw className="w-3 h-3" /> Restore
+                        </button>
+                      )}
+                      {!isActive && <ArrowRight className="w-4 h-4 text-ink-muted/30" />}
+                    </div>
                   </div>
                 )
               })}
@@ -234,7 +308,7 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
               Activity Log
             </h3>
             <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[10px] font-bold text-ink-muted">
-              {auditLog!.length} event{auditLog!.length !== 1 ? 's' : ''}
+              {auditLog!.length}{auditMayHaveMore ? '+' : ''} event{auditLog!.length !== 1 ? 's' : ''}
             </span>
           </div>
 
@@ -283,8 +357,76 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                 )
               })}
             </div>
+
+            {auditMayHaveMore && (
+              <button
+                onClick={() => setAuditLimit(l => l + AUDIT_PAGE_SIZE)}
+                disabled={auditFetching}
+                className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-500 hover:text-indigo-600 hover:bg-indigo-500/[0.06] transition-colors disabled:opacity-50"
+              >
+                {auditFetching ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                Load more events
+              </button>
+            )}
           </div>
         </div>
+      )}
+
+      {/* Compare dialog */}
+      {compareTarget && (
+        <VersionDiffDialog
+          base={ontology}
+          target={compareTarget}
+          onRestore={
+            access.canEdit && compareTarget.id !== latestVersion?.id
+              ? () => setRestoreTarget(compareTarget)
+              : undefined
+          }
+          onClose={() => setCompareTarget(null)}
+        />
+      )}
+
+      {/* Restore confirmation */}
+      {restoreTarget && (
+        <>
+          <div className="fixed inset-0 z-[110] bg-black/40" onClick={() => !isRestoring && setRestoreTarget(null)} />
+          <div className="fixed inset-0 z-[110] flex items-center justify-center pointer-events-none">
+            <div className="pointer-events-auto bg-canvas-elevated rounded-2xl border border-glass-border shadow-lg w-full max-w-md mx-4 overflow-hidden animate-in zoom-in-95 fade-in duration-200">
+              <div className="p-6">
+                <div className="flex items-start gap-3 mb-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0">
+                    <RotateCcw className="w-5 h-5 text-amber-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-ink">Restore v{restoreTarget.version}?</h3>
+                    <p className="text-sm text-ink-muted mt-1">
+                      This creates a <strong>new draft</strong> containing v{restoreTarget.version}&rsquo;s
+                      content. Nothing is overwritten — v{latestVersion?.version ?? ontology.version} and
+                      every other version stay exactly as they are. Publish the draft when you&rsquo;re ready.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-glass-border bg-black/[0.01] dark:bg-white/[0.01]">
+                <button
+                  onClick={() => setRestoreTarget(null)}
+                  disabled={isRestoring}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmRestore}
+                  disabled={isRestoring}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm shadow-amber-500/20 disabled:opacity-60"
+                >
+                  {isRestoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                  {isRestoring ? 'Restoring…' : 'Restore as Draft'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )

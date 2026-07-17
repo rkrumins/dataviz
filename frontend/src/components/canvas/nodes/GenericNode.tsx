@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
 import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
+import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
@@ -81,11 +82,13 @@ export const GenericNode = memo(function GenericNode({
   // Support both typeId and type fields
   const typeId = entityData.typeId || (entityData as unknown as Record<string, unknown>).type as string || 'unknown'
 
-  const getEntityType = useSchemaStore((s) => s.getEntityType)
-  const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
-
-  const entityType = getEntityType(typeId)
-  const schemaVisual = getEntityVisual(typeId)
+  // View-scoped lookup: inside a ViewExecutionContext these resolve against
+  // the VIEW's data source ontology (same source as edge containment/lineage
+  // classification), not whichever scope the global store last loaded —
+  // otherwise a node could style with one ontology while its edges classify
+  // with another. Outside a view context they fall back to the global store.
+  const entityType = useViewEntityType(typeId)
+  const schemaVisual = useViewEntityVisual(typeId)
 
   // Hash-palette fallback for types not in the schema (custom graphs)
   const visual: EntityVisualConfig = schemaVisual ?? {
@@ -146,15 +149,18 @@ export const GenericNode = memo(function GenericNode({
 
   // isGhost: use data prop (set by graph loader for placeholder/unknown nodes) rather than hardcoded type check
   const isGhost = entityData.isGhost ?? false
-  const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
+  // Guard entityType like every other read: types not in the schema (custom
+  // graphs — the visual fallback above exists for exactly that) must degrade,
+  // not crash the canvas.
+  const isExpandable = (entityType?.behavior?.expandable ?? false) && ((entityData.childCount ?? 0) > 0)
   // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
-  const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
+  const expansionMode: 'inline' | 'graph' = (entityType?.behavior as any)?.expansionMode ?? 'graph'
   // Add-child affordance is ontology-gated: shown only when this type can
   // contain others. Resolves normally for isPending:'create' ghost nodes.
   // A deletion ghost is READ-ONLY: no add-child / trace toolbar (a deleted entity must not be
   // mutated in place); its toolbar is just Restore.
   const canAddChild = !isGhost && (entityType?.hierarchy?.canContain?.length ?? 0) > 0
-  const canTrace = !isGhost && (entityType?.behavior.traceable ?? false)
+  const canTrace = !isGhost && (entityType?.behavior?.traceable ?? false)
   const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is

@@ -49,6 +49,21 @@ async def get_mapping(
     return await session.scalar(stmt)
 
 
+async def list_mappings_for_ontology(
+    session: AsyncSession, ontology_id: Optional[str], data_source_ids: list[str],
+) -> Dict[str, OntologySourceMappingORM]:
+    """All alignment rows for one ontology across the given sources, keyed by
+    data_source_id — one query instead of one ``get_mapping`` per source."""
+    if not data_source_ids:
+        return {}
+    stmt = select(OntologySourceMappingORM).where(
+        OntologySourceMappingORM.ontology_id == ontology_id,
+        OntologySourceMappingORM.data_source_id.in_(data_source_ids),
+    )
+    rows = (await session.scalars(stmt)).all()
+    return {r.data_source_id: r for r in rows}
+
+
 async def load_explicit_mappings(
     session: AsyncSession, data_source_id: str, ontology_id: Optional[str],
 ) -> Tuple[Dict[str, dict], Dict[str, dict]]:

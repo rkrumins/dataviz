@@ -16,7 +16,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Database, Layers, AlertTriangle, ArrowRight, Search,
-  Shield, CheckCircle2, PenLine, Unlink, Sparkles,
+  Shield, CheckCircle2, PenLine, Unlink, Sparkles, Link2,
   GitBranch, ChevronDown, ChevronUp, ChevronRight, X,
   Plus, BookOpen, Eye, HelpCircle, Compass, MoreHorizontal,
   Grid3x3, LayoutList, Network, CircleDot, Check, Trash2,
@@ -28,6 +28,13 @@ import { useDeploymentMatrix } from '../../hooks/useDeploymentMatrix'
 import { useWorkspaceViewCounts } from '../../hooks/useWorkspaceViewCounts'
 import type { DeploymentEntry } from '../../lib/ontology-types'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { TablePagination } from '@/components/ui/TablePagination'
+
+/** Rows shown per expanded group before paging kicks in. */
+const GROUP_PAGE_SIZE = 10
+/** Matrix cell budget — beyond this the matrix slices workspaces and says so. */
+const MATRIX_MAX_CELLS = 400
 import { WORKSPACE_PALETTES } from '@/components/dashboard/dashboard-constants'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -100,7 +107,9 @@ interface DeploymentDashboardPanelProps {
   workspaces: WorkspaceResponse[]
   ontologies: OntologyDefinitionResponse[]
   onNavigateToOntology: (ontologyId: string) => void
-  onAssign: (workspaceId: string, dataSourceId: string) => void
+  /** Assign an explicit ontology to a data source (dashboard has no "selected"
+   *  ontology, so rows carry their own picker). */
+  onAssign: (workspaceId: string, dataSourceId: string, ontologyId: string) => void
   onUnassign: (workspaceId: string, dataSourceId: string) => void
   onSuggest: (workspaceId: string, dataSourceId: string) => void
   onCreateDraft?: () => void
@@ -115,6 +124,7 @@ export function DeploymentDashboardPanel({
   workspaces,
   ontologies,
   onNavigateToOntology,
+  onAssign,
   onUnassign,
   onSuggest,
   onCreateDraft,
@@ -177,9 +187,14 @@ export function DeploymentDashboardPanel({
     return counts
   }, [ontologies])
 
+  // Per-workspace-group page index; narrowing resets all pages.
+  const [groupPages, setGroupPages] = useState<Record<string, number>>({})
+  const debouncedSearch = useDebouncedValue(search, 250)
+  useEffect(() => { setGroupPages({}) }, [debouncedSearch, quickFilters])
+
   // ─── Entry filtering (search + quick filters) ─────────────────────────
   const filteredEntries = useMemo(() => {
-    const q = search.trim().toLowerCase()
+    const q = debouncedSearch.trim().toLowerCase()
     return entries.filter(e => {
       if (q) {
         const hay = `${e.dataSourceLabel} ${e.workspaceName} ${e.ontologyName ?? ''}`.toLowerCase()
@@ -191,7 +206,7 @@ export function DeploymentDashboardPanel({
       if (quickFilters.has('active') && e.workspaceId !== activeWorkspaceId) return false
       return true
     })
-  }, [entries, search, quickFilters, driftKeys, activeWorkspaceId])
+  }, [entries, debouncedSearch, quickFilters, driftKeys, activeWorkspaceId])
 
   // ─── By-Workspace grouping ───────────────────────────────────────────
   const groupedByWorkspace = useMemo(() => {
@@ -809,33 +824,53 @@ export function DeploymentDashboardPanel({
                   </div>
                 )}
 
-                {/* Data source rows */}
-                {!isCollapsed && (
-                  <div className="divide-y divide-glass-border/30">
-                    {wsEntries.length === 0 && (
-                      <div className="px-5 py-6 text-center text-xs text-ink-muted italic">
-                        No data sources configured in this workspace yet.
-                      </div>
-                    )}
-                    {wsEntries.map(entry => (
-                      <DataSourceRow
-                        key={entry.dataSourceId}
-                        entry={entry}
-                        isSelected={selectedKeys.has(keyOf(entry))}
-                        onToggleSelect={() => toggleSelect(entry)}
-                        viewCount={viewCounts.byDataSource[entry.dataSourceId] ?? 0}
-                        isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
-                        isAssigning={isAssigning}
-                        canSuggest={canSuggest}
-                        onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
-                        onNavigateToOntology={onNavigateToOntology}
-                        onSuggest={onSuggest}
-                        onUnassign={onUnassign}
-                        onNavigateSchemaTab={(ontId, tab) => navigate(`/schema/${ontId}?tab=${tab}`)}
-                      />
-                    ))}
-                  </div>
-                )}
+                {/* Data source rows — paged per group so a 100-source
+                    workspace doesn't mount 100 rows at once */}
+                {!isCollapsed && (() => {
+                  const page = groupPages[workspace.id] ?? 0
+                  const paged = wsEntries.slice(page * GROUP_PAGE_SIZE, (page + 1) * GROUP_PAGE_SIZE)
+                  return (
+                    <div className="divide-y divide-glass-border/30">
+                      {wsEntries.length === 0 && (
+                        <div className="px-5 py-6 text-center text-xs text-ink-muted italic">
+                          No data sources configured in this workspace yet.
+                        </div>
+                      )}
+                      {paged.map(entry => (
+                        <DataSourceRow
+                          key={entry.dataSourceId}
+                          entry={entry}
+                          isSelected={selectedKeys.has(keyOf(entry))}
+                          onToggleSelect={() => toggleSelect(entry)}
+                          viewCount={viewCounts.byDataSource[entry.dataSourceId] ?? 0}
+                          isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
+                          isAssigning={isAssigning}
+                          canSuggest={canSuggest}
+                          ontologies={ontologies}
+                          onAssign={onAssign}
+                          onRowClick={() => goToExplorer(entry.workspaceId, entry.dataSourceId)}
+                          onNavigateToOntology={onNavigateToOntology}
+                          onSuggest={onSuggest}
+                          onUnassign={onUnassign}
+                          onNavigateSchemaTab={(ontId, tab) => navigate(`/schema/${ontId}?tab=${tab}`)}
+                        />
+                      ))}
+                      {wsEntries.length > GROUP_PAGE_SIZE && (
+                        <div className="flex items-center justify-between px-5 py-2">
+                          <span className="text-[11px] text-ink-muted tabular-nums">
+                            Showing {page * GROUP_PAGE_SIZE + 1}–{Math.min((page + 1) * GROUP_PAGE_SIZE, wsEntries.length)} of {wsEntries.length}
+                          </span>
+                          <TablePagination
+                            page={page}
+                            pageSize={GROUP_PAGE_SIZE}
+                            total={wsEntries.length}
+                            onPageChange={p => setGroupPages(s => ({ ...s, [workspace.id]: p }))}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             )
           })}
@@ -859,6 +894,8 @@ export function DeploymentDashboardPanel({
               keyOf={keyOf}
               isAssigning={isAssigning}
               canSuggest={canSuggest}
+              ontologies={ontologies}
+              onAssign={onAssign}
             />
           ))}
         </div>
@@ -1100,6 +1137,7 @@ function CoverageRing({
 // ───────────────────────────────────────────────────────────────────────
 function DataSourceRow({
   entry, isSelected, onToggleSelect, viewCount, isDrift, isAssigning, canSuggest,
+  ontologies, onAssign,
   onRowClick, onNavigateToOntology, onSuggest, onUnassign, onNavigateSchemaTab,
 }: {
   entry: DeploymentEntry
@@ -1109,6 +1147,8 @@ function DataSourceRow({
   isDrift: boolean
   isAssigning: boolean
   canSuggest: boolean
+  ontologies: OntologyDefinitionResponse[]
+  onAssign: (wsId: string, dsId: string, ontologyId: string) => void
   onRowClick: () => void
   onNavigateToOntology: (ontId: string) => void
   onSuggest: (wsId: string, dsId: string) => void
@@ -1257,15 +1297,22 @@ function DataSourceRow({
       </span>
 
       {!entry.ontologyId ? (
-        canSuggest && (
-          <button
-            onClick={e => { e.stopPropagation(); onSuggest(entry.workspaceId, entry.dataSourceId) }}
+        <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+          {canSuggest && (
+            <button
+              onClick={() => onSuggest(entry.workspaceId, entry.dataSourceId)}
+              disabled={isAssigning}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm shadow-indigo-500/20"
+            >
+              <Sparkles className="w-3 h-3" /> Suggest
+            </button>
+          )}
+          <AssignPopover
+            ontologies={ontologies}
             disabled={isAssigning}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors flex-shrink-0 disabled:opacity-50 shadow-sm shadow-indigo-500/20"
-          >
-            <Sparkles className="w-3 h-3" /> Suggest
-          </button>
-        )
+            onPick={ontId => onAssign(entry.workspaceId, entry.dataSourceId, ontId)}
+          />
+        </div>
       ) : (
         <button
           onClick={e => { e.stopPropagation(); onUnassign(entry.workspaceId, entry.dataSourceId) }}
@@ -1275,6 +1322,79 @@ function DataSourceRow({
         >
           <Unlink className="w-3 h-3" />
         </button>
+      )}
+    </div>
+  )
+}
+
+/** Inline ontology picker for unassigned rows — the dashboard has no selected
+ *  ontology, so assignment needs an explicit choice. */
+function AssignPopover({
+  ontologies, disabled, onPick,
+}: { ontologies: OntologyDefinitionResponse[]; disabled: boolean; onPick: (ontologyId: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const candidates = ontologies
+    .filter(o => !o.deletedAt)
+    .filter(o => !query.trim() || o.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => Number(b.isPublished) - Number(a.isPublished) || a.name.localeCompare(b.name))
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        disabled={disabled}
+        className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-semibold border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
+      >
+        <Link2 className="w-3 h-3" /> Assign
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-30 w-64 rounded-xl border border-glass-border bg-canvas-elevated shadow-lg overflow-hidden">
+          {ontologies.length > 5 && (
+            <div className="p-2 border-b border-glass-border/60">
+              <input
+                autoFocus
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Search semantic layers..."
+                className="w-full px-2.5 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-[11px] text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              />
+            </div>
+          )}
+          <div className="max-h-56 overflow-y-auto py-1">
+            {candidates.length === 0 && (
+              <p className="px-3 py-2 text-[11px] text-ink-muted">No semantic layers{query ? ' match' : ' available'}.</p>
+            )}
+            {candidates.map(o => (
+              <button
+                key={o.id}
+                onClick={() => { setOpen(false); setQuery(''); onPick(o.id) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
+              >
+                <span className="text-[11px] font-medium text-ink truncate flex-1">{o.name}</span>
+                <span className={cn(
+                  'px-1.5 py-0.5 rounded-full text-[9px] font-bold border flex-shrink-0',
+                  o.isPublished
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+                )}>
+                  {o.isPublished ? `v${o.version}` : 'draft'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -1305,6 +1425,7 @@ function MenuItem({
 function OntologyGroupCard({
   group, index, viewCounts, driftKeys, selectedKeys, onToggleSelect,
   onNavigateToOntology, onRowClick, onSuggest, onUnassign, onNavigateSchemaTab, keyOf, isAssigning, canSuggest,
+  ontologies, onAssign,
 }: {
   group: {
     ontology: OntologyDefinitionResponse | null
@@ -1324,6 +1445,8 @@ function OntologyGroupCard({
   keyOf: (e: DeploymentEntry) => string
   isAssigning: boolean
   canSuggest: boolean
+  ontologies: OntologyDefinitionResponse[]
+  onAssign: (wsId: string, dsId: string, ontologyId: string) => void
 }) {
   const isUnassigned = group.key === '__unassigned__'
   const ont = group.ontology
@@ -1334,6 +1457,8 @@ function OntologyGroupCard({
   const StatusIcon = status ? STATUS_ICON[status] : null
   const versions = [...new Set(group.entries.map(e => e.ontologyVersion).filter(Boolean))]
   const hasDrift = versions.length > 1
+  const [page, setPage] = useState(0)
+  const pagedEntries = group.entries.slice(page * GROUP_PAGE_SIZE, (page + 1) * GROUP_PAGE_SIZE)
 
   return (
     <div
@@ -1384,7 +1509,7 @@ function OntologyGroupCard({
       </div>
 
       <div className="divide-y divide-glass-border/30">
-        {group.entries.map(entry => (
+        {pagedEntries.map(entry => (
           <DataSourceRow
             key={`${entry.workspaceId}:${entry.dataSourceId}`}
             entry={entry}
@@ -1394,6 +1519,8 @@ function OntologyGroupCard({
             isDrift={driftKeys.has(`${entry.workspaceId}:${entry.dataSourceId}`)}
             isAssigning={isAssigning}
             canSuggest={canSuggest}
+            ontologies={ontologies}
+            onAssign={onAssign}
             onRowClick={() => onRowClick(entry.workspaceId, entry.dataSourceId)}
             onNavigateToOntology={onNavigateToOntology}
             onSuggest={onSuggest}
@@ -1401,6 +1528,19 @@ function OntologyGroupCard({
             onNavigateSchemaTab={onNavigateSchemaTab}
           />
         ))}
+        {group.entries.length > GROUP_PAGE_SIZE && (
+          <div className="flex items-center justify-between px-5 py-2">
+            <span className="text-[11px] text-ink-muted tabular-nums">
+              Showing {page * GROUP_PAGE_SIZE + 1}–{Math.min((page + 1) * GROUP_PAGE_SIZE, group.entries.length)} of {group.entries.length}
+            </span>
+            <TablePagination
+              page={page}
+              pageSize={GROUP_PAGE_SIZE}
+              total={group.entries.length}
+              onPageChange={setPage}
+            />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1437,12 +1577,19 @@ function CoverageMatrix({
     return m
   }, [entries])
 
-  const activeWs = workspaces.filter(w =>
+  const allActiveWs = workspaces.filter(w =>
     entries.some(e => e.workspaceId === w.id),
   )
   const activeOnts = ontologies.filter(o =>
     entries.some(e => e.ontologyId === o.id),
   )
+
+  // The matrix is an at-a-glance view — beyond the cell budget it slices
+  // workspaces (and says so) rather than rendering a quadratic grid.
+  // Use search/quick filters to narrow instead.
+  const maxWsRows = Math.max(1, Math.floor(MATRIX_MAX_CELLS / Math.max(1, activeOnts.length)))
+  const truncated = allActiveWs.length > maxWsRows
+  const activeWs = truncated ? allActiveWs.slice(0, maxWsRows) : allActiveWs
 
   if (activeWs.length === 0 || activeOnts.length === 0) {
     return (
@@ -1456,6 +1603,12 @@ function CoverageMatrix({
 
   return (
     <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-auto">
+      {truncated && (
+        <div className="flex items-center gap-2 px-4 py-2 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-500/[0.06] border-b border-amber-500/15">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          Matrix limited to the first {activeWs.length} of {allActiveWs.length} workspaces — use search or filters above to narrow.
+        </div>
+      )}
       <table className="w-full border-collapse">
         <thead>
           <tr className="bg-canvas-elevated/80">

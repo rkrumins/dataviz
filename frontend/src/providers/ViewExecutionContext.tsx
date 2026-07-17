@@ -26,7 +26,7 @@ import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderStatus } from '@/store/providerStatus'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
-import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType, deriveContainmentEdgeTypes } from '@/store/schema'
+import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType, deriveContainmentEdgeTypes, deriveLineageEdgeTypes } from '@/store/schema'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react'
 
@@ -59,6 +59,20 @@ export function useViewExecutionContext(): ViewExecutionContextValue | null {
   return useContext(ViewExecCtx)
 }
 
+/**
+ * Provide an explicit, static schema to the view-scoped hooks. Used by
+ * previews (the type editor's live node preview renders a REAL GenericNode
+ * against the unsaved form state) and by tests — never by real views, which
+ * go through ViewExecutionProvider's fetch/gate flow.
+ */
+export function StaticViewSchemaProvider({ schema, children }: { schema: ResolvedViewSchema; children: ReactNode }) {
+  const value = useMemo<ViewExecutionContextValue>(
+    () => ({ schema, workspaceId: '__preview__', dataSourceId: null }),
+    [schema],
+  )
+  return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
+}
+
 // ─── Schema Resolution ─────────────────────────────────────────────────────
 
 function resolveSchema(raw: GraphSchema): ResolvedViewSchema {
@@ -67,13 +81,16 @@ function resolveSchema(raw: GraphSchema): ResolvedViewSchema {
   // array is empty/absent (e.g. the cached-ontology synthetic schema), so a
   // lossy payload can't silently disable parent-child nesting in the canvas.
   const explicitContainment = raw.containmentEdgeTypes ?? []
+  const explicitLineage = raw.lineageEdgeTypes ?? []
   return {
     entityTypes: raw.entityTypes.map(convertBackendEntityType),
     relationshipTypes,
     containmentEdgeTypes: explicitContainment.length > 0
       ? explicitContainment
       : deriveContainmentEdgeTypes(relationshipTypes),
-    lineageEdgeTypes: raw.lineageEdgeTypes ?? [],
+    lineageEdgeTypes: explicitLineage.length > 0
+      ? explicitLineage
+      : deriveLineageEdgeTypes(relationshipTypes),
     rootEntityTypes: raw.rootEntityTypes ?? [],
     ontologyDigest: raw.ontologyDigest ?? null,
   }

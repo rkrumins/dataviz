@@ -739,6 +739,8 @@ class OntologyResolutionResponse(BaseModel):
     )
     advisory_warnings: List[str] = Field(default_factory=list, alias="advisoryWarnings")
     blocking_reasons: List[str] = Field(default_factory=list, alias="blockingReasons")
+    # Share of introspected types covered by the ontology; None without introspection data.
+    coverage_percent: Optional[float] = Field(None, alias="coveragePercent")
     fingerprint: Optional[str] = None
 
     class Config:

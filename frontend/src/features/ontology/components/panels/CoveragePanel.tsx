@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { fetchSchemaStats } from '../../lib/ontology-utils'
 import { formatCount } from '../../lib/ontology-parsers'
 import type { CoverageState } from '../../lib/ontology-types'
@@ -32,14 +33,12 @@ export function CoveragePanel({
   onChangeEvalTarget?: (wsId: string, dsId: string) => void
 }) {
   const workspaces = useWorkspacesStore(s => s.workspaces)
+  const { resolve: resolveProvider } = useDataSourceProviderMap()
 
-  // Optional data source override — lets user compare against a different data source
-  const [overrideWsId, setOverrideWsId] = useState<string | null>(null)
-  const [overrideDsId, setOverrideDsId] = useState<string | null>(null)
-  const [showPicker, setShowPicker] = useState(false)
-
-  const effectiveWsId = overrideWsId ?? workspaceId
-  const effectiveDsId = overrideDsId ?? dataSourceId
+  // The evaluation target is owned by the page (EvalContextBar states it and
+  // hosts the picker); this panel just analyzes whatever it's handed.
+  const effectiveWsId = workspaceId
+  const effectiveDsId = dataSourceId
 
   // Find active workspace/data source names for display
   const activeWs = workspaces.find(w => w.id === effectiveWsId)
@@ -115,11 +114,7 @@ export function CoveragePanel({
                   (ws.dataSources ?? []).map(ds => (
                     <button
                       key={`${ws.id}-${ds.id}`}
-                      onClick={() => {
-                        setOverrideWsId(ws.id)
-                        setOverrideDsId(ds.id)
-                        onChangeEvalTarget?.(ws.id, ds.id)
-                      }}
+                      onClick={() => onChangeEvalTarget?.(ws.id, ds.id)}
                       className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                     >
                       <LucideIcons.Database className="w-3.5 h-3.5 text-ink-muted flex-shrink-0" />
@@ -138,10 +133,17 @@ export function CoveragePanel({
 
   // ── Loading state ────────────────────────────────────────────────
   if (isLoading) {
+    const provider = resolveProvider(effectiveDsId)
+    const providerKnown = provider && provider.providerType !== 'unknown'
     return (
       <div className="text-center py-16 text-ink-muted">
         <LucideIcons.Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin opacity-50" />
-        <p className="text-sm">Analyzing coverage against {activeDs?.label || 'data source'}...</p>
+        <p className="text-sm">
+          Analyzing coverage against <span className="font-semibold text-ink">{activeDs?.label || 'data source'}</span>
+          {activeWs && <> in {activeWs.name}</>}
+          {providerKnown && <> on {provider.providerName}{provider.host ? ` (${provider.host}${provider.port != null ? `:${provider.port}` : ''})` : ''}</>}
+          ...
+        </p>
       </div>
     )
   }
@@ -180,60 +182,6 @@ export function CoveragePanel({
         description="Coverage measures how well this semantic layer describes the actual data in your graph. 100% means every entity and relationship type has a definition. Gaps mean some types exist in your data but aren't defined, which can lead to missing features in views and search."
         variant="tip"
       />
-
-      {/* Data source context bar */}
-      <div className="flex items-center justify-between mb-4 px-1">
-        <div className="flex items-center gap-2 text-xs text-ink-muted">
-          <LucideIcons.Database className="w-3.5 h-3.5" />
-          <span>Analyzing coverage against</span>
-          <span className="font-semibold text-ink">{activeDs?.label || effectiveDsId}</span>
-          {activeWs && <span className="text-ink-muted">in {activeWs.name}</span>}
-        </div>
-        <button
-          onClick={() => setShowPicker(!showPicker)}
-          className="text-xs text-indigo-500 hover:text-indigo-600 font-medium transition-colors"
-        >
-          {showPicker ? 'Hide' : 'Change'}
-        </button>
-      </div>
-
-      {/* Data source picker (collapsed by default) */}
-      {showPicker && (
-        <div className="mb-6 p-3 rounded-xl border border-glass-border bg-canvas-elevated/50">
-          <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-2">Select a different data source</p>
-          <div className="space-y-1 max-h-48 overflow-y-auto">
-            {workspaces.map(ws => (
-              <div key={ws.id}>
-                <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider px-2 py-1">{ws.name}</p>
-                {(ws.dataSources ?? []).map(ds => {
-                  const isActive = ws.id === effectiveWsId && ds.id === effectiveDsId
-                  return (
-                    <button
-                      key={ds.id}
-                      onClick={() => {
-                        setOverrideWsId(ws.id)
-                        setOverrideDsId(ds.id)
-                        setShowPicker(false)
-                        onChangeEvalTarget?.(ws.id, ds.id)
-                      }}
-                      className={cn(
-                        'w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-left transition-colors',
-                        isActive
-                          ? 'bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400'
-                          : 'hover:bg-black/5 dark:hover:bg-white/5',
-                      )}
-                    >
-                      <LucideIcons.Database className="w-3 h-3 flex-shrink-0" />
-                      <span className="font-medium">{ds.label || ds.id}</span>
-                      {isActive && <LucideIcons.Check className="w-3 h-3 ml-auto" />}
-                    </button>
-                  )
-                })}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Coverage summary with prominent progress ring */}
       {percent !== null && (

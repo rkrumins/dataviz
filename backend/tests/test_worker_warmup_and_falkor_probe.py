@@ -129,10 +129,18 @@ async def test_warmup_probes_the_provider_s_own_topology(monkeypatch):
         host = "seed-1"
         port = 6379
         tls_enabled = False
+        credentials = None
         extra_config = (
             '{"falkordbConnection": {"mode": "cluster", '
             '"cluster": {"startupNodes": [["n1", 7000]]}}}'
         )
+
+    class _FakeResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [_Row()]
 
     class _FakeSession:
         async def __aenter__(self):
@@ -141,12 +149,14 @@ async def test_warmup_probes_the_provider_s_own_topology(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
+        async def execute(self, *a, **k):
+            # _list_providers now does ONE select(ProviderORM) + in-memory
+            # decrypt (was N+1 get_credentials round-trips).
+            return _FakeResult()
+
     from backend.app.db import engine as _engine
-    from backend.app.db.repositories import provider_repo as _repo
 
     monkeypatch.setattr(_engine, "get_provider_probe_session", lambda: _FakeSession())
-    monkeypatch.setattr(_repo, "list_providers", lambda _s: _async_value([_Row()]))
-    monkeypatch.setattr(_repo, "get_credentials", lambda _s, _i: _async_value({}))
 
     captured = {}
 
