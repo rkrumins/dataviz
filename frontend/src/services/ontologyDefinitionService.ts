@@ -4,6 +4,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { TIMEOUTS } from '@/config/timeouts'
 
 const ADMIN_API = '/api/v1/admin/ontologies'
 
@@ -122,7 +123,7 @@ export interface OntologyImportResponse {
 
 async function request<T>(
     url: string,
-    init?: RequestInit & { silent403?: boolean },
+    init?: RequestInit & { silent403?: boolean; timeoutMs?: number },
 ): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
@@ -182,7 +183,7 @@ export const ontologyDefinitionService = {
     publish(id: string, force = false): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(
             `${ADMIN_API}/${id}/publish${force ? '?force=true' : ''}`,
-            { method: 'POST' },
+            { method: 'POST', timeoutMs: TIMEOUTS.PUBLISH_MS },
         )
     },
 

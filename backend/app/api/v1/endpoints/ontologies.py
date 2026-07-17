@@ -5,7 +5,7 @@ Published ontologies are immutable; updates create new versions.
 System ontologies (is_system=True) cannot be deleted.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import require_admin_unless, require_feature
@@ -92,17 +92,25 @@ _LIFECYCLE_GATES = [Depends(_GATE_WRITER)]
 
 async def _invalidate_ontology_caches(
     session: AsyncSession, ontology_id: Optional[str] = None,
+    background: Optional[BackgroundTasks] = None,
 ) -> None:
-    """Eagerly invalidate any cached aggregation idempotency replays
-    that pin to ``ontology_id``.
+    """Eagerly invalidate every cache layer keyed off ``ontology_id``.
 
-    The 60-minute idempotency replay in ``AggregationService.trigger``
-    short-circuits when ``AggregationJobORM.ontology_fingerprint``
-    matches the current ontology. After a successful PUT we proactively
-    clear that fingerprint to NULL on prior jobs for this ontology so
-    the very next trigger falls through to a fresh resolve. The
-    trigger-time check remains the authoritative defense; this hook
-    just makes invalidation explicit and observable.
+    Bounded-latency by design: this used to loop over every assigned data
+    source with an awaited Redis/DB round-trip each (3× over), which made
+    publish/update O(assignments) inside the request — widely-assigned
+    ontologies blew the frontend's 30s budget. Now:
+
+    * assigned sources are enumerated ONCE,
+    * generation bumps (the correctness-critical part — they make the next
+      read re-resolve the new ontology) are pipelined into single Redis
+      round-trips and stay synchronous,
+    * the persisted schema facets reset in one set-based UPDATE,
+    * the expensive LKG purge SCAN sweeps — cache hygiene, not correctness —
+      run AFTER the response via ``background`` (inline when None, e.g.
+      direct test calls), together with a post-commit re-bump that closes
+      the bump-before-commit race (a read racing the write could otherwise
+      cache pre-write rows under the new generation).
 
     No-op when ``ontology_id`` is None (e.g. seeding) or when the
     aggregation schema isn't loaded (test contexts).
@@ -121,63 +129,88 @@ async def _invalidate_ontology_caches(
         .where(AggregationJobORM.ontology_fingerprint.isnot(None))
         .values(ontology_fingerprint=None)
     )
-    # Also invalidate the process-wide resolved-ontology cache for every
-    # data source that resolves through this ontology — read paths on all
-    # pods re-resolve on their next request instead of serving the old
+
+    # Enumerate the assigned data sources ONCE; every step below reuses it.
+    try:
+        from sqlalchemy import select
+        from backend.app.db.models import WorkspaceDataSourceORM
+        scopes = [
+            (ws_id, ds_id)
+            for (ws_id, ds_id) in (
+                await session.execute(
+                    select(
+                        WorkspaceDataSourceORM.workspace_id,
+                        WorkspaceDataSourceORM.id,
+                    ).where(WorkspaceDataSourceORM.ontology_id == ontology_id)
+                )
+            ).all()
+        ]
+    except Exception as exc:  # never block the mutation on cache plumbing
+        import logging
+        logging.getLogger(__name__).warning(
+            "could not enumerate data sources for ontology %s (caches fall "
+            "back to TTL expiry): %s", ontology_id, exc)
+        scopes = []
+    if not scopes:
+        return None
+
+    # Invalidate the process-wide resolved-ontology cache for every data
+    # source that resolves through this ontology — read paths on all pods
+    # re-resolve on their next request instead of serving the old
     # containment/lineage/alias config for up to the TTL backstop.
     try:
-        from backend.app.services.resolved_ontology_cache import bump_for_ontology
-        await bump_for_ontology(session, ontology_id)
+        from backend.app.services.resolved_ontology_cache import bump_scopes
+        await bump_scopes(scopes)
     except Exception as exc:  # never block the mutation on cache plumbing
         import logging
         logging.getLogger(__name__).warning(
             "resolved-ontology generation bump failed for %s: %s", ontology_id, exc)
 
-    # Invalidate the PERSISTED schema cache (data_source_stats.graph_schema) for
-    # every data source using this ontology. The bump above only refreshes the
-    # in-memory resolved-ontology cache (live read paths); the frontend reads
-    # containment/lineage edge types from the persisted graph_schema column,
-    # which is written only by the insights deep worker and would otherwise stay
-    # stale after an ontology edit (containment types disappear → Context View
-    # renders flat). Resetting it makes the next /cached-schema read self-heal
-    # via build_synthetic_schema and the next deep poll rebuild it in full.
+    # Invalidate the PERSISTED schema cache (data_source_stats.graph_schema)
+    # for the same sources — the frontend reads containment/lineage edge
+    # types from that column; resetting it makes the next /cached-schema read
+    # self-heal via build_synthetic_schema and the next deep poll rebuild it.
     try:
-        from sqlalchemy import select
-        from backend.app.db.models import WorkspaceDataSourceORM
-        from backend.app.db.repositories.stats_repo import invalidate_schema_facet
-        ds_rows = (
-            await session.execute(
-                select(
-                    WorkspaceDataSourceORM.id,
-                    WorkspaceDataSourceORM.workspace_id,
-                ).where(
-                    WorkspaceDataSourceORM.ontology_id == ontology_id
-                )
-            )
-        ).all()
-        for (ds_id, _ws_id) in ds_rows:
-            await invalidate_schema_facet(session, ds_id)
+        from backend.app.db.repositories.stats_repo import invalidate_schema_facets
+        await invalidate_schema_facets(session, [ds_id for (_ws, ds_id) in scopes])
     except Exception as exc:  # never block the mutation on cache plumbing
         import logging
         logging.getLogger(__name__).warning(
             "schema-facet invalidation failed for ontology %s: %s", ontology_id, exc)
-        ds_rows = []
 
-    # Bump the hot-read GraphCache generation for the same data sources. The
-    # /children-with-edges and /edges/aggregated responses embed the SERVER-side
-    # containment/lineage split (ContextEngine classifies before caching), so an
-    # ontology edit must unreach those entries too — otherwise canvases keep the
-    # pre-edit grouping for up to the cache TTL (15 min). Known limitation:
-    # draft-branch entries (branch_id != "") are not enumerated here and fall
-    # back to TTL expiry.
+    # Bump the hot-read GraphCache generation for the same data sources (the
+    # /children-with-edges and /edges/aggregated responses embed the server-
+    # side containment/lineage split). Known limitation: draft-branch entries
+    # (branch_id != "") are not enumerated here and fall back to TTL expiry.
     try:
-        from backend.app.services.graph_cache import invalidate_aggregated_reads
-        for (ds_id, ws_id) in ds_rows:
-            await invalidate_aggregated_reads(ws_id, ds_id)
+        from backend.app.services.graph_cache import bump_aggregated_generations
+        await bump_aggregated_generations(scopes)
     except Exception as exc:  # never block the mutation on cache plumbing
         import logging
         logging.getLogger(__name__).warning(
             "graph-cache generation bump failed for ontology %s: %s", ontology_id, exc)
+
+    # Deferred hygiene: purge LKG fallback entries (one Redis SCAN sweep per
+    # source) and re-bump the generations once more AFTER the transaction has
+    # committed (closes the bump-before-commit race). Runs post-response via
+    # BackgroundTasks; inline when no task queue was provided (tests).
+    async def _post_commit_sweep() -> None:
+        try:
+            from backend.app.services.graph_cache import purge_aggregated_lkg
+            from backend.app.services.resolved_ontology_cache import bump_scopes as _rebump
+            from backend.app.services.graph_cache import bump_aggregated_generations as _rebump_agg
+            await _rebump(scopes)
+            await _rebump_agg(scopes)
+            await purge_aggregated_lkg(scopes)
+        except Exception as exc:  # best-effort hygiene
+            import logging
+            logging.getLogger(__name__).warning(
+                "post-commit cache sweep failed for ontology %s: %s", ontology_id, exc)
+
+    if background is not None:
+        background.add_task(_post_commit_sweep)
+    else:
+        await _post_commit_sweep()
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:
@@ -312,6 +345,7 @@ async def list_ontologies(
 @router.post("", response_model=OntologyDefinitionResponse, status_code=201,
              dependencies=_EDIT_GATES)
 async def create_ontology(
+    background: BackgroundTasks,
     req: OntologyCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
@@ -322,7 +356,7 @@ async def create_ontology(
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     result = await ontology_definition_repo.create_ontology(session, req)
-    await _invalidate_ontology_caches(session, getattr(result, "id", None))
+    await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
     return result
 
 
@@ -409,6 +443,7 @@ async def export_ontology(
 @router.put("/{ontology_id}", response_model=OntologyDefinitionResponse,
             dependencies=_EDIT_GATES)
 async def update_ontology(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     req: OntologyUpdateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
@@ -430,15 +465,16 @@ async def update_ontology(
     # Invalidate idempotency replays pinned to either the source ID
     # (in-place update) or the freshly minted version ID (published →
     # new-version path inside ``update_ontology``).
-    await _invalidate_ontology_caches(session, ontology_id)
+    await _invalidate_ontology_caches(session, ontology_id, background)
     new_id = getattr(ontology, "id", None)
     if new_id and new_id != ontology_id:
-        await _invalidate_ontology_caches(session, new_id)
+        await _invalidate_ontology_caches(session, new_id, background)
     return ontology
 
 
 @router.delete("/{ontology_id}", status_code=204, dependencies=_EDIT_GATES)
 async def delete_ontology(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -460,12 +496,13 @@ async def delete_ontology(
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
     await ontology_definition_repo.delete_ontology(session, ontology_id)
-    await _invalidate_ontology_caches(session, ontology_id)
+    await _invalidate_ontology_caches(session, ontology_id, background)
 
 
 @router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse,
              dependencies=_EDIT_GATES)
 async def restore_ontology(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
@@ -474,13 +511,14 @@ async def restore_ontology(
     restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
     if not restored:
         raise HTTPException(status_code=404, detail=f"No deleted ontology '{ontology_id}' found to restore")
-    await _invalidate_ontology_caches(session, ontology_id)
+    await _invalidate_ontology_caches(session, ontology_id, background)
     return restored
 
 
 @router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse,
              dependencies=_LIFECYCLE_GATES)
 async def publish_ontology(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     force: bool = Query(False, description="Bypass evolution_policy check (admin only)."),
     session: AsyncSession = Depends(get_db_session),
@@ -506,13 +544,14 @@ async def publish_ontology(
     ontology = await ontology_definition_repo.publish_ontology(session, ontology_id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await _invalidate_ontology_caches(session, ontology_id)
+    await _invalidate_ontology_caches(session, ontology_id, background)
     return ontology
 
 
 @router.post("/{ontology_id}/clone", response_model=OntologyDefinitionResponse, status_code=201,
              dependencies=_LIFECYCLE_GATES)
 async def clone_ontology(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -541,13 +580,14 @@ async def clone_ontology(
         relationshipTypeDefinitions=json.loads(source.relationship_type_definitions or "{}"),
     )
     result = await ontology_definition_repo.create_ontology(session, req)
-    await _invalidate_ontology_caches(session, getattr(result, "id", None))
+    await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
     return result
 
 
 @router.post("/{ontology_id}/new-version", response_model=OntologyDefinitionResponse,
              status_code=201, dependencies=_EDIT_GATES)
 async def create_new_version(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -577,7 +617,7 @@ async def create_new_version(
             detail=f"A draft version (v{existing_draft.version}) already exists for this schema. Edit it instead.",
         )
     result = await ontology_definition_repo.create_new_version_from_source(session, source)
-    await _invalidate_ontology_caches(session, getattr(result, "id", None))
+    await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
     return result
 
 
@@ -1245,6 +1285,7 @@ async def get_ontology_audit_log(
 @router.post("/import", response_model=OntologyImportResponse, status_code=200,
              dependencies=[Depends(_GATE_IMPORT), *_EDIT_GATES])
 async def import_ontology_new(
+    background: BackgroundTasks,
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
@@ -1259,7 +1300,7 @@ async def import_ontology_new(
     _reconcile_relationship_endpoints(req)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
-        await _invalidate_ontology_caches(session, getattr(result, "ontology_id", None))
+        await _invalidate_ontology_caches(session, getattr(result, "ontology_id", None), background)
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -1268,6 +1309,7 @@ async def import_ontology_new(
 @router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200,
              dependencies=[Depends(_GATE_IMPORT), *_EDIT_GATES])
 async def import_ontology_into(
+    background: BackgroundTasks,
     ontology_id: str = Path(...),
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
@@ -1289,10 +1331,10 @@ async def import_ontology_into(
     await ensure_ontology_visible(session, claims, ontology_id)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
-        await _invalidate_ontology_caches(session, ontology_id)
+        await _invalidate_ontology_caches(session, ontology_id, background)
         target_after = getattr(result, "ontology_id", None)
         if target_after and target_after != ontology_id:
-            await _invalidate_ontology_caches(session, target_after)
+            await _invalidate_ontology_caches(session, target_after, background)
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

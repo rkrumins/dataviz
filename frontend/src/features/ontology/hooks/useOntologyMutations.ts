@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ontologyDefinitionService, type OntologyCreateRequest, type OntologyUpdateRequest } from '@/services/ontologyDefinitionService'
-import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
+import { useInvalidateGraphSchema, GRAPH_SCHEMA_QUERY_KEY } from '@/hooks/useGraphSchema'
 import { ONTOLOGY_KEYS } from './useOntologies'
 
 export function useOntologyMutations() {
@@ -37,7 +37,19 @@ export function useOntologyMutations() {
       typeof arg === 'string'
         ? ontologyDefinitionService.publish(arg)
         : ontologyDefinitionService.publish(arg.id, arg.force ?? false),
-    onSuccess: invalidateAll,
+    // Publishing bumps the server-side resolution caches for EVERY assigned
+    // data source; refetching everything at once used to storm the provider
+    // concurrency slots (each cold read pays the full re-resolution) and
+    // surface as 429s. So: mark everything stale but refetch NOTHING except
+    // what the publish surface itself shows — the rest (adoption, coverage,
+    // graph schema, canvases) refetches lazily on next mount/focus.
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.all, refetchType: 'none' })
+      queryClient.invalidateQueries({ queryKey: GRAPH_SCHEMA_QUERY_KEY, refetchType: 'none' })
+      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.detail(data.id) })
+      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.versions(data.id) })
+      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.list() })
+    },
   })
 
   const clone = useMutation({
