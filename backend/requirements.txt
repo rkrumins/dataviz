@@ -19,7 +19,7 @@ cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle 
 argon2-cffi>=23.1.0      # Argon2id password hashing (OWASP recommended)
 PyJWT>=2.13.0            # Stateless JWT token creation / verification; >=2.13.0: crit-header bypass, JWKS confusion, decode DoS (GHSA-752w-5fwx-jx9f et al.)
 Authlib>=1.6.12          # OIDC ID-token verification (JWKS) + OAuth client; >=1.6.12: algorithm confusion, JWS crit bypass, JWE decompression bomb (PYSEC-2024-52 et al.)
-zxcvbn-python>=4.4.24    # Server-side password strength validation
+zxcvbn>=4.4.28           # Server-side password strength validation (maintained fork; zxcvbn-python no longer builds on modern pip)
 slowapi>=0.1.10           # Rate limiting for auth endpoints
 
 # SAML 2.0 SP. Only the viz-service mounts the auth routes that need

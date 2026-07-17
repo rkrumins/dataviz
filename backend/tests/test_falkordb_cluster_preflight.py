@@ -116,3 +116,108 @@ def test_only_explicit_false_authEnabled_drops_a_saved_password(auth_enabled, pa
     )
     assert (p._password is not None) is password_kept
     assert p._auth_enabled is password_kept
+
+
+# ── sentinel preflight: the fallback target is a DAEMON, not the data plane ──
+
+def _sentinel_provider(tls=None, sentinel_extra=None, password="graphpass"):
+    sentinel = {"masterName": "m", "nodes": [["s1", 26379]]}
+    sentinel.update(sentinel_extra or {})
+    fc_json = {"mode": "sentinel", "sentinel": sentinel}
+    if tls is not None:
+        fc_json["tls"] = tls
+    return FalkorDBProvider(
+        host="h", port=6379, graph_name="g", password=password,
+        connection_config=fc_json,
+        credentials={"password": password} if password else {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_sentinel_fallback_probes_the_daemon_with_daemon_identity(monkeypatch):
+    """When master discovery fails, the fallback pings a Sentinel DAEMON — a
+    separate service with its own auth and its own TLS listener. Probing it with
+    the GRAPH password + GRAPH TLS context reported auth_failed / a garbled
+    handshake against a healthy tier whenever the two differ (here: TLS data
+    plane, plaintext unauthenticated sentinels)."""
+    async def discovery_fails(cfg, socket_timeout):
+        raise ConnectionError("no sentinel quorum")
+
+    monkeypatch.setattr(fc_mod, "resolve_sentinel_master", discovery_fails)
+    seen = {}
+
+    async def fake(host, port, *, username=None, password=None, ssl_context=None, **kw):
+        seen.update(host=host, port=port, username=username,
+                    password=password, ssl_context=ssl_context)
+        return PreflightResult.success(f"{host}:{port}", 5)
+
+    monkeypatch.setattr(pf_mod, "redis_ping_preflight", fake)
+    p = _sentinel_provider(
+        tls={"enabled": True, "verifyMode": "none"},
+        sentinel_extra={"tls": {"enabled": False}},        # plaintext daemons
+    )
+    r = await p.preflight(deadline_s=2.0)
+    assert r.ok
+    assert (seen["host"], seen["port"]) == ("s1", 26379)   # fell back to the daemon
+    assert seen["password"] is None                        # no graph secret leaked
+    assert seen["ssl_context"] is None                     # daemon listener is plaintext
+
+
+@pytest.mark.asyncio
+async def test_sentinel_fallback_uses_sentinel_credentials_when_configured(monkeypatch):
+    async def discovery_fails(cfg, socket_timeout):
+        raise ConnectionError("no sentinel quorum")
+
+    monkeypatch.setattr(fc_mod, "resolve_sentinel_master", discovery_fails)
+    seen = {}
+
+    async def fake(host, port, *, username=None, password=None, ssl_context=None, **kw):
+        seen.update(username=username, password=password)
+        return PreflightResult.success(f"{host}:{port}", 5)
+
+    monkeypatch.setattr(pf_mod, "redis_ping_preflight", fake)
+    p = _sentinel_provider(sentinel_extra={"authEnabled": True})
+    await p.preflight(deadline_s=2.0)
+    assert seen["password"] == "graphpass"     # authEnabled opts the daemons in
+
+
+@pytest.mark.asyncio
+async def test_sentinel_master_probe_keeps_the_data_plane_identity(monkeypatch):
+    """When discovery SUCCEEDS the probe target is the MASTER: data-plane
+    credentials and data-plane TLS, exactly as before."""
+    async def discovery_ok(cfg, socket_timeout):
+        return ("the-master", 6379)
+
+    monkeypatch.setattr(fc_mod, "resolve_sentinel_master", discovery_ok)
+    seen = {}
+
+    async def fake(host, port, *, username=None, password=None, ssl_context=None, **kw):
+        seen.update(host=host, port=port, password=password, ssl_context=ssl_context)
+        return PreflightResult.success(f"{host}:{port}", 5)
+
+    monkeypatch.setattr(pf_mod, "redis_ping_preflight", fake)
+    p = _sentinel_provider(
+        tls={"enabled": True, "verifyMode": "none"},
+        sentinel_extra={"tls": {"enabled": False}},
+    )
+    r = await p.preflight(deadline_s=2.0)
+    assert r.ok
+    assert (seen["host"], seen["port"]) == ("the-master", 6379)
+    assert seen["password"] == "graphpass"                 # data-plane auth
+    assert seen["ssl_context"] is not None                 # data-plane TLS
+
+
+@pytest.mark.asyncio
+async def test_cluster_mode_without_nodes_is_a_definitive_config_failure(monkeypatch):
+    """mode=cluster with NO startup nodes used to silently fall through to a
+    standalone ping of self._host (typically localhost) — a verdict about a
+    host nobody will dial. It must surface as its own failure reason instead."""
+    async def never(host, port, **kw):
+        raise AssertionError("must not ping anything: the config is incomplete")
+
+    monkeypatch.setattr(pf_mod, "redis_ping_preflight", never)
+    fc = {"mode": "cluster", "cluster": {"startupNodes": []}}
+    p = FalkorDBProvider(host="h", port=6379, graph_name="g", connection_config=fc)
+    r = await p.preflight(deadline_s=2.0)
+    assert not r.ok
+    assert r.reason == "cluster_nodes_missing"

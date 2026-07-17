@@ -60,6 +60,13 @@ function workSignal(svc: ServiceEntry): string[] {
             if (graphs != null) parts.push(`${graphs} graphs`)
             const mem = str(d, 'usedMemoryHuman')
             if (mem) parts.push(mem)
+            // Topology facts the probe already computes: the resolved sentinel
+            // master and the cluster shard rollup.
+            const master = str(d, 'master')
+            if (master) parts.push(`master ${master}`)
+            const shardsUp = num(d, 'shardsUp')
+            const shardsTotal = num(d, 'shardsTotal')
+            if (shardsUp != null && shardsTotal != null) parts.push(`${shardsUp}/${shardsTotal} shards`)
             break
         }
         case 'aggregationWorker': {
@@ -93,6 +100,10 @@ function qualifier(svc: ServiceEntry): string | null {
     if (svc.key === 'graphverDb' && svc.detail.colocated === true) return 'colocated'
     if (svc.key === 'aggregationControlplane' && svc.detail.mode === 'inprocess') return 'in-process dispatch'
     if (svc.key === 'aggregationControlplane' && svc.detail.mode === 'proxy') return 'proxy'
+    if (svc.key === 'falkordb' && (svc.detail.mode === 'sentinel' || svc.detail.mode === 'cluster')) {
+        return String(svc.detail.mode)
+    }
+    if (svc.key === 'cacheRedis' && svc.detail.scope === 'global') return 'global endpoint'
     return null
 }
 

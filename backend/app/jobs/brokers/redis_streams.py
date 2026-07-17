@@ -159,26 +159,33 @@ class RedisStreamsJobBroker:
                     )
 
         # ── Live tail ──
+        from backend.common.adapters.redis_bus import (
+            bus_error_retry_delay, stream_block_ms,
+        )
+        # Block window sized to fit inside the resolved socket_timeout so a
+        # tightened REDIS_STREAMS_SOCKET_TIMEOUT never turns every quiet
+        # read into a spurious TimeoutError.
+        block_ms = stream_block_ms(_XREAD_BLOCK_MS)
         while True:
             try:
                 # XREAD with BLOCK; ``last_id`` is the cursor.
                 # Returns entries strictly newer than ``last_id``.
                 resp = await self._redis.xread(
                     {stream_key: last_id},
-                    block=_XREAD_BLOCK_MS,
+                    block=block_ms,
                     count=_BACKFILL_PAGE,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Transient Redis errors: log and retry. The consumer
-                # is mid-iteration; failing here would tear down the
-                # SSE connection unnecessarily.
-                logger.warning(
-                    "RedisStreamsJobBroker: XREAD error on %s (will retry): %s",
-                    stream_key, exc,
-                )
-                await asyncio.sleep(1.0)
+                # Keep the SSE connection: retry rather than tear down. The
+                # delay is auth-aware — NOAUTH/WRONGPASS (a rotated or wrong
+                # bus credential) backs off long with an actionable message
+                # instead of hot-looping at 1/s forever.
+                await asyncio.sleep(bus_error_retry_delay(
+                    exc, logger,
+                    what=f"RedisStreamsJobBroker XREAD on {stream_key}",
+                ))
                 continue
 
             if not resp:

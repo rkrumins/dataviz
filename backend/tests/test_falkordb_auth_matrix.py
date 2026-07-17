@@ -243,6 +243,169 @@ async def test_cluster_primary_nodes_surfaces_auth_as_config_error(monkeypatch):
         await fc.cluster_primary_nodes(_cfg(mode="cluster"), 5.0)
 
 
+# ── the symmetric self-heal: auth RE-ENABLED on a learned-unauth instance ──
+
+@pytest.mark.parametrize("mode", ["standalone", "sentinel", "cluster"])
+@pytest.mark.asyncio
+async def test_auth_reenabled_unlearns_and_retries_with_credentials(mode):
+    """CASE: instance was learned unauthenticated (credentials stripped), then auth
+    is ENABLED on the server. The NOAUTH on the stripped connection must un-learn
+    the mark and retry ONCE with the configured credentials — not dead-end in a
+    false 'no credentials configured' until process restart."""
+    cfg = _cfg(mode, username="u", password="p")
+    fc.mark_instance_unauthenticated(cfg)
+    seen = []
+
+    async def attempt(c):
+        seen.append((c.username, c.password))
+        if not c.password:                   # the server now demands AUTH
+            raise ERR_NOAUTH
+        return "connected"
+
+    assert await with_auth_negotiation(cfg, attempt) == "connected"
+    assert seen == [(None, None), ("u", "p")]          # exactly two attempts
+    assert not fc.is_instance_learned_unauthenticated(cfg)
+    # ...and the un-learn reaches every pool builder again.
+    kw = fc.build_graph_pool_kwargs(cfg, socket_timeout=10.0)
+    assert kw.get("password") == "p"
+
+
+@pytest.mark.asyncio
+async def test_auth_reenabled_with_wrong_creds_is_a_clean_config_error():
+    """The retry after un-learn fails too (row credentials genuinely wrong) →
+    a clean 'rejected' config error, never a loop and never a raw redis error."""
+    cfg = _cfg(username="u", password="wrong")
+    fc.mark_instance_unauthenticated(cfg)
+    seen = []
+
+    async def attempt(c):
+        seen.append((c.username, c.password))
+        raise ERR_NOAUTH if not c.password else ERR_WRONGPASS
+
+    with pytest.raises(ProviderConfigurationError, match="rejected"):
+        await with_auth_negotiation(cfg, attempt)
+    assert seen == [(None, None), ("u", "wrong")]      # bounded: two attempts, no loop
+
+
+@pytest.mark.asyncio
+async def test_noauth_without_a_learned_mark_never_retries():
+    """NOAUTH when nothing was stripped is a plain config error — the un-learn
+    retry only fires when the learned mark actually removed credentials."""
+    cfg = _cfg(username="u", password="p")
+    calls = {"n": 0}
+
+    async def attempt(c):
+        calls["n"] += 1
+        raise ERR_NOAUTH
+
+    with pytest.raises(ProviderConfigurationError, match="requires authentication"):
+        await with_auth_negotiation(cfg, attempt)
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_invalidate_config_clears_the_learned_mark():
+    """A provider config change (evict_provider → invalidate_config) must also
+    invalidate what we LEARNED about the instance's auth — the operator may have
+    just enabled authentication or rotated the credentials."""
+    cfg = _cfg(username="u", password="p")
+    fc.mark_instance_unauthenticated(cfg)
+    assert fc.is_instance_learned_unauthenticated(cfg)
+    await fc.TopologyGraphClients().invalidate_config(cfg)
+    assert not fc.is_instance_learned_unauthenticated(cfg)
+
+
+@pytest.mark.asyncio
+async def test_resilient_graph_reconnects_with_creds_when_auth_is_reenabled():
+    """The registry/projector handle: a cached credential-less client (learned
+    mark) hitting NOAUTH must un-learn, rebuild WITH the handle's credentials,
+    and retry once."""
+    cfg = _cfg(username="u", password="p")
+    fc.mark_instance_unauthenticated(cfg)
+
+    class _OkGraph:
+        async def query(self, *a, **kw):
+            return "ok"
+
+    class _NoAuthGraph:
+        async def query(self, *a, **kw):
+            raise ERR_NOAUTH
+
+    invalidated = []
+
+    class _Clients:
+        async def invalidate(self, c, name):
+            invalidated.append(name)
+
+        async def resolve_graph(self, c, name):
+            # After the un-learn the rebuild must carry credentials again.
+            assert not fc.is_instance_learned_unauthenticated(c)
+            return _OkGraph()
+
+    g = fc.ResilientGraph(_Clients(), cfg, "g1", _NoAuthGraph())
+    assert await g.query("RETURN 1") == "ok"
+    assert invalidated == ["g1"]
+    assert not fc.is_instance_learned_unauthenticated(cfg)
+
+
+@pytest.mark.asyncio
+async def test_resilient_graph_noauth_without_mark_is_still_a_config_error():
+    cfg = _cfg(username="u", password="p")
+
+    class _NoAuthGraph:
+        async def query(self, *a, **kw):
+            raise ERR_NOAUTH
+
+    class _Clients:
+        async def invalidate(self, c, name):          # pragma: no cover
+            raise AssertionError("must not rebuild on a plain config error")
+
+        async def resolve_graph(self, c, name):       # pragma: no cover
+            raise AssertionError("must not rebuild on a plain config error")
+
+    g = fc.ResilientGraph(_Clients(), cfg, "g1", _NoAuthGraph())
+    with pytest.raises(ProviderConfigurationError, match="requires authentication"):
+        await g.query("RETURN 1")
+
+
+@pytest.mark.asyncio
+async def test_provider_connect_restores_row_credentials_when_auth_is_reenabled(monkeypatch):
+    """The provider's connect path: an earlier 'no auth configured' self-heal
+    nulled self._username/_password for the process, then auth is enabled on the
+    server. The NOAUTH connect must restore the row credentials (they survive in
+    self._credentials), un-learn the instance, and rebuild once WITH them —
+    instead of the old permanent dead-end ProviderConfigurationError."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(
+        host="h", port=6379, graph_name="g",
+        username="u", password="p",
+        credentials={"username": "u", "password": "p"},
+    )
+    # Simulate the earlier auth_not_configured self-heal in this process:
+    cfg0 = fc.load_connection_config(None, host=p._host, port=6379,
+                                     username="u", password="p")
+    fc.mark_instance_unauthenticated(cfg0)
+    p._username = None
+    p._password = None
+
+    attempts = []
+
+    async def fake_build_and_verify(pool_kwargs, init_timeout):
+        attempts.append("password" in pool_kwargs)
+        if not pool_kwargs.get("password"):
+            raise ERR_NOAUTH                       # server now demands AUTH
+        p._graph = object()                        # success: connected handle
+
+    monkeypatch.setattr(p, "_build_and_verify", fake_build_and_verify)
+    monkeypatch.setattr(p, "_schedule_reconcile_once", lambda: None)
+
+    await p._ensure_connected()
+    assert attempts == [False, True]               # retried once, WITH credentials
+    assert (p._username, p._password) == ("u", "p")
+    assert not fc.is_instance_learned_unauthenticated(p._conn_cfg)
+
+
 # ── the learned state reaches every pool builder ─────────────────────
 
 def test_learned_no_auth_strips_credentials_from_every_pool_builder():

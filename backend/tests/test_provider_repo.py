@@ -94,6 +94,43 @@ async def test_update_provider_returns_none_for_missing(db_session):
     assert result is None
 
 
+async def test_update_provider_is_never_blocked_by_associations(db_session):
+    """PINNING TEST — a host/port/credential change must apply regardless of the
+    catalog items, workspaces, and data sources that reference the provider.
+    Association guards belong to DELETE only (has_workspaces → 409); an edit
+    entangled with existing views would make every connectivity fix require
+    tearing down user content first."""
+    created = await provider_repo.create_provider(db_session, _make_create_req())
+
+    catalog = CatalogItemORM(
+        id="cat_upd_free", provider_id=created.id,
+        name="g", source_identifier="g",
+    )
+    ws = WorkspaceORM(id="ws_upd_free", name="WS")
+    db_session.add_all([catalog, ws])
+    await db_session.flush()
+    ds = WorkspaceDataSourceORM(
+        id="ds_upd_free", workspace_id="ws_upd_free",
+        provider_id=created.id, catalog_item_id="cat_upd_free", graph_name="g",
+    )
+    db_session.add(ds)
+    await db_session.flush()
+    assert await provider_repo.has_workspaces(db_session, created.id) is True
+
+    updated = await provider_repo.update_provider(
+        db_session, created.id,
+        ProviderUpdateRequest(
+            host="falkordb-new.other-cluster.svc", port=6380,
+            credentials=ConnectionCredentials(username="u2", password="rotated"),
+        ),
+    )
+    assert updated is not None
+    assert updated.host == "falkordb-new.other-cluster.svc"
+    assert updated.port == 6380
+    creds = await provider_repo.get_credentials(db_session, created.id)
+    assert creds.get("password") == "rotated"
+
+
 # ── delete ────────────────────────────────────────────────────────────
 
 async def test_delete_provider_success(db_session):

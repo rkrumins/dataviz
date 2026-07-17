@@ -61,6 +61,12 @@ class AggregationEventListener:
         # Reclaim events delivered to a consumer that crashed before ACK.
         await self._recover_pending()
 
+        # Block window sized to fit inside the resolved socket_timeout — a
+        # tightened REDIS_STREAMS_SOCKET_TIMEOUT must shorten the block, not
+        # turn every quiet read into a spurious TimeoutError.
+        from backend.common.adapters.redis_bus import stream_block_ms
+        block_ms = stream_block_ms()
+
         while self._running:
             try:
                 entries = await self._redis.xreadgroup(
@@ -68,15 +74,17 @@ class AggregationEventListener:
                     self._consumer_name,
                     {EVENTS_STREAM: ">"},
                     count=64,
-                    block=5000,
+                    block=block_ms,
                 )
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(
-                    "state-sync XREADGROUP failed: %s (retrying in 2s)", e,
+                # Auth-class errors (rotated/wrong bus password) log an
+                # actionable line and back off long; blips keep the 2s retry.
+                from backend.common.adapters.redis_bus import bus_error_retry_delay
+                await asyncio.sleep(
+                    bus_error_retry_delay(e, logger, what="state-sync XREADGROUP")
                 )
-                await asyncio.sleep(2)
                 continue
 
             if not entries:

@@ -1012,6 +1012,18 @@ class ProviderManager:
                 "Failed to invalidate registry graph clients for %s: %s",
                 provider_id, exc,
             )
+        # Drop the warmup states for this provider too. They describe the OLD
+        # config, and the fast-fail read gate (get_provider's blocks_reads check)
+        # consults them INDEPENDENTLY of the instantiation breaker popped below —
+        # so a stale ok=False observation kept rejecting reads for up to 60s
+        # AFTER the operator fixed the configuration. The next warmup cycle (or
+        # the first read) re-observes the NEW config from scratch. Keyed sweep,
+        # not gated on self._providers: a provider that was probed but never
+        # read from has a state here without a cached instance.
+        async with self._state_lock:
+            for key in [k for k in self._provider_states if k[0] == provider_id]:
+                self._provider_states.pop(key, None)
+
         keys_to_evict = [k for k in self._providers if k[0] == provider_id]
         for key in keys_to_evict:
             await self.evict_data_source(key[0], key[1])

@@ -251,3 +251,73 @@ def test_bus_default_endpoint_is_not_falkordb(monkeypatch):
     build_bus_redis()
     assert captured["host"] == "localhost"
     assert captured["port"] == 6380
+
+
+# ── consumer-loop error classification (NOAUTH != a network blip) ──────────
+
+def test_bus_auth_error_classification():
+    from redis.exceptions import AuthenticationError, ResponseError
+    from backend.common.adapters.redis_bus import is_bus_auth_error
+
+    assert is_bus_auth_error(ResponseError("NOAUTH Authentication required."))
+    assert is_bus_auth_error(
+        AuthenticationError("WRONGPASS invalid username-password pair")
+    )
+    assert is_bus_auth_error(AuthenticationError(
+        "HELLO must be called with the client already authenticated, otherwise "
+        "the HELLO <proto> AUTH <user> <pass> option can be used"
+    ))
+    # Chained: an auth cause inside a generic wrapper still classifies.
+    wrapped = ConnectionError("read failed")
+    wrapped.__cause__ = ResponseError("NOAUTH Authentication required.")
+    assert is_bus_auth_error(wrapped)
+    # Real outages stay transient.
+    assert not is_bus_auth_error(ConnectionError("connection refused"))
+    assert not is_bus_auth_error(TimeoutError("timed out"))
+
+
+def test_bus_error_retry_delay_and_message(caplog):
+    import logging
+    from redis.exceptions import ResponseError
+    from backend.common.adapters.redis_bus import (
+        BUS_AUTH_RETRY_DELAY_S,
+        BUS_TRANSIENT_RETRY_DELAY_S,
+        bus_error_retry_delay,
+    )
+
+    log = logging.getLogger("test_bus_loop")
+    with caplog.at_level(logging.WARNING):
+        auth_delay = bus_error_retry_delay(
+            ResponseError("NOAUTH Authentication required."), log, what="XREADGROUP",
+        )
+        blip_delay = bus_error_retry_delay(
+            ConnectionError("reset by peer"), log, what="XREADGROUP",
+        )
+    assert auth_delay == BUS_AUTH_RETRY_DELAY_S       # long backoff — no hot loop
+    assert blip_delay == BUS_TRANSIENT_RETRY_DELAY_S  # blips keep today's cadence
+    auth_records = [r for r in caplog.records if "AUTHENTICATION" in r.message]
+    assert auth_records and auth_records[0].levelno == logging.ERROR
+    assert "REDIS_STREAMS_PASSWORD" in auth_records[0].getMessage() or \
+        "REDIS_STREAMS_PASSWORD" in auth_records[0].message
+
+
+# ── stream_block_ms: XREAD block vs socket_timeout (audit closure) ──────
+
+def test_stream_block_ms_passthrough_at_defaults(monkeypatch):
+    """Default socket_timeout (10s) comfortably fits the 5s block."""
+    from backend.common.adapters.redis_bus import stream_block_ms
+    assert stream_block_ms(5000) == 5000
+
+
+def test_stream_block_ms_clamps_under_tight_socket_timeout(monkeypatch):
+    """socket_timeout ≤ block makes EVERY quiet blocking read raise a spurious
+    TimeoutError — the window must shrink to fit one second inside it."""
+    from backend.common.adapters.redis_bus import stream_block_ms
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "3")
+    assert stream_block_ms(5000) == 2000
+
+
+def test_stream_block_ms_floor_is_one_second(monkeypatch):
+    from backend.common.adapters.redis_bus import stream_block_ms
+    monkeypatch.setenv("REDIS_STREAMS_SOCKET_TIMEOUT", "1")
+    assert stream_block_ms(5000) == 1000

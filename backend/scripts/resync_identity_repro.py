@@ -74,6 +74,9 @@ def graph_factory():
 
 
 async def main():
+    from backend.app.providers.falkordb_connection import assert_standalone_env
+    assert_standalone_env("resync_identity_repro.py")
+
     from backend.app.services.versioning import models
     from backend.app.services.versioning.bootstrap_worker import (
         BootstrapRunner, create_bootstrap_job)

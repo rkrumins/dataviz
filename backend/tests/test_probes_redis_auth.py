@@ -123,3 +123,116 @@ async def test_falkordb_probe_degrades_when_password_file_unreadable(monkeypatch
     res = await probes.probe_falkordb()
     assert res["status"] == "down"
     assert "FALKORDB_PASSWORD_FILE" in res["error"]
+
+
+# ── probe detail reports WHAT was probed (mode / tls / authenticated) ──────
+
+@pytest.mark.asyncio
+async def test_falkordb_standalone_probe_reports_config_detail(monkeypatch):
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
+    monkeypatch.setenv("FALKORDB_HOST", "fdb-host")
+    monkeypatch.setenv("FALKORDB_PASSWORD", "graph-pw")
+
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: _FakeProbeRedis(**kw))
+
+    from backend.app.services.system_status import probes
+
+    res = await probes.probe_falkordb()
+    assert res["detail"]["mode"] == "standalone"     # previously unstamped
+    assert res["detail"]["tls"] is False
+    assert res["detail"]["authenticated"] is True
+    assert "graph-pw" not in repr(res)
+
+
+@pytest.mark.asyncio
+async def test_cache_probe_reports_config_detail(monkeypatch):
+    monkeypatch.delenv("CACHE_REDIS_URL", raising=False)
+    monkeypatch.setenv("REDIS_CACHE_HOST", "cache.internal")
+    monkeypatch.setenv("REDIS_CACHE_PASSWORD", "cache-pw")
+
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: _FakeProbeRedis(**kw))
+
+    from backend.app.services.system_status import probes
+    probes._cache_redis_client = None
+
+    res = await probes.probe_cache_redis()
+    assert res["detail"]["mode"] == "standalone"
+    assert res["detail"]["tls"] is False
+    assert res["detail"]["authenticated"] is True
+    assert res["detail"]["scope"] == "global"
+
+
+@pytest.mark.asyncio
+async def test_bus_probe_reports_config_detail(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "bus.internal")
+    monkeypatch.setenv("REDIS_STREAMS_TLS_ENABLED", "true")
+
+    from backend.app.services.system_status import probes
+    from backend.app.services.aggregation import redis_client as rc_mod
+
+    monkeypatch.setattr(rc_mod, "get_redis", lambda: _FakeProbeRedis())
+
+    res = await probes.probe_bus_redis()
+    assert res["detail"]["mode"] == "standalone"
+    assert res["detail"]["tls"] is True
+    assert res["detail"]["authenticated"] is False   # auth disabled: honest
+
+
+# ── slow-network + unconfigured env-default (audit closure) ────────────────
+
+@pytest.mark.asyncio
+async def test_falkordb_probe_honors_configured_timeouts(monkeypatch):
+    """The fixed 1/1.5s probe windows false-downed a slow cross-cluster hop.
+    The env-default instance's connectTimeout/socketTimeout must reach the
+    probe client."""
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
+    monkeypatch.setenv("FALKORDB_HOST", "fdb-host")
+    monkeypatch.setenv("FALKORDB_SOCKET_CONNECT_TIMEOUT", "4")
+    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "6")
+
+    built = {}
+
+    import redis.asyncio as aioredis
+
+    def capture(**kw):
+        built.update(kw)
+        return _FakeProbeRedis(**kw)
+
+    monkeypatch.setattr(aioredis, "Redis", capture)
+
+    from backend.app.services.system_status import probes
+
+    res = await probes.probe_falkordb()
+    assert res["status"] != "down"
+    assert built["socket_connect_timeout"] == 4.0
+    assert built["socket_timeout"] == 6.0
+
+
+@pytest.mark.asyncio
+async def test_falkordb_probe_unset_host_unreachable_is_unknown(monkeypatch):
+    """FALKORDB_HOST unset → the probe dials the localhost default. On a
+    deployment where FalkorDB lives only in provider rows that is NOT an
+    outage — report unconfigured (the cache probe's convention), never a
+    false DOWN."""
+    for var in ("FALKORDB_HOST", "FALKORDB_MODE"):
+        monkeypatch.delenv(var, raising=False)
+
+    class _DownRedis(_FakeProbeRedis):
+        async def ping(self):
+            raise ConnectionError("connection refused")
+
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "Redis", lambda **kw: _DownRedis(**kw))
+
+    from backend.app.services.system_status import probes
+
+    res = await probes.probe_falkordb()
+    assert res["status"] == "unknown"
+    assert res["detail"]["configured"] is False
+
+    # With FALKORDB_HOST SET, an unreachable endpoint stays a real DOWN.
+    monkeypatch.setenv("FALKORDB_HOST", "fdb-host")
+    res = await probes.probe_falkordb()
+    assert res["status"] == "down"

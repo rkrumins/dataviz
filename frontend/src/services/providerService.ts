@@ -39,6 +39,9 @@ export interface ProviderCreateRequest {
         cache_password?: string
         cache_sentinel_username?: string
         cache_sentinel_password?: string
+        // FalkorDB GRAPH sentinel-DAEMON credentials (dedicated daemon auth).
+        sentinel_username?: string
+        sentinel_password?: string
     }
     tlsEnabled?: boolean
     extraConfig?: Record<string, any>
@@ -60,6 +63,9 @@ export interface ProviderUpdateRequest {
         cache_password?: string
         cache_sentinel_username?: string
         cache_sentinel_password?: string
+        // FalkorDB GRAPH sentinel-DAEMON credentials (dedicated daemon auth).
+        sentinel_username?: string
+        sentinel_password?: string
     }
     // Explicitly remove a credential key from the stored blob (an omitted
     // field just leaves its existing value in place on merge). Used by the
@@ -114,6 +120,8 @@ export interface ProviderResponse {
     // show "stored — leave blank to keep" instead of an empty field.
     authConfigured?: boolean
     cacheAuthConfigured?: boolean
+    /** FalkorDB sentinel-DAEMON credentials stored (write-only, presence flag). */
+    sentinelAuthConfigured?: boolean
 }
 
 export interface ProviderStatusResponse {

@@ -81,7 +81,7 @@ def test_run_guarded_raises_provider_loading_on_busyloading():
         with pytest.raises(ProviderLoading):
             await p._run_guarded(_busy_call)
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
 
 
 def test_run_guarded_does_not_burn_transient_retries_on_loading():
@@ -99,5 +99,5 @@ def test_run_guarded_does_not_burn_transient_retries_on_loading():
         with pytest.raises(ProviderLoading):
             await p._run_guarded(_busy_call)
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
     assert calls["n"] == 1

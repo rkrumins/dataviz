@@ -144,19 +144,26 @@ async def test_cluster_lost_handle_uses_reconnect_not_rebuild(monkeypatch):
     assert counts["rebuild"] == 0
 
 
-# ── 2. preflight: probe the owning node, not just an entry node ──────
+# ── 2. preflight: raw AUTH+PING to startup nodes, never a RedisCluster ──
+#
+# SUPERSEDED DESIGN NOTE: preflight used to resolve the graph's owning node
+# (resolve_cluster_node_for_key) and ping it, with a fallback to the first
+# startup node. That build blew the warmup budget (RedisCluster.initialize
+# connects to EVERY node; aclose blocks the deadline-cancel), so preflight is
+# now a raw AUTH+PING over the startup nodes in order — the full contract is
+# pinned in test_falkordb_cluster_preflight.py. Here we keep one guard for
+# THIS file's concern (rotation): the probe never resolves topology.
 
 @pytest.mark.asyncio
-async def test_cluster_preflight_probes_owning_node(monkeypatch):
+async def test_cluster_preflight_never_resolves_topology(monkeypatch):
     p = _cluster_provider()
 
-    async def fake_resolve(cfg, graph_name, socket_timeout):
-        assert graph_name == "g"
-        return ("owner-node", 7002)
+    async def boom(cfg, graph_name, socket_timeout):
+        raise AssertionError("preflight must not resolve the owning node")
 
     monkeypatch.setattr(
         "backend.app.providers.falkordb_connection.resolve_cluster_node_for_key",
-        fake_resolve,
+        boom,
     )
 
     probed = {}
@@ -164,78 +171,17 @@ async def test_cluster_preflight_probes_owning_node(monkeypatch):
     async def fake_ping(host, port, **kwargs):
         probed["target"] = (host, port)
         probed["deadline"] = kwargs.get("deadline_s")
-        return "PREFLIGHT_OK"
+        from backend.common.interfaces.preflight import PreflightResult
+        return PreflightResult.success(f"{host}:{port}", 3)
 
     monkeypatch.setattr(
         "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
     )
 
-    assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
-    assert probed["target"] == ("owner-node", 7002)
-    # The ping budget shrinks by the (instant fake) discovery time but
-    # never collapses below the floor.
-    assert 0.3 <= probed["deadline"] <= 1.5
-
-
-@pytest.mark.asyncio
-async def test_cluster_preflight_falls_back_to_startup_node(monkeypatch):
-    """Discovery failure (all startup nodes dark / topology mid-failover)
-    degrades to the old behavior — probe the first startup node — rather
-    than raising out of a probe that promises never to raise."""
-    p = _cluster_provider()
-
-    async def fake_resolve(cfg, graph_name, socket_timeout):
-        raise RedisConnectionError("cluster down")
-
-    monkeypatch.setattr(
-        "backend.app.providers.falkordb_connection.resolve_cluster_node_for_key",
-        fake_resolve,
-    )
-
-    probed = {}
-
-    async def fake_ping(host, port, **kwargs):
-        probed["target"] = (host, port)
-        return "PREFLIGHT_OK"
-
-    monkeypatch.setattr(
-        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
-    )
-
-    assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
-    assert probed["target"] == ("entry", 7000)
-
-
-@pytest.mark.asyncio
-async def test_cluster_preflight_discovery_is_deadline_bounded(monkeypatch):
-    """A hung topology discovery (black-holed startup node) cannot stall
-    the probe past its budget — wait_for cancels it and the probe falls
-    back to the startup node."""
-    p = _cluster_provider()
-
-    async def hung_resolve(cfg, graph_name, socket_timeout):
-        # Event().wait() genuinely hangs until wait_for cancels it (the
-        # autouse _no_sleep fixture neuters asyncio.sleep, so sleep-based
-        # hangs would return instantly and not exercise the deadline).
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(
-        "backend.app.providers.falkordb_connection.resolve_cluster_node_for_key",
-        hung_resolve,
-    )
-
-    probed = {}
-
-    async def fake_ping(host, port, **kwargs):
-        probed["target"] = (host, port)
-        return "PREFLIGHT_OK"
-
-    monkeypatch.setattr(
-        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
-    )
-
-    assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
-    assert probed["target"] == ("entry", 7000)
+    r = await p.preflight(deadline_s=1.5)
+    assert r.ok
+    assert probed["target"] == ("entry", 7000)      # a startup node, no discovery
+    assert probed["deadline"] >= 0.5                # per-node floor
 
 
 @pytest.mark.asyncio
@@ -321,3 +267,51 @@ async def test_standalone_preflight_unchanged(monkeypatch):
 
     assert await p.preflight(deadline_s=1.5) == "PREFLIGHT_OK"
     assert probed["target"][0] == "plainhost"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_preflight_discovery_budget_follows_connect_timeout(monkeypatch):
+    """The discovery socket budget was a literal 1.0s: a healthy sentinel tier
+    >1s RTT away failed discovery, so preflight silently fell back to pinging a
+    DAEMON — a dead master read green. connectTimeout now raises the budget
+    (capped by the preflight deadline)."""
+    p = FalkorDBProvider(host="ignored", graph_name="g")
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379)],
+        socket_connect_timeout=3.0,
+    )
+
+    budgets = {}
+
+    async def fake_discover(cfg, socket_timeout):
+        budgets["discover"] = socket_timeout
+        return ("master-node", 6379)
+
+    monkeypatch.setattr(
+        "backend.app.providers.falkordb_connection.resolve_sentinel_master",
+        fake_discover,
+    )
+
+    async def fake_ping(host, port, **kwargs):
+        return "PREFLIGHT_OK"
+
+    monkeypatch.setattr(
+        "backend.common.interfaces.preflight.redis_ping_preflight", fake_ping,
+    )
+
+    # Deadline is generous → the budget follows connectTimeout.
+    assert await p.preflight(deadline_s=8.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 3.0
+
+    # Deadline is tight → the budget is capped by it, never exceeding it.
+    assert await p.preflight(deadline_s=2.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 2.0
+
+    # No knob → the historical 1.0s floor.
+    p._conn_cfg = FalkorDBConnConfig(
+        mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=[("sentinel-1", 26379)],
+    )
+    assert await p.preflight(deadline_s=8.0) == "PREFLIGHT_OK"
+    assert budgets["discover"] == 1.0

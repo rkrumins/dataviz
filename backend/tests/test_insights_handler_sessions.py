@@ -73,6 +73,10 @@ def _wire_collector(monkeypatch, events: list[str], *, stored_row=None):
             return SimpleNamespace(
                 provider_id="prov1",
                 last_polled_at=None, last_status=None, last_error=None,
+                # The handler skips jobs for tombstoned data sources — the
+                # fake row must carry the column or every job reads as an
+                # AttributeError instead of "live source".
+                deleted_at=None,
             )
 
         async def execute(self, _stmt):
@@ -223,6 +227,9 @@ async def test_deep_facet_skips_scans_when_counts_unchanged(monkeypatch) -> None
         entity_type_counts='{"dataset": 5}',
         edge_type_counts='{"CONTAINS": 3}',
         schema_stats='{"totalNodes": 5}',
+        # The unchanged-counts short-circuit also requires a non-empty cached
+        # graph_schema (an ontology change clears it to force a rebuild).
+        graph_schema='{"nodes": []}',
     )
     primes, upserts_full, upserts_counts, warms, _ = _wire_collector(
         monkeypatch, events, stored_row=stored,

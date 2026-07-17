@@ -46,7 +46,9 @@ class _TraceFake:
             "weight": weight, "sd": sd, "td": td, "types": list(types),
         }
 
-    async def proj_ro_query(self, cypher, params=None, timeout=None):
+    async def proj_ro_query(self, cypher, params=None, timeout=None, **kwargs):
+        # **kwargs: the provider's query wrappers pass telemetry kwargs
+        # (op=...) — a fake that rejects them fails as 'descendants_failed'.
         params = params or {}
         if "_AggMeta" in cypher:
             regime, stamp = self.meta
@@ -81,7 +83,7 @@ class _TraceFake:
             return _Result(rows)
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
-    async def ro_query(self, cypher, params=None, timeout=None):
+    async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
         params = params or {}
         if "RETURN 's' AS side" in cypher and "type(c) IN $ctypes" in cypher:
             # _collect_children_pair
@@ -267,7 +269,7 @@ def test_bfs_peer_rollup_filters_cells_by_frontier_depth():
 
     orig = fake.proj_ro_query
 
-    async def spy(cypher, params=None, timeout=None):
+    async def spy(cypher, params=None, timeout=None, **kwargs):
         if "r.sourceDepth = $fDepth" in cypher:
             seen["depth_filter"] = params["fDepth"]
             # Serve exactly the matching cells like the real store would.
@@ -280,7 +282,7 @@ def test_bfs_peer_rollup_filters_cells_by_frontier_depth():
                         e["types"], e["weight"], None,
                     ])
             return _Result(rows)
-        return await orig(cypher, params=params, timeout=timeout)
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
 
     p._proj_ro_query = spy
     out = _run(p._expand_aggregated_set(

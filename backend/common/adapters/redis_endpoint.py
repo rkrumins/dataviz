@@ -99,6 +99,50 @@ class RedisEndpointConfig:
     # field name -> where the value came from. Rendered by Admin > System > Redis.
     source: Dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Credential normalization, at the ONE point every construction site
+        # (env resolution, legacy URL, provider-cache JSON, tests) passes
+        # through: ""/whitespace-only means "absent", and a username WITHOUT a
+        # password is dropped — the client builder would otherwise make
+        # redis-py send ``AUTH <user> ""`` (→ WRONGPASS), and on the
+        # sentinel-daemon connection that kills ``discover_master`` and takes
+        # the whole tier down. Mirrors ``falkordb_connection.
+        # normalize_credentials`` rule-for-rule but independently implemented:
+        # the roles deliberately never share a credential code path (see
+        # ``_read_secret_file``).
+        for user_field, pass_field, what in (
+            ("username", "password", "data-plane"),
+            ("sentinel_username", "sentinel_password", "sentinel-daemon"),
+        ):
+            user = getattr(self, user_field)
+            pw = getattr(self, pass_field)
+            if isinstance(user, str) and not user.strip():
+                user = None
+            if isinstance(pw, str) and not pw.strip():
+                pw = None
+            if user and not pw:
+                logger.warning(
+                    "redis_endpoint (%s): a %s username is configured without "
+                    "a password — ignoring the username (redis AUTH needs "
+                    "both; set the password or clear the username).",
+                    self.role.value, what,
+                )
+                user = None
+            object.__setattr__(self, user_field, user)
+            object.__setattr__(self, pass_field, pw)
+            # Provenance must agree with the normalized VALUE: the resolve
+            # sites record source["password"]="REDIS_..._PASSWORD" before this
+            # runs, so a whitespace-only secret would render on the admin page
+            # as hasPassword=false WITH a passwordSource — a self-contradicting
+            # row. Reset the entry when normalization dropped the value.
+            # Credential fields only: pool knobs rely on key-PRESENCE in
+            # ``source`` (build_bus_redis checks "max_connections" not in src)
+            # and are never touched here.
+            if user is None and self.source.get(user_field, "default") != "default":
+                self.source[user_field] = "default"
+            if pw is None and self.source.get(pass_field, "default") != "default":
+                self.source[pass_field] = "default"
+
     @property
     def is_configured(self) -> bool:
         """Did an operator actually point this role at an endpoint?
@@ -188,12 +232,29 @@ def _resolve_password(
     return None
 
 
-def _parse_url(url: str) -> Dict[str, Any]:
-    """redis(s)://[user[:pass]@]host[:port][/db] -> field dict."""
+def _parse_url(url: str, *, var: str) -> Dict[str, Any]:
+    """redis(s)://[user[:pass]@]host[:port][/db] -> field dict.
+
+    ``var`` names the config source (env var / provider credential key) for
+    error messages. Errors must NEVER echo the URL or any netloc fragment —
+    the userinfo section may embed a password.
+    """
     p = urlparse(url)
+    try:
+        # urlparse defers port validation to the .port accessor: a
+        # non-numeric port raises ValueError HERE, not at parse time. Left
+        # unguarded (the db-parse below always was guarded) it escaped as a
+        # raw ValueError — a 500 from the admin config endpoint and an
+        # opaque traceback at bus/cache startup.
+        port = int(p.port or 6379)
+    except ValueError as exc:
+        raise RedisConfigurationError(
+            f"{var} contains an invalid port — expected "
+            f"redis(s)://[user[:pass]@]host[:port][/db]. Fix the value of {var}."
+        ) from exc
     out: Dict[str, Any] = {
         "host": p.hostname or "localhost",
-        "port": int(p.port or 6379),
+        "port": port,
         "tls_enabled": p.scheme.lower() == "rediss",
     }
     if p.username:
@@ -309,7 +370,7 @@ def resolve_redis_config(
     legacy_url = os.getenv(legacy_var)
     base: Dict[str, Any] = {}
     if legacy_url:
-        base = _parse_url(legacy_url)
+        base = _parse_url(legacy_url, var=legacy_var)
         for k in base:
             # _parse_url's internal key is "tls_enabled"; the real config field
             # (and the one the Admin page renders source for) is "tls".
@@ -359,7 +420,24 @@ def resolve_redis_config(
             if legacy_pw:
                 password = legacy_pw
                 src["password"] = f"{src['password']} (legacy)"
-        if not tls.enabled and _as_bool(os.getenv("REDIS_TLS_ENABLED"), False):
+        # Legacy unprefixed TLS applies on two paths:
+        #  - REDIS_TLS_ENABLED=true turns TLS on with the legacy material;
+        #  - TLS is ALREADY on (a rediss:// REDIS_URL) and the legacy
+        #    CA/cert/key material exists with no prefixed REDIS_STREAMS_TLS_*
+        #    material to supersede it. It used to be silently dropped here,
+        #    which failed verification against a private CA (fail-closed
+        #    outage) the moment a deployment carried both legacy vars.
+        _prefixed_material = any(
+            os.getenv(f"{prefix}{var}")
+            for var in ("TLS_CA_CERTS", "TLS_CERTFILE", "TLS_KEYFILE")
+        )
+        _legacy_material = any(
+            os.getenv(var)
+            for var in ("REDIS_TLS_CA_CERTS", "REDIS_TLS_CERTFILE", "REDIS_TLS_KEYFILE")
+        )
+        if (not tls.enabled and _as_bool(os.getenv("REDIS_TLS_ENABLED"), False)) or (
+            tls.enabled and _legacy_material and not _prefixed_material
+        ):
             tls = TLSSettings.from_fields(
                 enabled=True,
                 ca_certs=os.getenv("REDIS_TLS_CA_CERTS"),
@@ -482,7 +560,7 @@ def _resolve_provider_cache(
     origin = f"provider:{ov.provider_id}"
 
     if not conn and legacy_url:
-        f = _parse_url(legacy_url)
+        f = _parse_url(legacy_url, var=f"{origin} cache_redis_url")
         legacy_origin = f"{origin} cache_redis_url (legacy)"
         # Only attribute what the URL actually supplied — _parse_url omits
         # username/password/db entirely when the URL doesn't carry them, so a
@@ -618,14 +696,24 @@ def build_redis_client(
         sentinel_kwargs: Dict[str, Any] = {
             "socket_timeout": cfg.socket_timeout,
             "socket_connect_timeout": cfg.socket_connect_timeout,
+            # Daemon sockets need the same slow-network posture as the data
+            # plane: idle health PINGs and timeout retry on discover_master.
+            # NEVER db/max_connections here — daemons have no databases and
+            # the pool cap is a data-plane concern.
+            "health_check_interval": cfg.health_check_interval,
+            "retry_on_timeout": cfg.retry_on_timeout,
             **tls_client_kwargs(cfg.tls),
         }
-        s_user = cfg.sentinel_username or (
-            cfg.username if cfg.sentinel_auth_enabled else None
-        )
-        s_pass = cfg.sentinel_password or (
-            cfg.password if cfg.sentinel_auth_enabled else None
-        )
+        # Dedicated daemon credentials win AS A UNIT: a dedicated password-only
+        # daemon (default user + requirepass) must not get the data-plane
+        # username spliced in via a per-field fallback — that mismatched pair
+        # fails AUTH even though both halves are individually valid.
+        if cfg.sentinel_username or cfg.sentinel_password:
+            s_user, s_pass = cfg.sentinel_username, cfg.sentinel_password
+        elif cfg.sentinel_auth_enabled:
+            s_user, s_pass = cfg.username, cfg.password
+        else:
+            s_user = s_pass = None
         if s_user:
             sentinel_kwargs["username"] = s_user
         if s_pass:

@@ -270,6 +270,9 @@ def test_sentinel_fields_record_provenance(monkeypatch):
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "mymaster")
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379,s2:26379")
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_USERNAME", "sentinel-user")
+    # A username needs a password to survive credential normalization —
+    # provenance now always agrees with the normalized VALUE (G5).
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_PASSWORD", "sentinel-pw")
     monkeypatch.setenv("REDIS_STREAMS_SENTINEL_AUTH_ENABLED", "true")
     s = resolve_redis_config(RedisRole.STREAMS)
     assert s.source["sentinel_master"] == "REDIS_STREAMS_SENTINEL_MASTER"
@@ -394,7 +397,9 @@ def test_provider_sentinel_fields_record_provenance():
                 "authEnabled": True,
             },
         },
-        credentials={"cache_sentinel_username": "sentinel-user"},
+        credentials={"cache_sentinel_username": "sentinel-user",
+                     # username needs a password to survive normalization (G5)
+                     "cache_sentinel_password": "sentinel-pw"},
     )
     c = resolve_redis_config(RedisRole.CACHE, provider_cache=override)
     for key in ("sentinel_master", "sentinel_nodes", "sentinel_username",
@@ -545,3 +550,218 @@ def test_streams_default_endpoint_is_not_falkordb(monkeypatch):
     s = resolve_redis_config(RedisRole.STREAMS)
     assert (s.host, s.port) == ("localhost", 6380)
     assert s.source["port"] == "default"
+
+
+# ── credential normalization: username without a password is dropped ───────
+# redis-py would send `AUTH <user> ""` (→ WRONGPASS); on the sentinel-daemon
+# connection that kills discover_master and takes the whole tier down.
+# Normalized in RedisEndpointConfig.__post_init__ — the one point every
+# construction site (env, legacy URL, provider-cache JSON) passes through.
+
+def test_username_without_password_is_dropped(caplog):
+    import logging
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    with caplog.at_level(logging.WARNING):
+        cfg = RedisEndpointConfig(role=RedisRole.STREAMS, username="user")
+    assert cfg.username is None and cfg.password is None
+    assert any("without a password" in r.message for r in caplog.records)
+
+
+def test_empty_and_whitespace_credentials_mean_absent():
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.CACHE, username="  ", password="",
+        sentinel_username="", sentinel_password=" \t",
+    )
+    assert cfg.username is None and cfg.password is None
+    assert cfg.sentinel_username is None and cfg.sentinel_password is None
+
+
+def test_real_credentials_pass_through_unstripped():
+    from backend.common.adapters.redis_endpoint import RedisEndpointConfig
+
+    cfg = RedisEndpointConfig(
+        role=RedisRole.STREAMS, username="u", password=" pw with spaces ",
+    )
+    assert (cfg.username, cfg.password) == ("u", " pw with spaces ")
+
+
+def test_env_username_without_password_never_reaches_the_client(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "bus")
+    monkeypatch.setenv("REDIS_STREAMS_USERNAME", "user")   # no password anywhere
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.username is None
+
+
+def test_sentinel_daemon_username_without_password_is_dropped(monkeypatch):
+    """The tier-killing variant: AUTH <user> "" against the sentinel DAEMONS
+    fails discover_master, so the whole sentinel deployment reads as down."""
+    monkeypatch.setenv("REDIS_STREAMS_MODE", "sentinel")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_MASTER", "m")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_NODES", "s1:26379")
+    monkeypatch.setenv("REDIS_STREAMS_SENTINEL_USERNAME", "sentineluser")
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.sentinel_username is None
+
+
+def test_provider_cache_username_without_password_is_dropped():
+    from backend.common.adapters.redis_endpoint import ProviderCacheOverride
+
+    ov = ProviderCacheOverride(
+        provider_id="p1",
+        connection={"mode": "standalone", "host": "cache", "port": 6379},
+        credentials={"cache_username": "user"},          # no cache_password
+    )
+    cfg = resolve_redis_config(RedisRole.CACHE, provider_cache=ov)
+    assert cfg.username is None
+
+
+# ── URL-form auth matrix (pinning: rediss://:pw@host and friends) ──────────
+# One parser (_parse_url) serves REDIS_URL / CACHE_REDIS_URL / provider
+# cache_redis_url — these pin every auth shape a URL can express.
+
+def test_url_empty_user_password_only(monkeypatch):
+    """The classic requirepass form: redis://:pw@host — empty username means
+    AUTH <password> (default user), never AUTH '' <password>."""
+    monkeypatch.setenv("REDIS_URL", "redis://:my-password@bus-host:6379/0")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.username is None
+    assert s.password == "my-password"
+    assert (s.host, s.port) == ("bus-host", 6379)
+
+
+def test_url_explicit_user_and_password(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://acl-user:my-password@bus-host:6379/0")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert (s.username, s.password) == ("acl-user", "my-password")
+
+
+def test_rediss_scheme_enables_tls_with_secure_defaults(monkeypatch):
+    """rediss://:pw@host — TLS on, full verification against the system trust
+    store by default (a private-CA server additionally needs *_TLS_CA_CERTS)."""
+    monkeypatch.setenv("CACHE_REDIS_URL", "rediss://:my-password@cache-host")
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert c.tls.enabled is True
+    assert c.tls.cert_reqs == "required"
+    assert c.tls.check_hostname is True
+    assert c.password == "my-password"
+    assert c.username is None
+    assert (c.host, c.port) == ("cache-host", 6379)   # port defaults
+
+
+def test_url_percent_encoded_credentials_are_unquoted(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://u%40corp:p%40ss%3Aword@h:6379/0")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert (s.username, s.password) == ("u@corp", "p@ss:word")
+
+
+def test_url_no_auth_at_all(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://plain-host:6380/2")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.username is None and s.password is None
+    assert (s.host, s.port, s.db) == ("plain-host", 6380, 2)
+
+
+def test_url_malformed_port_is_a_clean_config_error(monkeypatch):
+    """A non-numeric port used to escape as a raw ValueError → admin-API 500
+    and an opaque startup traceback. It must be a RedisConfigurationError that
+    names the VARIABLE and never echoes the URL (the userinfo section may
+    embed a password)."""
+    monkeypatch.setenv("REDIS_URL", "redis://:sekrit@host:notaport/0")
+    with pytest.raises(RedisConfigurationError) as exc_info:
+        resolve_redis_config(RedisRole.STREAMS)
+    msg = str(exc_info.value)
+    assert "REDIS_URL" in msg
+    assert "sekrit" not in msg
+    assert "host:notaport" not in msg
+
+
+def test_provider_cache_url_malformed_port_is_a_clean_config_error():
+    ov = ProviderCacheOverride(
+        provider_id="p1",
+        credentials={"cache_redis_url": "redis://:sekrit@host:oops/1"},
+    )
+    with pytest.raises(RedisConfigurationError) as exc_info:
+        resolve_redis_config(RedisRole.CACHE, provider_cache=ov)
+    msg = str(exc_info.value)
+    assert "p1" in msg and "cache_redis_url" in msg
+    assert "sekrit" not in msg
+
+
+def test_url_non_numeric_db_falls_back_with_warning(monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("REDIS_URL", "redis://h:6379/abc")
+    with caplog.at_level(logging.WARNING):
+        s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.db == 0
+    assert any("non-numeric db" in r.message for r in caplog.records)
+
+
+def test_url_without_scheme_silently_means_localhost(monkeypatch):
+    """PINNED caveat: a bare hostname in REDIS_URL parses to localhost (urlparse
+    treats it as a path). If this ever becomes a hard error, update this test
+    deliberately — today it is a silent misconfig."""
+    monkeypatch.setenv("REDIS_URL", "just-a-hostname")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.host == "localhost"
+
+
+# ── provenance agrees with the normalized value (G5) ───────────────────────
+
+def test_whitespace_password_provenance_is_reset(monkeypatch):
+    """A whitespace-only password normalizes to None; the admin view must not
+    show hasPassword=false WITH a passwordSource — the source entry resets to
+    'default' alongside the value."""
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "bus")
+    monkeypatch.setenv("REDIS_STREAMS_PASSWORD", "   ")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.password is None
+    assert s.source.get("password", "default") == "default"
+
+
+def test_username_without_password_provenance_is_reset(monkeypatch):
+    monkeypatch.setenv("REDIS_CACHE_HOST", "cache")
+    monkeypatch.setenv("REDIS_CACHE_USERNAME", "user")   # no password anywhere
+    c = resolve_redis_config(RedisRole.CACHE)
+    assert c.username is None
+    assert c.source.get("username", "default") == "default"
+
+
+def test_real_credentials_keep_their_provenance(monkeypatch):
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "bus")
+    monkeypatch.setenv("REDIS_STREAMS_USERNAME", "u")
+    monkeypatch.setenv("REDIS_STREAMS_PASSWORD", "pw")
+    s = resolve_redis_config(RedisRole.STREAMS)
+    assert s.source["username"] == "REDIS_STREAMS_USERNAME"
+    assert s.source["password"] == "REDIS_STREAMS_PASSWORD"
+
+
+# ── rediss:// legacy URL + legacy unprefixed TLS material (audit closure) ──
+
+def test_rediss_legacy_url_keeps_legacy_ca_material(monkeypatch):
+    """REDIS_URL=rediss://… + REDIS_TLS_CA_CERTS is a documented legacy combo.
+    The CA used to be silently dropped (TLS was already enabled by the URL, so
+    the legacy block never ran) — verification then failed against the system
+    trust store: a fail-closed outage on a perfectly configured deployment."""
+    monkeypatch.setenv("REDIS_URL", "rediss://bus.internal:6380/0")
+    monkeypatch.setenv("REDIS_TLS_CA_CERTS", "/certs/private-ca.pem")
+
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.tls.enabled is True
+    assert cfg.tls.ca_certs == "/certs/private-ca.pem"
+    assert cfg.source["tls"] == "REDIS_TLS_* (legacy)"
+
+
+def test_prefixed_tls_material_beats_legacy_on_rediss_url(monkeypatch):
+    """When the prefixed REDIS_STREAMS_TLS_* material exists it supersedes the
+    legacy unprefixed vars — migrating a deployment var-by-var never regresses
+    to the old CA."""
+    monkeypatch.setenv("REDIS_URL", "rediss://bus.internal:6380/0")
+    monkeypatch.setenv("REDIS_TLS_CA_CERTS", "/certs/old-ca.pem")
+    monkeypatch.setenv("REDIS_STREAMS_TLS_CA_CERTS", "/certs/new-ca.pem")
+
+    cfg = resolve_redis_config(RedisRole.STREAMS)
+    assert cfg.tls.enabled is True
+    assert cfg.tls.ca_certs == "/certs/new-ca.pem"

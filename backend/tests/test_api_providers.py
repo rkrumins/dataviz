@@ -7,7 +7,11 @@ which overrides auth and DB session.
 import pytest
 from httpx import AsyncClient
 
-from backend.app.registry.provider_registry import provider_registry
+# The SAME singleton the endpoints use: backend.app.api.v1.endpoints.providers
+# imports `provider_manager as provider_registry` (migration alias). The old
+# `backend.app.registry.provider_registry` singleton is a different object —
+# seeding/monkeypatching it never reaches the endpoint under test.
+from backend.app.providers.manager import provider_manager as provider_registry
 
 
 # ── Helper ────────────────────────────────────────────────────────────
@@ -172,75 +176,55 @@ async def test_provider_crud_roundtrip(test_client: AsyncClient):
     assert r.status_code == 404
 
 
-async def test_provider_status_endpoint_bounded_when_one_provider_hangs(
+async def test_provider_status_endpoint_is_zero_io_and_reads_warmup_cache(
     test_client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """Scenario 1 — one provider out of N hangs must NOT stall the others.
-
-    Concretely: three providers, one of which takes longer than the
-    endpoint's overall wall-clock. The endpoint must still return 200
-    within the overall timeout + a small slack window, the healthy
-    providers must be reported as ``ready``, and the hung one must be
-    reported as ``unknown`` (not cause a 5xx, not block the response).
-    """
-    import asyncio
+    """The /status endpoint's CURRENT contract (P0.5, superseding the old
+    bounded-fan-out design this test used to pin): the handler does NO
+    outbound work at all — it merges in-memory breaker state with the
+    background warmup cache and returns. A hung provider host therefore
+    cannot slow the response by construction (there is no probe to hang);
+    warmup-observed-healthy providers report ready, never-observed ones
+    report unknown."""
     import time
 
-    from backend.app.api.v1.endpoints import providers as providers_module
-
-    # Keep the test fast.
-    monkeypatch.setattr(providers_module, "_STATUS_PROBE_TIMEOUT_SECS", 0.5)
-    monkeypatch.setattr(providers_module, "_STATUS_OVERALL_TIMEOUT_SECS", 1.0)
-
     create_resp_a = await test_client.post(
-        "/api/v1/admin/providers", json=_provider_payload("Fast-A"),
+        "/api/v1/admin/providers", json=_provider_payload("Warm-A"),
     )
     create_resp_b = await test_client.post(
-        "/api/v1/admin/providers", json=_provider_payload("Hung-B"),
+        "/api/v1/admin/providers", json=_provider_payload("Never-Observed-B"),
     )
     create_resp_c = await test_client.post(
-        "/api/v1/admin/providers", json=_provider_payload("Fast-C"),
+        "/api/v1/admin/providers", json=_provider_payload("Warm-C"),
     )
     id_a = create_resp_a.json()["id"]
     id_b = create_resp_b.json()["id"]
     id_c = create_resp_c.json()["id"]
 
-    class _FastProvider:
-        async def get_stats(self):
-            return {"node_count": 1}
+    now = time.time()
+    provider_registry.warmup_cache[id_a] = {"ok": True, "checked_at": now}
+    provider_registry.warmup_cache[id_c] = {"ok": True, "checked_at": now}
 
-    class _HungProvider:
-        async def get_stats(self):
-            # Block longer than the overall wall-clock; cancellation
-            # should interrupt us.
-            await asyncio.sleep(10)
-            return {"node_count": 0}
-
-    async def _fake_load(provider_id: str, asset_name):
-        if provider_id == id_b:
-            return _HungProvider()
-        return _FastProvider()
-
-    monkeypatch.setattr(providers_module, "_load_provider_for_outbound", _fake_load)
-
-    t0 = time.monotonic()
-    resp = await test_client.get("/api/v1/admin/providers/status")
-    elapsed = time.monotonic() - t0
+    try:
+        t0 = time.monotonic()
+        resp = await test_client.get("/api/v1/admin/providers/status")
+        elapsed = time.monotonic() - t0
+    finally:
+        provider_registry.warmup_cache.pop(id_a, None)
+        provider_registry.warmup_cache.pop(id_c, None)
 
     assert resp.status_code == 200
     body = resp.json()
     by_id = {row["id"]: row for row in body}
 
-    # The hung provider must not have taken the whole response with it.
-    assert elapsed < 3.0, f"Response took {elapsed:.2f}s — bounded fan-out is broken"
+    # Zero outbound work → the response is effectively instant.
+    assert elapsed < 3.0, f"Response took {elapsed:.2f}s — /status must do no I/O"
 
     assert by_id[id_a]["status"] == "ready"
     assert by_id[id_c]["status"] == "ready"
-    assert by_id[id_b]["status"] in ("unknown", "unavailable"), by_id[id_b]
-    # ``unknown`` is the expected wall-clock outcome; ``unavailable`` is
-    # a legitimate alternative if cancellation surfaced as an error —
-    # either way it's NOT "ready" and NOT missing from the response.
+    assert by_id[id_b]["status"] == "unknown", by_id[id_b]
+    assert by_id[id_a]["lastCheckedAt"] is not None
+    assert by_id[id_b]["lastCheckedAt"] is None
 
 
 async def test_provider_status_endpoint_reports_unavailable_when_circuit_open(
@@ -278,7 +262,8 @@ async def test_provider_status_endpoint_reports_unavailable_when_circuit_open(
     assert body[0]["name"] == "Circuit Open"
     assert body[0]["status"] == "unavailable"
     assert body[0]["lastCheckedAt"] is not None
-    assert "circuit open" in body[0]["error"].lower()
+    # resolve_provider_status wording: "Provider circuit: <state>".
+    assert "circuit" in body[0]["error"].lower()
 
 
 async def test_test_connection_checks_unsaved_provider_details_without_persisting(
@@ -291,7 +276,7 @@ async def test_test_connection_checks_unsaved_provider_details_without_persistin
 
     created: dict[str, object] = {}
 
-    def _create_provider_instance(provider_type, host, port, asset_name, tls_enabled, creds):
+    def _create_provider_instance(provider_type, host, port, asset_name, tls_enabled, creds, extra_config=None):
         created.update({
             "provider_type": provider_type,
             "host": host,
@@ -319,14 +304,21 @@ async def test_test_connection_checks_unsaved_provider_details_without_persistin
     assert resp.status_code == 200
     assert resp.json()["success"] is True
     assert resp.json()["latencyMs"] is not None
+    # The submitted identity/credentials reach the instance factory. The
+    # credentials blob asserts as a SUBSET: ConnectionCredentials grows
+    # optional fields (cache_*, sentinel_*, spanner) that default to None.
+    creds_seen = created.pop("creds")
     assert created == {
         "provider_type": "falkordb",
         "host": "graph.internal",
         "port": 6379,
         "asset_name": None,
         "tls_enabled": True,
-        "creds": {"username": "demo", "password": "secret", "token": None},
     }
+    assert creds_seen["username"] == "demo"
+    assert creds_seen["password"] == "secret"
+    assert all(v is None for k, v in creds_seen.items()
+               if k not in ("username", "password"))
 
     providers_resp = await test_client.get("/api/v1/admin/providers")
     assert providers_resp.status_code == 200
@@ -365,3 +357,53 @@ async def test_test_connection_returns_failure_payload_for_unreachable_provider(
         "error": "connection refused",
         "providerVersion": None,
     }
+
+
+async def test_test_connection_deadline_extends_with_probe_deadline(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A standalone provider configured for a slow cross-cluster hop raises
+    its Test-button budget via falkordbConnection.probeDeadlineS — the fixed
+    2.0s default must extend, never clip."""
+    seen: dict[str, float] = {}
+
+    class _SlowLinkProvider:
+        async def preflight(self, deadline_s):
+            seen["deadline_s"] = deadline_s
+            from backend.common.interfaces.preflight import PreflightResult
+            return PreflightResult.success("graph.far-cluster:6379", 5)
+
+    monkeypatch.setattr(
+        provider_registry, "_create_provider_instance",
+        lambda *a, **kw: _SlowLinkProvider(),
+    )
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Far Provider",
+            "providerType": "falkordb",
+            "host": "graph.far-cluster",
+            "port": 6379,
+            "tlsEnabled": False,
+            "extraConfig": {"falkordbConnection": {"probeDeadlineS": 6}},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert seen["deadline_s"] == 6.0
+
+    # Without the knob the default stays the fast 2.0s budget.
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Near Provider",
+            "providerType": "falkordb",
+            "host": "graph.local",
+            "port": 6379,
+            "tlsEnabled": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert seen["deadline_s"] == 2.0

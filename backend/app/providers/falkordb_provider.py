@@ -657,6 +657,15 @@ class FalkorDBProvider(GraphDataProvider):
             and auth_enabled.strip().lower() in ("false", "0", "no", "off")
         )
         self._auth_enabled = not auth_off
+        # Normalize BEFORE storing: ""/whitespace-only creds must mean "absent"
+        # here exactly as they do in load_connection_config, or preflight (which
+        # reads self._username/_password directly) and the connect path would
+        # disagree about whether this provider authenticates.
+        from backend.app.providers.falkordb_connection import normalize_credentials
+        username, password = normalize_credentials(
+            username, password,
+            context=f"FalkorDB provider {provider_id or f'{self._host}:{port}'}",
+        )
         self._username = username if self._auth_enabled else None
         self._password = password if self._auth_enabled else None
         # Footgun guard: auth EXPLICITLY disabled while a graph password is saved
@@ -917,6 +926,14 @@ class FalkorDBProvider(GraphDataProvider):
         # construction — a health probe must never build a heavyweight client.
         ssl_ctx = build_ssl_context(cfg.tls_settings())
 
+        if cfg.mode == "cluster" and not cfg.cluster_nodes:
+            # Cluster mode with no startup nodes is a CONFIG error connect()
+            # will also raise. Falling through to a standalone ping of
+            # self._host probed the wrong thing entirely — typically localhost
+            # — and reported a verdict about a host nobody will dial.
+            from backend.common.interfaces.preflight import PreflightResult
+            return PreflightResult.failure("cluster_nodes_missing", 0)
+
         if cfg.mode == "cluster" and cfg.cluster_nodes:
             # Do NOT build a RedisCluster to resolve the owning node here.
             # RedisCluster.initialize() connects to EVERY startup node, verifies
@@ -958,12 +975,29 @@ class FalkorDBProvider(GraphDataProvider):
         # fallback to the first sentinel node.
         host, port = self._host, self._port
         discover = None
+        probe_username, probe_password = self._username, self._password
+        probe_ssl = ssl_ctx
         if cfg.mode == "sentinel" and cfg.sentinel_nodes:
             host, port = cfg.sentinel_nodes[0]
             from backend.app.providers.falkordb_connection import (
+                _sentinel_auth_kwargs,
                 resolve_sentinel_master,
             )
-            discover = resolve_sentinel_master(cfg, 1.0)
+            # The FALLBACK target is a Sentinel DAEMON: its own auth and its own
+            # TLS listener, not the data plane's. Probing it with the graph
+            # password / graph TLS context reported auth_failed or a garbled
+            # handshake against a perfectly healthy tier on any deployment where
+            # the two differ (e.g. TLS data plane + plaintext sentinels).
+            # Discovery socket budget: the 1.0s floor false-failed discovery on
+            # a >1s-RTT sentinel tier, silently downgrading the probe to a
+            # daemon PING (a dead master read green). A provider's
+            # connectTimeout raises it, capped by the preflight deadline.
+            discover_s = min(deadline_s, max(1.0, cfg.socket_connect_timeout or 1.0))
+            sentinel_kw = _sentinel_auth_kwargs(cfg, discover_s)
+            probe_username = sentinel_kw.get("username")
+            probe_password = sentinel_kw.get("password")
+            probe_ssl = build_ssl_context(cfg.sentinel_tls_settings())
+            discover = resolve_sentinel_master(cfg, discover_s)
 
         if discover is not None:
             started = time.monotonic()
@@ -971,15 +1005,19 @@ class FalkorDBProvider(GraphDataProvider):
                 host, port = await asyncio.wait_for(
                     discover, timeout=max(0.5, deadline_s * 0.6),
                 )
+                # Discovery succeeded → the probe target is the MASTER: back to
+                # data-plane credentials and data-plane TLS.
+                probe_username, probe_password = self._username, self._password
+                probe_ssl = ssl_ctx
             except Exception:
                 pass
             deadline_s = max(0.3, deadline_s - (time.monotonic() - started))
         return await redis_ping_preflight(
             host, port,
             deadline_s=deadline_s,
-            username=self._username,
-            password=self._password,
-            ssl_context=ssl_ctx,
+            username=probe_username,
+            password=probe_password,
+            ssl_context=probe_ssl,
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
@@ -996,7 +1034,12 @@ class FalkorDBProvider(GraphDataProvider):
         kw: dict = {
             "max_connections": graph_pool_size,
             "decode_responses": True,
-            **resilient_pool_kwargs(socket_timeout=socket_timeout),
+            **resilient_pool_kwargs(
+                socket_timeout=socket_timeout,
+                connect_timeout=(
+                    self._conn_cfg.socket_connect_timeout if self._conn_cfg else None
+                ),
+            ),
         }
         # P1.6 — auth so the pool issues AUTH transparently (else NOAUTH is
         # mis-classified as a network failure and trips a false breaker).
@@ -1005,6 +1048,45 @@ class FalkorDBProvider(GraphDataProvider):
         if self._password:
             kw["password"] = self._password
         return kw
+
+    async def _build_and_verify(self, graph_pool_kwargs: dict, init_timeout: float) -> None:
+        """Build the graph client (+ the dedicated projection client on cluster),
+        select the graphs, and verify the pool with ONE bounded connection-level
+        PING. Shared by the initial connect and both auth-renegotiation rebuilds
+        in ``_ensure_connected`` so the three paths can never drift apart.
+
+        The verify is a Redis PING, never a GRAPH query: a read-only graph query
+        raises "empty key" on a never-created graph (false "provider down"), and
+        a read-write one would lazily create an empty graph key per probe.
+        """
+        from redis.asyncio import Redis
+        from backend.app.providers.falkordb_connection import build_graph_client
+
+        self._db, self._pool = await build_graph_client(
+            self._conn_cfg,
+            graph_name=self._graph_name,
+            pool_kwargs=graph_pool_kwargs,
+        )
+        self._graph = self._db.select_graph(self._graph_name)
+        # Projection graph for dedicated mode. On a Redis Cluster,
+        # {graph}_proj may hash to a DIFFERENT shard than {graph}, so route it
+        # through its own owning-node client; else it shares the same client.
+        if self._projection_mode == "dedicated":
+            proj_name = f"{self._graph_name}_proj"
+            if self._conn_cfg.mode == "cluster":
+                self._proj_db, self._proj_pool = await build_graph_client(
+                    self._conn_cfg,
+                    graph_name=proj_name,
+                    pool_kwargs=graph_pool_kwargs,
+                )
+                self._proj_graph = self._proj_db.select_graph(proj_name)
+            else:
+                self._proj_db = self._db
+                self._proj_graph = self._db.select_graph(proj_name)
+        await asyncio.wait_for(
+            Redis(connection_pool=self._pool).ping(),
+            timeout=init_timeout,
+        )
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
@@ -1037,10 +1119,8 @@ class FalkorDBProvider(GraphDataProvider):
             # on a semaphore inside the loop itself). The circuit-breaker
             # proxy around this provider translates the failure into
             # ProviderUnavailable before it reaches the web tier.
-            from redis.asyncio import Redis
             from backend.app.providers.falkordb_connection import (
                 load_connection_config,
-                build_graph_client,
                 build_cache_client,
             )
 
@@ -1073,11 +1153,6 @@ class FalkorDBProvider(GraphDataProvider):
                     "FalkorDB provider connecting graph %r via %s",
                     self._graph_name, self._conn_cfg.describe(),
                 )
-            self._db, self._pool = await build_graph_client(
-                self._conn_cfg,
-                graph_name=self._graph_name,
-                pool_kwargs=_graph_pool_kwargs,
-            )
             # Redis for non-graph ops (caching, materialization tracking,
             # ancestor chains, stats). Resolved centrally via the CACHE role
             # (``build_cache_client``): the provider's own
@@ -1131,51 +1206,25 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 self._redis = None
                 self._redis_available = False
-            # self._db was built by the connection factory above.
-            self._graph = self._db.select_graph(self._graph_name)
+            # Build graph client(s) + verify with one bounded PING (see
+            # _build_and_verify — if the verify fails, the connect failed and
+            # the caller's circuit breaker records it).
+            from backend.app.providers.falkordb_connection import connect_verify_budget
 
-            # Set up projection graph if using dedicated mode. On a Redis
-            # Cluster, {graph}_proj may hash to a DIFFERENT shard than
-            # {graph}, so route it through its own owning-node client; in
-            # standalone/sentinel it shares the same client.
-            if self._projection_mode == "dedicated":
-                proj_name = f"{self._graph_name}_proj"
-                if self._conn_cfg.mode == "cluster":
-                    self._proj_db, self._proj_pool = await build_graph_client(
-                        self._conn_cfg,
-                        graph_name=proj_name,
-                        pool_kwargs=_graph_pool_kwargs,
-                    )
-                    self._proj_graph = self._proj_db.select_graph(proj_name)
-                else:
-                    self._proj_db = self._db
-                    self._proj_graph = self._db.select_graph(proj_name)
-
-            # Verify the pool with one cheap round-trip — if this fails, we
-            # treat the connect as failed and the caller's circuit breaker
-            # records it. Bounded so a half-open socket cannot stall the
-            # connect path.
-            #
-            # Use a connection-level Redis PING, NOT a GRAPH.RO_QUERY: a
-            # read-only graph query raises "Invalid graph operation on empty
-            # key" when the graph key doesn't exist yet (empty/never-created
-            # graph), which would make connecting fail for any empty graph
-            # and surface as a false "provider down". PING verifies the pool
-            # without touching any graph. We must also NOT probe with a
-            # read-write GRAPH.QUERY — that would lazily create an empty
-            # graph key for every asset name discovery probes.
-            _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+            _init_timeout = connect_verify_budget(
+                self._conn_cfg, float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
             try:
-                await asyncio.wait_for(
-                    Redis(connection_pool=self._pool).ping(),
-                    timeout=_init_timeout,
-                )
+                await self._build_and_verify(_graph_pool_kwargs, _init_timeout)
             except Exception as _auth_exc:
                 from backend.app.providers.falkordb_connection import (
                     is_auth_not_configured_error,
+                    is_auth_required_error,
                     mark_instance_unauthenticated,
+                    normalize_credentials,
                     raise_auth_config_error,
                     strip_credentials,
+                    unmark_instance_unauthenticated,
                 )
 
                 if is_auth_not_configured_error(_auth_exc) and (
@@ -1195,29 +1244,50 @@ class FalkorDBProvider(GraphDataProvider):
                     self._conn_cfg = strip_credentials(self._conn_cfg)
                     self._username = None
                     self._password = None
-                    _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
-                    self._db, self._pool = await build_graph_client(
-                        self._conn_cfg,
-                        graph_name=self._graph_name,
-                        pool_kwargs=_graph_pool_kwargs,
+                    await self._build_and_verify(
+                        self._build_pool_kwargs(socket_timeout), _init_timeout,
                     )
-                    self._graph = self._db.select_graph(self._graph_name)
-                    if self._projection_mode == "dedicated":
-                        proj_name = f"{self._graph_name}_proj"
-                        if self._conn_cfg.mode == "cluster":
-                            self._proj_db, self._proj_pool = await build_graph_client(
-                                self._conn_cfg,
-                                graph_name=proj_name,
-                                pool_kwargs=_graph_pool_kwargs,
-                            )
-                            self._proj_graph = self._proj_db.select_graph(proj_name)
-                        else:
-                            self._proj_db = self._db
-                            self._proj_graph = self._db.select_graph(proj_name)
-                    await asyncio.wait_for(
-                        Redis(connection_pool=self._pool).ping(),
-                        timeout=_init_timeout,
+                elif (
+                    is_auth_required_error(_auth_exc)
+                    and self._auth_enabled
+                    and not (self._username or self._password)
+                    and (
+                        self._credentials.get("username")
+                        or self._credentials.get("password")
                     )
+                ):
+                    # The mirror case: NOAUTH on a connect we made WITHOUT
+                    # credentials while the row HAS them — the self-heal above
+                    # nulled them earlier (instance was unauthenticated then) and
+                    # authentication has since been re-enabled on the server.
+                    # Restore the row credentials, un-learn, rebuild once WITH
+                    # them; a second auth failure is a clean config error, so
+                    # this can never loop.
+                    logger.warning(
+                        "FalkorDB at %s now REQUIRES authentication (it was "
+                        "previously observed unauthenticated) — reconnecting with "
+                        "the provider's saved credentials.",
+                        self._conn_cfg.describe(),
+                    )
+                    unmark_instance_unauthenticated(self._conn_cfg)
+                    self._username, self._password = normalize_credentials(
+                        self._credentials.get("username"),
+                        self._credentials.get("password"),
+                    )
+                    self._conn_cfg = load_connection_config(
+                        self._connection_config,
+                        host=self._host, port=self._port,
+                        username=self._username, password=self._password,
+                        tls_enabled=self._tls_enabled,
+                        credentials=self._credentials,
+                    )
+                    try:
+                        await self._build_and_verify(
+                            self._build_pool_kwargs(socket_timeout), _init_timeout,
+                        )
+                    except Exception as _auth_exc2:
+                        raise_auth_config_error(self._conn_cfg, _auth_exc2)
+                        raise
                 else:
                     # NOAUTH (instance wants credentials we lack) or WRONGPASS
                     # (credentials rejected) → a CONFIGURATION error, not an outage:

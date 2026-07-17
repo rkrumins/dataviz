@@ -18,6 +18,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytest.skip(
+    "QUARANTINED: imports ProviderTraceResult, which exists nowhere in backend.common.models.graph (or its git history) — the module tests an API that was never merged. Restore the models or rewrite against TraceResultV2",
+    allow_module_level=True,
+)
+
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.common.models.graph import (
     GraphNode,

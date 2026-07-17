@@ -61,7 +61,7 @@ def test_fast_query_logs_nothing(caplog, monkeypatch):
     monkeypatch.setattr(resilience, "FALKORDB_SLOW_QUERY_MS", 500)
     p = _make_provider(delay_s=0.0)
     with caplog.at_level(logging.WARNING):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             p._ro_query("MATCH (n) RETURN n LIMIT 1", op="nodes.get")
         )
     assert _slow_lines(caplog) == []
@@ -72,7 +72,7 @@ def test_slow_query_logs_one_warning_with_op_and_timings(caplog, monkeypatch):
     monkeypatch.setattr(resilience, "FALKORDB_SLOW_QUERY_MS", 10)
     p = _make_provider(delay_s=0.05)
     with caplog.at_level(logging.WARNING):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             p._ro_query("MATCH (n) WHERE n.urn IN $urns RETURN n", op="children.page")
         )
     lines = _slow_lines(caplog)
@@ -97,7 +97,7 @@ def test_slow_query_logs_error_class_on_failure(caplog, monkeypatch):
     p._graph.ro_query = _boom
     with caplog.at_level(logging.WARNING):
         with pytest.raises(RuntimeError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 p._ro_query("MATCH (n) RETURN n", op="agg.cells")
             )
     lines = _slow_lines(caplog)
@@ -126,7 +126,7 @@ def test_queue_wait_alone_triggers_the_log(caplog, monkeypatch):
         await holder
 
     with caplog.at_level(logging.WARNING):
-        asyncio.get_event_loop().run_until_complete(_scenario())
+        asyncio.run(_scenario())
     lines = _slow_lines(caplog)
     assert len(lines) == 1
     msg = lines[0].getMessage()

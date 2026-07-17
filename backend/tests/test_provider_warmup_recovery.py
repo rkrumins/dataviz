@@ -85,9 +85,12 @@ async def test_record_probe_success_evicts_cached_provider_on_recovery():
     mgr = _fresh_manager()
     cache_key = ("prov_X", "graph_a")
 
-    # Mock cached provider with an async close().
+    # Mock cached provider with an async close() and NO in-flight ops — a
+    # bare MagicMock's inflight_ops() returns a truthy mock, which reads as
+    # "busy" and defers the close to a background task the test never sees.
     fake_provider = MagicMock()
     fake_provider.close = AsyncMock()
+    fake_provider.inflight_ops = MagicMock(return_value=0)
     mgr._providers[cache_key] = fake_provider
     mgr._provider_states[cache_key] = _make_unhealthy_state("prov_X", "graph_a")
 
@@ -213,3 +216,47 @@ async def test_recovery_resets_breakers_for_all_matching_graph_names():
 
     assert breaker_a.current_state == BreakerState.CLOSED.value
     assert breaker_b.current_state == BreakerState.CLOSED.value
+
+
+# ── Multi-provider isolation: one provider's outage never gates another ──
+
+
+async def test_provider_failures_are_isolated_per_provider():
+    """PINNING TEST — the audit invariant: breakers, warmup states, and the
+    fast-fail read gate are all keyed per (provider_id, graph_name). Provider A
+    hard-down (pre-tripped breaker, read-gating state) must leave provider B's
+    state, breaker, and gate completely untouched — several FalkorDB providers
+    of the same type coexist and fail independently."""
+    mgr = _fresh_manager()
+    for _ in range(mgr._PRE_TRIP_AFTER_N):
+        await mgr.record_probe_failure("prov_A", reason="tcp_refused", source="warmup")
+    await mgr.record_probe_success("prov_B", source="warmup")
+
+    a_state = mgr._provider_states[("prov_A", "")]
+    b_state = mgr._provider_states[("prov_B", "")]
+    assert a_state.blocks_reads(max_age_s=60.0) is True
+    assert b_state.blocks_reads(max_age_s=60.0) is False
+    assert mgr._instantiation_breakers[("prov_A", "")].current_state == \
+        BreakerState.OPEN.value
+    assert ("prov_B", "") not in mgr._instantiation_breakers or (
+        mgr._instantiation_breakers[("prov_B", "")].current_state
+        != BreakerState.OPEN.value
+    )
+    # ...and A's recovery doesn't touch B either.
+    await mgr.record_probe_success("prov_A", source="warmup")
+    assert mgr._provider_states[("prov_B", "")] is b_state
+
+
+async def test_auth_reason_never_pre_trips_even_after_unlearn_change():
+    """The un-learn work must not weaken the invariant: auth_required /
+    auth_failed are 'reachable but misconfigured' — recorded as reachable,
+    failure streak reset, breaker left closed, reads never gated."""
+    mgr = _fresh_manager()
+    for _ in range(mgr._PRE_TRIP_AFTER_N + 1):
+        await mgr.record_probe_failure("prov_A", reason="auth_required", source="warmup")
+
+    state = mgr._provider_states[("prov_A", "")]
+    assert state.consecutive_failures == 0
+    assert state.blocks_reads(max_age_s=60.0) is False
+    breaker = mgr._instantiation_breakers.get(("prov_A", ""))
+    assert breaker is None or breaker.current_state != BreakerState.OPEN.value

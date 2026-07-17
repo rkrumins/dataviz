@@ -122,10 +122,21 @@ async def _run_connectivity_probe(
     host, and ≤500ms for a reachable one.
     """
     PREFLIGHT_DEADLINE_S = 2.0
-    PROBE_WALL_CLOCK_S = 2.5  # PREFLIGHT_DEADLINE_S + small slack
+    # A provider configured for a slow cross-cluster hop raises its own
+    # budget via falkordbConnection.probeDeadlineS — the fixed default must
+    # extend, never clip, or the Test button false-fails the exact providers
+    # the knob exists for.
+    _probe_deadline = (
+        (extra_config or {}).get("falkordbConnection") or {}
+    ).get("probeDeadlineS")
+    try:
+        PREFLIGHT_DEADLINE_S = max(PREFLIGHT_DEADLINE_S, float(_probe_deadline))
+    except (TypeError, ValueError):
+        pass
+    PROBE_WALL_CLOCK_S = PREFLIGHT_DEADLINE_S + 0.5  # + small slack
     # Sentinel/Cluster resolution (discover master / slot map) needs more
     # than the fast single-host preflight budget.
-    PROBE_FULL_CONNECT_S = 8.0
+    PROBE_FULL_CONNECT_S = max(8.0, PREFLIGHT_DEADLINE_S)
 
     instance = provider_registry._create_provider_instance(
         _provider_type_value(provider_type),
@@ -316,6 +327,13 @@ async def test_unsaved_provider_connection(
     req: ProviderCreateRequest = Body(...),
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
+    """Test connectivity for a SUBMITTED (unsaved) provider config.
+
+    The counterpart of ``/{provider_id}/test`` (which probes the saved row):
+    this probes exactly the payload it is given, nothing is persisted. It is
+    the correct target for create forms AND for edit forms validating a
+    pending change before saving.
+    """
     # Spanner is a managed gRPC service keyed on project / instance /
     # database (in extra_config). It does NOT use host/port. Reject
     # ambiguous requests so a misconfigured client doesn't silently
@@ -437,6 +455,12 @@ async def test_provider(
     ),
 ):
     """Test connectivity to a registered provider.
+
+    Probes the SAVED row — always the configuration as last persisted. A
+    pending (unsaved) edit is NOT visible here: to validate a candidate
+    config before saving, POST the full payload to ``/test-connection``
+    instead. Edit forms must use that endpoint, or their 'Test' button
+    silently tests the stale saved state.
 
     Phase 2.5 §2.5.2 — short-session pattern: open a session only long
     enough to fetch the provider row + credentials, close it, then

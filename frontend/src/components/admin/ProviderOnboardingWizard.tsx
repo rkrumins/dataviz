@@ -111,6 +111,20 @@ interface FalkorDBConnectionState {
   // Advanced knobs kept as strings for the inputs; parsed on submit.
   socketTimeout: string
   graphPoolSize: string
+  connectTimeout: string
+  probeDeadlineS: string
+  // Cross-cluster announced→reachable rewrites (falkordbConnection.addressRemap).
+  addressRemap: Array<[string, string]>
+  // Sentinel DAEMON TLS: 'inherit' = follow the data-plane TLS (backend
+  // default when sentinel.tls is absent); 'on'/'off' write an explicit
+  // sentinel.tls override.
+  sentinelTlsMode: 'inherit' | 'on' | 'off'
+  sentinelTlsCaCertPath: string
+  // Sentinel DAEMON auth: none | reuse data-plane creds (sentinel.authEnabled)
+  // | dedicated daemon credentials (ride the encrypted blob, write-only).
+  sentinelAuthMode: 'none' | 'reuse' | 'dedicated'
+  sentinelUsername: string
+  sentinelPassword: string
   // TLS / mutual-TLS detail (the enable flag is the top-level `tlsEnabled`).
   // Cert inputs are file PATHS to PEMs mounted into the services (non-secret).
   tlsCaCertPath: string
@@ -140,6 +154,13 @@ interface ProviderOnboardingFormData {
   spanner?: SpannerFormState
   // FalkorDB connection topology (standalone / sentinel / cluster).
   falkordbConnection?: FalkorDBConnectionState
+  // The provider's extra_config exactly as loaded (edit mode only; never
+  // rendered). buildExtraConfig REBUILDS the payload from the form fields,
+  // and the backend replaces extra_config wholesale on update — so any key
+  // the form doesn't own (falkordbConnection.addressRemap / connectTimeout /
+  // probeDeadlineS, sentinel.tls, ops-set top-level keys, ...) must be
+  // carried through from here or a routine Save silently deletes it.
+  rawExtraConfig?: Record<string, any>
 }
 
 interface ConnectivityCheck {
@@ -238,6 +259,14 @@ const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
   cache: { ...DEFAULT_CACHE_CONNECTION },
   socketTimeout: '',
   graphPoolSize: '',
+  connectTimeout: '',
+  probeDeadlineS: '',
+  addressRemap: [],
+  sentinelTlsMode: 'inherit',
+  sentinelTlsCaCertPath: '',
+  sentinelAuthMode: 'none',
+  sentinelUsername: '',
+  sentinelPassword: '',
   tlsCaCertPath: '',
   tlsCertPath: '',
   tlsKeyPath: '',
@@ -323,7 +352,7 @@ function parseLegacyCacheUrl(raw: string): Partial<CacheConnectionState> | null 
   }
 }
 
-function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
+export function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
   const extra = provider?.extraConfig ?? {}
   const isSpannerProvider = provider?.providerType === 'spanner'
@@ -340,6 +369,7 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
     host: provider?.host ?? '',
     port: provider?.port ?? defaultPortForProvider(provider?.providerType ?? ''),
     tlsEnabled: provider?.tlsEnabled ?? false,
+    rawExtraConfig: provider?.extraConfig ?? undefined,
     username: '',
     password: '',
     authConfigured: provider?.authConfigured ?? false,
@@ -398,6 +428,23 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
           },
           socketTimeout: fdbConn.socketTimeout != null ? String(fdbConn.socketTimeout) : '',
           graphPoolSize: fdbConn.graphPoolSize != null ? String(fdbConn.graphPoolSize) : '',
+          connectTimeout: fdbConn.connectTimeout != null ? String(fdbConn.connectTimeout) : '',
+          probeDeadlineS: fdbConn.probeDeadlineS != null ? String(fdbConn.probeDeadlineS) : '',
+          addressRemap: Object.entries(
+            (fdbConn.addressRemap ?? {}) as Record<string, string>,
+          ).map(([from, to]) => [from, String(to)] as [string, string]),
+          // sentinel.tls absent → the daemons inherit the data-plane TLS.
+          sentinelTlsMode: fdbConn.sentinel?.tls == null
+            ? 'inherit'
+            : fdbConn.sentinel.tls.enabled === false ? 'off' : 'on',
+          sentinelTlsCaCertPath: fdbConn.sentinel?.tls?.caCertPath ?? '',
+          // Dedicated daemon creds are write-only secrets — presence rides
+          // provider.sentinelAuthConfigured; authEnabled=true = reuse.
+          sentinelAuthMode: provider?.sentinelAuthConfigured
+            ? 'dedicated'
+            : fdbConn.sentinel?.authEnabled === true ? 'reuse' : 'none',
+          sentinelUsername: '',
+          sentinelPassword: '',
           tlsCaCertPath: fdbConn.tls?.caCertPath ?? '',
           tlsCertPath: fdbConn.tls?.certPath ?? '',
           tlsKeyPath: fdbConn.tls?.keyPath ?? '',
@@ -408,8 +455,53 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
   }
 }
 
-function buildExtraConfig(formData: ProviderOnboardingFormData) {
-  const out: Record<string, any> = {}
+// extra_config keys the FORM owns: it rebuilds these from its fields, so a
+// missing form value means "delete the key" (e.g. disabling the cache removes
+// cacheConnection). Everything NOT listed is carried through verbatim from the
+// loaded provider — the backend replaces extra_config wholesale on update, so
+// dropping unknown keys here silently deletes ops-configured settings.
+const FORM_OWNED_EXTRA_KEYS = new Set([
+  'schemaMapping',
+  'projectId', 'instanceId', 'databaseId', 'graphName', 'useEmulator',
+  'falkordbConnection', 'cacheConnection',
+])
+// Same contract one level down, inside falkordbConnection: keys the form
+// edits vs. advanced knobs that only ride the API/ops tooling
+// (addressRemap, connectTimeout, probeDeadlineS, and future additions).
+const FORM_OWNED_FALKORDB_CONN_KEYS = new Set([
+  'mode', 'sentinel', 'cluster', 'authEnabled',
+  'socketTimeout', 'graphPoolSize', 'tls',
+  // Advanced (rendered since the Advanced section): form-owned means the
+  // form's emission is authoritative — clearing the field DELETES the key.
+  'connectTimeout', 'probeDeadlineS', 'addressRemap',
+])
+
+/** Drop remap rows with an empty side (mirrors cleanNodes). */
+function cleanRemap(rows: Array<[string, string]>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [from, to] of rows) {
+    if (from.trim() && to.trim()) out[from.trim()] = to.trim()
+  }
+  return out
+}
+
+function preserveUnknownKeys(
+  raw: Record<string, any> | undefined,
+  owned: Set<string>,
+): Record<string, any> {
+  const kept: Record<string, any> = {}
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (!owned.has(key)) kept[key] = value
+  }
+  return kept
+}
+
+export function buildExtraConfig(formData: ProviderOnboardingFormData) {
+  // Unknown keys from the loaded provider survive the rebuild; the form-owned
+  // keys written below override them.
+  const out: Record<string, any> = preserveUnknownKeys(
+    formData.rawExtraConfig, FORM_OWNED_EXTRA_KEYS,
+  )
 
   if (formData.schemaMappingEnabled) {
     out.schemaMapping = {
@@ -434,10 +526,42 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
 
   if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
     const fc = formData.falkordbConnection
+    const rawConn = (formData.rawExtraConfig?.falkordbConnection ?? {}) as Record<string, any>
+    // Advanced knobs the form doesn't render (addressRemap, connectTimeout,
+    // probeDeadlineS, ...) must survive a Save.
+    const preservedConn = preserveUnknownKeys(rawConn, FORM_OWNED_FALKORDB_CONN_KEYS)
     const conn: Record<string, unknown> = {}
     if (fc.mode === 'sentinel') {
       conn.mode = 'sentinel'
-      conn.sentinel = { masterName: fc.sentinelMasterName.trim(), nodes: cleanNodes(fc.sentinelNodes) }
+      // Spread the stored sentinel object first: it can carry keys this panel
+      // doesn't edit (legacy creds pending migration, future additions). The
+      // form now OWNS masterName, nodes, authEnabled and tls.
+      const sentinel: Record<string, unknown> = {
+        ...(rawConn.sentinel ?? {}),
+        masterName: fc.sentinelMasterName.trim(),
+        nodes: cleanNodes(fc.sentinelNodes),
+      }
+      // Daemon auth: authEnabled=true means "reuse the data-plane creds".
+      // 'dedicated' rides the credentials blob instead; 'none' omits the key
+      // (backend default: unauthenticated daemons).
+      if (fc.sentinelAuthMode === 'reuse') sentinel.authEnabled = true
+      else delete sentinel.authEnabled
+      // Daemon TLS: 'inherit' omits sentinel.tls (backend inherits the
+      // data-plane TLS); 'on'/'off' write an explicit override, preserving
+      // any unrendered subkeys of a stored override.
+      if (fc.sentinelTlsMode === 'inherit') {
+        delete sentinel.tls
+      } else {
+        const rawSentinelTls = (rawConn.sentinel?.tls ?? {}) as Record<string, unknown>
+        sentinel.tls = {
+          ...rawSentinelTls,
+          enabled: fc.sentinelTlsMode === 'on',
+          ...(fc.sentinelTlsMode === 'on' && fc.sentinelTlsCaCertPath.trim()
+            ? { caCertPath: fc.sentinelTlsCaCertPath.trim() }
+            : {}),
+        }
+      }
+      conn.sentinel = sentinel
     } else if (fc.mode === 'cluster') {
       conn.mode = 'cluster'
       conn.cluster = { startupNodes: cleanNodes(fc.clusterStartupNodes) }
@@ -450,6 +574,12 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
     if (fc.socketTimeout.trim() && !Number.isNaN(st)) conn.socketTimeout = st
     const gp = parseInt(fc.graphPoolSize, 10)
     if (fc.graphPoolSize.trim() && !Number.isNaN(gp)) conn.graphPoolSize = gp
+    const ct = parseFloat(fc.connectTimeout)
+    if (fc.connectTimeout.trim() && !Number.isNaN(ct)) conn.connectTimeout = ct
+    const pd = parseFloat(fc.probeDeadlineS)
+    if (fc.probeDeadlineS.trim() && !Number.isNaN(pd)) conn.probeDeadlineS = pd
+    const remap = cleanRemap(fc.addressRemap)
+    if (Object.keys(remap).length > 0) conn.addressRemap = remap
     // TLS detail (CA / client cert+key / verify mode) when TLS is enabled.
     // Cert inputs are file paths (non-secret) → they ride extra_config.
     if (formData.tlsEnabled) {
@@ -463,10 +593,17 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
       if (fc.tlsKeyPath.trim()) tls.keyPath = fc.tlsKeyPath.trim()
       conn.tls = tls
     }
-    // Emit only when non-standalone OR an advanced knob/TLS is set; standalone
-    // with no knobs stays the legacy single-host path (no key written).
-    if (conn.mode || conn.authEnabled === false || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
-      out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
+    // Emit only when non-standalone OR an advanced knob/TLS is set (or a
+    // preserved unknown key exists); standalone with no knobs stays the
+    // legacy single-host path (no key written).
+    if (
+      conn.mode || conn.authEnabled === false || conn.socketTimeout != null ||
+      conn.graphPoolSize != null || conn.tls ||
+      conn.connectTimeout != null || conn.probeDeadlineS != null ||
+      conn.addressRemap != null ||
+      Object.keys(preservedConn).length > 0
+    ) {
+      out.falkordbConnection = { ...preservedConn, mode: conn.mode ?? 'standalone', ...conn }
     }
 
     // Dedicated cache: non-secret topology + TLS paths ONLY. Emitted as a
@@ -508,7 +645,7 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
 // paths so each carries the same secrets (incl. FalkorDB's dedicated-cache
 // ACL user/password — never the legacy cache_redis_url, which new saves no
 // longer emit; see the "Convert to structured config" flow for that path).
-function buildCredentials(formData: ProviderOnboardingFormData) {
+export function buildCredentials(formData: ProviderOnboardingFormData) {
   if (isSpanner(formData.providerType)) {
     return formData.spanner?.serviceAccountJson || formData.spanner?.projectId
       ? {
@@ -532,7 +669,20 @@ function buildCredentials(formData: ProviderOnboardingFormData) {
     formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)
   const graphUsername = graphAuthOn ? formData.username || undefined : undefined
   const graphPassword = graphAuthOn ? formData.password || undefined : undefined
-  if (!graphUsername && !graphPassword && !cacheUsername && !cachePassword) return undefined
+  // GRAPH sentinel-DAEMON credentials: sent only for sentinel mode with the
+  // 'dedicated' auth choice ('reuse' rides sentinel.authEnabled in
+  // extra_config; 'none' sends nothing). Write-only like every secret —
+  // blank inputs on edit mean "keep the stored value" (merge semantics).
+  const fc = formData.providerType === 'falkordb' ? formData.falkordbConnection : undefined
+  const sentinelDedicated = Boolean(
+    graphAuthOn && fc?.mode === 'sentinel' && fc.sentinelAuthMode === 'dedicated',
+  )
+  const sentinelUsername = sentinelDedicated ? fc?.sentinelUsername.trim() || undefined : undefined
+  const sentinelPassword = sentinelDedicated ? fc?.sentinelPassword || undefined : undefined
+  if (
+    !graphUsername && !graphPassword && !cacheUsername && !cachePassword &&
+    !sentinelUsername && !sentinelPassword
+  ) return undefined
   return {
     username: graphUsername,
     password: graphPassword,
@@ -540,6 +690,8 @@ function buildCredentials(formData: ProviderOnboardingFormData) {
     cache_password: cachePassword,
     cache_sentinel_username: cacheSentinelUsername,
     cache_sentinel_password: cacheSentinelPassword,
+    sentinel_username: sentinelUsername,
+    sentinel_password: sentinelPassword,
   }
 }
 
@@ -672,6 +824,7 @@ export function ProviderOnboardingWizard({
   // Scratch input for the legacy-cache "Convert to structured config" action
   // (holds the pasted redis:// URL only until it's parsed — not persisted).
   const [legacyCacheUrlInput, setLegacyCacheUrlInput] = useState('')
+  const [showFalkorAdvanced, setShowFalkorAdvanced] = useState(false)
   const [connectivityCheck, setConnectivityCheck] = useState<ConnectivityCheck>({
     state: 'idle',
     fingerprint: null,
@@ -1086,6 +1239,14 @@ export function ProviderOnboardingWizard({
           !formData.falkordbConnection.authEnabled
         ) {
           credentialsClear.push('username', 'password', 'sentinel_username', 'sentinel_password')
+        } else if (
+          formData.providerType === 'falkordb' &&
+          initialStateRef.current?.falkordbConnection?.sentinelAuthMode === 'dedicated' &&
+          formData.falkordbConnection?.sentinelAuthMode !== 'dedicated'
+        ) {
+          // Sentinel-daemon auth switched away from dedicated credentials →
+          // drop the stored daemon secrets (merge semantics would keep them).
+          credentialsClear.push('sentinel_username', 'sentinel_password')
         }
         const req: ProviderUpdateRequest = {
           name: formData.name.trim(),
@@ -1538,6 +1699,206 @@ export function ProviderOnboardingWizard({
                       />
                     </div>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowFalkorAdvanced((v) => !v)}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700"
+                  >
+                    <ChevronRight
+                      className={cn('h-3.5 w-3.5 transition-transform', showFalkorAdvanced && 'rotate-90')}
+                    />
+                    Advanced
+                  </button>
+
+                  {showFalkorAdvanced && (
+                    <div className="space-y-3 border-t border-glass-border pt-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-ink">
+                            Connect timeout (s)
+                          </label>
+                          <input
+                            type="number"
+                            value={formData.falkordbConnection?.connectTimeout ?? ''}
+                            onChange={(event) =>
+                              updateFalkorConn({ connectTimeout: event.target.value })
+                            }
+                            placeholder="5"
+                            className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-ink">
+                            Probe deadline (s)
+                          </label>
+                          <input
+                            type="number"
+                            value={formData.falkordbConnection?.probeDeadlineS ?? ''}
+                            onChange={(event) =>
+                              updateFalkorConn({ probeDeadlineS: event.target.value })
+                            }
+                            placeholder="8"
+                            className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[11px] leading-tight text-ink-muted">
+                        The probe deadline extends (never shrinks) the warmup budget for slow
+                        cross-cluster links.
+                      </p>
+
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-ink">
+                          Address remap
+                        </label>
+                        <p className="mb-1.5 text-[11px] leading-tight text-ink-muted">
+                          Rewrites node addresses the server announces (cluster slot map, sentinel
+                          master) to addresses reachable from this cluster — for cross-cluster
+                          setups where internal pod IPs aren’t routable.
+                        </p>
+                        <div className="space-y-2">
+                          {(formData.falkordbConnection?.addressRemap ?? []).map(([from, to], idx) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <input
+                                value={from}
+                                onChange={(event) => {
+                                  const rows = [...(formData.falkordbConnection?.addressRemap ?? [])]
+                                  rows[idx] = [event.target.value, rows[idx][1]]
+                                  updateFalkorConn({ addressRemap: rows })
+                                }}
+                                placeholder="10.0.0.5:6379"
+                                className="flex-1 rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                              <span className="text-xs text-ink-muted">→</span>
+                              <input
+                                value={to}
+                                onChange={(event) => {
+                                  const rows = [...(formData.falkordbConnection?.addressRemap ?? [])]
+                                  rows[idx] = [rows[idx][0], event.target.value]
+                                  updateFalkorConn({ addressRemap: rows })
+                                }}
+                                placeholder="edge.example.com:6379"
+                                className="flex-1 rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateFalkorConn({
+                                    addressRemap: (formData.falkordbConnection?.addressRemap ?? []).filter(
+                                      (_, i) => i !== idx,
+                                    ),
+                                  })
+                                }
+                                className="rounded-lg px-2 text-red-500 hover:bg-red-500/10"
+                                aria-label="Remove remap"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateFalkorConn({
+                                addressRemap: [...(formData.falkordbConnection?.addressRemap ?? []), ['', '']],
+                              })
+                            }
+                            className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700"
+                          >
+                            <Plus className="h-3.5 w-3.5" /> Add remap
+                          </button>
+                        </div>
+                      </div>
+
+                      {formData.falkordbConnection?.mode === 'sentinel' && (
+                        <>
+                          <div>
+                            <label className="mb-1.5 block text-xs font-medium text-ink">
+                              Sentinel daemon TLS
+                            </label>
+                            <select
+                              value={formData.falkordbConnection?.sentinelTlsMode ?? 'inherit'}
+                              onChange={(event) =>
+                                updateFalkorConn({
+                                  sentinelTlsMode: event.target.value as 'inherit' | 'on' | 'off',
+                                })
+                              }
+                              className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                            >
+                              <option value="inherit">Same as data plane (inherit)</option>
+                              <option value="on">TLS on</option>
+                              <option value="off">TLS off</option>
+                            </select>
+                            {formData.falkordbConnection?.sentinelTlsMode === 'on' && (
+                              <input
+                                value={formData.falkordbConnection?.sentinelTlsCaCertPath ?? ''}
+                                onChange={(event) =>
+                                  updateFalkorConn({ sentinelTlsCaCertPath: event.target.value })
+                                }
+                                placeholder="CA certificate path (optional)"
+                                className="mt-2 w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                              />
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="mb-1.5 block text-xs font-medium text-ink">
+                              Sentinel daemon authentication
+                            </label>
+                            <select
+                              value={formData.falkordbConnection?.sentinelAuthMode ?? 'none'}
+                              onChange={(event) =>
+                                updateFalkorConn({
+                                  sentinelAuthMode: event.target.value as 'none' | 'reuse' | 'dedicated',
+                                })
+                              }
+                              className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                            >
+                              <option value="none">None (unauthenticated daemons)</option>
+                              <option value="reuse">Reuse the graph credentials</option>
+                              <option value="dedicated">Dedicated daemon credentials</option>
+                            </select>
+                            {formData.falkordbConnection?.sentinelAuthMode === 'dedicated' && (
+                              <div className="mt-2 space-y-2">
+                                {!formData.falkordbConnection?.authEnabled && (
+                                  <p className="text-[11px] leading-tight text-amber-600">
+                                    Requires “Requires authentication” to be enabled above —
+                                    daemon credentials are cleared when graph auth is off.
+                                  </p>
+                                )}
+                                <input
+                                  value={formData.falkordbConnection?.sentinelUsername ?? ''}
+                                  onChange={(event) =>
+                                    updateFalkorConn({ sentinelUsername: event.target.value })
+                                  }
+                                  placeholder={
+                                    provider?.sentinelAuthConfigured
+                                      ? 'Daemon username (stored — leave blank to keep)'
+                                      : 'Daemon username (optional)'
+                                  }
+                                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                />
+                                <input
+                                  type="password"
+                                  value={formData.falkordbConnection?.sentinelPassword ?? ''}
+                                  onChange={(event) =>
+                                    updateFalkorConn({ sentinelPassword: event.target.value })
+                                  }
+                                  placeholder={
+                                    provider?.sentinelAuthConfigured
+                                      ? 'Daemon password (stored — leave blank to keep)'
+                                      : 'Daemon password'
+                                  }
+                                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </>
@@ -2224,9 +2585,9 @@ export function ProviderOnboardingWizard({
                     ? `${appName} is probing the provider now. This should only take a few seconds.`
                     : mode === 'create'
                       ? 'Run a live connection test before creating the provider so you know these settings are reachable.'
-                      : 'Save changes as-is, or re-test later from the provider management flow if you need to validate connectivity.'}
+                      : 'Save changes as-is, or test the PENDING settings now — the per-row Test button on the provider list probes the last saved config, not unsaved edits.'}
             </div>
-            {mode === 'create' && connectivityCheck.state !== 'idle' && (
+            {(mode === 'edit' || connectivityCheck.state !== 'idle') && (
               <div className="mt-3 flex justify-end">
                 <button
                   type="button"
@@ -2239,7 +2600,11 @@ export function ProviderOnboardingWizard({
                   ) : (
                     <RefreshCw className="h-4 w-4" />
                   )}
-                  {connectivityCheck.state === 'failure' ? 'Retry connection test' : 'Test again'}
+                  {connectivityCheck.state === 'failure'
+                    ? 'Retry connection test'
+                    : connectivityCheck.state === 'idle'
+                      ? 'Test pending settings'
+                      : 'Test again'}
                 </button>
               </div>
             )}

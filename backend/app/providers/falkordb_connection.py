@@ -21,13 +21,29 @@ Config rides the provider record's ``extra_config`` JSON (no migration):
 
     "falkordbConnection": {
       "mode": "standalone|sentinel|cluster",
-      "sentinel": {"masterName": "mymaster", "nodes": [["h1", 26379]]},
-      "cluster":  {"startupNodes": [["h1", 6379], ["h2", 6379]]}
+      "sentinel": {"masterName": "mymaster", "nodes": [["h1", 26379]],
+                   "authEnabled": false,
+                   "tls": {"enabled": true, "caCertPath": "..."}},
+      "cluster":  {"startupNodes": [["h1", 6379], ["h2", 6379]]},
+      "tls": {"enabled": true, "caCertPath": "...", "certPath": "...",
+              "keyPath": "...", "verifyMode": "required", "checkHostname": true},
+      "addressRemap": {"10.0.0.5:6379": "edge.example.com:6379"},
+      "socketTimeout": 10, "connectTimeout": 2, "graphPoolSize": 24,
+      "probeDeadlineS": 6, "authEnabled": true
     }
+
+``sentinel.tls`` defaults to the data-plane ``tls`` (absent → inherit; an
+explicit ``enabled: false`` gives a TLS data plane with plaintext sentinel
+daemons). ``addressRemap`` rewrites DISCOVERED addresses (cluster slot map /
+MOVED redirects / sentinel-announced master — typically pod IPs unreachable
+from another cluster) before they are dialed; see ``remap_address``.
+``connectTimeout``/``probeDeadlineS`` raise the dial/probe budgets for a
+single cross-cluster provider without fleet-wide env changes.
 
 Env-var fallbacks (when the JSON is absent): ``FALKORDB_MODE``,
 ``FALKORDB_SENTINEL_MASTER``, ``FALKORDB_SENTINEL_NODES``,
-``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"). The
+``FALKORDB_CLUSTER_NODES`` (the *_NODES vars accept "h1:port,h2:port"),
+``FALKORDB_SENTINEL_TLS_ENABLED``, ``FALKORDB_ADDRESS_REMAP`` (from=to CSV). The
 ENV-configured (unrouted) default instance additionally authenticates via
 ``FALKORDB_USERNAME`` / ``FALKORDB_PASSWORD`` / ``FALKORDB_PASSWORD_FILE`` —
 see ``env_conn_config``. Provider rows keep resolving their own credentials
@@ -77,12 +93,32 @@ class FalkorDBConnConfig:
     sentinel_username: Optional[str] = None
     sentinel_password: Optional[str] = None
     sentinel_auth_enabled: bool = False
+    # TLS for the Sentinel DAEMONS themselves. None → inherit the data-plane
+    # TLS settings (a "TLS everywhere" deployment needs no extra config);
+    # an explicit ``sentinel.tls`` object overrides per key, and
+    # ``sentinel.tls.enabled=false`` gives a TLS data plane with plaintext
+    # sentinels. See load_connection_config.
+    sentinel_tls: Optional[TLSSettings] = None
     cluster_nodes: List[Tuple[str, int]] = field(default_factory=list)
     # Per-provider advanced knobs (None → fall back to env defaults at the
     # call site). socket_timeout bounds a single Cypher query; graph_pool_size
-    # is the max graph-query connection pool size.
+    # is the max graph-query connection pool size; socket_connect_timeout
+    # (JSON key connectTimeout) bounds the TCP+TLS+AUTH dial — cross-cluster
+    # providers legitimately need more than the 2s global default, and this
+    # lets ONE slow provider get it without a fleet-wide env change.
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
+    socket_connect_timeout: Optional[float] = None
+    # probeDeadlineS EXTENDS (never shrinks) every fixed probe/verify budget —
+    # the warmup preflight deadline, the connect verify-ping wall clock, and
+    # the manual test-endpoint deadline — for one slow cross-cluster provider.
+    probe_deadline_s: Optional[float] = None
+    # Cross-cluster address remap: pairs of ("host[:port]", "host[:port]").
+    # Redis announces the addresses IT knows (cluster slot map, sentinel
+    # discover-master) — pod IPs that a client in ANOTHER GKE cluster cannot
+    # reach. The remap rewrites every DISCOVERED address before it is dialed;
+    # empty (the default) is a strict no-op. See remap_address().
+    address_remap: Tuple[Tuple[str, str], ...] = ()
     # TLS / mutual-TLS (cert inputs are file PATHS → non-secret, ride config/env).
     tls_enabled: bool = False
     tls_ca_certs: Optional[str] = None
@@ -101,6 +137,11 @@ class FalkorDBConnConfig:
             cert_reqs=self.tls_cert_reqs,
             check_hostname=self.tls_check_hostname,
         )
+
+    def sentinel_tls_settings(self) -> TLSSettings:
+        """TLS for connections to the Sentinel daemons: the explicit
+        ``sentinel.tls`` override when configured, else the data-plane settings."""
+        return self.sentinel_tls or self.tls_settings()
 
     def describe(self) -> str:
         if self.mode == "sentinel":
@@ -153,6 +194,116 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
     return out
 
 
+def _split_host_port(s: str) -> Tuple[str, Optional[int]]:
+    """``"h:6379"`` → ``("h", 6379)``; ``"h"`` → ``("h", None)``."""
+    host, _, port = s.rpartition(":")
+    if host and port.isdigit():
+        return host, int(port)
+    return s, None
+
+
+def _parse_address_remap(raw: Any) -> Tuple[Tuple[str, str], ...]:
+    """Parse the addressRemap config into normalized ``(from, to)`` pairs.
+
+    Accepts:
+      - ``{"10.0.0.5:6379": "graph.example.com:6379", "old-host": "new-host"}``
+        (the ``falkordbConnection.addressRemap`` JSON object)
+      - ``"10.0.0.5:6379=graph.example.com:6379,old=new"``
+        (the ``FALKORDB_ADDRESS_REMAP`` env CSV)
+    Both sides take ``host`` or ``host:port``. Malformed entries are skipped
+    with a warning (same convention as ``_parse_nodes``).
+    """
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        items = []
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            src, sep, dst = chunk.partition("=")
+            if not sep:
+                logger.warning(
+                    "falkordb_connection: ignoring addressRemap entry %r "
+                    "(expected from=to)", chunk,
+                )
+                continue
+            items.append((src.strip(), dst.strip()))
+    elif isinstance(raw, dict):
+        items = [(str(k).strip(), str(v).strip()) for k, v in raw.items()]
+    else:
+        logger.warning(
+            "falkordb_connection: ignoring addressRemap of type %s "
+            "(expected object or from=to CSV)", type(raw).__name__,
+        )
+        return ()
+    out = []
+    for src, dst in items:
+        if not src or not dst:
+            logger.warning(
+                "falkordb_connection: ignoring addressRemap entry %r=%r "
+                "(empty side)", src, dst,
+            )
+            continue
+        out.append((src, dst))
+    return tuple(out)
+
+
+def remap_address(cfg: FalkorDBConnConfig, host: str, port: int) -> Tuple[str, int]:
+    """Rewrite a DISCOVERED address through the operator's addressRemap.
+
+    An exact ``host:port`` entry wins over a host-only entry; a host-only
+    entry preserves the port unless its target names one. No entry → the
+    address passes through untouched (and an empty remap is a strict no-op).
+
+    Applied at every point a topology-discovered address is dialed: the
+    cluster slot-owner lookup, the primaries fan-out, the RedisCluster's own
+    MOVED/ASK redirects (redis-py's ``address_remap`` hook), and the sentinel
+    master discovery. The addresses the OPERATOR configured (startup nodes,
+    sentinel nodes, host/port) are never remapped — they are reachable by
+    definition, and remapping them would make the config lie about itself.
+    """
+    port = int(port)
+    if not cfg.address_remap:
+        return host, port
+    host_only_target: Optional[str] = None
+    for src, dst in cfg.address_remap:
+        s_host, s_port = _split_host_port(src)
+        if s_port is not None:
+            if s_host == host and s_port == port:
+                d_host, d_port = _split_host_port(dst)
+                mapped = (d_host, d_port if d_port is not None else port)
+                logger.debug(
+                    "falkordb_connection: remapped %s:%d -> %s:%d",
+                    host, port, mapped[0], mapped[1],
+                )
+                return mapped
+        elif s_host == host and host_only_target is None:
+            host_only_target = dst
+    if host_only_target is not None:
+        d_host, d_port = _split_host_port(host_only_target)
+        mapped = (d_host, d_port if d_port is not None else port)
+        logger.debug(
+            "falkordb_connection: remapped %s:%d -> %s:%d",
+            host, port, mapped[0], mapped[1],
+        )
+        return mapped
+    return host, port
+
+
+def _address_remap_kwargs(cfg: FalkorDBConnConfig) -> dict:
+    """The redis-py ``RedisCluster(address_remap=...)`` hook, or nothing.
+
+    Verified against redis-py 8 (``redis.asyncio.cluster.RedisCluster``):
+    ``address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]]``,
+    applied by the NodesManager to every discovered node address — which is
+    what keeps MOVED/ASK redirects dialable from another cluster.
+    """
+    if not cfg.address_remap:
+        return {}
+    return {"address_remap": lambda addr: remap_address(cfg, addr[0], addr[1])}
+
+
 def load_connection_config(
     explicit: Optional[dict],
     *,
@@ -196,6 +347,42 @@ def load_connection_config(
         or _as_bool(tls.get("enabled"), False)
         or _as_bool(os.getenv("FALKORDB_TLS_ENABLED"), False)
     )
+    tls_ca = tls.get("caCertPath") or os.getenv("FALKORDB_TLS_CA_CERTS")
+    tls_cert = tls.get("certPath") or os.getenv("FALKORDB_TLS_CERTFILE")
+    tls_key = tls.get("keyPath") or os.getenv("FALKORDB_TLS_KEYFILE")
+    tls_reqs = (
+        tls.get("verifyMode") or os.getenv("FALKORDB_TLS_CERT_REQS") or "required"
+    )
+    tls_check = _as_bool(
+        tls.get("checkHostname", os.getenv("FALKORDB_TLS_CHECK_HOSTNAME", True)),
+        True,
+    )
+    # Sentinel-daemon TLS. The daemons are a separate listener that may (or may
+    # not) terminate TLS independently of the data plane. When neither the
+    # ``sentinel.tls`` object nor FALKORDB_SENTINEL_TLS_ENABLED is present the
+    # field stays None and ``sentinel_tls_settings()`` INHERITS the data-plane
+    # settings — a "TLS everywhere" deployment needs no extra config. Explicit
+    # keys override individually (own CA, own verify mode); an explicit
+    # ``enabled: false`` gives a TLS data plane with plaintext sentinels.
+    sentinel_tls_json = sentinel.get("tls") if isinstance(sentinel.get("tls"), dict) else None
+    sentinel_tls_env = os.getenv("FALKORDB_SENTINEL_TLS_ENABLED")
+    sentinel_tls: Optional[TLSSettings] = None
+    if sentinel_tls_json is not None or sentinel_tls_env is not None:
+        st = sentinel_tls_json or {}
+        st_enabled = st.get("enabled")
+        if st_enabled is None:
+            st_enabled = sentinel_tls_env if sentinel_tls_env is not None else tls_on
+        st_check = st.get("checkHostname")
+        sentinel_tls = TLSSettings.from_fields(
+            enabled=_as_bool(st_enabled, tls_on),
+            ca_certs=st.get("caCertPath") or tls_ca,
+            certfile=st.get("certPath") or tls_cert,
+            keyfile=st.get("keyPath") or tls_key,
+            cert_reqs=st.get("verifyMode") or tls_reqs,
+            check_hostname=(
+                _as_bool(st_check, tls_check) if st_check is not None else tls_check
+            ),
+        )
     # Sentinel-daemon credentials. These USED to live in
     # extra_config.falkordbConnection.sentinel — an unencrypted column that the
     # API returns (ProviderResponse.extra_config). They now come from the
@@ -217,6 +404,12 @@ def load_connection_config(
     sentinel_username = sentinel_username or os.getenv("FALKORDB_SENTINEL_USERNAME")
     sentinel_password = sentinel_password or _env_secret(
         "FALKORDB_SENTINEL_PASSWORD", "FALKORDB_SENTINEL_PASSWORD_FILE"
+    )
+    # Single normalization chokepoint: ""/whitespace-only → None, and a
+    # username without a password is dropped (see normalize_credentials).
+    username, password = normalize_credentials(username, password)
+    sentinel_username, sentinel_password = normalize_credentials(
+        sentinel_username, sentinel_password, context="FalkorDB sentinel",
     )
     return FalkorDBConnConfig(
         mode=mode,
@@ -244,32 +437,46 @@ def load_connection_config(
             ),
             False,
         ),
+        sentinel_tls=sentinel_tls,
         cluster_nodes=_parse_nodes(
             cluster.get("startupNodes") or os.getenv("FALKORDB_CLUSTER_NODES")
         ),
+        address_remap=_parse_address_remap(
+            cfg.get("addressRemap") or os.getenv("FALKORDB_ADDRESS_REMAP")
+        ),
         socket_timeout=_coerce_float(cfg.get("socketTimeout")),
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
+        socket_connect_timeout=_coerce_float(cfg.get("connectTimeout"), "connectTimeout"),
+        probe_deadline_s=_coerce_float(cfg.get("probeDeadlineS"), "probeDeadlineS"),
         tls_enabled=tls_on,
-        tls_ca_certs=(tls.get("caCertPath") or os.getenv("FALKORDB_TLS_CA_CERTS")),
-        tls_certfile=(tls.get("certPath") or os.getenv("FALKORDB_TLS_CERTFILE")),
-        tls_keyfile=(tls.get("keyPath") or os.getenv("FALKORDB_TLS_KEYFILE")),
-        tls_cert_reqs=(
-            tls.get("verifyMode") or os.getenv("FALKORDB_TLS_CERT_REQS") or "required"
-        ),
-        tls_check_hostname=_as_bool(
-            tls.get("checkHostname", os.getenv("FALKORDB_TLS_CHECK_HOSTNAME", True)),
-            True,
-        ),
+        tls_ca_certs=tls_ca,
+        tls_certfile=tls_cert,
+        tls_keyfile=tls_key,
+        tls_cert_reqs=tls_reqs,
+        tls_check_hostname=tls_check,
     )
 
 
-def _coerce_float(v: Any) -> Optional[float]:
+def connect_verify_budget(cfg: FalkorDBConnConfig, default_s: float) -> float:
+    """Wall clock for the connect-verifying PING (and similar fixed probe
+    windows). The fleet default must EXTEND for a provider configured for a
+    slow cross-cluster hop, never clip it: the budget is at least the
+    configured dial timeout plus one ping, and at least ``probeDeadlineS``.
+    """
+    return max(
+        default_s,
+        cfg.probe_deadline_s or 0.0,
+        (cfg.socket_connect_timeout or 0.0) + 1.0,
+    )
+
+
+def _coerce_float(v: Any, name: str = "socketTimeout") -> Optional[float]:
     if v is None or v == "":
         return None
     try:
         return float(v)
     except (ValueError, TypeError):
-        logger.warning("falkordb_connection: ignoring non-numeric socketTimeout %r", v)
+        logger.warning("falkordb_connection: ignoring non-numeric %s %r", name, v)
         return None
 
 
@@ -320,7 +527,43 @@ def _env_secret(env_var: str, file_var: str) -> Optional[str]:
     return os.getenv(env_var)
 
 
-def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
+def normalize_credentials(
+    username: Optional[str], password: Optional[str], *, context: str = "FalkorDB",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Collapse every spelling of "no credential" into ``None``.
+
+    ``""`` and whitespace-only values already behave as absent in the kwargs
+    builders (truthiness checks) but NOT in ``TopologyGraphClients.identity``
+    or the learned-auth set — so ``username=""`` and ``username=None`` used to
+    be two different instances, and a learned-unauth mark or a cache
+    invalidation recorded under one spelling missed the other.
+
+    A username WITHOUT a password is dropped entirely: the kwargs builders
+    would make redis-py send ``AUTH <user> ""`` (→ WRONGPASS) while the raw
+    RESP preflight sends no AUTH at all (it gates on the password) — the two
+    paths returned contradictory verdicts for the same misconfigured row.
+    Values with real content are passed through UNTOUCHED (never stripped —
+    a password may legitimately contain edge whitespace).
+    """
+    if isinstance(username, str) and not username.strip():
+        username = None
+    if isinstance(password, str) and not password.strip():
+        password = None
+    if username and not password:
+        logger.warning(
+            "%s: a username is configured without a password — ignoring the "
+            "username (redis AUTH needs both; set a password or clear the "
+            "username).", context,
+        )
+        username = None
+    return username, password
+
+
+def resilient_pool_kwargs(
+    *,
+    socket_timeout: Optional[float] = None,
+    connect_timeout: Optional[float] = None,
+) -> dict:
     """Socket-hygiene kwargs every raw FalkorDB/Redis ``ConnectionPool`` must
     carry. ``socket_timeout`` is a HANG NET for black-holed sockets (a GKE
     node rotation leaves established connections pointing at a dead pod —
@@ -340,8 +583,10 @@ def resilient_pool_kwargs(*, socket_timeout: Optional[float] = None) -> dict:
     ``FALKORDB_SOCKET_KEEPALIVE`` / ``FALKORDB_HEALTH_CHECK_INTERVAL``)."""
     if socket_timeout is None:
         socket_timeout = _resilience.FALKORDB_SOCKET_TIMEOUT_SECS
+    if connect_timeout is None:
+        connect_timeout = _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
     return {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": connect_timeout,
         "socket_timeout": socket_timeout,
         "socket_keepalive": _resilience.FALKORDB_SOCKET_KEEPALIVE,
         "health_check_interval": _resilience.FALKORDB_HEALTH_CHECK_INTERVAL_SECS,
@@ -360,12 +605,41 @@ def projection_socket_timeout() -> float:
     return write_budget + _resilience.PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS
 
 
+def _sentinel_class(cfg: FalkorDBConnConfig):
+    """The ``Sentinel`` class to construct for ``cfg`` — plain when no remap is
+    configured (byte-for-byte the existing behavior), else a subclass whose
+    discovered addresses go through ``remap_address``.
+
+    Needed because ``master_for`` dials whatever ``discover_master`` returns
+    INTERNALLY on every (re)connect — the transparent-failover property — so a
+    return-value rewrite at our call sites cannot reach it.
+    """
+    from redis.asyncio.sentinel import Sentinel
+
+    if not cfg.address_remap:
+        return Sentinel
+
+    class _RemapSentinel(Sentinel):
+        async def discover_master(self, service_name):
+            host, port = await super().discover_master(service_name)
+            return remap_address(cfg, host, int(port))
+
+        async def discover_slaves(self, service_name):
+            slaves = await super().discover_slaves(service_name)
+            return [remap_address(cfg, h, int(p)) for h, p in slaves]
+
+    return _RemapSentinel
+
+
 def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
     """Connection kwargs shared by the high-level Sentinel/Cluster clients —
     auth + timeouts + TLS (``ssl=True`` + cert paths when enabled)."""
     cfg = apply_learned_auth(cfg)       # skip AUTH on an instance known to have none
     kw: dict = {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": (
+            cfg.socket_connect_timeout
+            or _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
+        ),
         "socket_timeout": socket_timeout,
         "decode_responses": True,
     }
@@ -466,6 +740,24 @@ def mark_instance_unauthenticated(cfg: FalkorDBConnConfig) -> None:
     _UNAUTHENTICATED_INSTANCES.add(TopologyGraphClients.identity(strip_credentials(cfg)))
 
 
+def unmark_instance_unauthenticated(cfg: FalkorDBConnConfig) -> None:
+    """Forget that an instance is unauthenticated — the symmetric half of the
+    self-heal. Called when a NOAUTH proves auth was (re-)enabled on the server,
+    and on every config invalidation: without it the learned mark outlives the
+    reality it recorded, credentials keep being stripped, and only a process
+    restart recovers."""
+    _UNAUTHENTICATED_INSTANCES.discard(
+        TopologyGraphClients.identity(strip_credentials(cfg))
+    )
+
+
+def is_instance_learned_unauthenticated(cfg: FalkorDBConnConfig) -> bool:
+    return (
+        TopologyGraphClients.identity(strip_credentials(cfg))
+        in _UNAUTHENTICATED_INSTANCES
+    )
+
+
 def apply_learned_auth(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
     """Drop credentials for an instance we've already learned has no auth, so every
     later connection (any mode, any entry point) skips AUTH instead of re-failing."""
@@ -478,17 +770,23 @@ def apply_learned_auth(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
 
 def raise_auth_config_error(cfg: FalkorDBConnConfig, exc: BaseException) -> None:
     """Translate an auth failure into an actionable configuration error (LOGICAL —
-    never trips the circuit breaker, never retried as a transient blip)."""
+    never trips the circuit breaker, never retried as a transient blip).
+
+    ``rejected`` is checked FIRST: the classifiers walk the __cause__/__context__
+    chain, and a retry-with-credentials raised inside an ``except NOAUTH`` block
+    carries both markers (WRONGPASS chained onto NOAUTH). A WRONGPASS anywhere in
+    the chain proves credentials WERE supplied and rejected — reporting it as
+    "no credentials configured" sent the operator chasing the wrong fix."""
+    if is_auth_rejected_error(exc):
+        raise ProviderConfigurationError(
+            f"FalkorDB at {cfg.describe()} rejected the provider's credentials "
+            f"(wrong username/password)."
+        ) from exc
     if is_auth_required_error(exc):
         raise ProviderConfigurationError(
             f"FalkorDB at {cfg.describe()} requires authentication but no credentials "
             f"are configured for this provider — add them to the provider, or disable "
             f"auth on the instance."
-        ) from exc
-    if is_auth_rejected_error(exc):
-        raise ProviderConfigurationError(
-            f"FalkorDB at {cfg.describe()} rejected the provider's credentials "
-            f"(wrong username/password)."
         ) from exc
 
 
@@ -497,10 +795,17 @@ async def with_auth_negotiation(cfg: FalkorDBConnConfig, attempt: Callable[..., 
 
     * instance has no auth but we hold credentials → strip them, remember it for
       every later connection, and retry (a stale password never takes a graph down);
+    * instance HAS auth but the learned-unauth mark stripped our credentials →
+      un-learn, retry once WITH them (auth re-enabled on the server must not
+      dead-end in a false "no credentials configured" until process restart);
     * instance wants credentials we lack, or rejects the ones we have → raise a clear
       ProviderConfigurationError instead of a retried, breaker-tripping "outage".
+
+    At most two ``attempt`` calls per invocation — each branch retries once and
+    maps a second failure to a configuration error, never a loop.
     """
     effective = apply_learned_auth(cfg)
+    stripped_by_learned_mark = effective is not cfg
     try:
         return await attempt(effective)
     except Exception as exc:
@@ -513,6 +818,23 @@ async def with_auth_negotiation(cfg: FalkorDBConnConfig, attempt: Callable[..., 
                 "this.", effective.describe(),
             )
             return await attempt(strip_credentials(effective))
+        if is_auth_required_error(exc) and stripped_by_learned_mark:
+            # NOAUTH on a connection we deliberately sent WITHOUT credentials:
+            # authentication was (re-)enabled on the instance since we learned it
+            # had none. Un-learn and retry once with the configured credentials —
+            # the downstream builders' apply_learned_auth is a no-op after the
+            # discard, so the retry really carries them.
+            unmark_instance_unauthenticated(cfg)
+            logger.warning(
+                "FalkorDB at %s now REQUIRES authentication (it was previously "
+                "observed unauthenticated) — retrying with the configured "
+                "credentials.", cfg.describe(),
+            )
+            try:
+                return await attempt(cfg)
+            except Exception as exc2:
+                raise_auth_config_error(cfg, exc2)
+                raise
         raise_auth_config_error(effective, exc)
         raise
 
@@ -526,21 +848,37 @@ def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dic
     credentials are sent only when explicitly configured (``sentinel.username`` /
     ``sentinel.password``) or when ``sentinel.authEnabled`` opts into reusing the
     data-plane credentials.
+
+    TLS likewise: the daemons listen on their own port, and when that listener
+    terminates TLS these kwargs must carry it or discovery dials the handshake
+    port in PLAINTEXT (garbled reply / timeout → the whole tier reads as down).
+    ``sentinel_tls_settings()`` inherits the data-plane TLS unless a
+    ``sentinel.tls`` override says otherwise. This is the single chokepoint —
+    every sentinel-daemon connection (build_graph_client, resolve_sentinel_master,
+    the dashboard probes) goes through it.
     """
     kw: dict = {
-        "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
+        "socket_connect_timeout": (
+            cfg.socket_connect_timeout
+            or _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS
+        ),
         "socket_timeout": socket_timeout,
     }
-    username = cfg.sentinel_username or (
-        cfg.username if cfg.sentinel_auth_enabled else None
-    )
-    password = cfg.sentinel_password or (
-        cfg.password if cfg.sentinel_auth_enabled else None
-    )
+    # Dedicated daemon credentials win AS A UNIT: a dedicated password-only
+    # daemon (default user + requirepass) must not get the data-plane username
+    # spliced in via a per-field fallback — that mismatched pair fails AUTH
+    # even though both halves are individually valid.
+    if cfg.sentinel_username or cfg.sentinel_password:
+        username, password = cfg.sentinel_username, cfg.sentinel_password
+    elif cfg.sentinel_auth_enabled:
+        username, password = cfg.username, cfg.password
+    else:
+        username = password = None
     if username:
         kw["username"] = username
     if password:
         kw["password"] = password
+    kw.update(tls_client_kwargs(cfg.sentinel_tls_settings()))
     return kw
 
 
@@ -578,7 +916,13 @@ async def _resolve_cluster_node_once(
     from redis.cluster import ClusterNode
 
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
+    # address_remap: discovery itself follows the slot map when a startup node
+    # redirects, so even this short-lived client needs the rewrite.
+    cluster = RedisCluster(
+        startup_nodes=nodes,
+        **_conn_auth_kwargs(cfg, socket_timeout),
+        **_address_remap_kwargs(cfg),
+    )
     try:
         # redis.asyncio.cluster initializes lazily; force it so the slot
         # map is populated before we look up the owning node.
@@ -586,7 +930,9 @@ async def _resolve_cluster_node_once(
             await cluster.initialize()
         slot = cluster.keyslot(graph_name)
         node = cluster.nodes_manager.get_node_from_slot(slot)
-        return node.host, int(node.port)
+        # The slot map answers with the address the CLUSTER knows (a pod IP);
+        # rewrite it into one the caller can actually dial.
+        return remap_address(cfg, node.host, node.port)
     finally:
         try:
             await cluster.aclose()
@@ -623,8 +969,6 @@ async def build_graph_client(
         return falkordb_over(Redis(connection_pool=pool)), pool
 
     if cfg.mode == "sentinel":
-        from redis.asyncio.sentinel import Sentinel
-
         if not cfg.sentinel_master or not cfg.sentinel_nodes:
             raise ProviderConfigurationError(
                 "FalkorDB sentinel mode requires sentinel.masterName and "
@@ -649,7 +993,10 @@ async def build_graph_client(
             master_kwargs["username"] = cfg.username
         if cfg.password and "password" not in master_kwargs:
             master_kwargs["password"] = cfg.password
-        sentinel = Sentinel(
+        # _sentinel_class: plain Sentinel, or the remapping subclass when
+        # addressRemap is configured — master_for re-runs discover_master on
+        # every reconnect, so the rewrite must live INSIDE the class.
+        sentinel = _sentinel_class(cfg)(
             cfg.sentinel_nodes,
             sentinel_kwargs=_sentinel_auth_kwargs(cfg, socket_timeout),
             **master_kwargs,
@@ -759,7 +1106,10 @@ def build_graph_pool_kwargs(
             or cfg.graph_pool_size
             or int(os.getenv("FALKORDB_POOL_SIZE", "10"))
         ),
-        **resilient_pool_kwargs(socket_timeout=socket_timeout),
+        **resilient_pool_kwargs(
+            socket_timeout=socket_timeout,
+            connect_timeout=cfg.socket_connect_timeout,
+        ),
     }
     # Credentials only when we actually have them: once an instance is learned to
     # be unauthenticated, ``apply_learned_auth`` clears them and they must vanish
@@ -842,6 +1192,9 @@ def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwarg
     return RedisCluster(
         host=host, port=port, startup_nodes=startup or None,
         **pool_kwargs, **tls_client_kwargs(cfg.tls_settings()),
+        # Every slot-map/MOVED/ASK address this client dials goes through the
+        # operator's remap — the redirects announce pod IPs too.
+        **_address_remap_kwargs(cfg),
     )
 
 
@@ -1014,6 +1367,29 @@ class ResilientGraph:
                 self._cfg = strip_credentials(self._cfg)
                 self._graph = await self._clients.resolve_graph(self._cfg, self._name)
                 return await getattr(self._graph, method)(*args, **kwargs)
+            if (
+                is_auth_required_error(exc)
+                and (self._cfg.username or self._cfg.password)
+                and is_instance_learned_unauthenticated(self._cfg)
+            ):
+                # The mirror case: our cached client was built WITHOUT credentials
+                # because of the learned-unauth mark, and the instance now demands
+                # them — auth was re-enabled on the server. Un-learn, rebuild WITH
+                # the credentials this handle still carries, retry once.
+                logger.warning(
+                    "falkordb graph %r: instance now REQUIRES authentication "
+                    "(previously observed unauthenticated) — reconnecting with "
+                    "the configured credentials.", self._name,
+                )
+                unmark_instance_unauthenticated(self._cfg)
+                await self._clients.invalidate(self._cfg, self._name)
+                try:
+                    self._graph = await self._clients.resolve_graph(self._cfg, self._name)
+                    return await getattr(self._graph, method)(*args, **kwargs)
+                except Exception as exc2:
+                    # Credentials genuinely missing/wrong → clean config error.
+                    raise_auth_config_error(self._cfg, exc2)
+                    raise
             if is_auth_error(exc):
                 # NOAUTH / WRONGPASS → configuration error, not a retryable outage.
                 raise_auth_config_error(self._cfg, exc)
@@ -1076,11 +1452,25 @@ class TopologyGraphClients:
         secret = hashlib.sha256(
             (cfg.password or "").encode("utf-8")
         ).hexdigest()[:16] if cfg.password else None
+        # Sentinel-DAEMON auth is part of the identity for the same reason as
+        # the data-plane password: two providers identical in data plane +
+        # master + nodes but differing only in daemon credentials must not
+        # collapse onto one cached client (whichever built first would win its
+        # daemon auth for both). Hash, never the secret.
+        daemon_secret = hashlib.sha256(
+            (cfg.sentinel_password or "").encode("utf-8")
+        ).hexdigest()[:16] if cfg.sentinel_password else None
         return (
             cfg.mode, cfg.host, cfg.port, cfg.username, secret,
             cfg.sentinel_master,
             tuple(cfg.sentinel_nodes), tuple(cfg.cluster_nodes),
+            cfg.sentinel_username, daemon_secret, cfg.sentinel_auth_enabled,
             cfg.tls_enabled,
+            # Frozen dataclass (hashable). Flipping the sentinel-daemon TLS
+            # override must invalidate cached clients like any config change.
+            cfg.sentinel_tls,
+            # Different remap → different reachable endpoints → different client.
+            cfg.address_remap,
         )
 
     def _pool_kwargs(self, cfg: FalkorDBConnConfig) -> dict:
@@ -1139,7 +1529,9 @@ class TopologyGraphClients:
 
                     await asyncio.wait_for(
                         Redis(connection_pool=pool).ping(),
-                        timeout=_resilience.FALKORDB_INIT_TIMEOUT_SECS,
+                        timeout=connect_verify_budget(
+                            c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
+                        ),
                     )
                     return db, pool
 
@@ -1181,6 +1573,11 @@ class TopologyGraphClients:
         """Drop EVERY client + owner mapping for one instance. Called when a
         provider row changes (host/mode/credentials) — otherwise the projector
         would keep writing to the old instance until the process restarts."""
+        # A config change also invalidates what we LEARNED about the instance's
+        # authentication: the operator may have just enabled auth or rotated the
+        # credentials, and a process-lifetime "no auth here" mark would keep
+        # stripping the new credentials until restart.
+        unmark_instance_unauthenticated(cfg)
         ident = self.identity(cfg)
         keys = [k for k in self._clients if k[0] == ident]
         for k in keys:
@@ -1242,12 +1639,17 @@ async def resolve_sentinel_master(
             "sentinel.nodes (or FALKORDB_SENTINEL_MASTER / FALKORDB_SENTINEL_NODES)."
         )
     async def _discover(c: FalkorDBConnConfig):
-        sentinel_auth = _sentinel_auth_kwargs(c, socket_timeout)
+        # Only sentinel_kwargs: discovery never opens a data-plane connection,
+        # and spreading the daemon kwargs as connection kwargs too would hand
+        # the DAEMONS' auth/TLS to any master pool built off this object.
         sentinel = Sentinel(
-            c.sentinel_nodes, sentinel_kwargs=sentinel_auth, **sentinel_auth,
+            c.sentinel_nodes,
+            sentinel_kwargs=_sentinel_auth_kwargs(c, socket_timeout),
         )
         host, port = await sentinel.discover_master(c.sentinel_master)
-        return host, int(port)
+        # Sentinels announce the master address THEY know (a pod IP) —
+        # rewrite it into one this client can actually dial.
+        return remap_address(c, host, int(port))
 
     # Sentinel daemons have their own auth (see _sentinel_auth_kwargs); negotiate the
     # same way so a credentialed config against unauthenticated sentinels self-heals.
@@ -1288,11 +1690,15 @@ async def _cluster_primary_nodes_once(
     from redis.cluster import ClusterNode
 
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
+    cluster = RedisCluster(
+        startup_nodes=nodes,
+        **_conn_auth_kwargs(cfg, socket_timeout),
+        **_address_remap_kwargs(cfg),
+    )
     try:
         if hasattr(cluster, "initialize"):
             await cluster.initialize()
-        return [(n.host, int(n.port)) for n in cluster.get_primaries()]
+        return [remap_address(cfg, n.host, n.port) for n in cluster.get_primaries()]
     finally:
         try:
             await cluster.aclose()

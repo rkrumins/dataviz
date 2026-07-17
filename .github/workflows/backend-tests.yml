@@ -1,0 +1,73 @@
+# Gates the backend test suite. Before this workflow existed, the ONLY pytest
+# in CI was alembic-guards.yml (two AST-only files, --noconftest) — the entire
+# connectivity/provider suite never ran, and 34 of its tests were failing on
+# main without anything going red.
+#
+# Two jobs:
+#   * connectivity-suite — REQUIRED. The FalkorDB/Redis/provider domain
+#     (connection factory, preflight, warmup, breakers, bus/cache roles,
+#     provider endpoints, aggregation/insights consumers). Green as of the
+#     falkordb-redis-connectivity hardening branch; keep it green.
+#   * full-suite — informational (continue-on-error). Surfaces the remaining
+#     repo-wide test debt (golden scenarios, RBAC, ontology, nav) without
+#     blocking merges; promote it to required once that debt is paid down.
+#
+# Integration-marked tests need live services (see deploy/topologies/) and are
+# excluded here via -m "not integration".
+name: backend-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  connectivity-suite:
+    name: Backend connectivity + provider suite (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      - name: Run the connectivity + provider domain suite
+        working-directory: backend
+        run: >-
+          python -m pytest tests/ -q -m "not integration"
+          -k "falkordb or preflight or warmup or circuit or redis or bus
+          or provider or probes or manager or aggregation or insights"
+
+  full-suite:
+    name: Full backend suite (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      - name: Run the full unit suite
+        working-directory: backend
+        run: python -m pytest tests/ -q -m "not integration"
