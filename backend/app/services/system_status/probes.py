@@ -561,13 +561,31 @@ async def probe_falkordb() -> dict:
         "tls": cfg.tls_enabled,
         "authenticated": bool(cfg.password),
     }
-    # The fixed 1/1.5s probe windows false-down a slow cross-cluster hop;
-    # a configured connectTimeout/probeDeadlineS extends them (never shrinks).
-    budget = connect_verify_budget(cfg, _BUDGET_FALKOR)
+    # The fixed 1/1.5s probe windows false-down a slow cross-cluster hop.
+    # The env-default instance's dial/query knobs are the FALKORDB_SOCKET_*
+    # env vars (cfg carries them only when set via JSON) — when EXPLICITLY
+    # set, they and probeDeadlineS extend the probe windows (never shrink;
+    # unset keeps the fast 1/1.5s defaults).
+    def _env_float(name):
+        raw = os.getenv(name)
+        try:
+            return float(raw) if raw else None
+        except ValueError:
+            return None
+
+    connect_timeout = (
+        cfg.socket_connect_timeout or _env_float("FALKORDB_SOCKET_CONNECT_TIMEOUT")
+    )
+    socket_timeout = cfg.socket_timeout or _env_float("FALKORDB_SOCKET_TIMEOUT")
+    import dataclasses
+    budget = connect_verify_budget(
+        dataclasses.replace(cfg, socket_connect_timeout=connect_timeout),
+        _BUDGET_FALKOR,
+    )
     node_probe_kw = dict(
         username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
-        connect_timeout=cfg.socket_connect_timeout,
-        socket_timeout=cfg.socket_timeout,
+        connect_timeout=connect_timeout,
+        socket_timeout=socket_timeout,
         budget=budget,
     )
 
