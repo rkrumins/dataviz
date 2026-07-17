@@ -2382,8 +2382,9 @@ export function ContextViewCanvas({
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
-  // suppresses them in favour of per-node stub indicators; `auto` flips
-  // between the two based on `autoStubThreshold`. The mode resolves
+  // suppresses them in favour of per-node stub indicators; `auto` keeps
+  // every edge rendered but adds stub indicators and focus emphasis
+  // above `autoStubThreshold`. The mode resolves
   // identically in trace and browse — trace mode no longer bypasses the
   // gate. Trace's focus-incident edges stay materialized via
   // `effectiveLineageEdges` so the anchor is always legible.
@@ -2393,12 +2394,20 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Effective edge set passed to the renderer. In stubs mode edges
-  // incident to the hovered, selected, or trace-focus node materialize
-  // (so the user can drill in by interacting and the trace anchor stays
-  // unmissable); the canvas otherwise stays light.
+  // Effective edge set passed to the renderer. In explicit 'stubs' mode
+  // ("On Hover") only edges incident to the hovered, selected, or
+  // trace-focus node materialize (so the user can drill in by
+  // interacting and the trace anchor stays unmissable); the canvas
+  // otherwise stays light by design. 'auto' ("Adaptive") must never
+  // blank or churn the canvas: it always passes the full projected set
+  // with a stable identity — LineageFlowOverlay's render tiers and
+  // viewport virtualization absorb the density, and its DOM
+  // hover-dimming handles focus emphasis without an O(edges) index
+  // rebuild per hover — so expanding past the threshold can't make
+  // edges disappear.
   const effectiveLineageEdges = useMemo(() => {
     if (!isStubsMode) return visibleLineageEdges
+    if (lineageRenderMode === 'auto') return visibleLineageEdges
     const focusIds = new Set<string>()
     if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
@@ -2407,7 +2416,7 @@ export function ContextViewCanvas({
     return visibleLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
-  }, [visibleLineageEdges, isStubsMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+  }, [visibleLineageEdges, isStubsMode, lineageRenderMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
