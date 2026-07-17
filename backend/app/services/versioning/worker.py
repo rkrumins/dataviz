@@ -223,6 +223,8 @@ class ProjectionWorker:
                 pass
 
     async def _stream_loop(self) -> None:
+        from backend.common.adapters.redis_bus import bus_error_retry_delay
+
         client = get_broker_redis()
         while not self._stop.is_set():
             try:
@@ -230,9 +232,14 @@ class ProjectionWorker:
                     CONSUMER_GROUP, self._consumer, {PROJECTION_STREAM: ">"},
                     count=16, block=1000,
                 )
-            except Exception:
-                logger.exception("projection stream read error")
-                await asyncio.sleep(1)
+            except Exception as exc:
+                # Auth-aware (same contract as the other consumer loops):
+                # NOAUTH/WRONGPASS — a rotated or wrong bus credential —
+                # backs off long with an actionable message instead of
+                # hot-looping at 1/s with a generic traceback.
+                await asyncio.sleep(bus_error_retry_delay(
+                    exc, logger, what="projection stream XREADGROUP",
+                ))
                 continue
             for _stream, msgs in resp or []:
                 for msg_id, fields in msgs:

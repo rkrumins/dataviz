@@ -149,13 +149,29 @@ class ProviderInvalidationListener:
             except Exception as exc:                 # pragma: no cover - infra
                 if self._shutdown.is_set():
                     return
-                logger.warning(
-                    "Provider invalidation listener error: %s — reconnecting in %.0fs",
-                    exc, backoff,
+                # Auth-class errors (NOAUTH/WRONGPASS — a rotated or wrong bus
+                # credential) get the long delay + actionable message shared
+                # with the stream-consumer loops; anything else keeps the
+                # exponential backoff.
+                from backend.common.adapters.redis_bus import (
+                    BUS_AUTH_RETRY_DELAY_S, is_bus_auth_error,
                 )
+                if is_bus_auth_error(exc):
+                    delay = BUS_AUTH_RETRY_DELAY_S
+                    logger.error(
+                        "Provider invalidation listener rejected by bus Redis "
+                        "AUTHENTICATION (%s) — check REDIS_STREAMS_PASSWORD / "
+                        "the ACL user; retrying in %.0fs.", exc, delay,
+                    )
+                else:
+                    delay = backoff
+                    logger.warning(
+                        "Provider invalidation listener error: %s — reconnecting in %.0fs",
+                        exc, delay,
+                    )
                 self._redis = None
                 try:
-                    await asyncio.wait_for(self._shutdown.wait(), timeout=backoff)
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
                     return
                 except asyncio.TimeoutError:
                     pass

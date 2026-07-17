@@ -292,7 +292,12 @@ the coordination bus: cross-slot `SCAN`/`DEL`, the bus's cross-slot `XADD`
 pipelining, and a non-zero DB index (Cluster only supports DB 0). Point
 `REDIS_CACHE_*` at a standalone or Sentinel dedicated Redis instead; without a
 configured cache the provider runs cache-disabled (correct, slower) and logs
-a loud warning. **Redis Cluster remains fully supported for FalkorDB itself**
+a loud warning. Note that the legacy URL forms (`REDIS_URL` /
+`CACHE_REDIS_URL`) can only express a **standalone** endpoint — a URL
+pointing at a Sentinel daemon is dialed directly as if it were the data
+node; Sentinel topologies must use the structured vars
+(`*_MODE=sentinel` + `*_SENTINEL_MASTER`/`*_SENTINEL_NODES`).
+**Redis Cluster remains fully supported for FalkorDB itself**
 — this restriction applies only to the cache role. In `dedicated` projection
 mode on a FalkorDB cluster, `{graph}_proj` may live on a different shard than
 `{graph}` and is routed through its own owning-node client automatically.

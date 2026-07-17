@@ -301,10 +301,26 @@ class CancelListener:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(
-                    "Cancel listener loop error (will retry in %.1fs): %s",
-                    backoff, exc,
+                # Auth-class errors (NOAUTH/WRONGPASS — a rotated or wrong bus
+                # credential) get the long delay + actionable message shared
+                # with the stream-consumer loops; anything else keeps the
+                # exponential backoff.
+                from backend.common.adapters.redis_bus import (
+                    BUS_AUTH_RETRY_DELAY_S, is_bus_auth_error,
                 )
+                if is_bus_auth_error(exc):
+                    delay = BUS_AUTH_RETRY_DELAY_S
+                    logger.error(
+                        "Cancel listener rejected by bus Redis AUTHENTICATION "
+                        "(%s) — check REDIS_STREAMS_PASSWORD / the ACL user; "
+                        "retrying in %.0fs.", exc, delay,
+                    )
+                else:
+                    delay = backoff
+                    logger.warning(
+                        "Cancel listener loop error (will retry in %.1fs): %s",
+                        delay, exc,
+                    )
                 # P2.7 — drop the cached client on error so the next
                 # iteration calls the factory again (in case the existing
                 # client is in a bad state, e.g. closed connection pool).
@@ -312,7 +328,7 @@ class CancelListener:
                     self._redis = None
                 self._pubsub = None
                 try:
-                    await asyncio.wait_for(self._shutdown.wait(), timeout=backoff)
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
                     return
                 except asyncio.TimeoutError:
                     pass

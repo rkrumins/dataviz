@@ -61,6 +61,12 @@ class AggregationEventListener:
         # Reclaim events delivered to a consumer that crashed before ACK.
         await self._recover_pending()
 
+        # Block window sized to fit inside the resolved socket_timeout — a
+        # tightened REDIS_STREAMS_SOCKET_TIMEOUT must shorten the block, not
+        # turn every quiet read into a spurious TimeoutError.
+        from backend.common.adapters.redis_bus import stream_block_ms
+        block_ms = stream_block_ms()
+
         while self._running:
             try:
                 entries = await self._redis.xreadgroup(
@@ -68,7 +74,7 @@ class AggregationEventListener:
                     self._consumer_name,
                     {EVENTS_STREAM: ">"},
                     count=64,
-                    block=5000,
+                    block=block_ms,
                 )
             except asyncio.CancelledError:
                 break

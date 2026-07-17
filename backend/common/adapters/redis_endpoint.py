@@ -420,7 +420,24 @@ def resolve_redis_config(
             if legacy_pw:
                 password = legacy_pw
                 src["password"] = f"{src['password']} (legacy)"
-        if not tls.enabled and _as_bool(os.getenv("REDIS_TLS_ENABLED"), False):
+        # Legacy unprefixed TLS applies on two paths:
+        #  - REDIS_TLS_ENABLED=true turns TLS on with the legacy material;
+        #  - TLS is ALREADY on (a rediss:// REDIS_URL) and the legacy
+        #    CA/cert/key material exists with no prefixed REDIS_STREAMS_TLS_*
+        #    material to supersede it. It used to be silently dropped here,
+        #    which failed verification against a private CA (fail-closed
+        #    outage) the moment a deployment carried both legacy vars.
+        _prefixed_material = any(
+            os.getenv(f"{prefix}{var}")
+            for var in ("TLS_CA_CERTS", "TLS_CERTFILE", "TLS_KEYFILE")
+        )
+        _legacy_material = any(
+            os.getenv(var)
+            for var in ("REDIS_TLS_CA_CERTS", "REDIS_TLS_CERTFILE", "REDIS_TLS_KEYFILE")
+        )
+        if (not tls.enabled and _as_bool(os.getenv("REDIS_TLS_ENABLED"), False)) or (
+            tls.enabled and _legacy_material and not _prefixed_material
+        ):
             tls = TLSSettings.from_fields(
                 enabled=True,
                 ca_certs=os.getenv("REDIS_TLS_CA_CERTS"),
@@ -679,6 +696,12 @@ def build_redis_client(
         sentinel_kwargs: Dict[str, Any] = {
             "socket_timeout": cfg.socket_timeout,
             "socket_connect_timeout": cfg.socket_connect_timeout,
+            # Daemon sockets need the same slow-network posture as the data
+            # plane: idle health PINGs and timeout retry on discover_master.
+            # NEVER db/max_connections here — daemons have no databases and
+            # the pool cap is a data-plane concern.
+            "health_check_interval": cfg.health_check_interval,
+            "retry_on_timeout": cfg.retry_on_timeout,
             **tls_client_kwargs(cfg.tls),
         }
         # Dedicated daemon credentials win AS A UNIT: a dedicated password-only

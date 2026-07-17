@@ -149,6 +149,12 @@ class InsightsJobConsumer:
         for cfg in ALL_STREAMS:
             await self._recover_pending(cfg)
 
+        # Block window sized to fit inside the resolved socket_timeout — a
+        # tightened REDIS_STREAMS_SOCKET_TIMEOUT must shorten the block, not
+        # turn every quiet read into a spurious TimeoutError.
+        from backend.common.adapters.redis_bus import stream_block_ms
+        block_ms = stream_block_ms()
+
         while not self._shutdown.is_set():
             self._reap_done_tasks()
 
@@ -171,7 +177,7 @@ class InsightsJobConsumer:
                     self._consumer_name,
                     {s.stream: ">" for s in eligible},
                     count=count,
-                    block=5000,
+                    block=block_ms,
                 )
             except asyncio.CancelledError:
                 raise

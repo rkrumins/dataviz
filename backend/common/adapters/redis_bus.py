@@ -83,6 +83,39 @@ def bus_error_retry_delay(
     return BUS_TRANSIENT_RETRY_DELAY_S
 
 
+def stream_block_ms(requested_ms: int = 5000) -> int:
+    """Blocking-read window (XREAD/XREADGROUP ``block=``) that fits inside the
+    resolved STREAMS ``socket_timeout``.
+
+    The consumer loops historically hardcoded ``block=5000`` while
+    ``REDIS_STREAMS_SOCKET_TIMEOUT`` is operator-tunable. A socket timeout at
+    or below the block window makes EVERY quiet blocking read raise
+    ``TimeoutError`` before the server can answer — the loops then spin
+    through spurious "transient error" retries instead of blocking
+    efficiently. Clamp the window to one second inside the socket timeout
+    (floor 1s) and say so once, so a tightened socket timeout degrades to a
+    shorter block instead of a spurious-error loop.
+    """
+    try:
+        cfg = resolve_redis_config(RedisRole.STREAMS)
+        socket_timeout = cfg.socket_timeout
+    except RedisConfigurationError:
+        return requested_ms
+    if not socket_timeout:                      # None/0 → no socket deadline
+        return requested_ms
+    max_ms = int((float(socket_timeout) - 1.0) * 1000)
+    if requested_ms <= max_ms:
+        return requested_ms
+    clamped = max(1000, max_ms)
+    logging.getLogger(__name__).warning(
+        "stream_block_ms: clamping blocking-read window %dms -> %dms so it "
+        "fits inside REDIS_STREAMS socket_timeout=%.1fs (raise the socket "
+        "timeout to block longer).",
+        requested_ms, clamped, float(socket_timeout),
+    )
+    return clamped
+
+
 def build_bus_redis(
     *,
     decode_responses: bool = True,
