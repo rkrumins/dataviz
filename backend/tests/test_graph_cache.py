@@ -198,6 +198,27 @@ async def test_bump_generation_issues_incr() -> None:
     assert "ds1" in key_arg
 
 
+@pytest.mark.asyncio
+async def test_bump_generations_pipelines_incrs() -> None:
+    """Bulk bumps are ONE pipelined round-trip (the publish-latency fix), not
+    one awaited INCR per scope."""
+    from unittest.mock import MagicMock
+
+    redis = _make_redis()
+    pipe = MagicMock()
+    pipe.incr = MagicMock()
+    pipe.execute = AsyncMock(return_value=[1] * 5)
+    redis.pipeline = MagicMock(return_value=pipe)
+    cache = GraphCache(redis)
+
+    scopes = [CacheScope(f"ws{i}", f"ds{i}") for i in range(5)]
+    await cache.bump_generations(scopes)
+
+    assert pipe.incr.call_count == 5
+    pipe.execute.assert_awaited_once()
+    redis.incr.assert_not_awaited()  # nothing bumped outside the pipeline
+
+
 # ─── fail-open semantics ───────────────────────────────────────────────
 
 @pytest.mark.asyncio

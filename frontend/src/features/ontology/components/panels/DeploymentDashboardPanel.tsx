@@ -111,6 +111,10 @@ interface DeploymentDashboardPanelProps {
    *  ontology, so rows carry their own picker). */
   onAssign: (workspaceId: string, dataSourceId: string, ontologyId: string) => void
   onUnassign: (workspaceId: string, dataSourceId: string) => void
+  /** Bulk unassign the SELECTED entries — one count-based confirm + settled
+   *  batch on the page. (Per-entry onUnassign opens a single-target dialog,
+   *  so calling it in a loop would drop all but the last selection.) */
+  onBulkUnassign?: (entries: DeploymentEntry[]) => void
   onSuggest: (workspaceId: string, dataSourceId: string) => void
   onCreateDraft?: () => void
   onSuggestFromGraph?: () => void
@@ -126,6 +130,7 @@ export function DeploymentDashboardPanel({
   onNavigateToOntology,
   onAssign,
   onUnassign,
+  onBulkUnassign,
   onSuggest,
   onCreateDraft,
   onSuggestFromGraph,
@@ -293,11 +298,21 @@ export function DeploymentDashboardPanel({
   )
 
   const runBulkUnassign = () => {
-    selectedEntries.forEach(e => onUnassign(e.workspaceId, e.dataSourceId))
+    if (onBulkUnassign) {
+      // Page-level count-based confirm + settled batch — every selected
+      // source is actually processed.
+      onBulkUnassign(selectedEntries)
+    } else if (selectedEntries.length === 1) {
+      onUnassign(selectedEntries[0].workspaceId, selectedEntries[0].dataSourceId)
+    }
     clearSelection()
   }
+  // Suggest is inherently single-source (it opens the analyze dialog for one
+  // graph), so the bulk bar only offers it for a single selection.
   const runBulkSuggest = () => {
-    selectedEntries.forEach(e => onSuggest(e.workspaceId, e.dataSourceId))
+    if (selectedEntries.length === 1) {
+      onSuggest(selectedEntries[0].workspaceId, selectedEntries[0].dataSourceId)
+    }
     clearSelection()
   }
 
@@ -942,7 +957,7 @@ export function DeploymentDashboardPanel({
         onSuggest={runBulkSuggest}
         onUnassign={runBulkUnassign}
         isAssigning={isAssigning}
-        canSuggest={canSuggest}
+        canSuggest={canSuggest && selectedEntries.length === 1}
       />
     </PageContainer>
   )
@@ -1718,7 +1733,7 @@ function BulkSelectionBar({
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm shadow-indigo-500/20"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            Suggest for all
+            Suggest schema
           </button>
         )}
         <button

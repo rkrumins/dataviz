@@ -119,6 +119,30 @@ export function WorkspaceDetailPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeSection])
 
+    // ``?ds=<id>`` deep-links straight into a data source's detail panel
+    // (e.g. the Ontology page's Health tab "Full analysis" link). Applied
+    // once the workspace has loaded so the id can be validated; kept in the
+    // URL while the panel is open, dropped when it closes.
+    useEffect(() => {
+        const dsParam = searchParams.get('ds')
+        if (!workspace) return
+        if (dsParam && selectedDsId !== dsParam
+            && workspace.dataSources.some(ds => ds.id === dsParam)) {
+            setSelectedDsId(dsParam)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [workspace, searchParams])
+    useEffect(() => {
+        const current = searchParams.get('ds')
+        const desired = selectedDsId
+        if (current === desired || (!current && !desired)) return
+        const next = new URLSearchParams(searchParams)
+        if (desired) next.set('ds', desired)
+        else next.delete('ds')
+        setSearchParams(next, { replace: true })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedDsId])
+
     // ── Sync editName/editDesc when workspace loads ────────
     useEffect(() => {
         if (workspace) {

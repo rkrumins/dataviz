@@ -102,8 +102,9 @@ vi.mock('@/services/ontologyDefinitionService', () => ({
   },
 }))
 
+const updateDataSourceMock = vi.fn()
 vi.mock('@/services/workspaceService', () => ({
-  workspaceService: { updateDataSource: vi.fn() },
+  workspaceService: { updateDataSource: (...a: unknown[]) => updateDataSourceMock(...a) },
 }))
 
 // ─── Heavy children → prop-driven stubs ────────────────────────────────
@@ -156,7 +157,18 @@ vi.mock('@/features/ontology/components/panels/HierarchyPanel', () => ({ Hierarc
 vi.mock('@/features/ontology/components/panels/CoveragePanel', () => ({ CoveragePanel: () => null }))
 vi.mock('@/features/ontology/components/panels/UsagePanel', () => ({ UsagePanel: () => null }))
 vi.mock('@/features/ontology/components/panels/VersionHistoryPanel', () => ({ VersionHistoryPanel: () => null }))
-vi.mock('@/features/ontology/components/panels/DeploymentDashboardPanel', () => ({ DeploymentDashboardPanel: () => null }))
+vi.mock('@/features/ontology/components/panels/DeploymentDashboardPanel', () => ({
+  DeploymentDashboardPanel: (props: {
+    onBulkUnassign?: (entries: Array<{ workspaceId: string; dataSourceId: string; dataSourceLabel: string }>) => void
+  }) => (
+    <button onClick={() => props.onBulkUnassign?.([
+      { workspaceId: 'ws1', dataSourceId: 'ds1', dataSourceLabel: 'Source A' },
+      { workspaceId: 'ws1', dataSourceId: 'ds2', dataSourceLabel: 'Source B' },
+    ])}>
+      bulk-unassign-two
+    </button>
+  ),
+}))
 vi.mock('@/features/ontology/components/panels/AdoptionMatchSection', () => ({ AdoptionMatchSection: () => null }))
 vi.mock('@/features/ontology/components/dialogs/SuggestConfirmDialog', () => ({ SuggestConfirmDialog: () => null }))
 vi.mock('@/features/ontology/components/dialogs/ImportDialog', () => ({ ImportDialog: () => null }))
@@ -270,5 +282,25 @@ describe('OntologySchemaPage edit model', () => {
     // No stray "Discard all changes?" confirm and no dirty state on arrival.
     expect(screen.queryByText(/Discard all changes/i)).toBeNull()
     expect(screen.queryByTestId('dirty-marker')).toBeNull()
+  })
+
+  it('C1: bulk unassign confirms once with the count, then processes EVERY selected source', async () => {
+    // Regression: forEach into single-target dialog state meant only the LAST
+    // selected source ever got unassigned.
+    const user = userEvent.setup()
+    updateDataSourceMock.mockReset()
+      .mockResolvedValueOnce({})                       // ds1 succeeds
+      .mockRejectedValueOnce(new Error('boom'))        // ds2 fails — batch must survive
+    renderPage('/schema?view=dashboard')
+
+    await user.click(await screen.findByText('bulk-unassign-two'))
+    expect(await screen.findByText(/Unassign 2 data sources\?/)).toBeInTheDocument()
+    expect(screen.getByText(/Source A/)).toBeInTheDocument()
+    expect(screen.getByText(/Source B/)).toBeInTheDocument()
+
+    await user.click(screen.getByText('Unassign All'))
+    await waitFor(() => expect(updateDataSourceMock).toHaveBeenCalledTimes(2))
+    expect(updateDataSourceMock).toHaveBeenCalledWith('ws1', 'ds1', { ontologyId: '' })
+    expect(updateDataSourceMock).toHaveBeenCalledWith('ws1', 'ds2', { ontologyId: '' })
   })
 })

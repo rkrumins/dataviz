@@ -41,7 +41,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
 
 from pydantic import BaseModel
 from redis import asyncio as aioredis
@@ -398,6 +398,25 @@ class GraphCache:
                 scope, exc,
             )
 
+    async def bump_generations(self, scopes: Sequence[CacheScope]) -> None:
+        """Bulk :meth:`bump_generation` — one pipelined round-trip for many
+        scopes. Ontology writers (publish/update/import…) invalidate every
+        assigned data source at once; N awaited INCRs made that O(N) in
+        Redis round-trips (the publish 30s-hang bug)."""
+        if not scopes:
+            return
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for scope in scopes:
+                pipe.incr(_gen_key(scope))
+            await pipe.execute()
+        except RedisError as exc:
+            logger.warning(
+                "graph_cache: bulk generation bump failed for %d scopes (%s); "
+                "stale entries may persist until TTL expiry",
+                len(scopes), exc,
+            )
+
     async def purge_lkg(self, scope: CacheScope, endpoint: str) -> int:
         """Delete the last-known-good entries for ``scope`` + ``endpoint``
         (every branch). LKG keys deliberately SURVIVE ``bump_generation``
@@ -631,6 +650,53 @@ async def invalidate_aggregated_reads(
             "aggregated-read cache invalidation failed for %s/%s: %s",
             workspace_id, data_source_id, exc,
         )
+
+
+async def bump_aggregated_generations(scopes) -> None:
+    """Bulk, pipelined generation bump for many ``(workspace_id,
+    data_source_id)`` pairs — the SYNCHRONOUS half of
+    :func:`invalidate_aggregated_reads` for ontology writers that fan out to
+    every assigned source. LKG purges (SCAN sweeps) are the caller's deferred
+    half — see :func:`purge_aggregated_lkg`. Best-effort: never raises."""
+    pairs = [(str(ws), str(ds)) for ws, ds in scopes if ws and ds]
+    if not pairs:
+        return
+    try:
+        cache = get_graph_cache()
+        await cache.bump_generations([
+            CacheScope(workspace_id=ws, data_source_id=ds, branch_id="")
+            for ws, ds in pairs
+        ])
+    except Exception as exc:
+        logger.warning(
+            "bulk aggregated-read generation bump failed for %d scopes: %s",
+            len(pairs), exc,
+        )
+
+
+async def purge_aggregated_lkg(scopes) -> None:
+    """Purge the LKG fallback entries for many scopes — the DEFERRED half of
+    ontology-writer invalidation (each purge is a Redis SCAN sweep, so this
+    runs post-response via BackgroundTasks). LKG entries only serve
+    degraded-fallback reads and TTL-expire anyway, so a lost run is bounded.
+    Best-effort: never raises."""
+    for ws, ds in scopes:
+        if not ws or not ds:
+            continue
+        try:
+            cache = get_graph_cache()
+            scope = CacheScope(
+                workspace_id=str(ws), data_source_id=str(ds), branch_id="",
+            )
+            removed = await cache.purge_lkg(scope, ENDPOINT_AGGREGATED)
+            logger.info(
+                "aggregated-read LKG purged for %s/%s (%d entries)",
+                ws, ds, removed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "aggregated-read LKG purge failed for %s/%s: %s", ws, ds, exc,
+            )
 
 
 # ─── Singleton accessor ────────────────────────────────────────────────
