@@ -20,6 +20,7 @@ import {
     providerService,
     friendlyError,
     isWarmingError,
+    isDriftError,
     type ProviderResponse,
     type ProviderImpactResponse,
 } from '@/services/providerService'
@@ -1447,6 +1448,21 @@ export function RegistryAssets() {
                                         </p>
                                         <p className="text-xs text-amber-600/90 dark:text-amber-400/90 mt-0.5 break-words">
                                             {friendlyError(assetsEnvelope.meta.last_error)} This resolves on its own — data will appear shortly.
+                                        </p>
+                                    </div>
+                                </div>
+                            ) : isDriftError(assetsEnvelope.meta.last_error) ? (
+                                // Data-integrity banner: the connection is fine (the
+                                // listing succeeded) but registered graphs are missing
+                                // from the provider — no "Edit connection" CTA.
+                                <div className="shrink-0 mb-3 p-3 rounded-xl border border-amber-500/20 bg-amber-500/5 flex items-start gap-3 animate-in slide-in-from-top-1 fade-in duration-200">
+                                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                                            Registered data sources missing from provider
+                                        </p>
+                                        <p className="text-xs text-amber-600/90 dark:text-amber-400/90 mt-0.5 break-words">
+                                            {assetsEnvelope.meta.last_error.replace(/^graph_drift:\s*/, '')}
                                         </p>
                                     </div>
                                 </div>

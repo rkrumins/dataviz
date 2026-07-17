@@ -33,3 +33,24 @@ describe('friendlyError auth classification', () => {
         expect(msg).toBe(friendlyError('auth_failed'))
     })
 })
+
+import { isDriftError } from '../providerService'
+
+describe('isDriftError / cluster_mode_mismatch mapping', () => {
+    it('recognizes graph_drift-prefixed last_error strings', () => {
+        expect(isDriftError('graph_drift: 3 registered graph(s) missing from this provider (e.g. a, b, c)')).toBe(true)
+    })
+
+    it('rejects other errors, null, and undefined', () => {
+        expect(isDriftError('tcp_refused: falkordb:6379')).toBe(false)
+        expect(isDriftError(null)).toBe(false)
+        expect(isDriftError(undefined)).toBe(false)
+        expect(isDriftError('')).toBe(false)
+    })
+
+    it('maps cluster_mode_mismatch to an actionable message', () => {
+        const msg = friendlyError('cluster_mode_mismatch')
+        expect(msg.toLowerCase()).toContain('cluster')
+        expect(msg.toLowerCase()).toContain('standalone')
+    })
+})

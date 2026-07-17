@@ -264,6 +264,16 @@ export function isWarmingError(raw: string | null | undefined): boolean {
         || lower.includes('warming up')
 }
 
+/**
+ * True when a discovery `last_error` reports registry drift: graphs the
+ * catalog / versioning registry says should exist on the provider were
+ * missing from the last successful listing. The connection itself is fine —
+ * callers should show a data-integrity banner, not "unreachable".
+ */
+export function isDriftError(raw: string | null | undefined): boolean {
+    return !!raw && raw.startsWith('graph_drift:')
+}
+
 async function request<T>(
     url: string,
     init?: RequestInit & { timeoutMs?: number; silent403?: boolean },
