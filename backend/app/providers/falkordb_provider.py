@@ -67,6 +67,69 @@ async def _completed(value):
     return value
 
 
+# Bulk-CREATE operator knobs — defaults shared with the class attributes.
+_BULK_CREATE_BATCH_DEFAULT = 10000
+_BULK_CREATE_TIMEOUT_DEFAULT = 60.0
+# Parsed-knob memo keyed by the RAW env values, so the parse (and its
+# operator-tuning log line) happens once per process per configuration —
+# not once per provider construction, which at fleet scale (discovery
+# transients, cache rebuilds) repeated the same line on every request.
+_BULK_CREATE_KNOBS_CACHE: dict = {}
+
+
+def _resolve_bulk_create_knobs() -> Tuple[int, float]:
+    """(batch_size, timeout_s) for bulk-CREATE, env-tuned with clamps.
+
+    Batch size: FalkorDB best practice is 10k-50k rows per UNWIND; the env
+    dial lets operators shrink it where the default monopolizes the single
+    Cypher thread under concurrent trace load. Timeout: bulk writes need more
+    headroom than incremental MERGEs; ceiling stays below the server's
+    TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or FalkorDB rejects the
+    per-query timeout and the write becomes unkillable server-side.
+    """
+    raw = (
+        os.getenv("FALKORDB_BULK_CREATE_BATCH_SIZE"),
+        os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S"),
+    )
+    if raw in _BULK_CREATE_KNOBS_CACHE:
+        return _BULK_CREATE_KNOBS_CACHE[raw]
+
+    size = _BULK_CREATE_BATCH_DEFAULT
+    if raw[0] is not None:
+        try:
+            size = max(100, min(50000, int(raw[0])))
+            if size != _BULK_CREATE_BATCH_DEFAULT:
+                logger.info(
+                    "FALKORDB_BULK_CREATE_BATCH_SIZE=%s (clamped to %d, "
+                    "default %d): operator-tuned bulk-CREATE batch size.",
+                    raw[0], size, _BULK_CREATE_BATCH_DEFAULT,
+                )
+        except ValueError:
+            logger.warning(
+                "FALKORDB_BULK_CREATE_BATCH_SIZE=%r is not an integer; "
+                "falling back to default %d.", raw[0], _BULK_CREATE_BATCH_DEFAULT,
+            )
+
+    timeout_s = _BULK_CREATE_TIMEOUT_DEFAULT
+    if raw[1] is not None:
+        try:
+            timeout_s = max(5.0, min(170.0, float(raw[1])))
+            if timeout_s != _BULK_CREATE_TIMEOUT_DEFAULT:
+                logger.info(
+                    "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
+                    "default %.1fs): operator-tuned bulk-CREATE write timeout.",
+                    raw[1], timeout_s, _BULK_CREATE_TIMEOUT_DEFAULT,
+                )
+        except ValueError:
+            logger.warning(
+                "FALKORDB_BULK_CREATE_TIMEOUT_S=%r is not a float; "
+                "falling back to default %.1fs.", raw[1], _BULK_CREATE_TIMEOUT_DEFAULT,
+            )
+
+    _BULK_CREATE_KNOBS_CACHE[raw] = (size, timeout_s)
+    return _BULK_CREATE_KNOBS_CACHE[raw]
+
+
 def _sanitize_label(s: str) -> str:
     """Sanitize string for use as FalkorDB label/relationship type (alphanumeric + underscore)."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
@@ -753,62 +816,15 @@ class FalkorDBProvider(GraphDataProvider):
         self._level_digest: Optional[str] = None
         self._levels_warning_for_digest: Optional[str] = None
 
-        # Phase 1.6 — operator dial for the bulk-CREATE UNWIND batch
-        # size. Env-var lets operators dial back per-call cost on graphs
-        # where the default 10k batch monopolizes the single FalkorDB
-        # Cypher thread for too long under concurrent trace load.
-        # Bounded to a sane floor/ceiling to prevent obviously-bad
-        # values from causing surprise.
-        _bulk_size_raw = os.getenv("FALKORDB_BULK_CREATE_BATCH_SIZE")
-        if _bulk_size_raw is None:
-            self._bulk_create_batch_size: int = self._BULK_CREATE_BATCH_SIZE
-        else:
-            try:
-                _bulk_size_parsed = int(_bulk_size_raw)
-                self._bulk_create_batch_size = max(100, min(50000, _bulk_size_parsed))
-                if self._bulk_create_batch_size != self._BULK_CREATE_BATCH_SIZE:
-                    logger.info(
-                        "FALKORDB_BULK_CREATE_BATCH_SIZE=%s (clamped to %d, "
-                        "default %d): operator-tuned bulk-CREATE batch size.",
-                        _bulk_size_raw, self._bulk_create_batch_size,
-                        self._BULK_CREATE_BATCH_SIZE,
-                    )
-            except ValueError:
-                logger.warning(
-                    "FALKORDB_BULK_CREATE_BATCH_SIZE=%r is not an integer; "
-                    "falling back to default %d.",
-                    _bulk_size_raw, self._BULK_CREATE_BATCH_SIZE,
-                )
-                self._bulk_create_batch_size = self._BULK_CREATE_BATCH_SIZE
-
-        # Phase 1.8 — dedicated timeout for bulk-CREATE batches. Default
-        # 60s vs the standard 15s ``_WRITE_TIMEOUT``: bulk writes
-        # legitimately need more headroom than incremental MERGEs,
-        # especially on graphs where FalkorDB is concurrently serving
-        # trace reads. Clamped to [5s, 170s]: the ceiling must stay below
-        # the server's TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or
-        # FalkorDB rejects the per-query timeout and the write becomes
-        # unkillable server-side.
-        _bulk_timeout_raw = os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
-        if _bulk_timeout_raw is None:
-            self._bulk_create_timeout_s: float = 60.0
-        else:
-            try:
-                _bulk_timeout_parsed = float(_bulk_timeout_raw)
-                self._bulk_create_timeout_s = max(5.0, min(170.0, _bulk_timeout_parsed))
-                if self._bulk_create_timeout_s != 60.0:
-                    logger.info(
-                        "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
-                        "default 60.0s): operator-tuned bulk-CREATE write timeout.",
-                        _bulk_timeout_raw, self._bulk_create_timeout_s,
-                    )
-            except ValueError:
-                logger.warning(
-                    "FALKORDB_BULK_CREATE_TIMEOUT_S=%r is not a float; "
-                    "falling back to default 60.0s.",
-                    _bulk_timeout_raw,
-                )
-                self._bulk_create_timeout_s = 60.0
+        # Phase 1.6/1.8 — operator dials for the bulk-CREATE UNWIND batch size
+        # and write timeout. Parsed + logged ONCE per process per env value
+        # (see _resolve_bulk_create_knobs): providers are constructed
+        # continuously at fleet scale (discovery worker transients, cache
+        # rebuilds), and re-logging the same operator tuning on every
+        # construction read as a per-request warning storm.
+        self._bulk_create_batch_size, self._bulk_create_timeout_s = (
+            _resolve_bulk_create_knobs()
+        )
 
         # Phase 2 — provider-internal hard cap and latency-quiesce circuit.
         #
@@ -4168,7 +4184,7 @@ class FalkorDBProvider(GraphDataProvider):
     # importer uses 2000 because its writes are MERGE-on-node (which is
     # more variance-prone); our path is CREATE-on-relationship, which
     # tolerates and benefits from the higher number.
-    _BULK_CREATE_BATCH_SIZE = 10000
+    _BULK_CREATE_BATCH_SIZE = _BULK_CREATE_BATCH_DEFAULT
     _BULK_WIPE_BATCH_SIZE = 50000    # cursored DELETE chunk for AGGREGATED wipe
 
     async def _wipe_aggregated_edges(
