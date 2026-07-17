@@ -170,6 +170,9 @@ class AggregationEventListener:
                 await self._invalidate_aggregated_cache(
                     payload.get("workspace_id"), data_source_id,
                 )
+                await self._clear_stale_marker(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "purge.completed":
                 await self._sync_data_source(
                     data_source_id,
@@ -239,6 +242,24 @@ class AggregationEventListener:
             logger.warning(
                 "Aggregated-edge cache invalidation failed for %s: %s",
                 data_source_id, e,
+            )
+
+    async def _clear_stale_marker(
+        self, workspace_id: Any, data_source_id: str,
+    ) -> None:
+        """A completed rebuild is the authority that clears the
+        stale-while-revalidate marker so the staleness banner self-clears.
+        Skips silently when workspace_id is missing (mirrors
+        ``_invalidate_aggregated_cache`` — the marker key is
+        workspace-scoped and can't be built without it)."""
+        if not workspace_id:
+            return
+        try:
+            from backend.app.services.graph_cache import clear_source_stale
+            await clear_source_stale(str(workspace_id), data_source_id)
+        except Exception as e:
+            logger.warning(
+                "Stale-marker clear failed for %s: %s", data_source_id, e,
             )
 
     async def _sync_data_source(self, data_source_id: str, **fields: Any) -> None:

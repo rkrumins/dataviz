@@ -113,3 +113,76 @@ def test_purge_completed_syncs_and_invalidates(monkeypatch):
     assert synced["aggregation_status"] == "none"
     cache.bump_generation.assert_awaited_once()
     cache.purge_lkg.assert_awaited_once()
+
+
+def test_job_completed_clears_stale_marker(monkeypatch):
+    """A completed rebuild is the authority that clears the
+    stale-while-revalidate marker so the staleness banner self-clears."""
+    lst = _listener()
+    lst._sync_data_source = AsyncMock()
+
+    cache = AsyncMock()
+    cache.purge_lkg = AsyncMock(return_value=0)
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+
+    clear_mock = AsyncMock()
+    monkeypatch.setattr(gc_module, "clear_source_stale", clear_mock)
+
+    _run(lst._handle_event({
+        "type": "job.completed",
+        "payload": {
+            "job_id": "agg_1",
+            "data_source_id": "ds_1",
+            "workspace_id": "ws_1",
+            "edge_count": 1840,
+            "completed_at": "2026-07-11T00:00:00Z",
+            "fingerprint": "fp",
+        },
+    }))
+
+    clear_mock.assert_awaited_once_with("ws_1", "ds_1")
+
+
+def test_job_failed_does_not_clear_stale_marker(monkeypatch):
+    """A failed rebuild leaves the marker set — the reconciler retries
+    after cooldown, and that retry loop depends on the marker persisting."""
+    lst = _listener()
+    lst._sync_data_source = AsyncMock()
+
+    cache = AsyncMock()
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+
+    clear_mock = AsyncMock()
+    monkeypatch.setattr(gc_module, "clear_source_stale", clear_mock)
+
+    _run(lst._handle_event({
+        "type": "job.failed",
+        "payload": {
+            "job_id": "agg_1",
+            "data_source_id": "ds_1",
+            "workspace_id": "ws_1",
+        },
+    }))
+
+    clear_mock.assert_not_awaited()
+
+
+def test_job_completed_without_workspace_skips_stale_clear(monkeypatch):
+    """Mirrors the invalidation skip: the marker key is workspace-scoped
+    and can't be built without a workspace_id, so the clear is skipped
+    silently rather than guessing."""
+    lst = _listener()
+    lst._sync_data_source = AsyncMock()
+
+    cache = AsyncMock()
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+
+    clear_mock = AsyncMock()
+    monkeypatch.setattr(gc_module, "clear_source_stale", clear_mock)
+
+    _run(lst._handle_event({
+        "type": "job.completed",
+        "payload": {"job_id": "agg_1", "data_source_id": "ds_1"},
+    }))
+
+    clear_mock.assert_not_awaited()
