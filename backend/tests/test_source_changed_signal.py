@@ -12,6 +12,7 @@ Trigger failures after invalidation must never fail the signal.
 """
 import asyncio
 import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -65,13 +66,18 @@ class _FakeSession:
         return None
 
 
-def _state(status="ready", fp="STORED", ws="ws-1"):
+def _state(status="ready", fp="STORED", ws="ws-1", last_aggregated_at=None):
     return types.SimpleNamespace(
         data_source_id="ds-1",
         workspace_id=ws,
         aggregation_status=status,
         graph_fingerprint=fp,
+        last_aggregated_at=last_aggregated_at,
     )
+
+
+def _secs_ago(seconds: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
 def _ds_row(ws="ws-1"):
@@ -87,9 +93,14 @@ def _build(
     fp_timeout=False,
     trigger_job_id="agg_new",
     trigger_exc=None,
+    cooldown=None,
 ):
     """Wire a service with all collaborators mocked to record their call
     order. Returns (svc, session, order, captured)."""
+    if cooldown is not None:
+        monkeypatch.setattr(
+            svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", cooldown,
+        )
     order = []
     provider = _FakeProvider(order)
     registry = _FakeRegistry(provider)
@@ -261,6 +272,73 @@ def test_fingerprint_timeout_treated_as_changed(monkeypatch):
     # Empty fp → the idempotency key falls back to a random token.
     assert captured["request"].idempotency_key.startswith("source-changed:")
     assert captured["request"].idempotency_key != "source-changed:"
+
+
+# ── Rebuild cooldown (eventual-consistency throttle, Task 3b) ────────────
+
+
+def test_rebuild_within_cooldown_defers_trigger(monkeypatch):
+    # Change detected, last rebuild 100s ago, cooldown 900 → invalidate but
+    # defer the rebuild to the reconciler.
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(100)),
+        current_fp="NEW",
+        cooldown=900,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.job_id is None
+    assert resp.deferred is True
+    # Steps 4-7 ran; the trigger did not.
+    assert order == [
+        "mark_source_stale",
+        "clear_content_caches",
+        "invalidate_hierarchy_reads",
+        "mark_stats_changed",
+    ]
+    assert "trigger" not in order
+
+
+def test_force_bypasses_cooldown(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(100)),
+        current_fp="NEW",
+        cooldown=900,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, force=True))
+    assert resp.changed is True
+    assert resp.deferred is False
+    assert order == _FULL_SEQUENCE
+
+
+def test_rebuild_past_cooldown_triggers(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(2000)),
+        current_fp="NEW",
+        cooldown=900,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.deferred is False
+    assert resp.job_id == "agg_new"
+    assert order == _FULL_SEQUENCE
+
+
+def test_cooldown_disabled_always_triggers(monkeypatch):
+    # Cooldown 0 → always trigger even with a very recent rebuild.
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(5)),
+        current_fp="NEW",
+        cooldown=0,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.deferred is False
+    assert order == _FULL_SEQUENCE
 
 
 if __name__ == "__main__":

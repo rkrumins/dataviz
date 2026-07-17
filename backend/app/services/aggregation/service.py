@@ -38,6 +38,19 @@ from backend.app.ontology import runtime as ontology_runtime
 
 logger = logging.getLogger(__name__)
 
+# Rebuild cooldown (eventual-consistency throttle). A confirmed source
+# change ALWAYS invalidates caches + marks the source stale, but the
+# aggregation REBUILD it queues is throttled to at most one per window per
+# source: a connector syncing every few minutes must not fire a full
+# rebuild of a multi-million-entity graph each time. Within the window the
+# rebuild is deferred (the source stays honestly stale via the marker /
+# read-path overlay) and the scheduler reconciler picks it up once the
+# window elapses. 0 disables the throttle (always rebuild); ``force=True``
+# bypasses it. Read once at import, mirroring the package's env-const style.
+AGGREGATION_REBUILD_MIN_INTERVAL_SECS = int(
+    __import__("os").getenv("AGGREGATION_REBUILD_MIN_INTERVAL_SECS", "900")
+)
+
 # Process-wide handle to the wired AggregationService (set at startup by
 # main.py in direct mode / controlplane.py on the CP). Lets non-HTTP
 # callers (e.g. the read path's empty-result backfill) create REAL
@@ -1258,7 +1271,10 @@ class AggregationService:
                     compute_graph_fingerprint(provider),
                     timeout=_DRIFT_TIMEOUT,
                 )
-            except asyncio.TimeoutError:
+            except Exception:
+                # Timeout, or a contract-violating raise from
+                # compute_graph_fingerprint — treat as unknown (a mismatch,
+                # fails open toward "changed") rather than 500 the signal.
                 current_fp = ""
 
         # 3. Change gate. A matching fingerprint (and no force) is a no-op —
@@ -1297,42 +1313,54 @@ class AggregationService:
                 )
 
         # 8. Queue the rebuild unless aggregation doesn't apply to this
-        # source. Trigger failures after invalidation must NOT fail the
-        # signal — a benign ConflictError (job already active) or an
-        # ontology-resolution failure both leave changed=True/job_id=None.
+        # source, or the rebuild cooldown is still in effect. Steps 4-7
+        # already ran — only the REBUILD is throttled. A deferred rebuild
+        # stays honestly stale (marker + read-path overlay) until the Task 4
+        # scheduler reconciler fires it once the window elapses; ``force``
+        # bypasses the cooldown. Trigger failures after invalidation must
+        # NOT fail the signal — a benign ConflictError (job already active)
+        # or an ontology-resolution failure both leave changed=True/job=None.
         job_id = None
+        deferred = False
         status = (state.aggregation_status if state else None) or "none"
         if status not in self._AGG_NOT_APPLICABLE:
-            from uuid import uuid4
-            try:
-                job = await self.trigger(
-                    ds_id,
-                    AggregationTriggerRequest(
-                        idempotency_key=f"source-changed:{current_fp or uuid4().hex}",
-                    ),
-                    "api",
-                    session,
-                )
-                job_id = job.id
-            except ConflictError:
+            if not force and self._within_rebuild_cooldown(state):
+                deferred = True
                 logger.info(
-                    "signal_source_changed: rebuild for %s already active — "
-                    "idempotency key collapses the duplicate", ds_id,
+                    "signal_source_changed: rebuild deferred (cooldown) for "
+                    "%s — reconciler will pick it up", ds_id,
                 )
-            except (OntologyResolutionError, ValueError, NotFoundError) as exc:
-                logger.warning(
-                    "signal_source_changed: rebuild trigger for %s could not "
-                    "resolve (%s) — caches invalidated, no job queued",
-                    ds_id, exc,
-                )
-            except Exception as exc:
-                # Any other trigger failure (DB/provider blip) must not fail
-                # the signal — the invalidation above already happened.
-                logger.warning(
-                    "signal_source_changed: rebuild trigger for %s failed "
-                    "unexpectedly (%s) — caches invalidated, no job queued",
-                    ds_id, exc,
-                )
+            else:
+                from uuid import uuid4
+                try:
+                    job = await self.trigger(
+                        ds_id,
+                        AggregationTriggerRequest(
+                            idempotency_key=f"source-changed:{current_fp or uuid4().hex}",
+                        ),
+                        "api",
+                        session,
+                    )
+                    job_id = job.id
+                except ConflictError:
+                    logger.info(
+                        "signal_source_changed: rebuild for %s already active — "
+                        "idempotency key collapses the duplicate", ds_id,
+                    )
+                except (OntologyResolutionError, ValueError, NotFoundError) as exc:
+                    logger.warning(
+                        "signal_source_changed: rebuild trigger for %s could not "
+                        "resolve (%s) — caches invalidated, no job queued",
+                        ds_id, exc,
+                    )
+                except Exception as exc:
+                    # Any other trigger failure (DB/provider blip) must not fail
+                    # the signal — the invalidation above already happened.
+                    logger.warning(
+                        "signal_source_changed: rebuild trigger for %s failed "
+                        "unexpectedly (%s) — caches invalidated, no job queued",
+                        ds_id, exc,
+                    )
 
         return SourceChangedResponse(
             changed=True,
@@ -1340,7 +1368,31 @@ class AggregationService:
             reason=reason,
             current_fingerprint=current_fp,
             stored_fingerprint=stored_fp,
+            deferred=deferred,
         )
+
+    def _within_rebuild_cooldown(self, state) -> bool:
+        """True when a rebuild for ``state`` falls inside the throttle
+        window and should be deferred to the reconciler.
+
+        Reference time is the state row's ``last_aggregated_at`` — the only
+        "when did we last rebuild" timestamp on the aggregation state row.
+        Returns False (⇒ trigger now) when the throttle is disabled, no
+        reference time exists (never aggregated), the timestamp is
+        unparseable, or the window has already elapsed."""
+        if AGGREGATION_REBUILD_MIN_INTERVAL_SECS <= 0:
+            return False
+        ref = state.last_aggregated_at if state is not None else None
+        if not ref:
+            return False
+        try:
+            ref_dt = datetime.fromisoformat(ref)
+        except (TypeError, ValueError):
+            return False
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - ref_dt).total_seconds()
+        return elapsed < AGGREGATION_REBUILD_MIN_INTERVAL_SECS
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 

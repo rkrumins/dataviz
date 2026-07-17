@@ -382,14 +382,19 @@ class SourceChangedResponse(BaseModel):
     ``changed`` is False only on the no-op path (fingerprints matched and
     ``force`` was not set) — nothing was invalidated or queued. When True,
     caches were invalidated and a rebuild was queued unless ``job_id`` is
-    None (an aggregation job was already active, or the source's status
-    makes aggregation not applicable).
+    None (an aggregation job was already active, the source's status makes
+    aggregation not applicable, or the rebuild was ``deferred`` by the
+    cooldown throttle for the scheduler reconciler to pick up).
     """
     changed: bool
     job_id: Optional[str] = Field(None, alias="jobId")
     reason: str
     current_fingerprint: str = Field(alias="currentFingerprint")
     stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
+    # True when the change was invalidated but the aggregation rebuild was
+    # throttled by the cooldown window — the scheduler reconciler queues it
+    # once the window elapses.
+    deferred: bool = False
 
     class Config:
         populate_by_name = True
