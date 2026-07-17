@@ -267,3 +267,42 @@ async def test_cluster_schema_stats_empty_key_verified(monkeypatch):
     monkeypatch.setattr(p, "_ro_query", _raise)
     with pytest.raises(ResponseError):
         await p.get_schema_stats()
+
+
+# ── bulk-CREATE knob parsing: once per process per env value ────────
+
+def test_bulk_create_knobs_parsed_once_per_env_value(monkeypatch, caplog):
+    """The operator-tuning log line fires once per process per env value —
+    not once per provider construction (discovery builds transient providers
+    continuously; per-construction logging read as a warning storm)."""
+    import logging
+
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "120")
+    with caplog.at_level(logging.INFO, logger=fp.logger.name):
+        p1 = _make_provider()
+        p2 = _make_provider()
+    assert p1._bulk_create_timeout_s == 120.0
+    assert p2._bulk_create_timeout_s == 120.0
+    tuned = [r for r in caplog.records if "operator-tuned" in r.getMessage()]
+    assert len(tuned) == 1                       # logged once, not per instance
+
+    # A changed env value re-parses (and re-logs) once.
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "90")
+    assert _make_provider()._bulk_create_timeout_s == 90.0
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+
+
+def test_bulk_create_knobs_clamped_and_default(monkeypatch):
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_BATCH_SIZE", "999999")
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "not-a-float")
+    p = _make_provider()
+    assert p._bulk_create_batch_size == 50000    # clamped to ceiling
+    assert p._bulk_create_timeout_s == 60.0      # bad value → default
+    monkeypatch.delenv("FALKORDB_BULK_CREATE_BATCH_SIZE")
+    monkeypatch.delenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    p = _make_provider()
+    assert p._bulk_create_batch_size == fp._BULK_CREATE_BATCH_DEFAULT
+    assert p._bulk_create_timeout_s == fp._BULK_CREATE_TIMEOUT_DEFAULT

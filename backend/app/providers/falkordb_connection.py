@@ -1084,7 +1084,11 @@ async def build_graph_client(
         # it proves the node that actually serves this graph is reachable and
         # authenticating, which pinging an arbitrary cluster node would not.
         pool = ConnectionPool(host=host, port=port, **node_kwargs, **_tls_pool)
-        logger.info(
+        # DEBUG: fires on every graph-client build — continuous at fleet scale
+        # (discovery transients, rebuilds). The connect-time "connecting graph
+        # via cluster(...)" line and the aggregated GRAPH.LIST fan-out line
+        # carry the operational signal; per-graph routing is diagnostics.
+        logger.debug(
             "falkordb_connection: cluster graph %r routed to owning node %s:%d%s",
             graph_name, host, port,
             " (TLS)" if _tls_pool else "",
