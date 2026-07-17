@@ -33,9 +33,11 @@ from backend.app.models.canvas import (
 )
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.graph_cache import (
+    CacheScope,
     ENDPOINT_CANVAS_BOOTSTRAP,
     ENDPOINT_CANVAS_EXPAND,
     get_graph_cache,
+    get_source_stale_reason,
 )
 from backend.app.services.top_level_cache import try_serve_top_level
 from backend.common.models.graph import (
@@ -81,6 +83,27 @@ def _merge_aggregated(
         stampVersion=base.stamp_version,
         regime=base.regime,
     )
+
+
+async def _apply_stale_overlay(
+    scope: CacheScope,
+    freshness: CanvasFreshness,
+    aggregated: Optional[AggregatedEdgeResult],
+) -> None:
+    """Post-cache staleness overlay (Task 6), shared by bootstrap and
+    expand: the source-changed marker is set/cleared independently of the
+    cache entry, so a cached/composed response can be honestly stale
+    without its own structural staleReason knowing it. Never overwrites
+    an existing stale reason; never baked back into the cache."""
+    reason = await get_source_stale_reason(scope.workspace_id, scope.data_source_id)
+    if not reason:
+        return
+    if not freshness.stale:
+        freshness.stale = True
+        freshness.stale_reason = reason
+    if aggregated is not None and not aggregated.stale:
+        aggregated.stale = True
+        aggregated.stale_reason = reason
 
 
 @router.post("/canvas/bootstrap", response_model=CanvasBootstrapResult, response_model_by_alias=True)
@@ -156,7 +179,7 @@ async def canvas_bootstrap(
 
     if scope is None:
         return await compute()
-    return await get_graph_cache().get_or_compute(
+    result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_CANVAS_BOOTSTRAP,
         params={
@@ -172,6 +195,8 @@ async def canvas_bootstrap(
         model_cls=CanvasBootstrapResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+    await _apply_stale_overlay(scope, result.freshness, result.aggregated)
+    return result
 
 
 @router.post("/canvas/expand", response_model=CanvasExpandResult, response_model_by_alias=True)
@@ -236,7 +261,7 @@ async def canvas_expand(
     visible_digest = hashlib.sha256(
         ",".join(sorted(request.visible_urns)).encode()
     ).hexdigest()
-    return await get_graph_cache().get_or_compute(
+    result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_CANVAS_EXPAND,
         params={
@@ -252,3 +277,5 @@ async def canvas_expand(
         model_cls=CanvasExpandResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+    await _apply_stale_overlay(scope, result.freshness, result.aggregated_delta)
+    return result

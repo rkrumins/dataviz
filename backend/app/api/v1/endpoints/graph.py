@@ -37,6 +37,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
+    get_source_stale_reason,
 )
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
@@ -2046,7 +2047,7 @@ async def get_aggregated_edges(
     # Sort URN lists so two semantically identical requests with differing
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
-    return await get_graph_cache().get_or_compute(
+    result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
         params={
@@ -2061,6 +2062,17 @@ async def get_aggregated_edges(
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+
+    # Post-cache staleness overlay (Task 6): the source-changed marker is
+    # set/cleared independently of the cache entry, so a cache hit (or a
+    # freshly computed but now-outdated-by-a-later-write result) can be
+    # honestly stale without the payload's own structural staleReason
+    # knowing it. Never baked into the cached bytes — read after the fact.
+    reason = await get_source_stale_reason(scope.workspace_id, scope.data_source_id)
+    if reason and not result.stale:
+        result.stale = True
+        result.stale_reason = reason
+    return result
 
 
 @router.post("/edges/aggregated/materialize")
