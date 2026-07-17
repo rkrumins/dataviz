@@ -465,6 +465,27 @@ async def test_query_error_is_not_retried(fleet):
         await g.query("RETRUN 1")
 
 
+# ── build failure must not leak the freshly-built pool ──────────────
+
+@pytest.mark.asyncio
+async def test_build_failure_closes_the_new_pool(fleet, monkeypatch):
+    """A raise between pool construction and the cache insert (verify ping /
+    cluster-node guard) must close the pool: a persistent condition re-enters
+    _build on every call and would otherwise leak one live socket each time."""
+    from backend.app.providers import falkordb_connection as fc
+
+    async def _reject(cfg, pool, timeout):
+        raise ProviderConfigurationError("standalone config on a cluster node")
+
+    monkeypatch.setattr(fc, "verify_not_cluster_node", _reject)
+    graph = _factory()
+    with pytest.raises(ProviderConfigurationError):
+        await graph("gv_sa_1", "standalone-1")
+    assert fleet["pools"], "expected a pool to have been built"
+    assert all(p.closed for p in fleet["pools"])
+    assert fleet["clients"]._clients == {}          # nothing cached on failure
+
+
 # ── GRAPH.LIST must not under-report on a cluster ────────────────────
 
 @pytest.mark.asyncio

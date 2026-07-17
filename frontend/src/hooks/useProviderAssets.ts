@@ -21,7 +21,7 @@
  * `useQueries` fan-out in `useAllProviderCounts`, so selecting a provider
  * hits the already-warmed cache instead of refetching.
  */
-import { useQuery, useQueries, keepPreviousData, type UseQueryResult } from '@tanstack/react-query'
+import { useQuery, useQueries, type UseQueryResult } from '@tanstack/react-query'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { Envelope, AssetListPayload } from '@/types/insights'
@@ -60,12 +60,12 @@ function providerAssetsQueryOptions(providerId: string) {
         gcTime: 10 * 60_000,
         retry: 1,
         refetchOnWindowFocus: true,
-        // A refetch (focus, poll, invalidation) that lands a transient-null
-        // envelope (`computing`/`unavailable` carry data:null) must not blank
-        // the list — keep showing the previous envelope until a real one
-        // arrives. Without this the list and the sidebar counts (same query
-        // key, useAllProviderCounts) blinked empty/full together.
-        placeholderData: keepPreviousData,
+        // Deliberately NO placeholderData/keepPreviousData here: the key
+        // includes providerId, so keepPreviousData would serve provider A's
+        // envelope under provider B's header while B's first fetch is in
+        // flight (status reads 'success', isLoading false) — mis-attributed
+        // assets, banners, and worse, registrable rows. Transient-null
+        // envelopes are handled by assetListState below instead.
         refetchInterval: (query: { state: { data?: Envelope<AssetListPayload> } }) =>
             query.state.data?.meta?.status === 'computing' ? 5_000 : (false as const),
     }
@@ -159,10 +159,12 @@ export function useAllProviderCounts(providers: ProviderResponse[]): AllProvider
     let total = 0
     let registered = 0
     providers.forEach((p, i) => {
-        // Array.isArray: the discovery failure stub row carries payload `{}`
-        // (assets undefined) — count it as 0, not a crash in .filter below.
-        const rawAssets = assetResults[i]?.data?.data?.assets
-        const assetList = Array.isArray(rawAssets) ? rawAssets : []
+        // Same classifier as the list panel — the sidebar badge and the
+        // visible list must never disagree about what "has assets" means.
+        const envelope = assetResults[i]?.data
+        const assetList = assetListState(envelope) === 'ready'
+            ? envelope!.data!.assets
+            : []
         const catalog = catalogResults[i]?.data ?? []
         const existing = new Set(catalog.map(c => c.sourceIdentifier).filter(Boolean))
         const t = assetList.length

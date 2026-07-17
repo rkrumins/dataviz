@@ -53,7 +53,42 @@ async def _run_preflight(replies: list[bytes], **kwargs):
 @pytest.mark.asyncio
 async def test_detect_cluster_flags_cluster_enabled_server():
     res = await _run_preflight(
-        [b"+PONG\r\n", _info_reply(b"# Cluster\r\ncluster_enabled:1\r\n")],
+        [
+            b"+PONG\r\n",
+            _info_reply(b"# Cluster\r\ncluster_enabled:1\r\n"),
+            _info_reply(b"cluster_state:ok\r\ncluster_size:3\r\n"),
+        ],
+        detect_cluster=True,
+    )
+    assert res.ok is False
+    assert res.reason == "cluster_mode_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_detect_cluster_exempts_cluster_of_one():
+    # A single master owning all slots serves a standalone client completely —
+    # not a mismatch.
+    res = await _run_preflight(
+        [
+            b"+PONG\r\n",
+            _info_reply(b"# Cluster\r\ncluster_enabled:1\r\n"),
+            _info_reply(b"cluster_state:ok\r\ncluster_size:1\r\n"),
+        ],
+        detect_cluster=True,
+    )
+    assert res.ok is True
+
+
+@pytest.mark.asyncio
+async def test_detect_cluster_mismatch_stands_without_size_evidence():
+    # cluster_enabled:1 confirmed but CLUSTER INFO errors → the exemption
+    # needs positive evidence, so the mismatch is still reported.
+    res = await _run_preflight(
+        [
+            b"+PONG\r\n",
+            _info_reply(b"# Cluster\r\ncluster_enabled:1\r\n"),
+            b"-ERR CLUSTER unavailable\r\n",
+        ],
         detect_cluster=True,
     )
     assert res.ok is False
@@ -87,7 +122,6 @@ async def test_info_not_issued_unless_requested():
         writer.write(b"+PONG\r\n")
         await writer.drain()
         await asyncio.sleep(0.15)
-        received["extra"] = reader._buffer if hasattr(reader, "_buffer") else b""
         try:
             data = await asyncio.wait_for(reader.read(64), timeout=0.05)
         except asyncio.TimeoutError:
@@ -137,7 +171,7 @@ async def test_provider_preflight_requests_detection_only_in_standalone(monkeypa
 
 # ── verify_not_cluster_node (client-build guard) ────────────────────
 
-def _fake_redis(monkeypatch, info_result):
+def _fake_redis(monkeypatch, info_result, cluster_info="cluster_size:3"):
     class FakeRedis:
         def __init__(self, connection_pool=None, **kw):
             pass
@@ -146,6 +180,12 @@ def _fake_redis(monkeypatch, info_result):
             if isinstance(info_result, BaseException):
                 raise info_result
             return info_result
+
+        async def execute_command(self, *args):
+            assert args == ("CLUSTER", "INFO")
+            if isinstance(cluster_info, BaseException):
+                raise cluster_info
+            return cluster_info
 
     monkeypatch.setattr("redis.asyncio.Redis", FakeRedis)
 
@@ -157,6 +197,34 @@ async def test_verify_raises_for_standalone_config_on_cluster_node(monkeypatch):
     with pytest.raises(ProviderConfigurationError) as excinfo:
         await verify_not_cluster_node(cfg, object(), 1.0)
     assert "mode=cluster" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_verify_exempts_cluster_of_one(monkeypatch):
+    _fake_redis(monkeypatch, {"cluster_enabled": 1}, cluster_info="cluster_size:1")
+    cfg = FalkorDBConnConfig(mode="standalone", host="h", port=6379)
+    await verify_not_cluster_node(cfg, object(), 1.0)     # warns, no raise
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_when_size_unreadable(monkeypatch):
+    # Confirmed cluster node + unreadable CLUSTER INFO → still a mismatch
+    # (the exemption needs positive evidence of cluster_size:1).
+    _fake_redis(monkeypatch, {"cluster_enabled": 1},
+                cluster_info=RuntimeError("CLUSTER INFO failed"))
+    cfg = FalkorDBConnConfig(mode="standalone", host="h", port=6379)
+    with pytest.raises(ProviderConfigurationError):
+        await verify_not_cluster_node(cfg, object(), 1.0)
+
+
+def test_cluster_mode_mismatch_is_reachable_config_reason():
+    # The warmup gate / breaker classification must treat the new reason as
+    # reachable-but-misconfigured, never as an outage.
+    from backend.common.interfaces.preflight import is_reachable_config_reason
+
+    assert is_reachable_config_reason("cluster_mode_mismatch")
+    assert is_reachable_config_reason("auth_required")
+    assert not is_reachable_config_reason("tcp_refused")
 
 
 @pytest.mark.asyncio

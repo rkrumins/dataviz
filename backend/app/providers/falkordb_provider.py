@@ -1685,9 +1685,30 @@ class FalkorDBProvider(GraphDataProvider):
             "empty-key verification: graph %r EXISTS on the cluster but a read "
             "reported 'empty key' — the read landed on a node that does not "
             "hold the graph (stale routing or an unsynced promotee). Failing "
-            "loud instead of reporting an empty graph.", self._graph_name,
+            "loud and rebuilding the client.", self._graph_name,
         )
+        # Heal, don't just detect: the client that produced the misroute stays
+        # cached otherwise (the bare ResponseError is not classified as a
+        # routing error, so _run_guarded never rebuilds for it) and every
+        # subsequent read keeps failing until an unrelated MOVED or a restart.
+        # The rebuild re-resolves the owning node; the CURRENT read still
+        # raises (fail loud), the next one uses the fresh route.
+        try:
+            await self._rebuild_graph_client_for_failover(self._conn_generation)
+        except Exception:                            # pragma: no cover - best effort
+            logger.warning(
+                "empty-key verification: client rebuild after stale-route "
+                "detection failed for %r.", self._graph_name, exc_info=True,
+            )
         return False
+
+    async def _is_verified_missing_graph(self, exc: BaseException) -> bool:
+        """The ONLY predicate that may mask an 'empty key' error as an empty
+        graph: matches the error AND (in cluster mode) verifies via EXISTS that
+        the graph is genuinely absent. Every masking site calls this — a bare
+        ``_is_missing_graph_error`` check silently converts a cluster misroute
+        into '0 rows'."""
+        return _is_missing_graph_error(exc) and await self._empty_key_is_genuine()
 
     async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None,
                                  op: Optional[str] = None):
@@ -1699,7 +1720,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             return await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         except Exception as exc:
-            if _is_missing_graph_error(exc) and await self._empty_key_is_genuine():
+            if await self._is_verified_missing_graph(exc):
                 return _EmptyResult()
             raise
 
@@ -2673,7 +2694,7 @@ class FalkorDBProvider(GraphDataProvider):
                     )
                     return res.result_set or []
                 except Exception as e:
-                    if _is_missing_graph_error(e):
+                    if await self._is_verified_missing_graph(e):
                         return []
                     logger.warning(f"get_nodes urn bucket failed: {e}")
                     return []
@@ -2763,7 +2784,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             result = await self._ro_query(cypher, params=params)
         except Exception as e:
-            if _is_missing_graph_error(e):
+            if await self._is_verified_missing_graph(e):
                 return []  # never-created / empty key = legitimately no data
             logger.warning(f"get_nodes query failed: {e}")
             raise  # connection refused / transient = surface it (breaker -> 503)
@@ -3429,7 +3450,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
         except Exception as e:
-            if not _is_missing_graph_error(e):
+            if not await self._is_verified_missing_graph(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
                 raise  # connection refused / transient = surface it (breaker -> 503)
             page_result = None  # never-created / empty key = legitimately no data
@@ -3500,7 +3521,7 @@ class FalkorDBProvider(GraphDataProvider):
                     first = count_result.result_set[0]
                     total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
             except Exception as e:
-                if not _is_missing_graph_error(e):
+                if not await self._is_verified_missing_graph(e):
                     logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
                     raise  # connection refused / transient = surface it (breaker -> 503)
                 total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
@@ -7872,7 +7893,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_type_counts[t] = cnt
                 edge_count += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc) or not await self._empty_key_is_genuine():
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_stats on %s: graph key does not exist yet (empty graph) "
@@ -7957,7 +7978,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
                 total_edges += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc) or not await self._empty_key_is_genuine():
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_schema_stats on %s: graph key does not exist yet "

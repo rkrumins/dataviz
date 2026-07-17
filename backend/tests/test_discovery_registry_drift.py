@@ -29,7 +29,7 @@ class _ExecSession:
 def _wire_sessions(monkeypatch, *, catalog_rows, projection_rows,
                    graphver_raises=False):
     """catalog_rows: [(source_identifier,)]; projection_rows:
-    [(falkor_graph_name, status, projected_commit_seq)]."""
+    [(falkor_graph_name, status, projected_commit_seq, last_projected_at)]."""
 
     @asynccontextmanager
     async def _jobs_session():
@@ -70,7 +70,7 @@ async def test_no_drift_when_everything_observed(monkeypatch):
     _wire_sessions(
         monkeypatch,
         catalog_rows=[("g1",)],
-        projection_rows=[("gv_1", "idle", 42)],
+        projection_rows=[("gv_1", "idle", 42, "2020-01-01T00:00:00+00:00")],
     )
     assert await discovery._detect_registry_drift(
         "p1", observed={"g1", "gv_1", "unregistered_extra"},
@@ -84,7 +84,7 @@ async def test_evicted_graph_absence_never_alarms(monkeypatch):
     _wire_sessions(
         monkeypatch,
         catalog_rows=[("gv_cold",)],
-        projection_rows=[("gv_cold", "evicted", 42)],
+        projection_rows=[("gv_cold", "evicted", 42, "2020-01-01T00:00:00+00:00")],
     )
     assert await discovery._detect_registry_drift("p1", observed=set()) is None
 
@@ -94,7 +94,7 @@ async def test_resident_versioned_graph_absence_alarms(monkeypatch):
     _wire_sessions(
         monkeypatch,
         catalog_rows=[],
-        projection_rows=[("gv_hot", "idle", 42)],
+        projection_rows=[("gv_hot", "idle", 42, "2020-01-01T00:00:00+00:00")],
     )
     msg = await discovery._detect_registry_drift("p1", observed=set())
     assert msg is not None and "gv_hot" in msg
@@ -108,9 +108,42 @@ async def test_midflight_and_never_projected_rows_do_not_alarm(monkeypatch):
         monkeypatch,
         catalog_rows=[],
         projection_rows=[
-            ("gv_a", "projecting", 0),
-            ("gv_b", "rebuilding", 10),
-            ("gv_c", "idle", 0),
+            ("gv_a", "projecting", 0, None),
+            ("gv_b", "rebuilding", 10, None),
+            ("gv_c", "idle", 0, None),
+        ],
+    )
+    assert await discovery._detect_registry_drift("p1", observed=set()) is None
+
+
+@pytest.mark.asyncio
+async def test_recently_projected_graph_gets_a_settling_window(monkeypatch):
+    # TOCTOU guard: a projection that completed AFTER the observed GRAPH.LIST
+    # snapshot must not alarm this sweep (it alarms from the NEXT one if the
+    # graph is still missing).
+    from datetime import datetime, timezone
+
+    _wire_sessions(
+        monkeypatch,
+        catalog_rows=[],
+        projection_rows=[
+            ("gv_fresh", "idle", 42, datetime.now(timezone.utc).isoformat()),
+        ],
+    )
+    assert await discovery._detect_registry_drift("p1", observed=set()) is None
+
+
+@pytest.mark.asyncio
+async def test_settling_window_shields_catalog_twin_too(monkeypatch):
+    # The just-projected name may ALSO be an active catalog item — the
+    # settling window must shield the whole union, not just the versioned set.
+    from datetime import datetime, timezone
+
+    _wire_sessions(
+        monkeypatch,
+        catalog_rows=[("gv_fresh",)],
+        projection_rows=[
+            ("gv_fresh", "idle", 42, datetime.now(timezone.utc).isoformat()),
         ],
     )
     assert await discovery._detect_registry_drift("p1", observed=set()) is None
@@ -131,10 +164,10 @@ async def test_graphver_failure_is_best_effort(monkeypatch):
 
 # ── collect() wiring: drift lands on the list-all row only ──────────
 
-def _wire_collect(monkeypatch, *, graphs, drift_msg):
+def _wire_collect(monkeypatch, *, graphs, drift_msg, provider_type="falkordb"):
     async def fake_get_provider(session, pid):
         return SimpleNamespace(
-            provider_type="falkordb", host="falkordb", port=6379,
+            provider_type=provider_type, host="falkordb", port=6379,
             tls_enabled=False, extra_config=None,
         )
 
@@ -217,5 +250,18 @@ async def test_collect_never_runs_drift_for_per_asset_jobs(monkeypatch):
         monkeypatch, graphs=["g1"], drift_msg="graph_drift: nope",
     )
     await discovery.collect(SimpleNamespace(provider_id="p1", asset_name="g1"))
+    assert drift_calls == []
+    assert ups[0]["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_collect_never_runs_drift_for_non_falkordb_providers(monkeypatch):
+    # DataHub's list_graphs() returns [] BY DESIGN — comparing a catalog item
+    # against it would stamp a permanent false drift banner.
+    drift_calls, ups = _wire_collect(
+        monkeypatch, graphs=[], drift_msg="graph_drift: nope",
+        provider_type="datahub",
+    )
+    await discovery.collect(SimpleNamespace(provider_id="p1", asset_name=""))
     assert drift_calls == []
     assert ups[0]["last_error"] is None

@@ -765,9 +765,7 @@ export function RegistryAssets() {
     // the true "no data sources" empty state — computing/unavailable/stub
     // envelopes are transient backend states, not an empty provider.
     const listState = assetListState(assetsEnvelope)
-    const assets = Array.isArray(assetsEnvelope?.data?.assets)
-        ? assetsEnvelope!.data!.assets
-        : []
+    const assets = listState === 'ready' ? assetsEnvelope!.data!.assets : []
     // Stable ref so the callbacks that depend on it (re-aggregate, purge,
     // unregister) aren't rebuilt every render.
     const existingCatalogs = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data])
