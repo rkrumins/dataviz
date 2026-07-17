@@ -448,6 +448,37 @@ class GraphCache:
             )
         return removed
 
+    async def purge_lkg_scope(
+        self, scope: CacheScope, *, exclude_endpoint: Optional[str] = None,
+    ) -> int:
+        """Delete the last-known-good entries for ``scope`` across EVERY
+        endpoint (every branch) — the hierarchy-invalidation counterpart to
+        :meth:`purge_lkg`, which is scoped to one endpoint. ``exclude_endpoint``
+        carves out one endpoint's LKG (the aggregated mirror, kept as the
+        stale-while-revalidate fallback until its own rebuild completes).
+        Bounded SCAN, never KEYS."""
+        pattern = f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:*"
+        removed = 0
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor=cursor, match=pattern, count=500,
+                )
+                if exclude_endpoint is not None:
+                    keys = [k for k in keys if f":{exclude_endpoint}:" not in k]
+                if keys:
+                    removed += int(await self._redis.delete(*keys) or 0)
+                if not cursor:
+                    break
+        except RedisError as exc:
+            logger.warning(
+                "graph_cache: LKG scope purge failed for %s (%s); stale "
+                "last-known-good entries may persist until TTL expiry",
+                scope, exc,
+            )
+        return removed
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
@@ -476,13 +507,16 @@ class GraphCache:
         ttl = _resolve_ttl(ttl_seconds, endpoint)
         if _is_empty_result(result):
             ttl = _NEGATIVE_TTL
+        elif _is_incomplete_result(result):
+            ttl = _NEGATIVE_TTL
         try:
             payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 logger.warning(
-                    "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (skipping cache write)",
+                    "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (dropping stale entry + skipping cache write)",
                     endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
                 )
+                await self._redis.delete(cache_key)
                 return
             await self._redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
@@ -499,18 +533,25 @@ class GraphCache:
 
         Skipped for empty results — a transient empty answer must not
         pin "empty" as the stale fallback during a future outage. Skipped
-        when ``_LKG_TTL`` is 0 (operator-disabled). Failures are
-        swallowed for the same reason as ``_set``.
+        for incomplete (truncated/stale) results — a degraded snapshot
+        must not become the outage fallback either. Skipped when
+        ``_LKG_TTL`` is 0 (operator-disabled). Failures are swallowed for
+        the same reason as ``_set``.
         """
         if _LKG_TTL <= 0:
             return
         if _is_empty_result(result):
             return
+        if _is_incomplete_result(result):
+            return
         try:
             payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 # Already logged at WARNING in _set for the primary key;
-                # the LKG mirror is dropped silently to avoid double-noise.
+                # the stale mirror is dropped here deliberately (log-silent
+                # to avoid double-noise) — an outage fallback that no
+                # longer matches reality is worse than none.
+                await self._redis.delete(_build_lkg_key(scope, endpoint, params))
                 return
             await self._redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
         except (RedisError, Exception) as exc:
@@ -616,6 +657,17 @@ def _is_empty_result(result: BaseModel) -> bool:
     return False
 
 
+def _is_incomplete_result(result: BaseModel) -> bool:
+    """Truncated/degraded/stale results must not be pinned for the full
+    TTL as if they were complete — cache them only for the negative
+    window. Checks the result itself and a nested ``aggregated`` payload
+    (canvas bootstrap/expand embed an AggregatedEdgeResult)."""
+    for obj in (result, getattr(result, "aggregated", None)):
+        if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
+            return True
+    return False
+
+
 async def invalidate_aggregated_reads(
     workspace_id: str, data_source_id: str,
 ) -> None:
@@ -650,6 +702,113 @@ async def invalidate_aggregated_reads(
             "aggregated-read cache invalidation failed for %s/%s: %s",
             workspace_id, data_source_id, exc,
         )
+
+
+async def invalidate_hierarchy_reads(
+    workspace_id: str, data_source_id: str,
+) -> None:
+    """Invalidate the hierarchy read caches (children, top-level, trace,
+    layer-assignment, canvas, …) after an event that changed the
+    underlying graph — e.g. an external load that wrote FalkorDB directly,
+    bypassing the app's own write paths and their per-write generation
+    bumps.
+
+    Bumps the scope-wide generation, which makes every endpoint's primary
+    cache entries unreachable; hierarchy endpoints read the live graph on
+    a miss, so they converge on the very next read. The aggregated LKG
+    mirror is deliberately KEPT (not purged here) — mid-rebuild it still
+    matches the live overlay and is the best degraded-read answer
+    available; :func:`invalidate_aggregated_reads` purges it once the
+    aggregation rebuild completes. Best-effort: never raises.
+    """
+    if not workspace_id or not data_source_id:
+        return
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(
+            workspace_id=str(workspace_id),
+            data_source_id=str(data_source_id),
+            branch_id="",
+        )
+        await cache.bump_generation(scope)
+        removed = await cache.purge_lkg_scope(scope, exclude_endpoint=ENDPOINT_AGGREGATED)
+        logger.info(
+            "hierarchy-read caches invalidated for %s/%s (%d non-aggregated LKG purged)",
+            workspace_id, data_source_id, removed,
+        )
+    except Exception as exc:
+        logger.warning(
+            "hierarchy-read cache invalidation failed for %s/%s: %s",
+            workspace_id, data_source_id, exc,
+        )
+
+
+# ─── Stale-source marker (stale-while-revalidate flag) ─────────────────
+
+_STALE_PREFIX = "aggstale:v1"      # key: aggstale:v1:{ws}:{ds}; value = reason string
+_STALE_TTL_S = 7 * 86400           # backstop only; cleared explicitly on job.completed
+
+
+def _stale_key(workspace_id: str, data_source_id: str) -> str:
+    return f"{_STALE_PREFIX}:{workspace_id}:{data_source_id}"
+
+
+async def mark_source_stale(
+    workspace_id: str, data_source_id: str, reason: str = "source_changed",
+) -> None:
+    """Set the stale-while-revalidate flag for a data source: its
+    underlying graph changed and a rebuild is queued. Read by the
+    aggregated/canvas read paths post-cache, so even a cached hit gets
+    flagged as stale to the caller. Cleared by the aggregation event
+    listener on ``job.completed``. ``_STALE_TTL_S`` is a backstop only —
+    a dropped completion event doesn't strand the flag forever.
+    Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return
+    try:
+        cache = get_graph_cache()
+        await cache._redis.set(_stale_key(ws, ds), reason, ex=_STALE_TTL_S)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: mark_source_stale failed for %s/%s: %s", ws, ds, exc,
+        )
+
+
+async def clear_source_stale(workspace_id: str, data_source_id: str) -> None:
+    """Clear the stale-while-revalidate flag once the queued rebuild
+    completes. Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return
+    try:
+        cache = get_graph_cache()
+        await cache._redis.delete(_stale_key(ws, ds))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: clear_source_stale failed for %s/%s: %s", ws, ds, exc,
+        )
+
+
+async def get_source_stale_reason(
+    workspace_id: str, data_source_id: str,
+) -> Optional[str]:
+    """Read the stale-while-revalidate reason for a data source. Returns
+    ``None`` when not stale, on empty ids, or on any Redis error — this
+    runs on the read path post-cache, so a Redis hiccup must degrade to
+    "not stale" rather than blocking the response. Best-effort: never
+    raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        return await cache._redis.get(_stale_key(ws, ds))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: get_source_stale_reason failed for %s/%s: %s", ws, ds, exc,
+        )
+        return None
 
 
 async def bump_aggregated_generations(scopes) -> None:

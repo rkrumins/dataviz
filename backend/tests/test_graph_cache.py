@@ -41,6 +41,28 @@ class _TraceLike(BaseModel):
     label: str = ""
 
 
+class _AggregatedLike(BaseModel):
+    """Minimal Pydantic model standing in for AggregatedEdgeResult — carries
+    the truncated/stale flags the incomplete-result heuristic checks."""
+    aggregated_edges: list = []
+    truncated: bool = False
+    stale: bool = False
+
+
+class _NestedAggregated(BaseModel):
+    """Minimal stand-in for the AggregatedEdgeResult embedded under
+    ``.aggregated`` on canvas bootstrap/expand results."""
+    truncated: bool = False
+    stale: bool = False
+
+
+class _CanvasBootstrapLike(BaseModel):
+    """Minimal stand-in for a canvas bootstrap/expand result, which embeds
+    an AggregatedEdgeResult under ``.aggregated``."""
+    nodes: list = []
+    aggregated: Any = None
+
+
 def _make_redis() -> AsyncMock:
     """An AsyncMock with the surface graph_cache touches: get/set/incr."""
     redis = AsyncMock()
@@ -294,11 +316,15 @@ async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
     """A response larger than ``_MAX_PAYLOAD_BYTES`` must skip the cache
     write — both primary and LKG — and log a WARNING. The compute already
     succeeded, so the caller still gets the answer; we just decline to
-    cache it so it can't crowd out hundreds of normal entries."""
+    cache it so it can't crowd out hundreds of normal entries. It must
+    also DELETE any existing (now-stale, smaller) entry at both the
+    primary key and the LKG mirror, so a stale entry can't outlive the
+    model's growth past the cap."""
     import logging
     monkeypatch.setattr(graph_cache, "_MAX_PAYLOAD_BYTES", 50)
 
     redis = _make_redis()
+    redis.delete = AsyncMock(return_value=1)
     cache = GraphCache(redis)
     # A non-empty payload whose JSON serialization exceeds 50 bytes.
     large = _Result(value=1, children=list(range(100)))
@@ -317,8 +343,186 @@ async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
     assert result.value == 1
     # No SET fired — neither primary nor LKG.
     assert redis.set.await_count == 0
+    # The existing stale entry was DELETEd at both the primary key and
+    # the LKG mirror.
+    assert redis.delete.await_count == 2
+    deleted_keys = [c.args[0] for c in redis.delete.await_args_list]
+    assert any(graph_cache._KEY_PREFIX in k for k in deleted_keys)
+    assert any(graph_cache._LKG_PREFIX in k for k in deleted_keys)
     # WARNING line was emitted with the diagnostic shape.
     assert any("payload_too_large" in rec.message for rec in caplog.records)
+    assert any("dropping stale entry" in rec.message for rec in caplog.records)
+
+
+# ─── incomplete-result short TTL (R2) ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_truncated_result_caches_with_negative_ttl_and_no_lkg() -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_AggregatedLike(
+        aggregated_edges=[1], truncated=True,
+    ))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_AGGREGATED,
+        params={},
+        compute=compute,
+        model_cls=_AggregatedLike,
+    )
+
+    # Primary SET only, at the negative TTL — no LKG mirror for a
+    # truncated snapshot.
+    assert redis.set.await_count == 1
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+@pytest.mark.asyncio
+async def test_stale_result_caches_with_negative_ttl_and_no_lkg() -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_AggregatedLike(
+        aggregated_edges=[1], stale=True,
+    ))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_AGGREGATED,
+        params={},
+        compute=compute,
+        model_cls=_AggregatedLike,
+    )
+
+    assert redis.set.await_count == 1
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+@pytest.mark.asyncio
+async def test_nested_aggregated_truncated_forces_negative_ttl() -> None:
+    """Canvas bootstrap/expand results embed an AggregatedEdgeResult under
+    ``.aggregated``; a truncated nested payload must still force the
+    negative TTL on the outer result."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_CanvasBootstrapLike(
+        nodes=[1], aggregated=_NestedAggregated(truncated=True),
+    ))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_CanvasBootstrapLike,
+    )
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+
+
+# ─── hierarchy invalidation w/ aggregated-LKG carve-out (R4) ───────────
+
+@pytest.mark.asyncio
+async def test_invalidate_hierarchy_reads_bumps_gen_and_spares_aggregated_lkg(
+    monkeypatch,
+) -> None:
+    """invalidate_hierarchy_reads bumps the scope generation (every
+    endpoint recomputes) but deliberately SPARES the aggregated LKG
+    mirror — it stays the stale-while-revalidate fallback until the
+    rebuild completes and `invalidate_aggregated_reads` purges it."""
+    redis = _make_redis()
+    matching = [
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::children:abc",
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::top-level:def",
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::aggregated:ghi",
+    ]
+    redis.scan = AsyncMock(return_value=(0, matching))
+    redis.delete = AsyncMock(return_value=1)
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.invalidate_hierarchy_reads("ws1", "ds1")
+
+    redis.incr.assert_awaited_once()
+    gen_key_arg = redis.incr.call_args.args[0]
+    assert "ws1" in gen_key_arg and "ds1" in gen_key_arg
+
+    pattern = redis.scan.await_args.kwargs["match"]
+    assert pattern == f"{graph_cache._LKG_PREFIX}:ws1:ds1:*"
+
+    redis.delete.assert_awaited_once()
+    deleted_keys = redis.delete.await_args.args
+    assert set(deleted_keys) == {matching[0], matching[1]}
+    assert matching[2] not in deleted_keys
+
+
+# ─── stale-source marker helpers (R3) ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_mark_source_stale_then_get_returns_reason(monkeypatch) -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.mark_source_stale("ws1", "ds1", reason="source_changed")
+    redis.set.assert_awaited_once()
+    set_args = redis.set.call_args
+    assert "ws1" in set_args.args[0] and "ds1" in set_args.args[0]
+    assert set_args.kwargs["ex"] == graph_cache._STALE_TTL_S
+
+    redis.get = AsyncMock(return_value="source_changed")
+    reason = await graph_cache.get_source_stale_reason("ws1", "ds1")
+    assert reason == "source_changed"
+
+
+@pytest.mark.asyncio
+async def test_clear_source_stale_then_get_returns_none(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.delete = AsyncMock(return_value=1)
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.clear_source_stale("ws1", "ds1")
+    redis.delete.assert_awaited_once()
+
+    redis.get = AsyncMock(return_value=None)
+    reason = await graph_cache.get_source_stale_reason("ws1", "ds1")
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_stale_marker_helpers_swallow_redis_errors(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.set = AsyncMock(side_effect=RedisError("down"))
+    redis.get = AsyncMock(side_effect=RedisError("down"))
+    redis.delete = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.mark_source_stale("ws1", "ds1")  # must not raise
+    await graph_cache.clear_source_stale("ws1", "ds1")  # must not raise
+    reason = await graph_cache.get_source_stale_reason("ws1", "ds1")
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_stale_marker_helpers_guard_empty_ids(monkeypatch) -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.mark_source_stale("", "ds1")
+    await graph_cache.clear_source_stale("ws1", "")
+    reason = await graph_cache.get_source_stale_reason("", "")
+
+    redis.set.assert_not_called()
+    redis.delete.assert_not_called()
+    redis.get.assert_not_called()
+    assert reason is None
 
 
 # ─── stale-on-error fallback (P1.1) ────────────────────────────────────
