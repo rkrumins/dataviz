@@ -580,8 +580,10 @@ export interface TopLevelNodesQuery {
 
 export interface TopLevelNodesResult {
     nodes: GraphNode[]
-    /** Total count across all pages (diagnostic — NOT nodes.length). */
-    totalCount: number
+    /** Total count across all pages (diagnostic — NOT nodes.length).
+     *  `null` when the backend's best-effort count was skipped or timed
+     *  out on a very large graph; pagination is driven by `hasMore`. */
+    totalCount: number | null
     hasMore: boolean
     nextCursor: string | null
     /** How many of `totalCount` are ontology-root instances. */

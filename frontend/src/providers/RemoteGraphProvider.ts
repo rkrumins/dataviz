@@ -527,6 +527,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // wire shape already matches TopLevelNodesResult one-to-one.
         return await this.fetch<TopLevelNodesResult>(
             `/nodes/top-level?${params.toString()}`,
+            { timeoutMs: TIMEOUTS.TOP_LEVEL_MS },
         )
     }
 

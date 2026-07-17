@@ -343,7 +343,9 @@ class TopLevelNodesResult(BaseModel):
     in UI (e.g. an "orphan" badge in the wizard tree).
     """
     nodes: List[GraphNode]
-    total_count: int = Field(alias="totalCount")
+    # None = the count query was skipped or timed out (best-effort on
+    # large graphs); pagination is driven by has_more, not this field.
+    total_count: Optional[int] = Field(None, alias="totalCount")
     has_more: bool = Field(alias="hasMore")
     next_cursor: Optional[str] = Field(None, alias="nextCursor")
     root_type_count: int = Field(0, alias="rootTypeCount")

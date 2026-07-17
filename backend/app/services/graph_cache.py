@@ -197,6 +197,10 @@ ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_TRACE = "trace"
 ENDPOINT_TRACE_EXPAND = "trace-expand"
 ENDPOINT_TOP_LEVEL = "top-level"
+# Key namespace for the top-level *total count* side-cache (a bare int,
+# not a response payload). Not in _ENABLED_ENDPOINTS — it shares the
+# ENDPOINT_TOP_LEVEL feature flag.
+ENDPOINT_TOP_LEVEL_COUNT = "top-level-count"
 ENDPOINT_LAYER_ASSIGNMENT = "layer-assignment"
 ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
 ENDPOINT_CANVAS_EXPAND = "canvas-expand"
@@ -380,6 +384,43 @@ class GraphCache:
             raise
         finally:
             self._inflight.pop(cache_key, None)
+
+    async def get_top_level_count(
+        self, scope: CacheScope, params: dict[str, Any],
+    ) -> Optional[int]:
+        """Read the cached top-level total count for ``scope`` + filter
+        ``params``. Keyed WITHOUT cursor/limit so every page of the same
+        filtered listing reuses one count; generation-keyed so write-path
+        ``bump_generation`` invalidates it for free. Best-effort: any
+        Redis error reads as a miss."""
+        if not self.is_enabled(ENDPOINT_TOP_LEVEL):
+            return None
+        try:
+            gen = await self._get_generation(scope)
+            raw = await self._redis.get(
+                _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params)
+            )
+            return int(raw) if raw is not None else None
+        except (RedisError, TypeError, ValueError) as exc:
+            logger.warning("graph_cache: top-level count read failed (%s)", exc)
+            return None
+
+    async def set_top_level_count(
+        self, scope: CacheScope, params: dict[str, Any], value: int,
+    ) -> None:
+        """Store a successfully computed top-level total count. Same TTL
+        as the top-level response cache. Best-effort no-op on error."""
+        if not self.is_enabled(ENDPOINT_TOP_LEVEL):
+            return
+        try:
+            gen = await self._get_generation(scope)
+            await self._redis.set(
+                _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params),
+                str(int(value)),
+                ex=_DEFAULT_TOP_LEVEL_TTL,
+            )
+        except (RedisError, TypeError, ValueError) as exc:
+            logger.warning("graph_cache: top-level count write failed (%s)", exc)
 
     async def bump_generation(self, scope: CacheScope) -> None:
         """Invalidate every cached entry under `scope` by bumping the

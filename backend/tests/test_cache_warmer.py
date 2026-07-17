@@ -61,13 +61,31 @@ async def test_warm_skipped_when_feature_flag_off(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_warm_skipped_when_node_count_over_cap(monkeypatch) -> None:
+async def test_warm_over_cap_fills_top_level_but_skips_fanout(monkeypatch) -> None:
+    """Above MAX_NODE_COUNT only the expensive aggregated/children fan-out
+    is skipped — the top-level entry (cheap via the materialized payload)
+    is still warmed, which is exactly what large graphs need."""
     monkeypatch.setattr(cache_warmer, "CACHE_PREWARM_ENABLED", True)
     monkeypatch.setattr(cache_warmer, "MAX_NODE_COUNT", 100)
+    redis = _make_redis()
+    monkeypatch.setattr(cache_warmer, "get_redis", lambda: redis)
+    cache = _make_cache_with_top_level(top_urns=["urn:a"], children_per=1)
+    monkeypatch.setattr(cache_warmer, "get_graph_cache", lambda: cache)
+    monkeypatch.setattr(
+        cache_warmer.ContextEngine, "for_workspace",
+        AsyncMock(return_value=MagicMock()),
+    )
+
     result = await cache_warmer.warm_data_source(
         ws_id="ws1", ds_id="ds1", node_count=10_000, session=MagicMock(),
     )
+
+    assert result.top_level_filled is True
     assert result.skipped_reason and "over_cap" in result.skipped_reason
+    assert result.aggregated_filled is False
+    assert result.children_filled == 0
+    endpoints = [kw["endpoint"] for _, kw in cache.get_or_compute.await_args_list]
+    assert endpoints == [cache_warmer.ENDPOINT_TOP_LEVEL]
 
 
 @pytest.mark.asyncio
@@ -243,3 +261,82 @@ async def test_shutdown_cancels_inflight_and_refuses_new_warms(monkeypatch) -> N
 async def test_shutdown_with_no_inflight_tasks_is_a_noop(monkeypatch) -> None:
     monkeypatch.setattr(cache_warmer, "_shutting_down", False)
     await cache_warmer.shutdown(timeout=0.1)  # must not raise or hang
+
+
+@pytest.mark.asyncio
+async def test_warm_top_level_compute_serves_from_materialized_payload(monkeypatch) -> None:
+    """On a cache miss the warm's top-level compute must consult the
+    materialized Postgres payload first — warming a large graph is a
+    Postgres read → Redis fill, never a live O(N) scan."""
+    monkeypatch.setattr(cache_warmer, "CACHE_PREWARM_ENABLED", True)
+    monkeypatch.setattr(cache_warmer, "MAX_NODE_COUNT", 100)
+    monkeypatch.setattr(cache_warmer, "get_redis", lambda: _make_redis())
+
+    cache = MagicMock()
+
+    async def fake_get_or_compute(*, compute, **_kw):
+        return await compute()  # cache MISS → compute runs
+
+    cache.get_or_compute = AsyncMock(side_effect=fake_get_or_compute)
+    monkeypatch.setattr(cache_warmer, "get_graph_cache", lambda: cache)
+
+    served = SimpleNamespace(nodes=[])
+    serve_spy = AsyncMock(return_value=(served, 42))
+    monkeypatch.setattr(cache_warmer, "try_serve_top_level", serve_spy)
+
+    engine = MagicMock()
+    engine.get_top_level_or_orphan_nodes = AsyncMock(
+        side_effect=AssertionError("live query must not run"),
+    )
+    monkeypatch.setattr(
+        cache_warmer.ContextEngine, "for_workspace",
+        AsyncMock(return_value=engine),
+    )
+
+    result = await cache_warmer.warm_data_source(
+        ws_id="ws1", ds_id="ds1", node_count=10_000, session=MagicMock(),
+    )
+
+    assert result.top_level_filled is True
+    serve_spy.assert_awaited_once()
+    engine.get_top_level_or_orphan_nodes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_warm_top_level_compute_falls_back_live_with_known_total(monkeypatch) -> None:
+    """When the materialized payload can't serve the page but knows the
+    total, the live fallback forwards it as known_total_count (skipping
+    the O(N) count scan)."""
+    monkeypatch.setattr(cache_warmer, "CACHE_PREWARM_ENABLED", True)
+    monkeypatch.setattr(cache_warmer, "MAX_NODE_COUNT", 0)
+    monkeypatch.setattr(cache_warmer, "get_redis", lambda: _make_redis())
+
+    cache = MagicMock()
+
+    async def fake_get_or_compute(*, compute, endpoint, **_kw):
+        if endpoint == cache_warmer.ENDPOINT_TOP_LEVEL:
+            return await compute()
+        return SimpleNamespace(aggregated_edges=[], children=[])
+
+    cache.get_or_compute = AsyncMock(side_effect=fake_get_or_compute)
+    monkeypatch.setattr(cache_warmer, "get_graph_cache", lambda: cache)
+
+    serve_spy = AsyncMock(return_value=(None, 42))
+    monkeypatch.setattr(cache_warmer, "try_serve_top_level", serve_spy)
+
+    engine = MagicMock()
+    engine.get_top_level_or_orphan_nodes = AsyncMock(
+        return_value=SimpleNamespace(nodes=[]),
+    )
+    monkeypatch.setattr(
+        cache_warmer.ContextEngine, "for_workspace",
+        AsyncMock(return_value=engine),
+    )
+
+    result = await cache_warmer.warm_data_source(
+        ws_id="ws1", ds_id="ds1", session=MagicMock(),
+    )
+
+    assert result.top_level_filled is True
+    live_kwargs = engine.get_top_level_or_orphan_nodes.await_args.kwargs
+    assert live_kwargs["known_total_count"] == 42

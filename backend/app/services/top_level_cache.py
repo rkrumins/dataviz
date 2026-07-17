@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from backend.app.config import resilience
 from backend.app.db.repositories.stats_repo import get_data_source_stats
@@ -34,7 +34,26 @@ from backend.insights_service.enqueue import enqueue_stats_job_safe_ex
 
 logger = logging.getLogger(__name__)
 
-TOP_LEVEL_MATERIALIZE_LIMIT = 1000
+def _clamped_int_env(name: str, default: int, *, lo: int, hi: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning("top_level_cache: %s=%r is not an integer; using %d", name, raw, default)
+        return default
+    return max(lo, min(hi, parsed))
+
+
+# How many top-level nodes one materialization captures. When the true
+# top-level set fits inside this window the payload is COMPLETE
+# (truncated=False) and can serve filtered requests in-process; widen it
+# for deployments whose graphs have large top-level sets (the 8MB payload
+# cap below is the hard safety net).
+TOP_LEVEL_MATERIALIZE_LIMIT = _clamped_int_env(
+    "TOP_LEVEL_MATERIALIZE_LIMIT", 1000, lo=100, hi=10000,
+)
 _MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 _FINGERPRINT_FIELDS = ("nodeCount", "edgeCount", "entityTypeCounts", "edgeTypeCounts")
@@ -73,7 +92,10 @@ def build_top_level_payload(result: TopLevelNodesResult, *, stats: dict, digest:
     nodes}``). Over-cap payloads are truncated to 200 nodes with
     ``truncated`` forced True — a single warning is logged."""
     fingerprint = {field: stats.get(field) for field in _FINGERPRINT_FIELDS}
-    truncated = bool(result.has_more or len(result.nodes) < result.total_count)
+    truncated = bool(
+        result.has_more
+        or (result.total_count is not None and len(result.nodes) < result.total_count)
+    )
     # try_serve_top_level keyset-slices this window assuming displayName-ASC;
     # enforce that invariant where the payload is built rather than trusting the
     # provider's ordering (defense-in-depth against the FalkorDB aggregating
@@ -142,18 +164,40 @@ async def restore_dirty_flag(ds_id: str) -> None:
         logger.warning("top_level_cache.restore_dirty_flag ds=%s error=%s", ds_id, exc)
 
 
+def _serve_min_nodes() -> int:
+    """Node-count floor below which the live query is cheap enough that
+    materialized serving isn't worth the staleness. Defaults to the
+    materialization threshold; override to widen coverage."""
+    raw = os.getenv("TOP_LEVEL_SERVE_MIN_NODES")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("top_level_cache: TOP_LEVEL_SERVE_MIN_NODES=%r invalid; using threshold", raw)
+    return resilience.STATS_POLL_LARGE_THRESHOLD
+
+
 async def try_serve_top_level(
     session, engine, *, ds_id: str, ws_id: str, limit: int, cursor: Optional[str],
+    search_query: Optional[str] = None, entity_types: Optional[List[str]] = None,
 ) -> Tuple[Optional[TopLevelNodesResult], Optional[int]]:
     """Attempt to serve a top-level-nodes page from the materialized payload.
 
     Returns ``(result, known_total)``. A non-None ``result`` should be
     served as-is; when ``result`` is None the caller must go live, passing
     ``known_total`` (which may itself be None) as ``known_total_count``.
+
+    ``search_query`` / ``entity_types`` are applied in-process — but only
+    when the payload is COMPLETE (``truncated=False``), because filtering
+    a truncated window would silently drop matches outside it. On a
+    filtered miss ``known_total`` is always None: the payload's stored
+    total counts the unfiltered set.
     """
+    filters_active = bool(search_query) or bool(entity_types)
+
     def _outcome(name: str, result=None, total=None):
         logger.info("top_level_cache.serve ds=%s outcome=%s", ds_id, name)
-        return result, total
+        return result, (None if filters_active else total)
 
     if not _kill_switch_enabled():
         return _outcome("miss_off")
@@ -162,7 +206,7 @@ async def try_serve_top_level(
     if row is None:
         return _outcome("miss_no_row")
 
-    if (row.node_count or 0) < resilience.STATS_POLL_LARGE_THRESHOLD:
+    if (row.node_count or 0) < _serve_min_nodes():
         return _outcome("miss_small")
 
     raw = row.top_level_nodes
@@ -201,6 +245,30 @@ async def try_serve_top_level(
         await enqueue_stats_job_safe_ex(ds_id, ws_id)
 
     window = payload.get("nodes") or []
+
+    if filters_active:
+        # A truncated window cannot answer a filtered query — matches may
+        # live outside it. Complete windows filter in-process (≤ the
+        # materialize limit of nodes), replacing an O(N) graph scan.
+        if payload.get("truncated"):
+            return _outcome("miss_filtered_truncated")
+        if entity_types:
+            wanted = {str(t).lower() for t in entity_types}
+            window = [
+                n for n in window
+                if str(n.get("entityType") or "").lower() in wanted
+            ]
+        if search_query:
+            s = search_query.lower()
+            window = [
+                n for n in window
+                if s in str(n.get("displayName") or "").lower()
+                or s in str(n.get("urn") or "").lower()
+            ]
+        # Filtered total counts the filtered set, not the payload's
+        # unfiltered totalCount. The window is complete, so this is exact.
+        total = len(window)
+
     filtered = (
         [n for n in window if n.get("displayName", "") > cursor]
         if cursor is not None else window
