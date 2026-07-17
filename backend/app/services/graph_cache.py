@@ -811,6 +811,39 @@ async def get_source_stale_reason(
         return None
 
 
+async def list_stale_sources() -> list[tuple[str, str]]:
+    """List every ``(workspace_id, data_source_id)`` pair currently
+    marked stale — read by the scheduler reconciler to re-signal sources
+    whose rebuild was deferred by the cooldown throttle or left stale by
+    a failed rebuild. Bounded SCAN, never KEYS. Malformed keys (wrong
+    segment count) are skipped. Best-effort: returns ``[]`` on any
+    Redis error."""
+    pairs: list[tuple[str, str]] = []
+    try:
+        cache = get_graph_cache()
+        pattern = f"{_STALE_PREFIX}:*"
+        cursor = 0
+        while True:
+            cursor, keys = await cache._redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            for key in keys:
+                rest = key[len(_STALE_PREFIX) + 1:]
+                parts = rest.split(":")
+                if len(parts) != 2 or not parts[0] or not parts[1]:
+                    logger.warning(
+                        "graph_cache: skipping malformed stale key %r", key,
+                    )
+                    continue
+                pairs.append((parts[0], parts[1]))
+            if not cursor:
+                break
+    except Exception as exc:
+        logger.warning("graph_cache: list_stale_sources failed: %s", exc)
+        return []
+    return pairs
+
+
 async def bump_aggregated_generations(scopes) -> None:
     """Bulk, pipelined generation bump for many ``(workspace_id,
     data_source_id)`` pairs — the SYNCHRONOUS half of

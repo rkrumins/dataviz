@@ -18,6 +18,8 @@ import pytest
 
 from backend.app.db.models import WorkspaceDataSourceORM
 from backend.app.services import graph_cache as graph_cache_mod
+from backend.app.services.aggregation import fingerprint as fingerprint_mod
+from backend.app.services.aggregation import scheduler as scheduler_mod
 from backend.app.services.aggregation import service as svc_mod
 from backend.app.services.aggregation.models import AggregationDataSourceStateORM
 from backend.app.services.aggregation.service import (
@@ -339,6 +341,300 @@ def test_cooldown_disabled_always_triggers(monkeypatch):
     assert resp.changed is True
     assert resp.deferred is False
     assert order == _FULL_SEQUENCE
+
+
+# ── Scheduler: act on drift + reconcile stale markers (Task 4) ──────────
+#
+# The scheduler sweep is the backstop that calls signal_source_changed for
+# external writers that never call it directly. These fakes exercise
+# AggregationScheduler._tick end to end; the collaborator under real test
+# is which ds_id gets signaled, with what reason, and on what session —
+# signal_source_changed itself is a bare recorder here (its own gating is
+# covered above).
+
+
+class _SchedRegistry:
+    """Registry stub for the drift sweep — compute_graph_fingerprint is
+    faked below, so the provider this returns is never actually used."""
+
+    async def get_provider_for_workspace(self, ws, session, data_source_id=None):
+        return object()
+
+
+class _SchedScalars:
+    def __init__(self, items):
+        self._items = items
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def all(self):
+        return list(self._items)
+
+
+class _SchedExecResult:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def scalars(self):
+        return _SchedScalars(self._items)
+
+
+class _SchedSession:
+    """Fake AsyncSession context manager. ``exec_results`` feeds
+    successive ``session.execute()`` calls in order; a session created
+    for a signal_source_changed call needs none (signal_source_changed
+    itself is faked, so it never touches this session)."""
+
+    def __init__(self, exec_results=None):
+        self._exec_results = list(exec_results or [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt):
+        if self._exec_results:
+            return self._exec_results.pop(0)
+        return _SchedExecResult([])
+
+
+def _sched_state(ds_id="ds-1", ws="ws-1", fp="OLD"):
+    return types.SimpleNamespace(
+        data_source_id=ds_id, workspace_id=ws, graph_fingerprint=fp,
+    )
+
+
+def _sched_session_factory(states):
+    """First call returns the sweep session (drift query returns
+    ``states``, the watchdog query after it returns no stale jobs);
+    every later call returns a FRESH throwaway session — asserting a
+    signal call's session is not the sweep's own proves the "fresh
+    session per signal" rule."""
+    created = []
+
+    def factory():
+        if not created:
+            s = _SchedSession(exec_results=[
+                _SchedExecResult(states), _SchedExecResult([]),
+            ])
+        else:
+            s = _SchedSession()
+        created.append(s)
+        return s
+
+    factory.created = created
+    return factory
+
+
+class _FakeSchedSvc:
+    """Records signal_source_changed calls; ``responses`` maps ds_id to
+    the response to return (default: a plain changed=True stand-in)."""
+
+    def __init__(self, responses=None):
+        self.calls = []
+        self._responses = responses or {}
+
+    async def signal_source_changed(
+        self, ds_id, session, *, reason="external_load", force=False,
+    ):
+        self.calls.append((ds_id, reason, session))
+        return self._responses.get(ds_id, types.SimpleNamespace(changed=True))
+
+
+def _no_drift(monkeypatch):
+    """compute_graph_fingerprint always matches the stored "OLD" value —
+    nothing drifts this tick."""
+    async def _fp(provider):
+        return "OLD"
+    monkeypatch.setattr(fingerprint_mod, "compute_graph_fingerprint", _fp)
+
+
+def _all_drift(monkeypatch, current="NEW"):
+    """compute_graph_fingerprint always returns a value that mismatches
+    the stored "OLD" fingerprint — every swept source drifts."""
+    async def _fp(provider):
+        return current
+    monkeypatch.setattr(fingerprint_mod, "compute_graph_fingerprint", _fp)
+
+
+def _empty_stale(monkeypatch):
+    async def _list_stale():
+        return []
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+
+# ── Scenario 1: drift + default env → signal awaited (ds_id, "drift", session)
+
+
+def test_scheduler_drift_signals_with_default_env(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _all_drift(monkeypatch)
+    _empty_stale(monkeypatch)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert len(fake_svc.calls) == 1
+    ds_id, reason, session = fake_svc.calls[0]
+    assert ds_id == "ds-1"
+    assert reason == "drift"
+    assert session is not None
+    assert session is not factory.created[0]  # fresh session, not the sweep's own
+
+
+# ── Scenario 2: flag off → neither path signals; notify-only preserved ──
+
+
+def test_scheduler_flag_off_disables_both_paths(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", False)
+    _all_drift(monkeypatch)
+
+    list_calls = []
+
+    async def _list_stale():
+        list_calls.append(True)
+        return [("ws-1", "ds-9")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())  # drift is still logged (notify-only) — no signal
+
+    assert fake_svc.calls == []
+    assert list_calls == []
+
+
+# ── Scenario 3: a signal failure must not abort the sweep ───────────────
+
+
+def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _all_drift(monkeypatch)
+    _empty_stale(monkeypatch)
+
+    class _FailingThenOkSvc:
+        def __init__(self):
+            self.calls = []
+
+        async def signal_source_changed(
+            self, ds_id, session, *, reason="external_load", force=False,
+        ):
+            self.calls.append((ds_id, reason))
+            if ds_id == "ds-1":
+                raise RuntimeError("boom")
+            return types.SimpleNamespace(changed=True)
+
+    fake_svc = _FailingThenOkSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    states = [_sched_state(ds_id="ds-1"), _sched_state(ds_id="ds-2")]
+    factory = _sched_session_factory(states)
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())  # must not raise despite ds-1's signal raising
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-1", "ds-2"]
+
+
+# ── Scenario 4: no active service → no call, no crash ───────────────────
+
+
+def test_scheduler_no_active_service_is_noop(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _all_drift(monkeypatch)
+
+    list_calls = []
+
+    async def _list_stale():
+        list_calls.append(True)
+        return []
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: None)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())  # must not raise
+
+    # svc is None ⇒ neither the drift path nor the reconciler runs.
+    assert list_calls == []
+
+
+# ── Scenario 5: reconciler dedupes against this tick's drift signals ────
+
+
+def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _all_drift(monkeypatch)  # ds-1 (the only swept source) drifts
+
+    async def _list_stale():
+        return [("ws-1", "ds-1"), ("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    reasons_by_ds: dict[str, list[str]] = {}
+    for ds_id, reason, _session in fake_svc.calls:
+        reasons_by_ds.setdefault(ds_id, []).append(reason)
+
+    # ds-1: only the drift signal fires; the reconciler skips it (already
+    # handled this tick). ds-2: only the reconciler signals it.
+    assert reasons_by_ds["ds-1"] == ["drift"]
+    assert reasons_by_ds["ds-2"] == ["reconcile"]
+
+
+# ── Scenario 6: changed=False from a reconcile call clears the marker ───
+
+
+def test_scheduler_reconciler_clears_marker_when_unchanged(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)  # nothing drifts in the sweep itself
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    clear_calls = []
+
+    async def _clear(ws, ds):
+        clear_calls.append((ws, ds))
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _clear)
+
+    fake_svc = _FakeSchedSvc(
+        responses={"ds-2": types.SimpleNamespace(changed=False)},
+    )
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-2"]
+    assert clear_calls == [("ws-2", "ds-2")]
 
 
 if __name__ == "__main__":

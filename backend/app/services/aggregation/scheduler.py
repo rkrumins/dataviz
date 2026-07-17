@@ -2,8 +2,15 @@
 AggregationScheduler — cron-like drift detection for aggregated data.
 
 Runs periodic fingerprint checks for data sources with configured schedules.
-When drift is detected, it updates the data source but does NOT automatically
-re-aggregate — the user must confirm.
+When drift is detected, it calls AggregationService.signal_source_changed
+(reason="drift") — the change-gated invalidate+rebuild entry point — as a
+backstop for external writers that bypass the app's own write paths, unless
+AGGREGATION_DRIFT_AUTO_REBUILD=false, in which case it only notifies (no
+auto-rebuild; the historic behavior). The same pass reconciles sources left
+marked stale (aggstale:v1) by a rebuild the cooldown deferred or a prior
+attempt that failed, re-signaling each with reason="reconcile". This is
+schedule-tick-driven only, never read-path-driven — read-path auto-heal was
+removed after it caused backfill storms (commit 110cd431).
 
 Uses AggregationDataSourceStateORM (aggregation schema) instead of
 WorkspaceDataSourceORM (public schema) — fully decoupled.
@@ -21,11 +28,29 @@ from sqlalchemy import and_, select
 
 logger = logging.getLogger(__name__)
 
+# Gates both the act-on-drift signal and the stale-marker reconciler
+# (Task 4). ``signal_source_changed`` is the single choke point for the
+# change gate and rebuild cooldown — this flag only controls whether the
+# scheduler CALLS it; off preserves the historic notify-only sweep
+# exactly. Default on; read once at import, mirroring the package's
+# env-const style.
+_DRIFT_AUTO_REBUILD = os.getenv(
+    "AGGREGATION_DRIFT_AUTO_REBUILD", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+
 
 class AggregationScheduler:
     """Runs periodic change detection checks for data sources with configured schedules.
 
-    Checks are non-blocking — drift detection never auto-triggers re-aggregation.
+    Drift detection auto-queues a change-gated rebuild via
+    ``AggregationService.signal_source_changed`` (reason="drift") unless
+    ``AGGREGATION_DRIFT_AUTO_REBUILD=false``, in which case checks stay
+    non-blocking and notify-only (the historic behavior). The same flag
+    also gates the marker reconciler, which re-signals (reason="reconcile")
+    sources left marked stale by a deferred or failed rebuild. Repeat-fire
+    is bounded: a source's status flips out of 'ready' while a job runs
+    (the sweep skips it), the fingerprint-embedded idempotency key
+    collapses repeat triggers, and an active-job conflict is a no-op.
     """
 
     def __init__(
@@ -60,11 +85,18 @@ class AggregationScheduler:
         For each due schedule:
         1. Compute current fingerprint
         2. Compare against stored fingerprint
-        3. If changed: log drift detection (non-blocking)
-        4. Only notify — never auto-trigger re-aggregation
+        3. If changed: log drift detection, collect the ds_id
+        4. After the sweep: signal_source_changed(reason="drift") for each
+           collected id, then reconcile any aggstale:v1-marked sources
+           (reason="reconcile") — both gated by AGGREGATION_DRIFT_AUTO_REBUILD
         """
         from .models import AggregationDataSourceStateORM, AggregationJobORM
         from .fingerprint import compute_graph_fingerprint, fingerprints_match
+        from .service import get_active_service
+        from backend.app.services.graph_cache import (
+            clear_source_stale,
+            list_stale_sources,
+        )
 
         async with self._session_factory() as session:
             # Find data sources with schedules configured AND status = 'ready'
@@ -80,6 +112,11 @@ class AggregationScheduler:
             # blocking the scheduler (and, by extension, the API event loop
             # when running in-process).
             _DRIFT_TIMEOUT = float(os.getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
+
+            # Drifted ds_ids are acted on AFTER this loop completes (see
+            # below) — a slow/failing signal must never block the sweep
+            # from checking the remaining sources.
+            drifted_ids: list[str] = []
 
             for state in result.scalars():
                 try:
@@ -103,11 +140,68 @@ class AggregationScheduler:
                         # Note: we do NOT change aggregation_status here.
                         # The frontend polls for drift via the readiness endpoint.
                         # The user decides whether to re-aggregate.
+                        drifted_ids.append(state.data_source_id)
                 except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(
                         "Drift check failed for data source %s: %s",
                         state.data_source_id, e,
                     )
+
+            # R1 — act on detected drift + R1b — reconcile marked-stale
+            # sources. Both are the backstop for external writers that
+            # never call signal_source_changed directly; the signal itself
+            # re-runs the change gate and rebuild cooldown, so nothing here
+            # duplicates that timing logic. Gated by AGGREGATION_DRIFT_AUTO_
+            # REBUILD — off preserves the notify-only sweep above exactly.
+            if _DRIFT_AUTO_REBUILD:
+                svc = get_active_service()
+                if svc is not None:
+                    for ds_id in drifted_ids:
+                        try:
+                            async with self._session_factory() as s2:
+                                await svc.signal_source_changed(
+                                    ds_id, s2, reason="drift",
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "drift auto-rebuild signal failed for "
+                                "data source %s: %s", ds_id, exc,
+                            )
+
+                    # Reconciler: sources a cooldown deferred or a failed
+                    # rebuild left marked stale. Dedupe against this tick's
+                    # drift signals (already handled above) and bound the
+                    # pass so a large backlog can't stampede the job queue.
+                    _MAX_STALE_RECONCILE_PER_TICK = 50
+                    stale_pairs = await list_stale_sources()
+                    to_reconcile = [
+                        (ws, ds) for ws, ds in stale_pairs if ds not in drifted_ids
+                    ]
+                    if len(to_reconcile) > _MAX_STALE_RECONCILE_PER_TICK:
+                        logger.info(
+                            "stale-marker reconcile: %d marker(s) exceed the "
+                            "per-tick cap (%d); processing the first %d, "
+                            "remainder picked up next tick",
+                            len(to_reconcile), _MAX_STALE_RECONCILE_PER_TICK,
+                            _MAX_STALE_RECONCILE_PER_TICK,
+                        )
+                    for ws, ds in to_reconcile[:_MAX_STALE_RECONCILE_PER_TICK]:
+                        try:
+                            async with self._session_factory() as s2:
+                                resp = await svc.signal_source_changed(
+                                    ds, s2, reason="reconcile",
+                                )
+                            if not resp.changed:
+                                # No real change (the marker was stale from
+                                # a prior deferral that later reverted, or
+                                # never should have fired) — clear it so it
+                                # can't ping the reconciler forever.
+                                await clear_source_stale(ws, ds)
+                        except Exception as exc:
+                            logger.warning(
+                                "stale-marker reconcile failed for %s/%s: %s",
+                                ws, ds, exc,
+                            )
 
             # Stale-job watchdog — catch jobs stuck in 'running' with no
             # checkpoint update (e.g. worker died silently). NO-REDIS

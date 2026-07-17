@@ -525,6 +525,55 @@ async def test_stale_marker_helpers_guard_empty_ids(monkeypatch) -> None:
     assert reason is None
 
 
+# ─── list_stale_sources (Task 4 scheduler reconciler) ──────────────────
+
+@pytest.mark.asyncio
+async def test_list_stale_sources_parses_well_formed_keys(monkeypatch) -> None:
+    redis = _make_redis()
+    matching = [
+        f"{graph_cache._STALE_PREFIX}:ws1:ds1",
+        f"{graph_cache._STALE_PREFIX}:ws2:ds2",
+        f"{graph_cache._STALE_PREFIX}:malformed",     # too few segments
+        f"{graph_cache._STALE_PREFIX}:ws3:ds3:extra",  # too many segments
+    ]
+    redis.scan = AsyncMock(return_value=(0, matching))
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    pairs = await graph_cache.list_stale_sources()
+
+    assert set(pairs) == {("ws1", "ds1"), ("ws2", "ds2")}
+    pattern = redis.scan.await_args.kwargs["match"]
+    assert pattern == f"{graph_cache._STALE_PREFIX}:*"
+
+
+@pytest.mark.asyncio
+async def test_list_stale_sources_paginates_scan(monkeypatch) -> None:
+    redis = _make_redis()
+    matching = [
+        f"{graph_cache._STALE_PREFIX}:ws1:ds1",
+        f"{graph_cache._STALE_PREFIX}:ws2:ds2",
+    ]
+    redis.scan = AsyncMock(side_effect=[(7, matching[:1]), (0, matching[1:])])
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    pairs = await graph_cache.list_stale_sources()
+
+    assert set(pairs) == {("ws1", "ds1"), ("ws2", "ds2")}
+    assert redis.scan.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_stale_sources_swallows_redis_errors(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.scan = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    assert await graph_cache.list_stale_sources() == []
+
+
 # ─── stale-on-error fallback (P1.1) ────────────────────────────────────
 
 @pytest.mark.asyncio
