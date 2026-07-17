@@ -1656,6 +1656,38 @@ async def resolve_sentinel_master(
     return await with_auth_negotiation(cfg, _discover)
 
 
+class ClusterCoverageError(RuntimeError):
+    """The cluster's primaries do not cover the full slot space.
+
+    Raised by the primaries fan-out so a keyless GRAPH.LIST union is NEVER
+    computed over a partial cluster: with a shard missing, the union would
+    silently contain only the surviving shards' graphs, and the discovery
+    worker would persist that shrunken list as ``fresh`` — items "vanish"
+    from the UI for a whole sweep interval with no error anywhere. A raise
+    routes to ``record_failure`` instead: last-known-good data is preserved
+    and ``last_error`` names the gap. Transient (a mid-failover window heals
+    itself), so deliberately NOT a ProviderConfigurationError."""
+
+
+def _missing_slot_ranges(covered, total: int = 16384, max_ranges: int = 4) -> str:
+    """Compact ``"0-5460, 10923-16383"`` description of uncovered slots,
+    capped at ``max_ranges`` ranges (log/error hygiene at 16k slots)."""
+    ranges: List[str] = []
+    start = None
+    for slot in range(total + 1):                    # +1: flush a trailing range
+        if slot < total and slot not in covered:
+            if start is None:
+                start = slot
+        elif start is not None:
+            ranges.append(f"{start}-{slot - 1}" if slot - 1 > start else f"{start}")
+            start = None
+            if len(ranges) > max_ranges:
+                break
+    if len(ranges) > max_ranges:
+        return ", ".join(ranges[:max_ranges]) + ", …"
+    return ", ".join(ranges)
+
+
 async def cluster_primary_nodes(
     cfg: FalkorDBConnConfig, socket_timeout: float,
 ) -> List[Tuple[str, int]]:
@@ -1692,13 +1724,42 @@ async def _cluster_primary_nodes_once(
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
     cluster = RedisCluster(
         startup_nodes=nodes,
+        # Explicit, not the library default: the async client happens to
+        # default require_full_coverage=True (the sync one does not), and a
+        # future redis-py relaxing it would silently re-open the partial-
+        # union hole this fan-out exists to close. The SERVER runs
+        # --cluster-require-full-coverage no (surviving shards keep serving
+        # through an outage), so the client must be the one to insist.
+        require_full_coverage=True,
         **_conn_auth_kwargs(cfg, socket_timeout),
         **_address_remap_kwargs(cfg),
     )
     try:
         if hasattr(cluster, "initialize"):
             await cluster.initialize()
-        return [remap_address(cfg, n.host, n.port) for n in cluster.get_primaries()]
+        # Belt over the braces above: verify the slot map we are about to
+        # trust really covers the whole space, whatever initialize() accepted.
+        slots_cache = getattr(cluster.nodes_manager, "slots_cache", None) or {}
+        if len(slots_cache) < 16384:
+            raise ClusterCoverageError(
+                f"cluster slot map covers {len(slots_cache)}/16384 slots "
+                f"(missing: {_missing_slot_ranges(slots_cache)}) — refusing to "
+                f"enumerate primaries over a partial cluster (a shard is down "
+                f"or mid-failover; results would silently omit its graphs)"
+            )
+        primaries = [(n.host, int(n.port)) for n in cluster.get_primaries()]
+        remapped = [remap_address(cfg, h, p) for h, p in primaries]
+        # An addressRemap that collapses distinct primaries onto one dialable
+        # endpoint would make the fan-out query the same node repeatedly and
+        # under-report with no error — that is a config bug, so fail loud.
+        if len(set(remapped)) < len(set(primaries)):
+            raise ProviderConfigurationError(
+                f"addressRemap collapses {len(set(primaries))} distinct cluster "
+                f"primaries onto {len(set(remapped))} endpoint(s) "
+                f"({sorted(set(remapped))}) — each primary needs its own "
+                f"reachable address or a GRAPH.LIST fan-out cannot see every shard"
+            )
+        return remapped
     finally:
         try:
             await cluster.aclose()
@@ -1746,7 +1807,12 @@ async def list_graph_keys_for_config(
             try:
                 node = _NodeRedis(connection_pool=pool)
                 res = await node.execute_command("GRAPH.LIST")
-                keys |= {_decode_key(k) for k in (res or [])}
+                node_keys = {_decode_key(k) for k in (res or [])}
+                keys |= node_keys
+                logger.info(
+                    "falkordb GRAPH.LIST fan-out: node %s:%d -> %d key(s) (union %d)",
+                    host, port, len(node_keys), len(keys),
+                )
             finally:
                 try:
                     await pool.aclose()
