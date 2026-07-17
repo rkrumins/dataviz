@@ -196,6 +196,20 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
             with contextlib.suppress(Exception):
                 await close()
 
+    # Registry-vs-observed reconciliation, list-all only, FALKORDB only —
+    # other provider types (DataHub, mock, …) return [] or partial sets from
+    # list_graphs() by design, so a catalog item there would read as
+    # permanently "missing". Runs AFTER the provider IO (outside the admission
+    # gate — pure DB reads) and only on this fresh-upsert path, i.e. after a
+    # successful, coverage-guarded list_graphs(): a partial cluster raises
+    # above and never reaches here. Recomputed every sweep, so the annotation
+    # self-clears when the graph returns, the catalog row is archived, or the
+    # projection is evicted.
+    drift = (
+        await _detect_registry_drift(provider_id, set(payload["assets"]))
+        if is_list_all and prov_row.provider_type == "falkordb" else None
+    )
+
     async with get_jobs_session() as session:
         await _upsert_cache(
             session,
@@ -203,7 +217,7 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
             asset_name=asset_name,
             payload=payload,
             status="fresh",
-            last_error=None,
+            last_error=drift,
         )
 
     duration = asyncio.get_event_loop().time() - start_ts
@@ -212,6 +226,128 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
         provider_id, asset_name or "<list-all>",
         duration, len(json.dumps(payload)),
     )
+
+
+def _settled_before(projected_at: str | None, horizon: datetime) -> bool:
+    """True when a resident projection finished BEFORE ``horizon`` (i.e. has
+    been resident long enough that the observed GRAPH.LIST snapshot must
+    include it). ``None``/unparseable → settled: long-standing legacy rows
+    must stay in the expected set."""
+    if not projected_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(projected_at)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    return ts <= horizon
+
+
+async def _detect_registry_drift(provider_id: str, observed: set) -> str | None:
+    """Compare the OBSERVED graph list against what the registry says should
+    be resident on this provider; a non-empty gap returns a ``graph_drift:``
+    message for the cache row's ``last_error`` (UI banner).
+
+    GRAPH.LIST is a statement about what the cluster holds NOW — not about
+    what should exist. Without this check, a provider that restored from a
+    stale snapshot or lost a shard's data serves a smaller-but-"fresh" list
+    and the platform never notices; registered items just quietly vanish.
+
+    Expected-present: active catalog items (created from observed assets at
+    registration, so their graphs existed) ∪ fully-projected AND currently-
+    resident versioned graphs (projection_state rows with status='idle' and
+    projected_commit_seq > 0) that have been resident for at least one sweep.
+    Expected-absent — subtracted from the WHOLE union, because these names can
+    also appear in the catalog:
+
+    * every projection_state row NOT currently resident: 'evicted' rows (the
+      versioning cache manager physically DROPS cold graphs by design — a
+      routine budget eviction must never alarm), and mid-flight
+      'projecting'/'rebuilding' rows (the rewarm path flips evicted →
+      rebuilding BEFORE the physical graph exists again);
+    * resident rows that finished projecting within the last sweep interval —
+      the observed list is a snapshot taken BEFORE this comparison, so a
+      projection completing between the two would read as "missing" for one
+      sweep (TOCTOU). Such rows are alarmed from the NEXT sweep on.
+
+    Best-effort by contract: any failure (unbootstrapped graphver store, DB
+    blip) logs a warning and returns None — the drift check must never fail
+    the sweep that carries the observed list. Only meaningful AFTER a
+    successful, coverage-guarded ``list_graphs()``: the caller runs it on the
+    fresh-upsert path only, so a partial cluster can never mass-alarm.
+    """
+    try:
+        from sqlalchemy import func, select
+
+        from backend.app.db.models import CatalogItemORM
+
+        async with get_jobs_session() as session:
+            rows = await session.execute(
+                select(CatalogItemORM.source_identifier).where(
+                    CatalogItemORM.provider_id == provider_id,
+                    CatalogItemORM.status == "active",
+                    CatalogItemORM.source_identifier.is_not(None),
+                )
+            )
+            expected = {r[0] for r in rows.all() if r[0]}
+
+        # The graphver store lives behind its own engine (GRAPHVER_DB_URL,
+        # possibly a separate database) — never joined in a JOBS-pool query.
+        from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
+        from backend.app.services.versioning.db import (
+            get_session_factory as _graphver_session_factory,
+        )
+        from backend.app.services.versioning.models import ProjectionStateORM
+
+        settle_horizon = datetime.now(timezone.utc) - timedelta(
+            seconds=resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+        )
+        not_expected: set = set()
+        async with _graphver_session_factory()() as vsession:
+            rows = await vsession.execute(
+                select(
+                    ProjectionStateORM.falkor_graph_name,
+                    ProjectionStateORM.status,
+                    ProjectionStateORM.projected_commit_seq,
+                    ProjectionStateORM.last_projected_at,
+                ).where(
+                    func.coalesce(
+                        ProjectionStateORM.falkor_provider, DEFAULT_FALKOR_PROVIDER
+                    ) == provider_id,
+                    ProjectionStateORM.falkor_graph_name.is_not(None),
+                )
+            )
+            for name, status, seq, projected_at in rows.all():
+                if status == "idle" and (seq or 0) > 0:
+                    if _settled_before(projected_at, settle_horizon):
+                        expected.add(name)
+                    else:
+                        not_expected.add(name)     # TOCTOU settling window
+                else:
+                    not_expected.add(name)         # evicted / mid-flight
+
+        missing = sorted((expected - not_expected) - observed)
+        if not missing:
+            return None
+        examples = ", ".join(missing[:3])
+        logger.warning(
+            "discovery.registry_drift provider=%s missing=%d expected=%d "
+            "observed=%d examples=%s",
+            provider_id, len(missing), len(expected - not_expected), len(observed),
+            examples,
+        )
+        return (
+            f"graph_drift: {len(missing)} registered graph(s) missing from this "
+            f"provider (e.g. {examples}) — the provider may have restored from a "
+            f"stale snapshot or lost a shard's data"
+        )
+    except Exception:
+        logger.warning(
+            "discovery.registry_drift_check_failed provider=%s — skipping "
+            "drift check", provider_id, exc_info=True,
+        )
+        return None
 
 
 async def record_failure(

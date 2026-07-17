@@ -162,3 +162,108 @@ def test_both_paths_apply_local_dev_override(monkeypatch):
     )
     assert mgr._host == "127.0.0.1"
     assert reg._host == "127.0.0.1"
+
+
+# ── cluster-aware empty-key verification ────────────────────────────
+#
+# On a cluster, "Invalid graph operation on empty key" is ALSO what a read
+# returns when it lands on a node that doesn't hold the graph key (stale
+# pinned handle after a slot migration, or a promoted-but-unsynced replica).
+# Masking that as "0 nodes / 0 edges" made graphs silently read as empty on
+# some pods — so the mask is only allowed after a slot-routed EXISTS says
+# the graph is genuinely absent.
+
+from types import SimpleNamespace
+
+
+def _cluster_provider(exists_result):
+    """Provider faked into cluster mode with an EXISTS probe answering
+    ``exists_result`` (an int, or an exception instance to raise)."""
+    p = _make_provider()
+    p._conn_cfg = SimpleNamespace(mode="cluster")
+    calls = {"exists": 0}
+
+    async def _execute_command(cmd, *args):
+        assert cmd == "EXISTS"
+        calls["exists"] += 1
+        if isinstance(exists_result, BaseException):
+            raise exists_result
+        return exists_result
+
+    p._db = SimpleNamespace(execute_command=_execute_command)
+    return p, calls
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_with_existing_graph_fails_loud(monkeypatch):
+    """EXISTS=1: the graph is real and the empty read was a misroute —
+    get_stats must raise, never persist zero counts."""
+    p, calls = _cluster_provider(1)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p.get_stats()
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_with_absent_graph_returns_zero(monkeypatch):
+    """EXISTS=0: genuinely never-created graph — zeros, as before."""
+    p, calls = _cluster_provider(0)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    stats = await p.get_stats()
+    assert stats["nodeCount"] == 0 and stats["edgeCount"] == 0
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_probe_failure_fails_loud(monkeypatch):
+    """A failing EXISTS probe must not mask — never report empty off an
+    unhealthy cluster."""
+    p, calls = _cluster_provider(ConnectionError("node gone"))
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p._ro_query_tolerant("MATCH (n) RETURN n")
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_standalone_empty_key_never_probes(monkeypatch):
+    """Standalone/Sentinel behavior is byte-identical: no EXISTS issued."""
+    p = _make_provider()          # _conn_cfg is None → non-cluster path
+
+    async def _boom(*a, **k):
+        raise AssertionError("EXISTS must not be issued outside cluster mode")
+
+    p._db = SimpleNamespace(execute_command=_boom)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    stats = await p.get_stats()
+    assert stats["nodeCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cluster_schema_stats_empty_key_verified(monkeypatch):
+    """get_schema_stats honours the same verification."""
+    p, _calls = _cluster_provider(1)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p.get_schema_stats()

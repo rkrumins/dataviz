@@ -42,7 +42,10 @@ from backend.common.interfaces.provider import (
     GraphDataProvider,
     ProviderConfigurationError,
 )
-from backend.common.interfaces.preflight import is_auth_reachable_reason
+from backend.common.interfaces.preflight import (
+    is_auth_reachable_reason,
+    is_reachable_config_reason,
+)
 
 from .state import ProbeOutcome, ProviderState
 
@@ -440,6 +443,16 @@ class ProviderManager:
                 f"missing or rejected — add/correct the provider's username/password "
                 f"(or disable auth on the instance)."
             )
+        if verdict == "config":
+            # Reachable but the topology mode is wrong (standalone config against
+            # a multi-shard cluster node). Same contract as the auth branch: a
+            # LOGICAL error the breaker ignores, so fixing the config heals
+            # immediately instead of waiting out a pre-tripped breaker.
+            raise ProviderConfigurationError(
+                f"FalkorDB provider {cp} is reachable but is a Redis Cluster node "
+                f"while this provider is configured mode=standalone — set "
+                f"falkordbConnection.mode=cluster with the cluster's startupNodes."
+            )
         raise ProviderUnavailable(
             provider_name=cp,
             reason="provider unreachable (preflight failed)",
@@ -492,6 +505,11 @@ class ProviderManager:
                     # the request as unreachable and, via warmup, pre-trips the
                     # instantiation breaker).
                     verdict = "auth"
+                elif is_reachable_config_reason(pf_reason):
+                    # Reachable but misconfigured for another reason (currently:
+                    # cluster_mode_mismatch). Same non-outage semantics, distinct
+                    # message at the raise site.
+                    verdict = "config"
             except Exception:
                 verdict = "down"
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
@@ -699,16 +717,17 @@ class ProviderManager:
         """
         cache_keys = self._resolve_state_for_provider(provider_id)
 
-        # Reachable-but-misconfigured (missing/wrong graph auth): the instance
-        # ANSWERED, so it is NOT an outage. Counting it toward the pre-trip counter
-        # would open the instantiation breaker with reason=auth_required and block
-        # the provider even after the operator fixes the credentials (until the
-        # breaker resets); storing an ok=False observation would also make the
-        # fast-fail gate short-circuit requests. Record it as REACHABLE (breaker +
-        # gate stay clear) while preserving the reason for status, reset the failure
-        # streak, and never pre-trip. The real connection path surfaces the precise
-        # ProviderConfigurationError (which the circuit breaker ignores).
-        if is_auth_reachable_reason(reason):
+        # Reachable-but-misconfigured (missing/wrong graph auth, or a standalone
+        # config against a cluster node): the instance ANSWERED, so it is NOT an
+        # outage. Counting it toward the pre-trip counter would open the
+        # instantiation breaker and block the provider even after the operator
+        # fixes the config (until the breaker resets); storing an ok=False
+        # observation would also make the fast-fail gate short-circuit requests.
+        # Record it as REACHABLE (breaker + gate stay clear) while preserving the
+        # reason for status, reset the failure streak, and never pre-trip. The
+        # real connection path surfaces the precise ProviderConfigurationError
+        # (which the circuit breaker ignores).
+        if is_reachable_config_reason(reason):
             reachable = (
                 ProbeOutcome.from_warmup(ok=True, reason=reason, elapsed_ms=elapsed_ms)
                 if source == "warmup"

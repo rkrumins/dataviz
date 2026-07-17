@@ -457,6 +457,65 @@ def load_connection_config(
     )
 
 
+async def verify_not_cluster_node(
+    cfg: FalkorDBConnConfig, pool: Any, timeout: float,
+) -> None:
+    """Reject a STANDALONE-mode config pointed at a multi-shard Redis Cluster.
+
+    A standalone client against a cluster node sees only that node's slots:
+    keyless GRAPH.LIST silently under-reports (a random third of the graphs,
+    varying per connection behind a load-balanced Service), and keyed commands
+    fail with bare ``MOVED`` ResponseErrors nothing classifies. One bounded
+    ``INFO cluster`` at client-BUILD time (never per query); fail-open on INFO
+    errors — this guard must never take a healthy standalone instance down.
+
+    Cluster-of-one exemption: a single master owning all 16384 slots serves a
+    standalone client completely and correctly (no MOVED possible, listings
+    complete), so only ``cluster_size > 1`` is rejected — a working
+    single-shard deployment must not go down over a mode label. The mismatch
+    itself needs positive evidence (cluster_enabled parsed from INFO); the
+    exemption also needs positive evidence (cluster_size parsed as 1).
+    """
+    if cfg.mode != "standalone":
+        return
+    from redis.asyncio import Redis
+
+    client = Redis(connection_pool=pool)
+    try:
+        info = await asyncio.wait_for(client.info("cluster"), timeout=timeout)
+    except Exception:                                # pragma: no cover - fail-open
+        return
+    enabled = info.get("cluster_enabled", 0) if isinstance(info, dict) else 0
+    if str(enabled).strip().lower() not in ("1", "true"):
+        return
+    size = None
+    try:
+        raw = await asyncio.wait_for(
+            client.execute_command("CLUSTER", "INFO"), timeout=timeout,
+        )
+        text = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+        for ln in text.splitlines():
+            if ln.startswith("cluster_size:"):
+                size = int(ln.split(":", 1)[1].strip())
+    except Exception:                                # pragma: no cover - see below
+        size = None                                  # confirmed cluster still rejects
+    if size == 1:
+        logger.warning(
+            "FalkorDB at %s:%d is a single-shard Redis Cluster served over a "
+            "standalone-mode provider config — works today, but breaks the "
+            "moment a second shard is added. Consider falkordbConnection."
+            "mode=cluster.", cfg.host, cfg.port,
+        )
+        return
+    raise ProviderConfigurationError(
+        f"FalkorDB at {cfg.host}:{cfg.port} is a Redis Cluster node but this "
+        f"provider is configured mode=standalone — a standalone client sees "
+        f"only one node's graphs (listings under-report; queries hit MOVED). "
+        f"Set falkordbConnection.mode=cluster with cluster.startupNodes (or "
+        f"FALKORDB_MODE=cluster + FALKORDB_CLUSTER_NODES)."
+    )
+
+
 def connect_verify_budget(cfg: FalkorDBConnConfig, default_s: float) -> float:
     """Wall clock for the connect-verifying PING (and similar fixed probe
     windows). The fleet default must EXTEND for a provider configured for a
@@ -1527,12 +1586,23 @@ class TopologyGraphClients:
                     # NOAUTH/WRONGPASS into a clear configuration error.
                     from redis.asyncio import Redis
 
-                    await asyncio.wait_for(
-                        Redis(connection_pool=pool).ping(),
-                        timeout=connect_verify_budget(
-                            c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
-                        ),
+                    budget = connect_verify_budget(
+                        c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
                     )
+                    try:
+                        await asyncio.wait_for(
+                            Redis(connection_pool=pool).ping(), timeout=budget,
+                        )
+                        # Standalone config against a cluster-enabled node would
+                        # silently see one node's slots — fail loud at build time.
+                        await verify_not_cluster_node(c, pool, budget)
+                    except BaseException:
+                        # A raise here never lands the entry in self._clients, so
+                        # nothing would ever close it — and a persistent condition
+                        # (mode mismatch, dead node) re-enters _build on every
+                        # call, leaking one live socket per attempt.
+                        await aclose_graph_client(db, pool)
+                        raise
                     return db, pool
 
                 db, pool = await with_auth_negotiation(cfg, _build)
@@ -1656,6 +1726,33 @@ async def resolve_sentinel_master(
     return await with_auth_negotiation(cfg, _discover)
 
 
+class ClusterCoverageError(RuntimeError):
+    """The cluster's primaries do not cover the full slot space.
+
+    Raised by the primaries fan-out so a keyless GRAPH.LIST union is NEVER
+    computed over a partial cluster: with a shard missing, the union would
+    silently contain only the surviving shards' graphs, and the discovery
+    worker would persist that shrunken list as ``fresh`` — items "vanish"
+    from the UI for a whole sweep interval with no error anywhere. A raise
+    routes to ``record_failure`` instead: last-known-good data is preserved
+    and ``last_error`` names the gap. Transient (a mid-failover window heals
+    itself), so deliberately NOT a ProviderConfigurationError."""
+
+
+def _missing_slot_ranges(covered) -> str:
+    """Compact ``"0-5460, 10923-16383"`` description of uncovered slots,
+    capped at 4 ranges (log/error hygiene at 16k slots)."""
+    missing = sorted(set(range(16384)) - set(covered))
+    ranges: List[str] = []
+    for slot in missing:
+        if ranges and slot == ranges[-1][1] + 1:
+            ranges[-1][1] = slot
+        else:
+            ranges.append([slot, slot])
+    out = [f"{a}-{b}" if b > a else f"{a}" for a, b in ranges[:4]]
+    return ", ".join(out) + (", …" if len(ranges) > 4 else "")
+
+
 async def cluster_primary_nodes(
     cfg: FalkorDBConnConfig, socket_timeout: float,
 ) -> List[Tuple[str, int]]:
@@ -1692,13 +1789,52 @@ async def _cluster_primary_nodes_once(
     nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
     cluster = RedisCluster(
         startup_nodes=nodes,
+        # Explicit, not the library default: the async client happens to
+        # default require_full_coverage=True (the sync one does not), and a
+        # future redis-py relaxing it would silently re-open the partial-
+        # union hole this fan-out exists to close. The SERVER runs
+        # --cluster-require-full-coverage no (surviving shards keep serving
+        # through an outage), so the client must be the one to insist.
+        require_full_coverage=True,
         **_conn_auth_kwargs(cfg, socket_timeout),
         **_address_remap_kwargs(cfg),
     )
     try:
         if hasattr(cluster, "initialize"):
             await cluster.initialize()
-        return [remap_address(cfg, n.host, n.port) for n in cluster.get_primaries()]
+        # Belt over the braces above: verify the slot map we are about to
+        # trust really covers the whole space, whatever initialize() accepted.
+        # slots_cache is a private redis-py attribute: if a library upgrade
+        # renames it, SKIP the belt (the explicit require_full_coverage kwarg
+        # above still holds the invariant) rather than misreporting a healthy
+        # cluster as 0/16384 covered and failing every listing fleet-wide.
+        slots_cache = getattr(cluster.nodes_manager, "slots_cache", None)
+        if slots_cache is None:
+            logger.warning(
+                "falkordb_connection: redis-py nodes_manager has no slots_cache "
+                "attribute (library change?) — slot-coverage belt check skipped; "
+                "require_full_coverage=True at initialize() still enforces it."
+            )
+        elif len(slots_cache) < 16384:
+            raise ClusterCoverageError(
+                f"cluster slot map covers {len(slots_cache)}/16384 slots "
+                f"(missing: {_missing_slot_ranges(slots_cache)}) — refusing to "
+                f"enumerate primaries over a partial cluster (a shard is down "
+                f"or mid-failover; results would silently omit its graphs)"
+            )
+        primaries = [(n.host, int(n.port)) for n in cluster.get_primaries()]
+        remapped = [remap_address(cfg, h, p) for h, p in primaries]
+        # An addressRemap that collapses distinct primaries onto one dialable
+        # endpoint would make the fan-out query the same node repeatedly and
+        # under-report with no error — that is a config bug, so fail loud.
+        if len(set(remapped)) < len(set(primaries)):
+            raise ProviderConfigurationError(
+                f"addressRemap collapses {len(set(primaries))} distinct cluster "
+                f"primaries onto {len(set(remapped))} endpoint(s) "
+                f"({sorted(set(remapped))}) — each primary needs its own "
+                f"reachable address or a GRAPH.LIST fan-out cannot see every shard"
+            )
+        return remapped
     finally:
         try:
             await cluster.aclose()
@@ -1740,18 +1876,27 @@ async def list_graph_keys_for_config(
         from redis.asyncio import Redis as _NodeRedis
 
         keys: set = set()
+        per_node: dict = {}
         tls = tls_pool_kwargs(cfg.tls_settings())
         for host, port in await cluster_primary_nodes(cfg, st):
             pool = ConnectionPool(host=host, port=port, **pool_kwargs, **tls)
             try:
                 node = _NodeRedis(connection_pool=pool)
                 res = await node.execute_command("GRAPH.LIST")
-                keys |= {_decode_key(k) for k in (res or [])}
+                node_keys = {_decode_key(k) for k in (res or [])}
+                keys |= node_keys
+                per_node[f"{host}:{port}"] = len(node_keys)
             finally:
                 try:
                     await pool.aclose()
                 except Exception:                    # pragma: no cover - best effort
                     pass
+        # One line per fan-out (not per node): the per-node split is the
+        # under-report diagnostic; a line per node per sweep is log spam.
+        logger.info(
+            "falkordb GRAPH.LIST fan-out: %d primaries %s -> union %d key(s)",
+            len(per_node), per_node, len(keys),
+        )
         return keys
 
     db, pool = await build_graph_client(cfg, graph_name="", pool_kwargs=pool_kwargs)

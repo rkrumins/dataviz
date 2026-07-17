@@ -1018,6 +1018,12 @@ class FalkorDBProvider(GraphDataProvider):
             username=probe_username,
             password=probe_password,
             ssl_context=probe_ssl,
+            # Standalone mode against a cluster-enabled node silently sees only
+            # one node's graphs — surface it as a config verdict here (the /test
+            # wizard and discovery last_error both carry preflight reasons).
+            # Sentinel targets are never cluster nodes; cluster mode never
+            # reaches this call.
+            detect_cluster=(cfg.mode == "standalone"),
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
@@ -1060,7 +1066,10 @@ class FalkorDBProvider(GraphDataProvider):
         a read-write one would lazily create an empty graph key per probe.
         """
         from redis.asyncio import Redis
-        from backend.app.providers.falkordb_connection import build_graph_client
+        from backend.app.providers.falkordb_connection import (
+            build_graph_client,
+            verify_not_cluster_node,
+        )
 
         self._db, self._pool = await build_graph_client(
             self._conn_cfg,
@@ -1087,6 +1096,9 @@ class FalkorDBProvider(GraphDataProvider):
             Redis(connection_pool=self._pool).ping(),
             timeout=init_timeout,
         )
+        # Standalone config against a cluster-enabled node would silently see
+        # only one node's graphs — fail loud at build time (no-op otherwise).
+        await verify_not_cluster_node(self._conn_cfg, self._pool, init_timeout)
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
@@ -1666,15 +1678,79 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
+    async def _empty_key_is_genuine(self) -> bool:
+        """Whether an "Invalid graph operation on empty key" really means the
+        graph is empty.
+
+        Standalone/Sentinel: yes — one endpoint serves every key, so the error
+        can only mean the graph key does not exist yet.
+
+        Cluster: verify before believing it. The SAME error comes back when a
+        read lands on a node that does not hold the graph key — a stale pinned
+        handle after a slot migration, or a replica promoted without its
+        shard's data — and masking that as "0 nodes / 0 edges" is how a graph
+        silently reads as empty on one pod while another still shows data. A
+        slot-routed EXISTS through the cluster client asks the CURRENT owner:
+        0 → genuinely absent (mask as empty); 1 → the graph exists and the
+        empty read was a misroute (fail loud); probe error → fail loud, never
+        mask on an unhealthy cluster.
+        """
+        if self._conn_cfg is None or self._conn_cfg.mode != "cluster":
+            return True
+        try:
+            exists = await asyncio.wait_for(
+                self._db.execute_command("EXISTS", self._graph_name),
+                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
+        except Exception as probe_exc:
+            logger.warning(
+                "empty-key verification: EXISTS probe for %r failed (%s) — "
+                "treating the empty read as UNVERIFIED and failing loud.",
+                self._graph_name, probe_exc,
+            )
+            return False
+        if int(exists or 0) == 0:
+            return True
+        logger.warning(
+            "empty-key verification: graph %r EXISTS on the cluster but a read "
+            "reported 'empty key' — the read landed on a node that does not "
+            "hold the graph (stale routing or an unsynced promotee). Failing "
+            "loud and rebuilding the client.", self._graph_name,
+        )
+        # Heal, don't just detect: the client that produced the misroute stays
+        # cached otherwise (the bare ResponseError is not classified as a
+        # routing error, so _run_guarded never rebuilds for it) and every
+        # subsequent read keeps failing until an unrelated MOVED or a restart.
+        # The rebuild re-resolves the owning node; the CURRENT read still
+        # raises (fail loud), the next one uses the fresh route.
+        try:
+            await self._rebuild_graph_client_for_failover(self._conn_generation)
+        except Exception:                            # pragma: no cover - best effort
+            logger.warning(
+                "empty-key verification: client rebuild after stale-route "
+                "detection failed for %r.", self._graph_name, exc_info=True,
+            )
+        return False
+
+    async def _is_verified_missing_graph(self, exc: BaseException) -> bool:
+        """The ONLY predicate that may mask an 'empty key' error as an empty
+        graph: matches the error AND (in cluster mode) verifies via EXISTS that
+        the graph is genuinely absent. Every masking site calls this — a bare
+        ``_is_missing_graph_error`` check silently converts a cluster misroute
+        into '0 rows'."""
+        return _is_missing_graph_error(exc) and await self._empty_key_is_genuine()
+
     async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None,
                                  op: Optional[str] = None):
         """Like :meth:`_ro_query`, but a missing/empty graph yields an empty
         result set instead of raising. For introspection reads where an empty
-        graph is a valid 0-result state (the graph key may not exist yet)."""
+        graph is a valid 0-result state (the graph key may not exist yet).
+        On a cluster the empty-key signal is verified first — see
+        :meth:`_empty_key_is_genuine`."""
         try:
             return await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         except Exception as exc:
-            if _is_missing_graph_error(exc):
+            if await self._is_verified_missing_graph(exc):
                 return _EmptyResult()
             raise
 
@@ -2636,7 +2712,7 @@ class FalkorDBProvider(GraphDataProvider):
                     )
                     return res.result_set or []
                 except Exception as e:
-                    if _is_missing_graph_error(e):
+                    if await self._is_verified_missing_graph(e):
                         return []
                     logger.warning(f"get_nodes urn bucket failed: {e}")
                     return []
@@ -2726,7 +2802,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             result = await self._ro_query(cypher, params=params)
         except Exception as e:
-            if _is_missing_graph_error(e):
+            if await self._is_verified_missing_graph(e):
                 return []  # never-created / empty key = legitimately no data
             logger.warning(f"get_nodes query failed: {e}")
             raise  # connection refused / transient = surface it (breaker -> 503)
@@ -3407,7 +3483,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"(graph={self._graph_name})"
             ) from e
         except Exception as e:
-            if not _is_missing_graph_error(e):
+            if not await self._is_verified_missing_graph(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
                 raise  # connection refused / transient = surface it (breaker -> 503)
             page_result = None  # never-created / empty key = legitimately no data
@@ -3489,7 +3565,7 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 total_count = None
             except Exception as e:
-                if not _is_missing_graph_error(e):
+                if not await self._is_verified_missing_graph(e):
                     logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
                     raise  # connection refused / transient = surface it (breaker -> 503)
                 total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
@@ -7861,7 +7937,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_type_counts[t] = cnt
                 edge_count += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_stats on %s: graph key does not exist yet (empty graph) "
@@ -7946,7 +8022,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
                 total_edges += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_schema_stats on %s: graph key does not exist yet "
