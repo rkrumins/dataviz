@@ -24,7 +24,7 @@ import {
   useMatchUrnSet,
 } from '@/store/searchStore'
 import type { ViewLayerConfig } from '@/types/schema'
-import type { HierarchyNode, FlatTreeNode } from './types'
+import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -89,6 +89,10 @@ interface LayerColumnProps {
    *  (DOM scrolling can't work — rows below the overscan window aren't
    *  mounted). Columns that don't own the URN no-op. */
   revealTarget?: { id: string; pulse: number } | null
+  /** Shared registry the column registers its geometry API into (keyed
+   *  by layer id) so the edge overlay can estimate row positions for
+   *  unmounted rows via the virtualizer's measurements cache. */
+  geometryRegistry?: Map<string, ColumnGeometryApi>
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -137,6 +141,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onReorderLayer,
   isHydratingInitial = false,
   revealTarget,
+  geometryRegistry,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -678,6 +683,44 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (index < 0 || index >= flatTree.length) return
     virtualizer.scrollToIndex(index, { align, behavior: 'smooth' })
   }, [virtualizer, flatTree.length])
+
+  // ── Geometry API registration ─────────────────────────────────────────────
+  // Exposes estimated row rects to the edge overlay WITHOUT mounting rows.
+  // Offsets come from the virtualizer's measurements cache (exact for
+  // measured rows, estimate-derived for unmounted ones). The lookup map is
+  // kept fresh via a ref so registration happens once per column mount
+  // (`virtualizer` is instance-stable).
+  const nodeToFlatIndexMapRef = useRef(nodeToFlatIndexMap)
+  nodeToFlatIndexMapRef.current = nodeToFlatIndexMap
+  useEffect(() => {
+    if (!geometryRegistry) return
+    // Matches the `py-2` on the totalSize wrapper below — virtualizer
+    // offsets are relative to the padded content box.
+    const LIST_PAD_TOP = 8
+    const api: ColumnGeometryApi = {
+      hasNode: (nodeId) => nodeToFlatIndexMapRef.current.has(nodeId),
+      getNodeRect: (nodeId) => {
+        const el = scrollContainerRef.current
+        if (!el) return null
+        const idx = nodeToFlatIndexMapRef.current.get(nodeId)
+        if (idx === undefined) return null
+        const m = virtualizer.measurementsCache[idx]
+        if (!m) return null
+        const rect = el.getBoundingClientRect()
+        // Canvas-zoom compensation: virtualizer offsets are unscaled local
+        // px while getBoundingClientRect returns scaled viewport px.
+        const scale = el.clientHeight > 0 ? rect.height / el.clientHeight : 1
+        return {
+          top: rect.top + (LIST_PAD_TOP + m.start - el.scrollTop) * scale,
+          height: m.size * scale,
+          left: rect.left,
+          right: rect.right,
+        }
+      },
+    }
+    geometryRegistry.set(layer.id, api)
+    return () => { geometryRegistry.delete(layer.id) }
+  }, [geometryRegistry, layer.id, virtualizer])
 
   return (
     <motion.div

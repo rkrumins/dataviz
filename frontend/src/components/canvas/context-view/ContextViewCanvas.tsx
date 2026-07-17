@@ -86,6 +86,7 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
@@ -1743,6 +1744,13 @@ export function ContextViewCanvas({
     [revealAndFocus],
   )
 
+  // Registry of per-column imperative geometry APIs, keyed by layer id.
+  // Identity-stable Map (state initializer, never re-set) — columns
+  // register/unregister via effect; the edge overlay reads it
+  // imperatively (pass-through detection, badge partner positions) so
+  // no React state churn is involved.
+  const [columnGeometryRegistry] = useState(() => new Map<string, ColumnGeometryApi>())
+
   // Reveal-into-view: the LayerColumn that owns the hit URN uses its
   // virtualizer's scrollToIndex (DOM scrollIntoView can't work — rows
   // below the overscan window aren't in the DOM at all). We signal via
@@ -2439,14 +2447,14 @@ export function ContextViewCanvas({
     return ids
   }, [trace.expandingPairs, effectiveLineageEdges, displayMap])
 
-  // Per-node lineage counts in stubs mode. Drives the small partial-edge
-  // markers on each entity card — a quiet inbound arrow on the left when
-  // `in > 0`, a quiet outbound arrow on the right when `out > 0`. Counts
-  // come from the full projected set (not the hover-filtered slice) so
-  // the markers reflect the entity's true lineage volume regardless of
-  // which edges happen to be materialized for the current hover.
+  // Per-node lineage counts. Drives the in/out indicators on each entity
+  // card — computed in EVERY render mode so a node always communicates
+  // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
+  // quiet tab otherwise; see LineageFlowOverlay). Counts come from the
+  // full projected set (not the hover-filtered slice) so the markers
+  // reflect the entity's true lineage volume regardless of which edges
+  // happen to be materialized for the current hover.
   const nodeStubCounts = useMemo(() => {
-    if (!isStubsMode) return new Map<string, { in: number; out: number }>()
     const counts = new Map<string, { in: number; out: number }>()
     for (const e of visibleLineageEdges) {
       const s = counts.get(e.source) ?? { in: 0, out: 0 }
@@ -2457,7 +2465,7 @@ export function ContextViewCanvas({
       counts.set(e.target, t)
     }
     return counts
-  }, [visibleLineageEdges, isStubsMode])
+  }, [visibleLineageEdges])
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
@@ -2903,6 +2911,8 @@ export function ContextViewCanvas({
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
               expandingEdgeIds={expandingEdgeIds}
+              geometryRegistry={columnGeometryRegistry}
+              onRevealNode={scrollHitIntoView}
             />
           )}
 
@@ -3022,6 +3032,7 @@ export function ContextViewCanvas({
                 onReorderLayer={isDraft ? reorderLayer : undefined}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
+                geometryRegistry={columnGeometryRegistry}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
