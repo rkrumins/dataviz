@@ -12,6 +12,7 @@
  * lands on the one source that needs work, not on 26 identical green rings.
  */
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import * as Icons from 'lucide-react'
 import { useOntologyAdoption } from '../../hooks/useOntologies'
 import type {
@@ -178,7 +179,10 @@ function Legend() {
 
 // ── type-breakdown chips (expanded row) ───────────────────────────────────────
 
-function DimBreakdown({ title, dim }: { title: string; dim: AdoptionDimension | null }) {
+/** Exact/drift/unmapped/unused chips for one dimension. Exported for the
+ *  per-source PhysicalAlignmentSection (data source profile) — same chip
+ *  semantics everywhere alignment is shown. */
+export function DimBreakdown({ title, dim }: { title: string; dim: AdoptionDimension | null }) {
   if (!dim || (dim.exact.length + dim.caseDrift.length + dim.unmapped.length + dim.declaredUnused.length) === 0) return null
   const Chip = ({ children, tone, title: t }: { children: ReactNode; tone: 'exact' | 'drift' | 'unmapped' | 'unused'; title?: string }) => {
     const cls = {
@@ -287,6 +291,15 @@ function SourceRow({ src, mode, index }: { src: AdoptionSource; mode: Mode; inde
           )}
           <DimBreakdown title="Node types" dim={src.nodes} />
           <DimBreakdown title="Edge types" dim={src.edges} />
+          {/* The per-source deep dive (grade, index coverage, predicted slow
+              queries) lives on the data source's profile. */}
+          <Link
+            to={`/workspaces/${src.workspaceId}?ds=${encodeURIComponent(src.dataSourceId)}`}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-500 hover:text-indigo-600 transition-colors"
+          >
+            Full alignment & query-performance analysis
+            <Icons.ArrowRight className="w-3 h-3" />
+          </Link>
         </div>
       )}
     </div>

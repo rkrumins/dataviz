@@ -25,6 +25,7 @@ import { StatusChip } from '@/components/insights/StatusChip'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { aggregationService } from '@/services/aggregationService'
 import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
+import { PhysicalAlignmentSection } from './PhysicalAlignmentSection'
 
 export interface DataSourceProfileContext {
     wsId: string
@@ -358,7 +359,10 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                 </p>
             </Card>
 
-            {/* ── Enhanced (workspace-context): aggregation + vocab ── */}
+            {/* ── Enhanced (workspace-context): alignment + aggregation + vocab ── */}
+            {context?.ontologyId && (
+                <PhysicalAlignmentSection wsId={context.wsId} dataSourceId={context.dataSourceId} />
+            )}
             {context && <AggregationStatusCard dataSourceId={context.dataSourceId} wsId={context.wsId} />}
             {/* Vocab warning: the workspace drawer already shows it in its
                 header, so only render it in the standalone (non-embedded) view. */}

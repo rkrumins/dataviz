@@ -1,17 +1,69 @@
 import { useState } from 'react'
-import { X, AlertTriangle, Plus, Minus, Lock, Shield, ShieldAlert } from 'lucide-react'
+import { X, AlertTriangle, Plus, Minus, Lock, Shield, ShieldAlert, CheckCircle2, HelpCircle, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import type { OntologyDefinitionResponse, OntologyImpactResponse } from '@/services/ontologyDefinitionService'
 
+/** One advisory pre-publish check row (validation / coverage). A failed
+ *  FETCH renders as 'unavailable' — checks inform, they never block. */
+export interface PublishCheckRow {
+  status: 'pass' | 'warn' | 'fail' | 'unavailable'
+  summary: string
+  /** Deep link into the page (rendered when onNavigateTab is provided). */
+  tab?: string
+  tabLabel?: string
+}
+
+export interface PublishChecks {
+  validation: PublishCheckRow
+  coverage: PublishCheckRow
+}
+
 interface PublishConfirmDialogProps {
   ontology: OntologyDefinitionResponse
   impact: OntologyImpactResponse
+  /** Advisory readiness checks fetched alongside impact (validation +
+   *  coverage). Optional — the dialog renders without them. */
+  checks?: PublishChecks | null
   isPublishing?: boolean
   /** `force` is true only via the admin escape hatch when the impact check blocked. */
   onConfirm: (force?: boolean) => void
   onClose: () => void
+  /** Jump to a page tab to fix a failed check (closes the dialog). */
+  onNavigateTab?: (tab: string) => void
+}
+
+const CHECK_ICON = {
+  pass: { Icon: CheckCircle2, cls: 'text-emerald-500' },
+  warn: { Icon: AlertTriangle, cls: 'text-amber-500' },
+  fail: { Icon: XCircle, cls: 'text-red-500' },
+  unavailable: { Icon: HelpCircle, cls: 'text-ink-muted/60' },
+} as const
+
+function CheckRow({ label, check, onNavigateTab }: {
+  label: string
+  check: PublishCheckRow
+  onNavigateTab?: (tab: string) => void
+}) {
+  const { Icon, cls } = CHECK_ICON[check.status]
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <Icon className={cn('w-4 h-4 mt-px flex-shrink-0', cls)} />
+      <div className="min-w-0 flex-1">
+        <span className="text-xs font-semibold text-ink">{label}</span>
+        <span className="text-xs text-ink-muted"> — {check.summary}</span>
+      </div>
+      {check.tab && onNavigateTab && check.status !== 'pass' && (
+        <button
+          onClick={() => onNavigateTab(check.tab!)}
+          className="text-[11px] font-semibold text-indigo-500 hover:text-indigo-600 flex-shrink-0"
+        >
+          {check.tabLabel ?? 'Review'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 function TypeDiffList({ types, variant }: { types: string[]; variant: 'added' | 'removed' }) {
@@ -47,9 +99,11 @@ const POLICY_LABELS: Record<string, string> = {
 export function PublishConfirmDialog({
   ontology,
   impact,
+  checks,
   isPublishing,
   onConfirm,
   onClose,
+  onNavigateTab,
 }: PublishConfirmDialogProps) {
   const hasChanges =
     impact.addedEntityTypes.length > 0 ||
@@ -103,6 +157,23 @@ export function PublishConfirmDialog({
             </div>
           </div>
         </div>
+
+        {/* Pre-publish readiness — validation + coverage fetched alongside
+            impact; advisory rows with deep links, never blocking. */}
+        {checks && (
+          <div className="mx-6 mb-4 px-4 py-2 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
+            <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider pt-1">Readiness checks</p>
+            <CheckRow label="Validation" check={checks.validation} onNavigateTab={onNavigateTab} />
+            <CheckRow label="Coverage" check={checks.coverage} onNavigateTab={onNavigateTab} />
+            <CheckRow
+              label="Impact"
+              check={impact.allowed
+                ? { status: hasChanges ? 'warn' : 'pass',
+                    summary: hasChanges ? 'type changes vs the published version — review below' : 'no breaking changes' }
+                : { status: 'fail', summary: impact.reason || 'blocked by the evolution policy' }}
+            />
+          </div>
+        )}
 
         {/* Impact section */}
         {hasChanges && (

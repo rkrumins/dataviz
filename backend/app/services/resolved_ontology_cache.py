@@ -136,6 +136,33 @@ async def bump_ontology_generation(
         )
 
 
+async def bump_scopes(scopes) -> int:
+    """Bump many ``(workspace_id, data_source_id)`` scopes in ONE Redis
+    round-trip (pipeline of INCRs). Local entries drop immediately either way.
+
+    This is the bulk form of :func:`bump_ontology_generation` — ontology
+    writers (publish/update/import…) fan out to every assigned data source,
+    and doing that as N awaited INCRs made publish latency O(assignments)
+    (the 30s-hang bug for widely-assigned ontologies).
+    """
+    scopes = list(scopes)
+    for ws_id, ds_id in scopes:
+        _entries.pop(_key(ws_id, ds_id), None)
+    if not scopes:
+        return 0
+    try:
+        pipe = _redis().pipeline(transaction=False)
+        for ws_id, ds_id in scopes:
+            pipe.incr(_gen_key(ws_id, ds_id))
+        await pipe.execute()
+    except Exception as exc:
+        logger.warning(
+            "bulk ontology generation bump failed for %d scopes (pods fall "
+            "back to the %ss TTL backstop): %s", len(scopes), int(TTL_SECS), exc,
+        )
+    return len(scopes)
+
+
 async def bump_for_ontology(session, ontology_id: str) -> int:
     """Bump every data source that resolves through ``ontology_id`` (used by
     ontology CRUD/publish/import endpoints, which don't know the consuming
@@ -158,9 +185,7 @@ async def bump_for_ontology(session, ontology_id: str) -> int:
             "to the TTL backstop): %s", ontology_id, exc,
         )
         return 0
-    for ws_id, ds_id in rows:
-        await bump_ontology_generation(ws_id, ds_id)
-    return len(rows)
+    return await bump_scopes([(ws_id, ds_id) for ws_id, ds_id in rows])
 
 
 def drop_local(workspace_id: Optional[str], data_source_id: Optional[str]) -> None:

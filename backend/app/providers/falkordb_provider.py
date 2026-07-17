@@ -1830,26 +1830,16 @@ class FalkorDBProvider(GraphDataProvider):
 
         When *entity_type_ids* is provided (e.g. from the resolved ontology),
         those labels are indexed in addition to the hardcoded defaults.
-        """
-        default_labels = [
-            "domain",
-            "dataPlatform",
-            "container",
-            "dataset",
-            "schemaField",
-        ]
-        extra = list(entity_type_ids) if entity_type_ids else []
-        seen: set[str] = set()
-        labels: list[str] = []
-        for lbl in default_labels + extra:
-            if lbl not in seen:
-                seen.add(lbl)
-                labels.append(lbl)
 
-        # `level` indexed for trace queries that filter by hierarchy level
-        # (Cypher: WHERE n.level = $level). Idempotent CREATE INDEX is fine
-        # if the index already exists.
-        properties = ["urn", "displayName", "qualifiedName", "level"]
+        The label/property policy lives in ``index_policy`` — shared with the
+        alignment-analysis endpoint so its performance predictions can never
+        drift from what is actually indexed here.
+        """
+        from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
+
+        labels = indexed_labels(entity_type_ids)
+        # Idempotent CREATE INDEX is fine if the index already exists.
+        properties = list(INDEXED_NODE_PROPS)
 
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         # Failure accounting: "already indexed" is success (idempotent DDL);

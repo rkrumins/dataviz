@@ -341,6 +341,210 @@ async def get_vocab_alignment(
             "schemaHash": row.last_seen_schema_hash, "lastSeenAt": row.last_seen_at}
 
 
+@router.get("/alignment-analysis")
+async def get_alignment_analysis(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Per-data-source "Physical Alignment & Query Performance" report,
+    assembled ENTIRELY from cached data — no provider calls:
+
+    * adoption (exact / case-drift / unmapped, instance-weighted) from the
+      cached ``data_source_stats.schema_stats`` profile vs the assigned
+      ontology's declared types (system built-ins injected, matching
+      /adoption and /coverage semantics);
+    * index coverage derived from the shared ``index_policy`` (the exact
+      label set ``ensure_indices`` creates) — a case-drifted or unmapped
+      physical label is by construction NOT index-backed, so raw reads on it
+      fall back to label scans;
+    * cached aggregation state (``status``/``lastAggregatedAt``) — a READY
+      aggregated/versioned graph is canonicalized to declared spellings at
+      commit, making drift moot for reads through it;
+    * server-computed findings (predictive slow-query warnings) + a grade.
+    """
+    import json as _json
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.db.repositories import ontology_definition_repo, stats_repo
+    from backend.app.ontology.adoption import build_source_adoption, dimension_to_wire
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+    from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
+
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    ds = await get_data_source_orm(session, ds_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+
+    # ── Assigned ontology (None = platform defaults only) ────────────────
+    ontology = None
+    entity_defs: dict = {}
+    rel_defs: dict = {}
+    ont_id = getattr(ds, "ontology_id", None)
+    if ont_id:
+        orm = await ontology_definition_repo.get_ontology_orm(session, ont_id)
+        if orm is not None:
+            ontology = {"id": orm.id, "name": orm.name, "version": orm.version}
+            entity_defs = _json.loads(orm.entity_type_definitions or "{}")
+            rel_defs = _json.loads(orm.relationship_type_definitions or "{}")
+    declared_entities = set(with_system_entity_types(entity_defs).keys())
+    declared_edges = set(with_system_edge_types(rel_defs).keys())
+
+    # ── Cached profile ───────────────────────────────────────────────────
+    stats_row = await stats_repo.get_data_source_stats(session, ds_id)
+    raw_stats = getattr(stats_row, "schema_stats", None) if stats_row else None
+    try:
+        schema_stats = _json.loads(raw_stats) if raw_stats else {}
+    except (ValueError, TypeError):
+        schema_stats = {}
+    profiled = bool(schema_stats.get("entityTypeStats") or schema_stats.get("edgeTypeStats"))
+    schema_updated_at = getattr(stats_row, "schema_updated_at", None) if stats_row else None
+
+    # ── Cached aggregation state (no live drift fingerprint) ─────────────
+    agg_status = "none"
+    last_aggregated_at = None
+    try:
+        from backend.app.services.aggregation.models import AggregationDataSourceStateORM
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is not None:
+            agg_status = state.aggregation_status or "none"
+            last_aggregated_at = state.last_aggregated_at
+    except Exception:  # aggregation schema absent (test contexts)
+        pass
+    # Only a READY aggregation serves reads through the canonicalized
+    # (declared-spelling, index-aligned) graph.
+    canonicalized = agg_status == "ready"
+
+    if not profiled:
+        return {
+            "profiled": False,
+            "schemaUpdatedAt": schema_updated_at,
+            "ontology": ontology,
+            "adoption": None,
+            "indexCoverage": None,
+            "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
+                            "canonicalized": canonicalized},
+            "grade": None,
+            "findings": [{
+                "severity": "info", "code": "NOT_PROFILED",
+                "message": "This source hasn't been profiled yet — the analysis appears "
+                           "after the insights service scans its graph.",
+            }],
+        }
+
+    adopt = build_source_adoption(
+        entity_ids=declared_entities, edge_ids=declared_edges, schema_stats=schema_stats)
+    match_weighted = adopt.match_weighted
+    total_instances = adopt.nodes.total_instances + adopt.edges.total_instances
+
+    # ── Index coverage (labels are node-side; FalkorDB labels are
+    #    case-sensitive, so the comparison is exact-spelling) ─────────────
+    idx_labels = indexed_labels(sorted(declared_entities))
+    idx_label_set = set(idx_labels)
+    lowered_declared = {d.lower() for d in idx_label_set}
+    unindexed_physical = []
+    declared_by_lower = {d.lower(): d for d in idx_label_set}
+    for s in schema_stats.get("entityTypeStats") or []:
+        if not isinstance(s, dict) or not s.get("id"):
+            continue
+        label = s["id"]
+        if label in idx_label_set:
+            continue
+        reason = "case_drift" if label.lower() in lowered_declared else "unmapped"
+        unindexed_physical.append({
+            "label": label,
+            "declared": declared_by_lower.get(label.lower()),
+            "instances": int(s.get("count") or 0),
+            "reason": reason,
+        })
+
+    # ── Findings (predictive — derived from cached data, not observed) ───
+    findings = []
+    drift_instances = adopt.nodes.drift_instances + adopt.edges.drift_instances
+    for entry in unindexed_physical:
+        if entry["reason"] != "case_drift":
+            continue
+        share = (entry["instances"] / total_instances * 100) if total_instances else 0.0
+        findings.append({
+            "severity": "critical" if (share > 25 or entry["instances"] > 50_000) else "warning",
+            "code": "CASE_DRIFT_SCAN",
+            "message": (
+                f"Raw reads on `{entry['label']}` ({entry['instances']:,} instances) fall back "
+                f"to label scans — the index exists on the declared spelling "
+                f"`{entry['declared']}`, and FalkorDB labels are case-sensitive."
+            ),
+            "instances": entry["instances"],
+        })
+    unmapped_entries = [e for e in unindexed_physical if e["reason"] == "unmapped"]
+    if unmapped_entries or adopt.edges.unmapped:
+        n_types = len(unmapped_entries) + len(adopt.edges.unmapped)
+        n_inst = sum(e["instances"] for e in unmapped_entries) + adopt.edges.unmapped_instances
+        findings.append({
+            "severity": "warning",
+            "code": "UNMAPPED_NO_INDEX",
+            "message": (
+                f"{n_types} physical type{'s' if n_types != 1 else ''} "
+                f"({n_inst:,} instances) have no declared counterpart in the schema — "
+                "no index guarantee, no ontology styling, invisible to coverage."
+            ),
+            "instances": n_inst,
+        })
+    has_drift = drift_instances > 0 or any(e["reason"] == "case_drift" for e in unindexed_physical)
+    if has_drift and not canonicalized:
+        findings.append({
+            "severity": "critical",
+            "code": "RAW_READS_DEGRADED",
+            "message": (
+                "This source is not aggregated/versioned, so reads hit the raw graph "
+                "directly — every drifted type above pays the scan penalty on every query. "
+                "Aggregating canonicalizes spellings and restores index-backed reads."
+            ),
+        })
+    declared_unused = list(adopt.nodes.declared_unused) + list(adopt.edges.declared_unused)
+    if declared_unused:
+        findings.append({
+            "severity": "info",
+            "code": "DECLARED_UNUSED",
+            "message": (
+                f"{len(declared_unused)} declared type{'s' if len(declared_unused) != 1 else ''} "
+                f"({', '.join(sorted(declared_unused)[:5])}"
+                f"{'…' if len(declared_unused) > 5 else ''}) have no instances in this source."
+            ),
+        })
+
+    # ── Grade ─────────────────────────────────────────────────────────────
+    if match_weighted >= 98 and (not has_drift or canonicalized):
+        grade = "A"
+    elif match_weighted >= 90:
+        grade = "B"
+    elif match_weighted >= 70:
+        grade = "C"
+    else:
+        grade = "D"
+
+    return {
+        "profiled": True,
+        "schemaUpdatedAt": schema_updated_at,
+        "ontology": ontology,
+        "adoption": {
+            "nodes": dimension_to_wire(adopt.nodes),
+            "edges": dimension_to_wire(adopt.edges),
+            "matchWeighted": match_weighted,
+            "matchByType": adopt.match_by_type,
+        },
+        "indexCoverage": {
+            "indexedLabels": idx_labels,
+            "indexedProps": list(INDEXED_NODE_PROPS),
+            "unindexedPhysical": unindexed_physical,
+        },
+        "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
+                        "canonicalized": canonicalized},
+        "grade": grade,
+        "findings": findings,
+    }
+
+
 @router.post("/vocab-alignment/confirm")
 async def confirm_vocab_variant(
     ws_id: Optional[str] = None,

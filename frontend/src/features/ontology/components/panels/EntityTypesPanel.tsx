@@ -312,12 +312,32 @@ export function EntityTypesPanel({
         </p>
       )}
 
-      {/* Entity type list */}
-      {filtered.length === 0 ? (
+      {/* Entity type list — first-run CTA instead of a passive hint */}
+      {filtered.length === 0 && !search && !isLocked && entityTypes.length === 0 ? (
+        <div className="border border-dashed border-glass-border rounded-2xl py-12 text-center">
+          <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-violet-500/10 flex items-center justify-center">
+            <LucideIcons.Box className="w-6 h-6 text-indigo-400" />
+          </div>
+          <p className="text-sm font-semibold text-ink mb-1">Define your first entity type</p>
+          <p className="text-xs text-ink-muted max-w-sm mx-auto mb-5">
+            Entity types are the vocabulary of this schema — what kinds of nodes exist
+            and how they look and behave on the canvas.
+          </p>
+          <button
+            onClick={onNew}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
+          >
+            <LucideIcons.Plus className="w-3.5 h-3.5" /> Add entity type
+          </button>
+          <p className="text-[11px] text-ink-muted mt-3">
+            or use <span className="font-semibold">Suggest from Graph</span> in the sidebar
+            to generate types from a connected data source
+          </p>
+        </div>
+      ) : filtered.length === 0 ? (
         <EmptyState
           icon="Box"
           message={search ? 'No entity types match your search' : 'No entity types defined yet.'}
-          hint={!search && !isLocked ? 'Use "Suggest from Graph" in the Library tab to auto-generate, or add manually.' : undefined}
         />
       ) : (
         <div className="space-y-2">

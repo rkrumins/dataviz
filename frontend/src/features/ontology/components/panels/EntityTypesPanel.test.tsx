@@ -6,7 +6,8 @@
  * message-substring heuristic.
  */
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import { EntityTypesPanel } from './EntityTypesPanel'
 import type { EntityTypeSchema } from '@/types/schema'
 
@@ -69,5 +70,32 @@ describe('EntityTypesPanel validation attribution', () => {
       { severity: 'error', message: 'broken', affected: 'Server' },
     ])
     expect(screen.getByRole('button', { name: /Server\s*1/ })).toBeInTheDocument()
+  })
+})
+
+describe('EntityTypesPanel first-run empty state', () => {
+  it('offers an Add CTA and points at the real Suggest location (no phantom Library tab)', async () => {
+    const onNew = vi.fn()
+    render(
+      <EntityTypesPanel
+        entityTypes={[]}
+        entityStatMap={new Map()}
+        isLocked={false}
+        search=""
+        validationResult={null}
+        editorPanel={null}
+        onSearch={noop}
+        onEdit={noop}
+        onNew={onNew}
+        onDelete={noop}
+        onDismissValidation={noop}
+      />,
+    )
+    expect(screen.getByText('Define your first entity type')).toBeInTheDocument()
+    expect(screen.queryByText(/Library tab/)).toBeNull()
+    expect(screen.getByText(/in the sidebar/)).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByText('Add entity type'))
+    expect(onNew).toHaveBeenCalled()
   })
 })

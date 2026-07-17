@@ -89,6 +89,9 @@ const _BANNER = { min: 5_000,  max: 600_000 } as const   // 5s..10min
 export const TIMEOUTS = {
   DEFAULT_MS:           readMs('VITE_TIMEOUT_DEFAULT_MS',           30_000, _MEDIUM),
   TRACE_MS:             readMs('VITE_TIMEOUT_TRACE_MS',             60_000, _LONG),
+  // Ontology publish runs the impact check and cache invalidation for every
+  // assigned data source server-side — give it headroom over the default.
+  PUBLISH_MS:           readMs('VITE_TIMEOUT_PUBLISH_MS',           60_000, _LONG),
   GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      30_000, _MEDIUM),
   // /nodes/top-level. Must exceed the backend's worst case for this
   // endpoint (page query 15s + best-effort count 5s + queue/serialize

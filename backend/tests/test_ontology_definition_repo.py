@@ -331,7 +331,8 @@ async def test_invalidate_ontology_caches_bumps_graph_cache(db_session: AsyncSes
     """An ontology content edit must unreach the hot-read GraphCache for every
     data source on that ontology — /children-with-edges embeds the SERVER-side
     containment/lineage split, so without the bump canvases keep the pre-edit
-    grouping for up to the cache TTL."""
+    grouping for up to the cache TTL. The fan-out is bulk (one pipelined call
+    with every scope), not one awaited round-trip per source."""
     from backend.app.api.v1.endpoints.ontologies import _invalidate_ontology_caches
     from backend.app.db.models import WorkspaceDataSourceORM
 
@@ -342,26 +343,91 @@ async def test_invalidate_ontology_caches_bumps_graph_cache(db_session: AsyncSes
     ))
     await db_session.flush()
 
-    calls = []
+    bump_calls = []
 
-    async def fake_invalidate(workspace_id, data_source_id):
-        calls.append((workspace_id, data_source_id))
+    async def fake_bump_aggregated(scopes):
+        bump_calls.append(list(scopes))
 
     monkeypatch.setattr(
-        "backend.app.services.graph_cache.invalidate_aggregated_reads",
-        fake_invalidate,
+        "backend.app.services.graph_cache.bump_aggregated_generations",
+        fake_bump_aggregated,
     )
 
-    async def fake_bump_for_ontology(session, ontology_id):
-        return None
+    purge_calls = []
+
+    async def fake_purge(scopes):
+        purge_calls.append(list(scopes))
 
     monkeypatch.setattr(
-        "backend.app.services.resolved_ontology_cache.bump_for_ontology",
-        fake_bump_for_ontology,
+        "backend.app.services.graph_cache.purge_aggregated_lkg",
+        fake_purge,
+    )
+
+    ont_bumps = []
+
+    async def fake_bump_scopes(scopes):
+        ont_bumps.append(list(scopes))
+        return len(ont_bumps[-1])
+
+    monkeypatch.setattr(
+        "backend.app.services.resolved_ontology_cache.bump_scopes",
+        fake_bump_scopes,
     )
 
     await _invalidate_ontology_caches(db_session, created.id)
-    assert ("ws_gc", "ds_gc") in calls
+    # Synchronous half: one bulk generation bump per layer carrying the scope.
+    assert any(("ws_gc", "ds_gc") in call for call in bump_calls)
+    assert any(("ws_gc", "ds_gc") in call for call in ont_bumps)
+    # Inline mode (no BackgroundTasks): the deferred LKG purge ran too.
+    assert any(("ws_gc", "ds_gc") in call for call in purge_calls)
+
+
+async def test_invalidate_ontology_caches_defers_lkg_purge(db_session: AsyncSession, monkeypatch):
+    """With a BackgroundTasks queue, the expensive LKG SCAN purge (and the
+    post-commit re-bump) run AFTER the response — the generation bumps still
+    run before return (they are read-correctness, not hygiene)."""
+    from fastapi import BackgroundTasks
+    from backend.app.api.v1.endpoints.ontologies import _invalidate_ontology_caches
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    created = await ontology_definition_repo.create_ontology(db_session, _make_create_req())
+    for i in range(3):
+        db_session.add(WorkspaceDataSourceORM(
+            id=f"ds_bg{i}", workspace_id="ws_bg", provider_id="prov_bg",
+            graph_name=f"g{i}", ontology_id=created.id,
+        ))
+    await db_session.flush()
+
+    bump_calls, purge_calls = [], []
+
+    async def fake_bump_aggregated(scopes):
+        bump_calls.append(list(scopes))
+
+    async def fake_purge(scopes):
+        purge_calls.append(list(scopes))
+
+    async def fake_bump_scopes(scopes):
+        return len(list(scopes))
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.bump_aggregated_generations", fake_bump_aggregated)
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.purge_aggregated_lkg", fake_purge)
+    monkeypatch.setattr(
+        "backend.app.services.resolved_ontology_cache.bump_scopes", fake_bump_scopes)
+
+    background = BackgroundTasks()
+    await _invalidate_ontology_caches(db_session, created.id, background)
+
+    # Before the background queue runs: bumps happened, purge did not.
+    assert len(bump_calls) == 1 and len(bump_calls[0]) == 3
+    assert purge_calls == []
+
+    await background()
+
+    # The deferred sweep purged every scope and re-bumped post-commit.
+    assert len(purge_calls) == 1 and len(purge_calls[0]) == 3
+    assert len(bump_calls) == 2
 
 
 async def test_write_syncs_entity_hierarchy_from_containment_rels(db_session: AsyncSession):

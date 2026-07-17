@@ -413,17 +413,25 @@ export function OntologyDetailHeader({
 
           {/* Publish — shown for drafts, manage-only. Disabled while dirty:
               publish runs against the SAVED layer, so publishing with staged
-              edits would silently exclude them. */}
+              edits would silently exclude them. The reason is stated inline —
+              a title tooltip on a disabled button is undiscoverable. */}
           {access.canPublish && !isImmutable && (
-            <button
-              onClick={onPublish}
-              disabled={hasPendingChanges}
-              title={hasPendingChanges ? 'Save or discard your staged changes first — publish runs against the saved layer.' : undefined}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-indigo-500 disabled:hover:to-purple-500"
-            >
-              <Upload className="w-4 h-4" />
-              Publish
-            </button>
+            <div className="flex items-center gap-2">
+              {hasPendingChanges && (
+                <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 whitespace-nowrap">
+                  Save changes to publish
+                </span>
+              )}
+              <button
+                onClick={onPublish}
+                disabled={hasPendingChanges}
+                title={hasPendingChanges ? 'Save or discard your staged changes first — publish runs against the saved layer.' : undefined}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-indigo-500 disabled:hover:to-purple-500"
+              >
+                <Upload className="w-4 h-4" />
+                Publish
+              </button>
+            </div>
           )}
 
           {/* New Version — manage-only. */}

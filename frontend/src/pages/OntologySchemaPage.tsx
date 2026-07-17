@@ -47,7 +47,7 @@ import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
-import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
+import { PublishConfirmDialog, type PublishCheckRow, type PublishChecks } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
 import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialog'
 import { SuggestConfirmDialog } from '@/features/ontology/components/dialogs/SuggestConfirmDialog'
 import { ChangesReviewDialog } from '@/features/ontology/components/dialogs/ChangesReviewDialog'
@@ -215,6 +215,7 @@ export function OntologySchemaPage() {
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [publishImpact, setPublishImpact] = useState<OntologyImpactResponse | null>(null)
+  const [publishChecks, setPublishChecks] = useState<PublishChecks | null>(null)
   const [isPublishing, setIsPublishing] = useState(false)
   const [validationResult, setValidationResult] = useState<{
     isValid: boolean
@@ -233,6 +234,10 @@ export function OntologySchemaPage() {
   const [unassignTarget, setUnassignTarget] = useState<{
     wsId: string; dsId: string; dsLabel: string; wsName: string; ontologyName: string | null
   } | null>(null)
+  // Bulk unassign confirmation (Deployment Dashboard multi-select)
+  const [bulkUnassignTargets, setBulkUnassignTargets] = useState<
+    Array<{ workspaceId: string; dataSourceId: string; dataSourceLabel: string }> | null
+  >(null)
 
   // ── Edit mode + working copies (lazy initialization) ────────────
   // No explicit isEditing toggle — working copies are created on first edit attempt.
@@ -647,23 +652,59 @@ export function OntologySchemaPage() {
     }
   }
 
-  /** Roll out the current ontology to ALL data sources in a workspace */
+  /** Bulk unassign (Deployment Dashboard selection) — one count-based confirm,
+   *  then a settled batch with honest partial-failure reporting. Replaces the
+   *  old forEach-into-single-dialog path where only the LAST selected source
+   *  ever got confirmed/unassigned. */
+  async function handleConfirmBulkUnassign() {
+    if (!bulkUnassignTargets || bulkUnassignTargets.length === 0) return
+    const targets = bulkUnassignTargets
+    setIsAssigning(true)
+    try {
+      const results = await Promise.allSettled(targets.map(t =>
+        workspaceService.updateDataSource(t.workspaceId, t.dataSourceId, { ontologyId: '' })))
+      await loadWorkspaces()
+      invalidateGraphSchema()
+      const ok = results.filter(r => r.status === 'fulfilled').length
+      if (ok === targets.length) {
+        showToast('success', `Unassigned ${ok} data source${ok !== 1 ? 's' : ''}`)
+      } else {
+        const failed = targets
+          .filter((_, i) => results[i].status === 'rejected')
+          .map(t => t.dataSourceLabel)
+        showToast('error',
+          `Unassigned ${ok} of ${targets.length} — failed: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`)
+      }
+      setBulkUnassignTargets(null)
+    } finally {
+      setIsAssigning(false)
+    }
+  }
+
+  /** Roll out the current ontology to ALL data sources in a workspace.
+   *  Settled batch: one failing source no longer hides the ones that
+   *  succeeded — the toast reports the real count. */
   async function handleRollOutToWorkspace(workspaceId: string) {
     if (!selectedOntology) return
     const ws = workspaces.find(w => w.id === workspaceId)
     if (!ws) return
+    const targets = ws.dataSources ?? []
     setIsAssigning(true)
     try {
-      await Promise.all(
-        (ws.dataSources ?? []).map(ds =>
-          workspaceService.updateDataSource(workspaceId, ds.id, { ontologyId: selectedOntology.id })
-        )
-      )
+      const results = await Promise.allSettled(targets.map(ds =>
+        workspaceService.updateDataSource(workspaceId, ds.id, { ontologyId: selectedOntology.id })))
       await loadWorkspaces()
       invalidateGraphSchema()
-      showToast('success', `Schema rolled out to all data sources in "${ws.name}"`)
-    } catch (err: unknown) {
-      showToast('error', `Rollout failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      const ok = results.filter(r => r.status === 'fulfilled').length
+      if (ok === targets.length) {
+        showToast('success', `Schema rolled out to all ${ok} data source${ok !== 1 ? 's' : ''} in "${ws.name}"`)
+      } else {
+        const failed = targets
+          .filter((_, i) => results[i].status === 'rejected')
+          .map(ds => ds.label || ds.id)
+        showToast('error',
+          `Rolled out to ${ok} of ${targets.length} in "${ws.name}" — failed: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`)
+      }
     } finally {
       setIsAssigning(false)
     }
@@ -1007,14 +1048,59 @@ export function OntologySchemaPage() {
     }
   }
 
+  /** Open the publish dialog with impact PLUS advisory readiness checks
+   *  (validation + coverage) fetched in one settled batch. Impact is the only
+   *  hard requirement — a failed check FETCH renders as "couldn't check",
+   *  never blocking the dialog. */
   async function handlePublish() {
     if (!selectedOntology) return
-    try {
-      const impact = await ontologyDefinitionService.impact(selectedOntology.id)
-      setPublishImpact(impact)
-    } catch (err: unknown) {
+    const id = selectedOntology.id
+    const [impactRes, validateRes, coverageRes] = await Promise.allSettled([
+      ontologyDefinitionService.impact(id),
+      ontologyDefinitionService.validate(id),
+      ontologyDefinitionService.coverageRanking(id, { limit: 100, filter: 'assigned-this' }),
+    ])
+    if (impactRes.status === 'rejected') {
+      const err = impactRes.reason
       showToast('error', `Failed to check impact: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      return
     }
+
+    let validation: PublishCheckRow
+    if (validateRes.status === 'fulfilled') {
+      const errors = validateRes.value.issues.filter(i => i.severity === 'error').length
+      const warnings = validateRes.value.issues.length - errors
+      validation = errors > 0
+        ? { status: 'fail', summary: `${errors} error${errors !== 1 ? 's' : ''}${warnings ? ` + ${warnings} warning${warnings !== 1 ? 's' : ''}` : ''}`, tab: 'schema', tabLabel: 'Fix' }
+        : warnings > 0
+          ? { status: 'warn', summary: `${warnings} warning${warnings !== 1 ? 's' : ''}`, tab: 'schema', tabLabel: 'Review' }
+          : { status: 'pass', summary: 'no issues' }
+    } else {
+      validation = { status: 'unavailable', summary: "couldn't check" }
+    }
+
+    let coverage: PublishCheckRow
+    if (coverageRes.status === 'fulfilled') {
+      const assigned = coverageRes.value.sources
+      if (assigned.length === 0) {
+        coverage = { status: 'warn', summary: 'no data sources use this schema yet — publishing has no immediate effect', tab: 'usage', tabLabel: 'Assign' }
+      } else {
+        const profiled = assigned.filter(s => s.profiled && s.coveragePercent != null)
+        const worst = profiled.length
+          ? Math.min(...profiled.map(s => s.coveragePercent as number))
+          : null
+        coverage = worst == null
+          ? { status: 'warn', summary: `${assigned.length} assigned source${assigned.length !== 1 ? 's' : ''}, none profiled yet`, tab: 'health', tabLabel: 'Review' }
+          : worst >= 100
+            ? { status: 'pass', summary: `100% across ${assigned.length} assigned source${assigned.length !== 1 ? 's' : ''}` }
+            : { status: 'warn', summary: `lowest ${Math.round(worst)}% across ${assigned.length} assigned source${assigned.length !== 1 ? 's' : ''}`, tab: 'coverage', tabLabel: 'Review' }
+      }
+    } else {
+      coverage = { status: 'unavailable', summary: "couldn't check" }
+    }
+
+    setPublishChecks({ validation, coverage })
+    setPublishImpact(impactRes.value)
   }
 
   async function handleConfirmPublish(force = false) {
@@ -1108,7 +1194,9 @@ export function OntologySchemaPage() {
     } else {
       try {
         const created = await mutations.create.mutateAsync({ name })
-        navigate(schemaUrl(created.id))
+        // Empty drafts land where the schema is BUILT (the from-graph path
+        // already does) — Overview is a dead end with zero types.
+        navigate(schemaUrl(created.id, 'schema'))
         showToast('success', 'New draft created')
       } catch (err: unknown) {
         showToast('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -1322,6 +1410,7 @@ export function OntologySchemaPage() {
                 }}
                 onAssign={handleAssignToDataSource}
                 onUnassign={requestUnassign}
+                onBulkUnassign={entries => setBulkUnassignTargets(entries)}
                 onSuggest={handleSuggestForDataSource}
                 onCreateDraft={() => setShowCreateDialog(true)}
                 onSuggestFromGraph={access.canSuggest ? handleSuggestOntology : undefined}
@@ -1749,9 +1838,11 @@ export function OntologySchemaPage() {
         <PublishConfirmDialog
           ontology={selectedOntology}
           impact={publishImpact}
+          checks={publishChecks}
           isPublishing={isPublishing}
           onConfirm={handleConfirmPublish}
-          onClose={() => setPublishImpact(null)}
+          onClose={() => { setPublishImpact(null); setPublishChecks(null) }}
+          onNavigateTab={(tab) => { setPublishImpact(null); setPublishChecks(null); setTab(tab as Parameters<typeof setTab>[0]) }}
         />
       )}
 
@@ -1834,6 +1925,54 @@ export function OntologySchemaPage() {
           onCancel={() => setUnassignTarget(null)}
           isLoading={isAssigning}
         />
+      )}
+
+      {/* Bulk Unassign Confirmation (Deployment Dashboard multi-select) */}
+      {bulkUnassignTargets && bulkUnassignTargets.length > 0 && (
+        <>
+          <Backdrop open onClick={isAssigning ? undefined : () => setBulkUnassignTargets(null)} zClassName="z-50" className="bg-black/40" />
+          <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+            <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6 pointer-events-auto">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5 text-red-500" />
+                </div>
+                <h3 className="text-sm font-bold text-ink">
+                  Unassign {bulkUnassignTargets.length} data source{bulkUnassignTargets.length !== 1 ? 's' : ''}?
+                </h3>
+              </div>
+              <p className="text-xs text-ink-muted mb-3 leading-relaxed">
+                Each source falls back to the platform default schema — views built on their
+                current schemas may render differently.
+              </p>
+              <ul className="text-[11px] text-ink-secondary mb-5 space-y-0.5 max-h-32 overflow-y-auto">
+                {bulkUnassignTargets.slice(0, 8).map(t => (
+                  <li key={t.dataSourceId} className="truncate">· {t.dataSourceLabel}</li>
+                ))}
+                {bulkUnassignTargets.length > 8 && (
+                  <li className="text-ink-muted">…and {bulkUnassignTargets.length - 8} more</li>
+                )}
+              </ul>
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setBulkUnassignTargets(null)}
+                  disabled={isAssigning}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmBulkUnassign}
+                  disabled={isAssigning}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors shadow-sm disabled:opacity-50"
+                >
+                  {isAssigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  Unassign All
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       {/* Discard Confirmation */}

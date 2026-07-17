@@ -112,6 +112,26 @@ async def invalidate_schema_facet(session: AsyncSession, ds_id: str) -> None:
     await session.flush()
 
 
+async def invalidate_schema_facets(
+    session: AsyncSession, ds_ids: Sequence[str],
+) -> None:
+    """Bulk :func:`invalidate_schema_facet` — one set-based UPDATE instead of
+    a SELECT+UPDATE per source. Ontology writers invalidate every assigned
+    data source at once; the per-row loop made that O(assignments) in DB
+    round-trips (the publish 30s-hang bug). Same semantics: rows without a
+    stats row are silently skipped (their first deep poll builds fresh)."""
+    if not ds_ids:
+        return
+    from sqlalchemy import update
+
+    await session.execute(
+        update(DataSourceStatsORM)
+        .where(DataSourceStatsORM.data_source_id.in_(list(ds_ids)))
+        .values(graph_schema="{}", schema_updated_at=None)
+    )
+    await session.flush()
+
+
 async def upsert_data_source_stats_counts(
     session: AsyncSession,
     ds_id: str,
