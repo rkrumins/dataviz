@@ -1636,15 +1636,58 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
+    async def _empty_key_is_genuine(self) -> bool:
+        """Whether an "Invalid graph operation on empty key" really means the
+        graph is empty.
+
+        Standalone/Sentinel: yes — one endpoint serves every key, so the error
+        can only mean the graph key does not exist yet.
+
+        Cluster: verify before believing it. The SAME error comes back when a
+        read lands on a node that does not hold the graph key — a stale pinned
+        handle after a slot migration, or a replica promoted without its
+        shard's data — and masking that as "0 nodes / 0 edges" is how a graph
+        silently reads as empty on one pod while another still shows data. A
+        slot-routed EXISTS through the cluster client asks the CURRENT owner:
+        0 → genuinely absent (mask as empty); 1 → the graph exists and the
+        empty read was a misroute (fail loud); probe error → fail loud, never
+        mask on an unhealthy cluster.
+        """
+        if self._conn_cfg is None or self._conn_cfg.mode != "cluster":
+            return True
+        try:
+            exists = await asyncio.wait_for(
+                self._db.execute_command("EXISTS", self._graph_name),
+                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
+        except Exception as probe_exc:
+            logger.warning(
+                "empty-key verification: EXISTS probe for %r failed (%s) — "
+                "treating the empty read as UNVERIFIED and failing loud.",
+                self._graph_name, probe_exc,
+            )
+            return False
+        if int(exists or 0) == 0:
+            return True
+        logger.warning(
+            "empty-key verification: graph %r EXISTS on the cluster but a read "
+            "reported 'empty key' — the read landed on a node that does not "
+            "hold the graph (stale routing or an unsynced promotee). Failing "
+            "loud instead of reporting an empty graph.", self._graph_name,
+        )
+        return False
+
     async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None,
                                  op: Optional[str] = None):
         """Like :meth:`_ro_query`, but a missing/empty graph yields an empty
         result set instead of raising. For introspection reads where an empty
-        graph is a valid 0-result state (the graph key may not exist yet)."""
+        graph is a valid 0-result state (the graph key may not exist yet).
+        On a cluster the empty-key signal is verified first — see
+        :meth:`_empty_key_is_genuine`."""
         try:
             return await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         except Exception as exc:
-            if _is_missing_graph_error(exc):
+            if _is_missing_graph_error(exc) and await self._empty_key_is_genuine():
                 return _EmptyResult()
             raise
 
@@ -7817,7 +7860,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_type_counts[t] = cnt
                 edge_count += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not _is_missing_graph_error(exc) or not await self._empty_key_is_genuine():
                 raise
             logger.info(
                 "get_stats on %s: graph key does not exist yet (empty graph) "
@@ -7902,7 +7945,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
                 total_edges += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not _is_missing_graph_error(exc) or not await self._empty_key_is_genuine():
                 raise
             logger.info(
                 "get_schema_stats on %s: graph key does not exist yet "
