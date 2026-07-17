@@ -170,6 +170,16 @@ class AggregationScheduleRequest(BaseModel):
         populate_by_name = True
 
 
+class SourceChangedRequest(BaseModel):
+    """Body for the source-changed signal. Both fields optional — an
+    external loader can POST an empty body and get the defaults."""
+    reason: str = Field("external_load")
+    force: bool = Field(False)
+
+    class Config:
+        populate_by_name = True
+
+
 class InternalTriggerRequest(BaseModel):
     """Used by the viz-service proxy to send pre-resolved trigger data
     to the Control Plane.
@@ -361,6 +371,25 @@ class DriftCheckResponse(BaseModel):
     current_fingerprint: Optional[str] = Field(None, alias="currentFingerprint")
     stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
     last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class SourceChangedResponse(BaseModel):
+    """Result of the change-gated source-changed signal.
+
+    ``changed`` is False only on the no-op path (fingerprints matched and
+    ``force`` was not set) — nothing was invalidated or queued. When True,
+    caches were invalidated and a rebuild was queued unless ``job_id`` is
+    None (an aggregation job was already active, or the source's status
+    makes aggregation not applicable).
+    """
+    changed: bool
+    job_id: Optional[str] = Field(None, alias="jobId")
+    reason: str
+    current_fingerprint: str = Field(alias="currentFingerprint")
+    stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
 
     class Config:
         populate_by_name = True

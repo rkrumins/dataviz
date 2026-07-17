@@ -30,6 +30,7 @@ from .schemas import (
     DriftCheckResponse,
     PaginatedJobsResponse,
     ResumeOverrides,
+    SourceChangedResponse,
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
 from backend.app.ontology import gate as ontology_gate
@@ -1178,6 +1179,167 @@ class AggregationService:
             current_fingerprint=current_fp,
             stored_fingerprint=state.graph_fingerprint,
             last_checked_at=_now(),
+        )
+
+    # Statuses where aggregation doesn't apply — the source was never
+    # configured ("none", including the no-state-row case) or the user
+    # opted out ("skipped"). The source-changed signal still invalidates
+    # caches for these but skips queuing a rebuild.
+    _AGG_NOT_APPLICABLE = frozenset({"none", "skipped"})
+
+    async def signal_source_changed(
+        self, ds_id: str, session: AsyncSession, *,
+        reason: str = "external_load", force: bool = False,
+    ) -> SourceChangedResponse:
+        """Convergence entry point after a DIRECT write to a source's graph.
+
+        External loaders (seed/import scripts, connectors) write FalkorDB
+        without going through the app's write paths, so read caches and the
+        :AGGREGATED overlay go stale silently. This signal, once a real
+        change is confirmed via the graph fingerprint, marks the source
+        stale, clears content caches, invalidates hierarchy read caches,
+        nudges stats, and queues an idempotency-keyed rebuild.
+
+        Change-gated: unless ``force``, a fingerprint that matches the last
+        aggregated fingerprint is a no-op — NOTHING after the gate runs.
+        An empty/unknown current fingerprint (compute failure or timeout)
+        is treated as a mismatch (fails open toward "changed").
+
+        Best-effort convergence: steps 4-7 use helpers that never raise; a
+        trigger failure after invalidation (job already active, or ontology
+        resolution failing) yields ``changed=True, job_id=None`` rather than
+        failing the signal — the invalidation already happened and must not
+        be undone.
+
+        The stored ``graph_fingerprint`` is deliberately NOT updated here —
+        the event listener writes it on ``job.completed``. A repeat signal
+        before the rebuild completes re-invalidates harmlessly and the
+        idempotency key collapses the duplicate job; if the rebuild fails,
+        the stored fingerprint stays old so the next signal retries.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        # 1. Resolve workspace_id + state row. Fall back to the public
+        # data-source row for workspace_id when no state row exists (same
+        # pattern as the event listener / claim_purge_job).
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        stored_fp = state.graph_fingerprint if state else None
+        workspace_id = state.workspace_id if state else None
+        if not workspace_id:
+            from backend.app.db.models import WorkspaceDataSourceORM
+            ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds_orm is not None and ds_orm.deleted_at is None:
+                workspace_id = ds_orm.workspace_id
+
+        # 2. Resolve the provider and fingerprint the live graph (same
+        # bounded pattern as check_drift / the scheduler). A resolution
+        # failure leaves provider=None (content-cache clear is skipped); a
+        # fingerprint timeout leaves current_fp="" (a mismatch).
+        _DRIFT_TIMEOUT = float(
+            __import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5")
+        )
+        provider = None
+        current_fp = ""
+        try:
+            provider = await asyncio.wait_for(
+                self._registry.get_provider_for_workspace(
+                    workspace_id, session, data_source_id=ds_id,
+                ),
+                timeout=_DRIFT_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.warning(
+                "signal_source_changed: provider resolution failed for %s: %s",
+                ds_id, exc,
+            )
+        if provider is not None:
+            try:
+                current_fp = await asyncio.wait_for(
+                    compute_graph_fingerprint(provider),
+                    timeout=_DRIFT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                current_fp = ""
+
+        # 3. Change gate. A matching fingerprint (and no force) is a no-op —
+        # nothing below runs.
+        if not force and fingerprints_match(stored_fp, current_fp):
+            return SourceChangedResponse(
+                changed=False,
+                job_id=None,
+                reason=reason,
+                current_fingerprint=current_fp,
+                stored_fingerprint=stored_fp,
+            )
+
+        # 4-7. Best-effort convergence (sequential awaits; the helpers never
+        # raise). workspace-scoped helpers only fire once a workspace is
+        # known; content-cache clear needs a resolved provider.
+        from backend.app.services.graph_cache import (
+            invalidate_hierarchy_reads,
+            mark_source_stale,
+        )
+
+        if workspace_id:
+            await mark_source_stale(workspace_id, ds_id, reason)
+        if provider is not None:
+            await provider.clear_content_caches()
+        if workspace_id:
+            await invalidate_hierarchy_reads(workspace_id, ds_id)
+        if workspace_id:
+            try:
+                from backend.insights_service.enqueue import mark_stats_changed
+                await mark_stats_changed(ds_id, workspace_id)
+            except Exception as exc:
+                logger.warning(
+                    "signal_source_changed: stats nudge failed for %s: %s",
+                    ds_id, exc,
+                )
+
+        # 8. Queue the rebuild unless aggregation doesn't apply to this
+        # source. Trigger failures after invalidation must NOT fail the
+        # signal — a benign ConflictError (job already active) or an
+        # ontology-resolution failure both leave changed=True/job_id=None.
+        job_id = None
+        status = (state.aggregation_status if state else None) or "none"
+        if status not in self._AGG_NOT_APPLICABLE:
+            from uuid import uuid4
+            try:
+                job = await self.trigger(
+                    ds_id,
+                    AggregationTriggerRequest(
+                        idempotency_key=f"source-changed:{current_fp or uuid4().hex}",
+                    ),
+                    "api",
+                    session,
+                )
+                job_id = job.id
+            except ConflictError:
+                logger.info(
+                    "signal_source_changed: rebuild for %s already active — "
+                    "idempotency key collapses the duplicate", ds_id,
+                )
+            except (OntologyResolutionError, ValueError, NotFoundError) as exc:
+                logger.warning(
+                    "signal_source_changed: rebuild trigger for %s could not "
+                    "resolve (%s) — caches invalidated, no job queued",
+                    ds_id, exc,
+                )
+            except Exception as exc:
+                # Any other trigger failure (DB/provider blip) must not fail
+                # the signal — the invalidation above already happened.
+                logger.warning(
+                    "signal_source_changed: rebuild trigger for %s failed "
+                    "unexpectedly (%s) — caches invalidated, no job queued",
+                    ds_id, exc,
+                )
+
+        return SourceChangedResponse(
+            changed=True,
+            job_id=job_id,
+            reason=reason,
+            current_fingerprint=current_fp,
+            stored_fingerprint=stored_fp,
         )
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────

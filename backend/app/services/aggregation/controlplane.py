@@ -255,6 +255,8 @@ from .schemas import (  # noqa: E402
     DataSourceReadinessResponse,
     DriftCheckResponse,
     ResumeOverrides,
+    SourceChangedRequest,
+    SourceChangedResponse,
     WorkersResponse,
 )
 from .service import ConflictError, NotFoundError  # noqa: E402
@@ -604,6 +606,24 @@ async def check_drift(
         return await svc.check_drift(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── POST /aggregation/data-sources/{ds_id}/source-changed ────────────
+
+@app.post(
+    "/aggregation/data-sources/{ds_id}/source-changed",
+    response_model=SourceChangedResponse,
+    summary="Signal that a source's graph changed (external direct load)",
+)
+async def source_changed(
+    ds_id: str,
+    body: SourceChangedRequest = Body(default=SourceChangedRequest()),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    return await svc.signal_source_changed(
+        ds_id, session, reason=body.reason, force=body.force,
+    )
 
 
 # ── CLI entry point ─────────────────────────────────────────────────
