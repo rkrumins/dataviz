@@ -21,7 +21,7 @@
  * `useQueries` fan-out in `useAllProviderCounts`, so selecting a provider
  * hits the already-warmed cache instead of refetching.
  */
-import { useQuery, useQueries, type UseQueryResult } from '@tanstack/react-query'
+import { useQuery, useQueries, keepPreviousData, type UseQueryResult } from '@tanstack/react-query'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { Envelope, AssetListPayload } from '@/types/insights'
@@ -60,9 +60,40 @@ function providerAssetsQueryOptions(providerId: string) {
         gcTime: 10 * 60_000,
         retry: 1,
         refetchOnWindowFocus: true,
+        // A refetch (focus, poll, invalidation) that lands a transient-null
+        // envelope (`computing`/`unavailable` carry data:null) must not blank
+        // the list — keep showing the previous envelope until a real one
+        // arrives. Without this the list and the sidebar counts (same query
+        // key, useAllProviderCounts) blinked empty/full together.
+        placeholderData: keepPreviousData,
         refetchInterval: (query: { state: { data?: Envelope<AssetListPayload> } }) =>
             query.state.data?.meta?.status === 'computing' ? 5_000 : (false as const),
     }
+}
+
+/**
+ * How the asset-list envelope should render when there is nothing to show.
+ *
+ * The insights endpoint answers 200 for every state; the payload alone can't
+ * distinguish "this provider genuinely has no graphs" from "the cache has no
+ * usable row yet". Only `ready` may render the true empty state:
+ *  - loading     — no envelope yet, or the backend is computing a cold cache.
+ *  - unavailable — data:null without a job in flight (`unavailable`, or a
+ *                  cache row whose payload failed to parse).
+ *  - error-stub  — the discovery worker's failure stub (payload `{}` with
+ *                  `last_error` stamped): listing failed and there is no
+ *                  last-known-good list to fall back on.
+ *  - ready       — a fresh/stale envelope carrying a real assets array.
+ */
+export type AssetListState = 'loading' | 'unavailable' | 'error-stub' | 'ready'
+
+export function assetListState(
+    env: Envelope<AssetListPayload> | null | undefined,
+): AssetListState {
+    if (!env || env.meta?.status === 'computing') return 'loading'
+    if (env.data == null) return 'unavailable'
+    if (!Array.isArray(env.data.assets)) return 'error-stub'
+    return 'ready'
 }
 
 function providerCatalogQueryOptions(providerId: string) {
@@ -128,7 +159,10 @@ export function useAllProviderCounts(providers: ProviderResponse[]): AllProvider
     let total = 0
     let registered = 0
     providers.forEach((p, i) => {
-        const assetList = assetResults[i]?.data?.data?.assets ?? []
+        // Array.isArray: the discovery failure stub row carries payload `{}`
+        // (assets undefined) — count it as 0, not a crash in .filter below.
+        const rawAssets = assetResults[i]?.data?.data?.assets
+        const assetList = Array.isArray(rawAssets) ? rawAssets : []
         const catalog = catalogResults[i]?.data ?? []
         const existing = new Set(catalog.map(c => c.sourceIdentifier).filter(Boolean))
         const t = assetList.length

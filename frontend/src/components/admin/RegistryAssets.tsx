@@ -29,6 +29,7 @@ import {
     useProviderAssets,
     useProviderCatalog,
     useAllProviderCounts,
+    assetListState,
     PROVIDER_ASSETS_QUERY_KEY,
     PROVIDER_CATALOG_QUERY_KEY,
 } from '@/hooks/useProviderAssets'
@@ -759,7 +760,13 @@ export function RegistryAssets() {
     const assetsQuery = useProviderAssets(selectedProviderId)
     const catalogQuery = useProviderCatalog(selectedProviderId)
     const assetsEnvelope = assetsQuery.data ?? null
-    const assets = assetsEnvelope?.data?.assets ?? []
+    // How a nothing-to-show envelope should render: only 'ready' may show
+    // the true "no data sources" empty state — computing/unavailable/stub
+    // envelopes are transient backend states, not an empty provider.
+    const listState = assetListState(assetsEnvelope)
+    const assets = Array.isArray(assetsEnvelope?.data?.assets)
+        ? assetsEnvelope!.data!.assets
+        : []
     // Stable ref so the callbacks that depend on it (re-aggregate, purge,
     // unregister) aren't rebuilt every render.
     const existingCatalogs = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data])
@@ -1491,13 +1498,34 @@ export function RegistryAssets() {
                                     feature="view data assets for this provider"
                                 />
                             ) : filteredAssets.length === 0 ? (
-                                assets.length === 0 && assetsEnvelope?.meta.status === 'computing' ? (
+                                assets.length === 0 && listState === 'loading' ? (
                                     <div className="flex flex-col items-center justify-center h-full text-ink-muted py-16 gap-4">
                                         <Loader2 className="w-8 h-8 animate-spin" />
                                         <div className="text-center">
                                             <p className="font-semibold text-sm">Discovering data sources…</p>
                                             <p className="text-xs opacity-70 mt-1">This updates automatically — no need to reload.</p>
                                         </div>
+                                    </div>
+                                ) : assets.length === 0 && listState === 'unavailable' ? (
+                                    // data:null without a job in flight — the cache has no
+                                    // usable row (enqueue failed / payload unreadable). NOT
+                                    // proof the provider is empty.
+                                    <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
+                                        <RefreshCw className="w-10 h-10 opacity-20" />
+                                        <p className="text-sm font-semibold">Background refresh paused</p>
+                                        <p className="text-xs opacity-70 text-center max-w-sm">
+                                            The data source list couldn't be refreshed in the background. Use Refresh to retry — existing data sources are unaffected.
+                                        </p>
+                                    </div>
+                                ) : assets.length === 0 && listState === 'error-stub' ? (
+                                    // Discovery failure stub: listing failed before a first
+                                    // successful scan (the banner above carries the reason).
+                                    <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
+                                        <WifiOff className="w-10 h-10 opacity-20" />
+                                        <p className="text-sm font-semibold">Couldn't list data sources</p>
+                                        <p className="text-xs opacity-70 text-center max-w-sm">
+                                            Discovery failed on the last attempt — this is not proof the provider is empty. It retries automatically on the next background sweep.
+                                        </p>
                                     </div>
                                 ) : assets.length === 0 ? (
                                     <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
