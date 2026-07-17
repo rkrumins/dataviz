@@ -50,7 +50,8 @@ async def test_preflight_sends_no_password_when_auth_disabled(monkeypatch):
     captured = {}
 
     async def fake_preflight(host, port, *, deadline_s, password=None,
-                             username=None, ssl_context=None):
+                             username=None, ssl_context=None,
+                             detect_cluster=False):
         captured["password"] = password
         captured["username"] = username
         from backend.common.interfaces.preflight import PreflightResult

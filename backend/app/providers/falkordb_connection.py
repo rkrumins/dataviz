@@ -457,6 +457,39 @@ def load_connection_config(
     )
 
 
+async def verify_not_cluster_node(
+    cfg: FalkorDBConnConfig, pool: Any, timeout: float,
+) -> None:
+    """Reject a STANDALONE-mode config pointed at a Redis Cluster node.
+
+    A standalone client against a cluster node sees only that node's slots:
+    keyless GRAPH.LIST silently under-reports (a random third of the graphs,
+    varying per connection behind a load-balanced Service), and keyed commands
+    fail with bare ``MOVED`` ResponseErrors nothing classifies. One bounded
+    ``INFO cluster`` at client-BUILD time (never per query); fail-open on INFO
+    errors — this guard must never take a healthy standalone instance down.
+    """
+    if cfg.mode != "standalone":
+        return
+    from redis.asyncio import Redis
+
+    try:
+        info = await asyncio.wait_for(
+            Redis(connection_pool=pool).info("cluster"), timeout=timeout,
+        )
+    except Exception:                                # pragma: no cover - fail-open
+        return
+    enabled = (info or {}).get("cluster_enabled", 0) if isinstance(info, dict) else 0
+    if str(enabled).strip().lower() in ("1", "true"):
+        raise ProviderConfigurationError(
+            f"FalkorDB at {cfg.host}:{cfg.port} is a Redis Cluster node but this "
+            f"provider is configured mode=standalone — a standalone client sees "
+            f"only one node's graphs (listings under-report; queries hit MOVED). "
+            f"Set falkordbConnection.mode=cluster with cluster.startupNodes (or "
+            f"FALKORDB_MODE=cluster + FALKORDB_CLUSTER_NODES)."
+        )
+
+
 def connect_verify_budget(cfg: FalkorDBConnConfig, default_s: float) -> float:
     """Wall clock for the connect-verifying PING (and similar fixed probe
     windows). The fleet default must EXTEND for a provider configured for a
@@ -1527,12 +1560,15 @@ class TopologyGraphClients:
                     # NOAUTH/WRONGPASS into a clear configuration error.
                     from redis.asyncio import Redis
 
-                    await asyncio.wait_for(
-                        Redis(connection_pool=pool).ping(),
-                        timeout=connect_verify_budget(
-                            c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
-                        ),
+                    budget = connect_verify_budget(
+                        c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
                     )
+                    await asyncio.wait_for(
+                        Redis(connection_pool=pool).ping(), timeout=budget,
+                    )
+                    # Standalone config against a cluster-enabled node would
+                    # silently see one node's slots — fail loud at build time.
+                    await verify_not_cluster_node(c, pool, budget)
                     return db, pool
 
                 db, pool = await with_auth_negotiation(cfg, _build)

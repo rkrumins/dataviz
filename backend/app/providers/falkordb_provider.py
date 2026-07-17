@@ -1018,6 +1018,12 @@ class FalkorDBProvider(GraphDataProvider):
             username=probe_username,
             password=probe_password,
             ssl_context=probe_ssl,
+            # Standalone mode against a cluster-enabled node silently sees only
+            # one node's graphs — surface it as a config verdict here (the /test
+            # wizard and discovery last_error both carry preflight reasons).
+            # Sentinel targets are never cluster nodes; cluster mode never
+            # reaches this call.
+            detect_cluster=(cfg.mode == "standalone"),
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
@@ -1060,7 +1066,10 @@ class FalkorDBProvider(GraphDataProvider):
         a read-write one would lazily create an empty graph key per probe.
         """
         from redis.asyncio import Redis
-        from backend.app.providers.falkordb_connection import build_graph_client
+        from backend.app.providers.falkordb_connection import (
+            build_graph_client,
+            verify_not_cluster_node,
+        )
 
         self._db, self._pool = await build_graph_client(
             self._conn_cfg,
@@ -1087,6 +1096,9 @@ class FalkorDBProvider(GraphDataProvider):
             Redis(connection_pool=self._pool).ping(),
             timeout=init_timeout,
         )
+        # Standalone config against a cluster-enabled node would silently see
+        # only one node's graphs — fail loud at build time (no-op otherwise).
+        await verify_not_cluster_node(self._conn_cfg, self._pool, init_timeout)
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
