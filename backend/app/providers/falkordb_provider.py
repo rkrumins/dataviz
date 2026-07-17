@@ -1139,14 +1139,13 @@ class FalkorDBProvider(GraphDataProvider):
                 tls_enabled=self._tls_enabled,
                 credentials=self._credentials,
             )
-            socket_timeout = self._conn_cfg.socket_timeout or float(
-                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-            )
-            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. Auth + TLS
-            # are applied inside the connection factory (TLS via
-            # connection_class=SSLConnection on the raw pools); pool_kwargs
-            # carries only sizing/timeouts/auth/decode. Built once here and
-            # reused verbatim on failover rebuild.
+            socket_timeout = self._graph_socket_timeout()
+            # The graph-pool socket timeout bounds a single Cypher query
+            # (floored above the server's TIMEOUT_MAX — see
+            # _graph_socket_timeout). Auth + TLS are applied inside the
+            # connection factory (TLS via connection_class=SSLConnection on
+            # the raw pools); pool_kwargs carries only sizing/timeouts/auth/
+            # decode. Built once here and reused verbatim on failover rebuild.
             _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
             if self._conn_cfg.mode != "standalone":
                 logger.info(
@@ -1381,9 +1380,42 @@ class FalkorDBProvider(GraphDataProvider):
     # FalkorDB engine cancels the query 500ms before the asyncio deadline so
     # the DB-side cancel races first (frees the worker thread + the pool
     # connection); asyncio.wait_for is the safety net for socket-level hangs.
+    #
+    # Clamped to the server's TIMEOUT_MAX: FalkorDB REJECTS (never runs) a
+    # query whose TIMEOUT parameter exceeds it, so an over-budget caller
+    # (e.g. the insights materialization's 600s) must degrade to "run for
+    # up to TIMEOUT_MAX" rather than fail instantly with "The query TIMEOUT
+    # parameter value cannot exceed the TIMEOUT_MAX configuration parameter".
     @staticmethod
     def _db_timeout_ms(seconds: float) -> int:
-        return max(500, int(seconds * 1000) - 500)
+        from ..config import resilience
+        ms = max(500, int(seconds * 1000) - 500)
+        cap = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
+        if cap > 0:
+            ms = min(ms, cap)
+        return ms
+
+    def _graph_socket_timeout(self) -> float:
+        """Socket recv/send timeout for the GRAPH query pools.
+
+        Floored above the server's TIMEOUT_MAX: the redis client applies
+        ``socket_timeout`` to each ``read_response``, and a long-running
+        Cypher query sends no bytes until it completes — a socket timeout
+        below the query budget kills legitimate queries mid-flight. The
+        hang-net role the low per-tier value played is preserved by the
+        per-call ``asyncio.wait_for`` in ``_ro_query``/``_query``, which
+        bounds every call at its own (much smaller) budget regardless of
+        socket state.
+        """
+        from ..config import resilience
+        configured = (
+            (self._conn_cfg.socket_timeout if self._conn_cfg else None)
+            or float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+        )
+        cap_ms = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
+        if cap_ms <= 0:
+            return configured
+        return max(configured, cap_ms / 1000.0 + 15.0)
 
     async def _rebuild_graph_client_for_failover(self, seen_generation: int) -> None:
         """Re-resolve and rebuild the FalkorDB client(s) after a cluster
@@ -1401,9 +1433,7 @@ class FalkorDBProvider(GraphDataProvider):
                 build_graph_client, aclose_graph_client,
             )
 
-            socket_timeout = self._conn_cfg.socket_timeout or float(
-                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-            )
+            socket_timeout = self._graph_socket_timeout()
             # Same kwargs as the initial connect (auth; TLS re-applied inside
             # the factory) so failover never drops credentials or TLS.
             pool_kwargs = self._build_pool_kwargs(socket_timeout)
@@ -2103,9 +2133,7 @@ class FalkorDBProvider(GraphDataProvider):
                     from backend.app.providers.falkordb_connection import (
                         build_graph_client,
                     )
-                    socket_timeout = self._conn_cfg.socket_timeout or float(
-                        os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-                    )
+                    socket_timeout = self._graph_socket_timeout()
                     self._proj_db, self._proj_pool = await build_graph_client(
                         self._conn_cfg,
                         graph_name=proj_name,
@@ -3256,8 +3284,15 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        from ..config.resilience import FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        from ..config.resilience import (
+            FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS,
+            FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS,
+        )
         t = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        # Count is best-effort with a shorter budget (display-only); an
+        # explicit query_timeout (e.g. the collector's materialization)
+        # keeps its generous budget for both queries.
+        ct = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS
 
         # Raises ProviderConfigurationError if no types resolvable — surfaced
         # as HTTP 400 by the endpoint. An empty set is a valid state meaning
@@ -3363,6 +3398,14 @@ class FalkorDBProvider(GraphDataProvider):
 
         try:
             page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
+        except asyncio.TimeoutError as e:
+            # Same type (GraphCache stale-fallback and the 503 handler match
+            # on it) but with a non-empty str() so the surfaced reason names
+            # the budget that actually fired instead of a blank string.
+            raise asyncio.TimeoutError(
+                f"top-level page query exceeded {t:.0f}s provider budget "
+                f"(graph={self._graph_name})"
+            ) from e
         except Exception as e:
             if not _is_missing_graph_error(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
@@ -3428,12 +3471,23 @@ class FalkorDBProvider(GraphDataProvider):
                 where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
                 count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
 
-            total_count = 0
+            total_count: Optional[int] = 0
             try:
-                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t, op="toplevel.count")
+                count_result = await self._ro_query(count_cypher, params=count_params, timeout=ct, op="toplevel.count")
                 if count_result and count_result.result_set:
                     first = count_result.result_set[0]
                     total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+            except asyncio.TimeoutError:
+                # Best-effort: the count is display-only, has_more is derived
+                # from the page size, and on large graphs the full-scan count
+                # is expected to miss its budget. Degrade instead of failing
+                # the whole request.
+                logger.warning(
+                    "get_top_level_or_orphan_nodes count query degraded: "
+                    f"exceeded {ct:.0f}s budget (graph={self._graph_name}); "
+                    "returning totalCount=null"
+                )
+                total_count = None
             except Exception as e:
                 if not _is_missing_graph_error(e):
                     logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")

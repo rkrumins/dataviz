@@ -1034,18 +1034,30 @@ async def get_top_level_nodes(
             scope is not None
             and not scope.branch_id            # main-branch physical reads only
             and scope.data_source_id
-            and not searchQuery
-            and not entityTypes
             and includeChildCount
         ):
+            # Filtered requests are served too when the materialized payload
+            # holds the COMPLETE top-level set (in-process filter beats an
+            # O(N) graph scan per keystroke); truncated payloads fall back
+            # to live for filters.
             served, known_total = await try_serve_top_level(
                 session, engine,
                 ds_id=scope.data_source_id, ws_id=scope.workspace_id,
                 limit=limit, cursor=cursor,
+                search_query=searchQuery, entity_types=entityTypes,
             )
             if served is not None:
                 return served
-        return await engine.get_top_level_or_orphan_nodes(
+        # Count side-cache: keyed by filters only (no cursor/limit), so
+        # every page of one filtered listing pays for at most one live
+        # count scan. Generation-keyed — write paths invalidate it.
+        count_params = {
+            "entityTypes": sorted(entityTypes) if entityTypes else None,
+            "searchQuery": searchQuery,
+        }
+        if known_total is None and scope is not None:
+            known_total = await get_graph_cache().get_top_level_count(scope, count_params)
+        result = await engine.get_top_level_or_orphan_nodes(
             entity_types=entityTypes,
             search_query=searchQuery,
             limit=limit,
@@ -1053,6 +1065,11 @@ async def get_top_level_nodes(
             include_child_count=includeChildCount,
             known_total_count=known_total,
         )
+        if known_total is None and scope is not None and result.total_count is not None:
+            await get_graph_cache().set_top_level_count(
+                scope, count_params, result.total_count,
+            )
+        return result
 
     if scope is None:
         try:

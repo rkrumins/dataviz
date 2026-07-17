@@ -370,7 +370,10 @@ export async function fetchWithTimeout(
     res = await runOnce(input, fetchInit, method, timeoutMs)
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new TypeError('Request timed out (backend may be unavailable)')
+      throw new TypeError(
+        `Request timed out after ${Math.round(timeoutMs / 1000)}s ` +
+        '(client-side limit — backend may be slow or unavailable)',
+      )
     }
     throw err
   }
@@ -386,7 +389,10 @@ export async function fetchWithTimeout(
         return await runOnce(input, fetchInit, method, timeoutMs)
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
-          throw new TypeError('Request timed out (backend may be unavailable)')
+          throw new TypeError(
+            `Request timed out after ${Math.round(timeoutMs / 1000)}s ` +
+            '(client-side limit — backend may be slow or unavailable)',
+          )
         }
         throw err
       }
@@ -406,7 +412,10 @@ export async function fetchWithTimeout(
         return await runOnce(input, fetchInit, method, timeoutMs)
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
-          throw new TypeError('Request timed out (backend may be unavailable)')
+          throw new TypeError(
+            `Request timed out after ${Math.round(timeoutMs / 1000)}s ` +
+            '(client-side limit — backend may be slow or unavailable)',
+          )
         }
         throw err
       }

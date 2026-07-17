@@ -553,3 +553,179 @@ async def test_restore_dirty_flag_swallows_redis_errors(monkeypatch):
     monkeypatch.setattr(top_level_cache, "get_redis", lambda: redis)
 
     await top_level_cache.restore_dirty_flag("ds1")  # must not raise
+
+
+# ── filtered serving from a COMPLETE payload ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_try_serve_search_filter_on_complete_payload(monkeypatch):
+    payload = _stored_payload(
+        ["Alpha", "Beta", "Alphabet"], digest=DIGEST, truncated=False,
+    )
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    enqueue = _patch(monkeypatch, row=row)
+
+    result, total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, search_query="alph",
+    )
+    assert result is not None
+    assert [n.display_name for n in result.nodes] == ["Alpha", "Alphabet"]
+    assert result.total_count == 2  # counts the FILTERED set
+    assert result.has_more is False
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_try_serve_search_filter_matches_urn(monkeypatch):
+    # urns are "urn:Table:<name>" — search on the urn substring "table"
+    payload = _stored_payload(["Alpha"], digest=DIGEST, truncated=False)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, search_query="table",
+    )
+    assert result is not None
+    assert [n.display_name for n in result.nodes] == ["Alpha"]
+
+
+@pytest.mark.asyncio
+async def test_try_serve_entity_type_filter_case_insensitive(monkeypatch):
+    payload = _stored_payload(
+        ["Alpha", "Beta"], digest=DIGEST, truncated=False,
+        entity_types=["Table", "Domain"],
+    )
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, entity_types=["domain"],
+    )
+    assert result is not None
+    assert [n.display_name for n in result.nodes] == ["Beta"]
+    assert result.total_count == 1
+
+
+@pytest.mark.asyncio
+async def test_try_serve_combined_filters_and_pagination(monkeypatch):
+    payload = _stored_payload(
+        ["Alpha", "Alpine", "Altair", "Beta"], digest=DIGEST, truncated=False,
+        entity_types=["Table", "Table", "Table", "Table"],
+    )
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=2, cursor=None, search_query="al", entity_types=["Table"],
+    )
+    assert result is not None
+    assert [n.display_name for n in result.nodes] == ["Alpha", "Alpine"]
+    assert result.total_count == 3
+    assert result.has_more is True
+    assert result.next_cursor == "Alpine"
+
+    page2, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=2, cursor=result.next_cursor, search_query="al", entity_types=["Table"],
+    )
+    assert [n.display_name for n in page2.nodes] == ["Altair"]
+    assert page2.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_try_serve_filter_no_matches_serves_empty(monkeypatch):
+    payload = _stored_payload(["Alpha"], digest=DIGEST, truncated=False)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, search_query="zzz",
+    )
+    assert result is not None
+    assert result.nodes == []
+    assert result.total_count == 0
+    assert result.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_try_serve_filter_on_truncated_payload_misses(monkeypatch):
+    """A truncated window cannot answer a filtered query — matches may
+    live outside it. Must fall back live with known_total=None."""
+    payload = _stored_payload(["Alpha"], digest=DIGEST, total=5000, truncated=True)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    enqueue = _patch(monkeypatch, row=row)
+
+    result, total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, search_query="alp",
+    )
+    assert (result, total) == (None, None)
+    enqueue.assert_not_awaited()  # payload is current — live is the only source
+
+
+@pytest.mark.asyncio
+async def test_try_serve_filtered_expired_returns_no_total(monkeypatch):
+    """On an expired-tier miss the unfiltered path forwards the payload's
+    total; a filtered miss must NOT (the stored total counts the
+    unfiltered set)."""
+    payload = _stored_payload(["Alpha"], digest=DIGEST, total=1)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_expired_ts())
+    _patch(monkeypatch, row=row)
+
+    _, unfiltered_total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None,
+    )
+    assert unfiltered_total == 1
+
+    _, filtered_total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None, search_query="alp",
+    )
+    assert filtered_total is None
+
+
+# ── best-effort count: payload build with total_count=None ──────────
+
+def test_build_payload_with_null_total_count():
+    nodes = [GraphNode(urn="urn:1", entityType="Table", displayName="Alpha")]
+    stats = {"nodeCount": 1, "edgeCount": 0, "entityTypeCounts": {}, "edgeTypeCounts": {}}
+    serialized = top_level_cache.build_top_level_payload(
+        _result(nodes, None, False), stats=stats, digest="d1",
+    )
+    payload = json.loads(serialized)
+    assert payload["totalCount"] is None
+    assert payload["truncated"] is False  # None total must not force truncated
+
+
+# ── serve gate override ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_serve_min_nodes_env_override(monkeypatch):
+    """TOP_LEVEL_SERVE_MIN_NODES lowers the serve gate so mid-size graphs
+    can serve materialized pages too."""
+    payload = _stored_payload(["Alpha"], digest=DIGEST, truncated=False)
+    row = _FakeStatsRow(
+        node_count=50_000,  # below the 100k default threshold
+        top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts(),
+    )
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None,
+    )
+    assert result is None  # default gate: miss_small
+
+    monkeypatch.setenv("TOP_LEVEL_SERVE_MIN_NODES", "10000")
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",
+        limit=10, cursor=None,
+    )
+    assert result is not None
+    assert [n.display_name for n in result.nodes] == ["Alpha"]

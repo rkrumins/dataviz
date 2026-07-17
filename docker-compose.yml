@@ -198,6 +198,9 @@ services:
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "5"
+      # Must match TIMEOUT_MAX in the falkordb service's FALKORDB_ARGS —
+      # the backend clamps per-query timeouts to it (server rejects more).
+      FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
 
@@ -253,6 +256,8 @@ services:
       # per-provider edits. Override (or set empty) to disable.
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
+      # Must match TIMEOUT_MAX in the falkordb service's FALKORDB_ARGS.
+      FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
       # Management database
@@ -345,7 +350,8 @@ services:
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "60"
-
+      # Must match TIMEOUT_MAX in the falkordb service's FALKORDB_ARGS.
+      FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
 
       # Concurrency: max parallel aggregation jobs per worker replica.
       # Pool sizes are auto-computed: graph = concurrency*4+8, redis = concurrency*3+8
@@ -398,6 +404,8 @@ services:
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "60"
+      # Must match TIMEOUT_MAX in the falkordb service's FALKORDB_ARGS.
+      FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
       SYNODIC_ROLE: worker
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     # Headless projector: no HTTP health server yet, so disable the inherited
@@ -458,6 +466,11 @@ services:
       # per-provider edits. Override (or set empty) to disable.
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
+      # Must match TIMEOUT_MAX in the falkordb service's FALKORDB_ARGS.
+      # Critical here: the top-level materialization's 600s budget is
+      # clamped to this — a mismatch makes FalkorDB reject the query and
+      # large graphs never get their materialized payload.
+      FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
 
       # Must match viz-service or stored provider credentials won't decrypt.
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}

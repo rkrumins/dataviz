@@ -213,10 +213,23 @@ def _wire(
 
     monkeypatch.setattr(cache_warmer, "schedule_warm", lambda **_kw: None)
 
+    # Capture the Redis count-cache seed (and keep tests off real Redis).
+    count_seeds: list[tuple] = []
+
+    class _FakeGraphCache:
+        async def set_top_level_count(self, scope, params, value):
+            count_seeds.append((scope, params, value))
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.get_graph_cache",
+        lambda: _FakeGraphCache(),
+    )
+
     return SimpleNamespace(
         events=events, upserts=upserts, tl_calls=tl_calls, sets=sets,
         touched=touched, reads=reads, consumed=consumed, restored=restored,
         polling_config=polling_config, stored_row=stored_row,
+        count_seeds=count_seeds, engine=engine,
     )
 
 
@@ -432,6 +445,70 @@ async def test_ontology_shift_mid_query_skips_persist(monkeypatch) -> None:
     assert obs.restored == ["ds1"]                      # consumed dirty flag restored
     assert len(obs.upserts) == 1                        # counts write intact
     assert obs.polling_config.last_status == "success"  # poll-success stamp intact
+
+
+@pytest.mark.asyncio
+async def test_materialize_seeds_count_cache(monkeypatch) -> None:
+    """A successful materialize seeds the Redis count side-cache with the
+    unfiltered filter shape, so live-path requests skip the O(N) count."""
+    stats = _stats(150_000)
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=_resolved(),
+        stored_top_level=None, tl_result=_tl_result(3, total=150_000),
+    )
+
+    await collector.collect_counts(_envelope())
+
+    assert len(obs.sets) == 1
+    assert len(obs.count_seeds) == 1
+    scope, params, value = obs.count_seeds[0]
+    assert scope.workspace_id == "ws1"
+    assert scope.data_source_id == "ds1"
+    assert params == {"entityTypes": None, "searchQuery": None}
+    assert value == 150_000
+
+
+@pytest.mark.asyncio
+async def test_deep_lane_materializes_on_first_profile(monkeypatch) -> None:
+    """`collect_deep` (profile creation) must materialize the top-level
+    payload too — a freshly profiled large data source should be servable
+    from Postgres immediately, not after the next counts poll."""
+    stats = _stats(150_000)
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=_resolved(),
+        stored_top_level=None, tl_result=_tl_result(3),
+    )
+    # collect_deep-specific seams on top of _wire's fakes:
+    # no previous profile → change detection can't short-circuit.
+    obs.stored_row.schema_stats = None
+    obs.stored_row.graph_schema = None
+    obs.engine.provider.get_schema_stats = AsyncMock(
+        return_value=SimpleNamespace(
+            total_nodes=stats["nodeCount"], total_edges=stats["edgeCount"],
+            entity_type_stats=[
+                SimpleNamespace(id="dataset", count=stats["nodeCount"]),
+            ],
+            edge_type_stats=[
+                SimpleNamespace(id="CONTAINS", count=stats["edgeCount"]),
+            ],
+            model_dump_json=lambda **_kw: "{}",
+        ),
+    )
+    obs.engine.get_graph_schema = AsyncMock(
+        return_value=SimpleNamespace(model_dump_json=lambda **_kw: "{}"),
+    )
+    monkeypatch.setattr(collector, "upsert_data_source_stats", AsyncMock())
+
+    await collector.collect_deep(_envelope())
+
+    assert len(obs.tl_calls) == 1
+    assert obs.tl_calls[0]["limit"] == collector.TOP_LEVEL_MATERIALIZE_LIMIT
+    assert obs.tl_calls[0]["query_timeout"] == resilience.STATS_POLL_TIMEOUT_LARGE_SECS
+    assert len(obs.sets) == 1
+    payload = json.loads(obs.sets[0])
+    assert payload["digest"] == containment_digest(_CONTAINMENT, _ROOTS)
+    assert len(payload["nodes"]) == 3
+    _assert_no_io_in_session(obs.events)
 
 
 @pytest.mark.asyncio

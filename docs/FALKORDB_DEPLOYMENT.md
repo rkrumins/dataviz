@@ -322,7 +322,15 @@ How the deployed `FALKORDB_ARGS` values are derived:
   the *node's* cores, and on a big node that causes CFS throttling and CPU spikes.
 - **`TIMEOUT_MAX`** must be set for FalkorDB to honor per-query timeouts on WRITE
   queries (`TIMEOUT_DEFAULT` alone only covers reads). Client-side query budgets
-  must stay below `TIMEOUT_MAX` or the server rejects the timeout.
+  must stay below `TIMEOUT_MAX` or the server rejects the timeout — the error is
+  "The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX configuration
+  parameter" and the query never runs. The backend clamps every per-query timeout
+  it sends to **`FALKORDB_SERVER_TIMEOUT_MAX_MS`** (default 180000), so this env
+  var MUST be kept equal to the deployed `TIMEOUT_MAX`. It is wired in
+  docker-compose (all FalkorDB-consuming services), the k8s `common-config`
+  ConfigMap (base 180000; production-cluster overlay overrides to 120000 to match
+  its shard args), and the Helm chart (`config.falkordb.serverTimeoutMaxMs`). See
+  `docs/TOP_LEVEL_NODES_PERFORMANCE.md` for the incident this alignment fixes.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling

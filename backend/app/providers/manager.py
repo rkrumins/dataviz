@@ -321,12 +321,13 @@ class ProviderManager:
             )
             ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
             try:
+                from backend.app.config import resilience as _resilience
                 raw_provider = await asyncio.wait_for(
                     self._instantiate_from_provider(
                         ds.provider_id, ds.graph_name, session,
                         ds_extra_config=ds_extra,
                     ),
-                    timeout=10,
+                    timeout=_resilience.PROVIDER_INSTANTIATION_TIMEOUT_SECS,
                 )
             except asyncio.TimeoutError:
                 state_after, fails_after = await breaker._record_failure()
