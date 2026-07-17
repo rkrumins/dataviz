@@ -473,17 +473,20 @@ async def probe_cache_redis() -> dict:
 
 def _build_falkor_probe_client(
     host: str, port: int, *, username=None, password=None, tls=None,
+    connect_timeout=None, socket_timeout=None,
 ):
     """Short-lived probe client for ONE FalkorDB node, carrying the graph
     connection's auth + TLS. It used to be a bare Redis(host, port), which cannot
-    talk to an authenticated instance at all."""
+    talk to an authenticated instance at all. The 1/1.5s defaults false-down a
+    slow cross-cluster hop, so a configured connectTimeout/socketTimeout wins."""
     import redis.asyncio as aioredis
 
     from backend.common.adapters.redis_tls import tls_client_kwargs
 
     kw = dict(
         host=host, port=port, decode_responses=True,
-        socket_connect_timeout=1, socket_timeout=1.5,
+        socket_connect_timeout=connect_timeout or 1,
+        socket_timeout=socket_timeout or 1.5,
         **tls_client_kwargs(tls),
     )
     if username:
@@ -495,19 +498,22 @@ def _build_falkor_probe_client(
 
 async def _falkor_node_probe(
     host: str, port: int, label: str, *, username=None, password=None, tls=None,
+    connect_timeout=None, socket_timeout=None, budget=None,
 ) -> dict:
     """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
     short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+    budget = budget or _BUDGET_FALKOR
     client = _build_falkor_probe_client(
         host, port, username=username, password=password, tls=tls,
+        connect_timeout=connect_timeout, socket_timeout=socket_timeout,
     )
     try:
-        result = await _redis_probe("falkordbNode", label, client, _BUDGET_FALKOR)
+        result = await _redis_probe("falkordbNode", label, client, budget)
         if result["status"] != "down":
             # Best-effort — GRAPH.LIST failing alone is not a fault. On a cluster
             # this is the count of keys in THIS node's slots.
             try:
-                async with asyncio.timeout(_BUDGET_FALKOR):
+                async with asyncio.timeout(budget):
                     graphs = await client.execute_command("GRAPH.LIST")
                     result["detail"]["graphCount"] = (
                         len(graphs) if graphs is not None else None
@@ -536,7 +542,8 @@ async def probe_falkordb() -> dict:
     none up → down. Graph count is the sum across shards.
     """
     from backend.app.providers.falkordb_connection import (
-        cluster_primary_nodes, env_conn_config, resolve_sentinel_master,
+        cluster_primary_nodes, connect_verify_budget, env_conn_config,
+        resolve_sentinel_master,
     )
 
     try:
@@ -554,6 +561,15 @@ async def probe_falkordb() -> dict:
         "tls": cfg.tls_enabled,
         "authenticated": bool(cfg.password),
     }
+    # The fixed 1/1.5s probe windows false-down a slow cross-cluster hop;
+    # a configured connectTimeout/probeDeadlineS extends them (never shrinks).
+    budget = connect_verify_budget(cfg, _BUDGET_FALKOR)
+    node_probe_kw = dict(
+        username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+        connect_timeout=cfg.socket_connect_timeout,
+        socket_timeout=cfg.socket_timeout,
+        budget=budget,
+    )
 
     if cfg.mode == "sentinel":
         # Probe the MASTER Sentinel currently names, not a Sentinel daemon: a
@@ -561,14 +577,13 @@ async def probe_falkordb() -> dict:
         # would show the graph tier green through a whole master outage.
         host, port = cfg.host, cfg.port
         try:
-            async with asyncio.timeout(_BUDGET_FALKOR):
-                host, port = await resolve_sentinel_master(cfg, _BUDGET_FALKOR)
+            async with asyncio.timeout(budget):
+                host, port = await resolve_sentinel_master(cfg, budget)
         except Exception as exc:
             return _svc("falkordb", "FalkorDB · Sentinel", "down",
                         error=_err(exc), detail={"mode": "sentinel"})
         result = await _falkor_node_probe(
-            host, port, "FalkorDB · Sentinel",
-            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+            host, port, "FalkorDB · Sentinel", **node_probe_kw,
         )
         result["detail"]["mode"] = "sentinel"
         result["detail"]["master"] = f"{host}:{port}"
@@ -577,26 +592,34 @@ async def probe_falkordb() -> dict:
 
     if cfg.mode != "cluster":
         result = await _falkor_node_probe(
-            cfg.host, cfg.port, "FalkorDB",
-            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
+            cfg.host, cfg.port, "FalkorDB", **node_probe_kw,
         )
         result["detail"]["mode"] = "standalone"
         result["detail"].update(graph_conf_detail)
+        if result["status"] == "down" and os.getenv("FALKORDB_HOST") is None:
+            # No FALKORDB_* endpoint was ever configured, so the probe dialed
+            # the localhost default. Where FalkorDB lives only in provider rows
+            # (probed per-provider) this is not an outage — report unconfigured
+            # (the cache probe's convention), not a false DOWN.
+            result["status"] = "unknown"
+            result["detail"]["configured"] = False
+            result["error"] = (
+                "no env-default FalkorDB endpoint configured (FALKORDB_HOST "
+                "unset); provider-routed instances are probed per provider"
+            )
         return result
 
     try:
-        async with asyncio.timeout(_BUDGET_FALKOR):
-            nodes = await cluster_primary_nodes(cfg, _BUDGET_FALKOR)
+        async with asyncio.timeout(budget):
+            nodes = await cluster_primary_nodes(cfg, budget)
     except Exception as exc:
         # No topology → the cluster is unreachable from here, which IS the fault.
         return _svc("falkordb", "FalkorDB · Cluster", "down", error=_err(exc),
                     detail={"mode": "cluster"})
 
     results = await asyncio.gather(
-        *(_falkor_node_probe(
-            h, p, f"shard {h}:{p}",
-            username=cfg.username, password=cfg.password, tls=cfg.tls_settings(),
-        ) for h, p in nodes),
+        *(_falkor_node_probe(h, p, f"shard {h}:{p}", **node_probe_kw)
+          for h, p in nodes),
         return_exceptions=True,
     )
     shards = [r for r in results if isinstance(r, dict)]

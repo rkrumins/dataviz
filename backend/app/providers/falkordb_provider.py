@@ -988,11 +988,16 @@ class FalkorDBProvider(GraphDataProvider):
             # password / graph TLS context reported auth_failed or a garbled
             # handshake against a perfectly healthy tier on any deployment where
             # the two differ (e.g. TLS data plane + plaintext sentinels).
-            sentinel_kw = _sentinel_auth_kwargs(cfg, 1.0)
+            # Discovery socket budget: the 1.0s floor false-failed discovery on
+            # a >1s-RTT sentinel tier, silently downgrading the probe to a
+            # daemon PING (a dead master read green). A provider's
+            # connectTimeout raises it, capped by the preflight deadline.
+            discover_s = min(deadline_s, max(1.0, cfg.socket_connect_timeout or 1.0))
+            sentinel_kw = _sentinel_auth_kwargs(cfg, discover_s)
             probe_username = sentinel_kw.get("username")
             probe_password = sentinel_kw.get("password")
             probe_ssl = build_ssl_context(cfg.sentinel_tls_settings())
-            discover = resolve_sentinel_master(cfg, 1.0)
+            discover = resolve_sentinel_master(cfg, discover_s)
 
         if discover is not None:
             started = time.monotonic()
@@ -1204,7 +1209,11 @@ class FalkorDBProvider(GraphDataProvider):
             # Build graph client(s) + verify with one bounded PING (see
             # _build_and_verify — if the verify fails, the connect failed and
             # the caller's circuit breaker records it).
-            _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+            from backend.app.providers.falkordb_connection import connect_verify_budget
+
+            _init_timeout = connect_verify_budget(
+                self._conn_cfg, float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
             try:
                 await self._build_and_verify(_graph_pool_kwargs, _init_timeout)
             except Exception as _auth_exc:

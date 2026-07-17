@@ -109,6 +109,10 @@ class FalkorDBConnConfig:
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
     socket_connect_timeout: Optional[float] = None
+    # probeDeadlineS EXTENDS (never shrinks) every fixed probe/verify budget —
+    # the warmup preflight deadline, the connect verify-ping wall clock, and
+    # the manual test-endpoint deadline — for one slow cross-cluster provider.
+    probe_deadline_s: Optional[float] = None
     # Cross-cluster address remap: pairs of ("host[:port]", "host[:port]").
     # Redis announces the addresses IT knows (cluster slot map, sentinel
     # discover-master) — pod IPs that a client in ANOTHER GKE cluster cannot
@@ -443,12 +447,26 @@ def load_connection_config(
         socket_timeout=_coerce_float(cfg.get("socketTimeout")),
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
         socket_connect_timeout=_coerce_float(cfg.get("connectTimeout"), "connectTimeout"),
+        probe_deadline_s=_coerce_float(cfg.get("probeDeadlineS"), "probeDeadlineS"),
         tls_enabled=tls_on,
         tls_ca_certs=tls_ca,
         tls_certfile=tls_cert,
         tls_keyfile=tls_key,
         tls_cert_reqs=tls_reqs,
         tls_check_hostname=tls_check,
+    )
+
+
+def connect_verify_budget(cfg: FalkorDBConnConfig, default_s: float) -> float:
+    """Wall clock for the connect-verifying PING (and similar fixed probe
+    windows). The fleet default must EXTEND for a provider configured for a
+    slow cross-cluster hop, never clip it: the budget is at least the
+    configured dial timeout plus one ping, and at least ``probeDeadlineS``.
+    """
+    return max(
+        default_s,
+        cfg.probe_deadline_s or 0.0,
+        (cfg.socket_connect_timeout or 0.0) + 1.0,
     )
 
 
@@ -1434,10 +1452,19 @@ class TopologyGraphClients:
         secret = hashlib.sha256(
             (cfg.password or "").encode("utf-8")
         ).hexdigest()[:16] if cfg.password else None
+        # Sentinel-DAEMON auth is part of the identity for the same reason as
+        # the data-plane password: two providers identical in data plane +
+        # master + nodes but differing only in daemon credentials must not
+        # collapse onto one cached client (whichever built first would win its
+        # daemon auth for both). Hash, never the secret.
+        daemon_secret = hashlib.sha256(
+            (cfg.sentinel_password or "").encode("utf-8")
+        ).hexdigest()[:16] if cfg.sentinel_password else None
         return (
             cfg.mode, cfg.host, cfg.port, cfg.username, secret,
             cfg.sentinel_master,
             tuple(cfg.sentinel_nodes), tuple(cfg.cluster_nodes),
+            cfg.sentinel_username, daemon_secret, cfg.sentinel_auth_enabled,
             cfg.tls_enabled,
             # Frozen dataclass (hashable). Flipping the sentinel-daemon TLS
             # override must invalidate cached clients like any config change.
@@ -1502,7 +1529,9 @@ class TopologyGraphClients:
 
                     await asyncio.wait_for(
                         Redis(connection_pool=pool).ping(),
-                        timeout=_resilience.FALKORDB_INIT_TIMEOUT_SECS,
+                        timeout=connect_verify_budget(
+                            c, _resilience.FALKORDB_INIT_TIMEOUT_SECS,
+                        ),
                     )
                     return db, pool
 
