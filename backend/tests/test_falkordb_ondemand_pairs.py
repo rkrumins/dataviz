@@ -1131,3 +1131,92 @@ def test_entry_result_carries_freshness_fields():
     ))
     assert result2.stale is False
     assert result2.regime == "boundary" and result2.stamp_version == 2
+
+
+def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
+    """A timed-out :AGGREGATED batch used to be silently swallowed by
+    `_run_batch`'s ``except Exception: return []`` — the merged result
+    presented (and got cached upstream) as complete even though a whole
+    label bucket's edges were dropped. It must instead flag the result
+    stale/degraded/truncated, exactly like an on-demand sub-query
+    failure, WITHOUT dropping the rows the other batch did return."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a-fail"]), ("LabelB", ["urn:b-ok"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "LabelA" in cypher:
+            raise TimeoutError("batch timed out")
+        return _Result([["urn:b-ok", "urn:target", 3, ["FLOWS"]]])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a-fail", "urn:b-ok"], ["urn:target"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],  # short-circuits on-demand synthesis
+    ))
+
+    assert result.stale is True
+    assert result.stale_reason == "degraded"
+    assert result.truncated is True
+    got = {
+        (e.source_urn, e.target_urn): e.edge_count
+        for e in result.aggregated_edges
+    }
+    assert got == {("urn:b-ok", "urn:target"): 3}
+
+
+def test_all_materialized_batches_succeed_leaves_flags_unset():
+    """Sanity counterpart: when every batch succeeds, the new flag must
+    not falsely mark the result stale/truncated."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a-ok"]), ("LabelB", ["urn:b-ok"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "LabelA" in cypher:
+            return _Result([["urn:a-ok", "urn:target", 1, ["FLOWS"]]])
+        return _Result([["urn:b-ok", "urn:target", 3, ["FLOWS"]]])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a-ok", "urn:b-ok"], ["urn:target"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert result.stale is False
+    assert result.stale_reason is None
+    assert result.truncated is False

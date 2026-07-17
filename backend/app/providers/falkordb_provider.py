@@ -4996,6 +4996,37 @@ class FalkorDBProvider(GraphDataProvider):
 
         logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
 
+    async def clear_content_caches(self) -> None:
+        """Bulk counterpart to :meth:`on_containment_changed`: clears every
+        containment-digest ancestors namespace and the urn→label cache,
+        and drops the in-process aggregation run-meta memo.
+
+        Call only from the confirmed-source-change signal (e.g. after an
+        external bulk load/re-parent) — per-node edits still go through
+        ``on_containment_changed``. Without this, both the read path and
+        the aggregation rebuild worker keep resolving ancestor chains
+        from the old graph shape for up to the 7-day content-cache TTL.
+
+        Best-effort and never-raising: a no-op if no cache Redis is
+        configured; any failure is logged and swallowed.
+        """
+        try:
+            await self._ensure_connected()
+            if self._redis is not None:
+                pattern = f"{self._cache_ns}:ancestors:*"
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(cursor, match=pattern, count=500)
+                    if keys:
+                        await self._redis.delete(*keys)
+                    if cursor == 0:
+                        break
+                await self._redis.delete(self._urn_label_key())
+        except Exception as e:
+            logger.warning(f"clear_content_caches failed: {e}")
+        finally:
+            self._agg_meta_cached = None
+
     async def count_aggregated_edges(self) -> int:
         """Cheap COUNT for purge progress reporting. Returns the current
         number of materialized AGGREGATED edges in the projection graph.
@@ -5286,7 +5317,10 @@ class FalkorDBProvider(GraphDataProvider):
                 f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
 
+        batch_failed = False
+
         async def _run_batch(label: str, batch: List[str]) -> list:
+            nonlocal batch_failed
             params: Dict[str, Any] = {"sourceUrns": batch}
             if target_urns:
                 params["targetUrns"] = target_urns
@@ -5297,6 +5331,7 @@ class FalkorDBProvider(GraphDataProvider):
                 return result.result_set or []
             except Exception as e:
                 logger.warning(f"AGGREGATED edge read failed: {e}")
+                batch_failed = True
                 return []
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
@@ -5380,7 +5415,12 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
 
-        if synth_degraded and not stale_reason:
+        # A failed materialized-edge batch is the same "answer is
+        # incomplete for this graph state" condition as an on-demand
+        # sub-query failure — fold it into the same degraded/stale_reason
+        # computation rather than a parallel flag.
+        degraded = synth_degraded or batch_failed
+        if degraded and not stale_reason:
             stale_reason = "degraded"
 
         # The legacy single-query read returned rows weight-descending;
@@ -5388,7 +5428,7 @@ class FalkorDBProvider(GraphDataProvider):
         rows = sorted(rows, key=lambda r: -(int(r[2]) if r[2] else 0))
         return self._rows_to_aggregated_result(
             rows, last_materialized_at=meta.last_materialized_at,
-            degraded=synth_degraded,
+            degraded=degraded,
             stale=bool(stale_reason),
             stale_reason=stale_reason,
             stamp_version=meta.stamp_version,
