@@ -86,6 +86,7 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import { CanvasStatusChips } from './CanvasStatusChips'
 import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -166,6 +167,9 @@ export function ContextViewCanvas({
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
+  const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
+  const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
@@ -497,6 +501,8 @@ export function ContextViewCanvas({
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
+    error: aggregationError,
+    loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
@@ -1361,7 +1367,7 @@ export function ContextViewCanvas({
   )
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1597,7 +1603,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
+  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -2342,7 +2348,7 @@ export function ContextViewCanvas({
   // Edge projection: lineageEdges, visibleLineageEdges
   // Pass the trace-filtered views so projected edges only reference visible
   // nodes; outside trace mode these are pass-through to the originals.
-  const { visibleLineageEdges } = useEdgeProjection({
+  const { visibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
@@ -2466,6 +2472,33 @@ export function ContextViewCanvas({
     }
     return counts
   }, [visibleLineageEdges])
+
+  // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  const unassignedEntities = useMemo(() =>
+    unassignedNodes.map((n) => ({
+      id: n.id,
+      label: (n.data?.label ?? n.data?.businessLabel ?? n.id) as string,
+      type: n.data?.type as string | undefined,
+    })), [unassignedNodes])
+  // Truncated aggregated expansions: summed shown/total across all expanded
+  // bundles whose detail was capped, plus a load-more that pages each one.
+  const aggDetailStatus = useMemo(() => {
+    let shown = 0
+    let total = 0
+    const truncatedIds: string[] = []
+    aggregatedEdges.forEach((state, id) => {
+      if (state.state === 'expanded' && state.detailTruncated) {
+        shown += state.detailedEdges.length
+        total += state.detailTotal ?? state.detailedEdges.length
+        truncatedIds.push(id)
+      }
+    })
+    return { shown, total, truncatedIds }
+  }, [aggregatedEdges])
+  const handleLoadMoreAggDetail = useCallback(() => {
+    aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
+  }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
@@ -2716,12 +2749,33 @@ export function ContextViewCanvas({
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {aggregationTruncated && (
+        {(aggregationTruncated || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
             <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+          </div>
+        )}
+        {/* Edge-fetch integrity banner — an edge query failed and was
+            swallowed to keep nodes rendering; the canvas may be missing
+            connections. Retry re-hydrates and refetches aggregated edges. */}
+        {(edgeFetchFailures > 0 || aggregationError) && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">Some connections could not be loaded — the canvas may be incomplete.</span>
+            <button
+              className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
+              onClick={() => {
+                clearEdgeFetchFailures()
+                invalidateAggregatedEdges()
+                retryHydration()
+              }}
+            >
+              Retry
+            </button>
           </div>
         )}
         {/* Warning: missing ontology configuration */}
@@ -2856,6 +2910,18 @@ export function ContextViewCanvas({
         >
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
         </div>
+
+        {/* Status chips — loaded-but-hidden data (unresolved edges,
+            unassigned entities, truncated aggregated detail). The canvas
+            never hides lineage silently. */}
+        <CanvasStatusChips
+          unresolvedEdgeCount={unresolvedEdgeCount}
+          unassignedEntities={unassignedEntities}
+          onOpenEntity={openNodeDrawer}
+          aggDetailShown={aggDetailStatus.shown}
+          aggDetailTotal={aggDetailStatus.total}
+          onLoadMoreDetail={handleLoadMoreAggDetail}
+        />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
             empty model, and the first-steps companion while building. Both are

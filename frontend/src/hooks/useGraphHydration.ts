@@ -26,7 +26,13 @@ import { useProviderHealthStore } from '@/store/providerHealth'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Max entities per type per fetch. Keeps initial loads manageable. */
+/** Max entities per type per fetch. Keeps initial loads manageable.
+ *  KNOWN LIMIT (deliberate, deferred): open ('all') views load only the
+ *  first 200 top-level entities per type and there is no top-level
+ *  load-more affordance — curated views (the primary product path) load
+ *  by explicit URN and are unaffected. Reaching entities beyond the cap
+ *  works via search + reveal. A per-type cursor through hydration is the
+ *  eventual fix. */
 const PER_TYPE_LIMIT = 200
 
 /**
@@ -352,6 +358,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // blink to "Start building" between attempts; a retry only clears them
         // by SUCCEEDING (markReady) below.
         setGraph([], [])
+        // Fresh attempt → fresh edge-integrity state; failures from the
+        // previous attempt would otherwise keep the incomplete-canvas
+        // banner up after a clean reload.
+        useCanvasStore.getState().clearEdgeFetchFailures()
+        useCanvasStore.getState().setEdgesTruncated(false)
 
         const controller = new AbortController()
 
@@ -510,8 +521,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // truncated at the 50k default on large graphs.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch(() => [] as GraphEdge[])
+                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch((err: unknown) => {
+                        // Nodes still render (graceful), but record the
+                        // failure so the canvas can say edges are missing.
+                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                        return [] as GraphEdge[]
+                    })
                     if (controller.signal.aborted) return
+                    // /edges/between returns a bare list with no truncated
+                    // flag — a result exactly at the request limit almost
+                    // certainly hit the server-side cap. (A response header
+                    // would be lost on GraphCache hits, so this length
+                    // heuristic is the compatible signal.)
+                    if (allEdges.length >= 200_000) {
+                        useCanvasStore.getState().setEdgesTruncated(true)
+                    }
 
                     // Replace with complete dataset atomically
                     setGraph(
@@ -602,8 +626,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Step 4: Fetch edges between ALL loaded nodes
                     setHydrationPhase('edges')
                     const allUrns = uniqueNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                    const allEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
+                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                        return [] as GraphEdge[]
+                    })
                     if (controller.signal.aborted) return
+                    if (allEdges.length >= 50_000) {
+                        useCanvasStore.getState().setEdgesTruncated(true)
+                    }
 
                     console.log(`[useGraphHydration] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${allEdges.length} edges`)
 
@@ -778,7 +808,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // Fetch real edges from backend
                         const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
                         const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
-                        const backendEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                        const backendEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
+                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                            return [] as GraphEdge[]
+                        })
                         if (signal.aborted) return
 
                         addGraph(nodesToAdd, backendEdges.map(e => toCanvasEdge(e)))
@@ -868,6 +901,34 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Single atomic commit — nodes and edges arrive together
                     const { addGraph: addGraphFresh } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
+
+                    // Cross-page sibling lineage: getChildrenWithEdges only
+                    // returns lineage among [parent + this page's children],
+                    // so an edge between a page-1 child and a page-2 child
+                    // never arrives through it. For page ≥ 2, supplement
+                    // with one bounded edges-between call over ALL loaded
+                    // children of this parent; the store dedupes by id.
+                    if (currentChildrenCount > 0) {
+                        const fresh = useCanvasStore.getState()
+                        const loadedIds = new Set(fresh.nodes.map(n => n.id))
+                        const siblingUrns = fresh.edges
+                            .filter(e =>
+                                e.source === parentId
+                                && loadedIds.has(e.target)
+                                && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes))
+                            .map(e => e.target)
+                        const crossPageEdges = await provider.getEdgesBetween(
+                            [...new Set([urn, ...siblingUrns])],
+                            lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+                        ).catch((err: unknown) => {
+                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                            return [] as GraphEdge[]
+                        })
+                        if (signal.aborted) return
+                        if (crossPageEdges.length > 0) {
+                            useCanvasStore.getState().addGraph([], crossPageEdges.map(e => toCanvasEdge(e)))
+                        }
+                    }
 
                     console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
                 }
