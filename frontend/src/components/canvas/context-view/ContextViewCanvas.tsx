@@ -2644,9 +2644,31 @@ export function ContextViewCanvas({
   const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
     setAnchorProxyGroups(groups)
   }, [])
+
+  // Rail focus: selection wins instantly; hover engages after a short
+  // DWELL (so drive-by mouse movement doesn't flash chips) and, when the
+  // hover ends with nothing selected, the rail LINGERS long enough for
+  // the pointer to travel to a chip — the reason a naive hover-scoped
+  // rail is unusable (it dismisses itself en route). Timers are
+  // effect-scoped; every transition cancels the previous one.
+  const [railFocusId, setRailFocusId] = useState<string | null>(null)
+  useEffect(() => {
+    if (selectedNodeId) {
+      const raf = requestAnimationFrame(() => setRailFocusId(selectedNodeId))
+      return () => cancelAnimationFrame(raf)
+    }
+    if (hoveredNodeId) {
+      const t = setTimeout(() => setRailFocusId(hoveredNodeId), 250)
+      return () => clearTimeout(t)
+    }
+    const t = setTimeout(() => setRailFocusId(null), 1500)
+    return () => clearTimeout(t)
+  }, [selectedNodeId, hoveredNodeId])
+
   const handleProxyMore = useCallback(() => {
-    if (selectedNodeId) openLens(selectedNodeId)
-  }, [selectedNodeId, openLens])
+    const target = railFocusId ?? selectedNodeId
+    if (target) openLens(target)
+  }, [railFocusId, selectedNodeId, openLens])
 
   // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
   // Never auto-scrolls: business users hate surprise camera moves. The
@@ -3318,7 +3340,7 @@ export function ContextViewCanvas({
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
-              focusNodeId={selectedNodeId}
+              focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
             />
           )}
