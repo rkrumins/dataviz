@@ -1167,74 +1167,84 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
-          {/* Top periphery chip — merges "rows beyond the fold" with the
-              overlay's "connections leading up there" into ONE labeled
-              statement. Lives outside the scroll container so it stays
-              anchored to the viewport edge instead of scrolling with
-              content. Click scrolls the column — the single promise the
-              chip makes. */}
+          {/* ── Periphery scrims — "content continues" affordances at the
+              column edges. A gradient veil lets the boundary rows fade
+              out beneath it (the veil IS the signal that more follows),
+              and one compact centered label states exactly how much:
+              "↑ N more · M connections". Scrims float, so scrolling
+              never shifts layout, and unlike the old floating pill the
+              occlusion reads as an intentional fade — never as chrome
+              covering a card. Click scrolls the column. ── */}
           <AnimatePresence>
             {(overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
-              <motion.button
-                key="above"
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
+              <motion.div
+                key="periphery-top"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(0, 'start')}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title={`${overflowCounts.above.toLocaleString()} row${overflowCounts.above === 1 ? '' : 's'} above the current view${(periphery?.upEdges ?? 0) > 0 ? ` — ${periphery!.upEdges.toLocaleString()} connection${periphery!.upEdges === 1 ? '' : 's'} from entities on screen lead up there (${periphery!.upEntities.toLocaleString()} entit${periphery!.upEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll up.`}
+                className="absolute top-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronUp className="w-3 h-3" />
-                {overflowCounts.above > 0 && (
-                  <span className="tabular-nums">{overflowCounts.above} row{overflowCounts.above === 1 ? '' : 's'}</span>
-                )}
-                {(periphery?.upEdges ?? 0) > 0 && (
-                  <>
-                    {overflowCounts.above > 0 && <span className="opacity-50">·</span>}
-                    <LucideIcons.GitBranch className="w-2.5 h-2.5 opacity-70" />
-                    <span className="tabular-nums">{periphery!.upEdges} connection{periphery!.upEdges === 1 ? '' : 's'}</span>
-                  </>
-                )}
-              </motion.button>
+                <div className="h-12 bg-gradient-to-b from-canvas via-canvas/70 to-transparent" />
+                <button
+                  type="button"
+                  data-canvas-interactive
+                  onClick={() => scrollToFlatIndex(0, 'start')}
+                  title={`${overflowCounts.above.toLocaleString()} more row${overflowCounts.above === 1 ? '' : 's'} above the current view${(periphery?.upEdges ?? 0) > 0 ? ` — ${periphery!.upEdges.toLocaleString()} connection${periphery!.upEdges === 1 ? '' : 's'} from entities on screen lead up there (${periphery!.upEntities.toLocaleString()} entit${periphery!.upEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll up.`}
+                  className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                  style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                >
+                  <LucideIcons.ChevronUp className="w-3 h-3" />
+                  {overflowCounts.above > 0 && (
+                    <span className="tabular-nums">{overflowCounts.above.toLocaleString()} more</span>
+                  )}
+                  {(periphery?.upEdges ?? 0) > 0 && (
+                    <>
+                      {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
+                      <span className="tabular-nums opacity-80">
+                        {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Bottom periphery chip — mirror of the top chip. */}
+          {/* Bottom periphery scrim — mirror of the top. */}
           <AnimatePresence>
             {(overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
-              <motion.button
-                key="below"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
+              <motion.div
+                key="periphery-bottom"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title={`${overflowCounts.below.toLocaleString()} row${overflowCounts.below === 1 ? '' : 's'} below the current view${(periphery?.downEdges ?? 0) > 0 ? ` — ${periphery!.downEdges.toLocaleString()} connection${periphery!.downEdges === 1 ? '' : 's'} from entities on screen lead down there (${periphery!.downEntities.toLocaleString()} entit${periphery!.downEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll down.`}
+                className="absolute bottom-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronDown className="w-3 h-3" />
-                {overflowCounts.below > 0 && (
-                  <span className="tabular-nums">{overflowCounts.below} row{overflowCounts.below === 1 ? '' : 's'}</span>
-                )}
-                {(periphery?.downEdges ?? 0) > 0 && (
-                  <>
-                    {overflowCounts.below > 0 && <span className="opacity-50">·</span>}
-                    <LucideIcons.GitBranch className="w-2.5 h-2.5 opacity-70" />
-                    <span className="tabular-nums">{periphery!.downEdges} connection{periphery!.downEdges === 1 ? '' : 's'}</span>
-                  </>
-                )}
-              </motion.button>
+                <div className="h-12 bg-gradient-to-t from-canvas via-canvas/70 to-transparent" />
+                <button
+                  type="button"
+                  data-canvas-interactive
+                  onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
+                  title={`${overflowCounts.below.toLocaleString()} more row${overflowCounts.below === 1 ? '' : 's'} below the current view${(periphery?.downEdges ?? 0) > 0 ? ` — ${periphery!.downEdges.toLocaleString()} connection${periphery!.downEdges === 1 ? '' : 's'} from entities on screen lead down there (${periphery!.downEntities.toLocaleString()} entit${periphery!.downEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll down.`}
+                  className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                  style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                >
+                  <LucideIcons.ChevronDown className="w-3 h-3" />
+                  {overflowCounts.below > 0 && (
+                    <span className="tabular-nums">{overflowCounts.below.toLocaleString()} more</span>
+                  )}
+                  {(periphery?.downEdges ?? 0) > 0 && (
+                    <>
+                      {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
+                      <span className="tabular-nums opacity-80">
+                        {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </motion.div>
             )}
           </AnimatePresence>
 
@@ -1294,13 +1304,13 @@ export const LayerColumn = React.memo(function LayerColumn({
                   className="pointer-events-none"
                 >
                   {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
-                    <div className="absolute top-9 left-3 right-3 z-30 flex flex-col gap-1">
+                    <div className="absolute top-12 left-3 right-3 z-30 flex flex-col gap-1">
                       {upProxies.map(renderChip)}
                       {downProxies.length === 0 && moreChip}
                     </div>
                   )}
                   {(downProxies.length > 0) && (
-                    <div className="absolute bottom-9 left-3 right-3 z-30 flex flex-col gap-1">
+                    <div className="absolute bottom-12 left-3 right-3 z-30 flex flex-col gap-1">
                       {downProxies.map(renderChip)}
                       {moreChip}
                     </div>
