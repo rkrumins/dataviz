@@ -430,7 +430,7 @@ function useSectionOpen(id: string): [boolean, () => void] {
   return [open, toggle]
 }
 
-function CollapsibleSection({
+export function CollapsibleSection({
   id,
   icon: Icon,
   title,

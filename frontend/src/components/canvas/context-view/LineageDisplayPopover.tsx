@@ -26,6 +26,7 @@ import {
   Waves,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CollapsibleSection } from './DisplaySettingsPopover'
 import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
 
 interface LineageDisplayPopoverProps {
@@ -230,11 +231,12 @@ export function LineageDisplaySections({
   return (
     <div className={cn(disabled && 'opacity-50')}>
       {/* Edge Density */}
-      <div className="px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <Layers className="w-3 h-3" />
-          <span>Edge Density</span>
-        </div>
+      <CollapsibleSection
+        id="edge-density"
+        icon={Layers}
+        title="Edge Density"
+        summary={DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)?.label ?? 'Adaptive'}
+      >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           How many edges materialise on the canvas at once.
         </p>
@@ -293,16 +295,17 @@ export function LineageDisplaySections({
         </div>
         {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
         {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
-      </div>
+      </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Direction */}
-      <div className="px-3 pt-2.5 pb-3">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <MoveRight className="w-3 h-3" />
-          <span>Direction</span>
-        </div>
+      <CollapsibleSection
+        id="edge-direction"
+        icon={MoveRight}
+        title="Direction"
+        summary={showEdgeDirection ? 'On' : 'Off'}
+      >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           Show arrow markers on edges to indicate flow direction.
         </p>
@@ -350,7 +353,7 @@ export function LineageDisplaySections({
             </div>
           </div>
         </button>
-      </div>
+      </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
