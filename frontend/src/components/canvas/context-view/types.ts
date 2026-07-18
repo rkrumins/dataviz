@@ -60,18 +60,6 @@ export type OverflowEdge = {
   ey: number
 }
 
-/** Edge whose BOTH endpoints are off-viewport but whose path crosses the
- *  visible box. Geometry is estimated (virtualizer offsets), rendered
- *  dashed/dimmed to signal estimation. Never participates in the hit
- *  layer — its endpoints are unmounted. */
-export type PassThroughEdge = {
-  id: string
-  source: string
-  target: string
-  pathD: string
-  color: string
-}
-
 export type ComputedEdge = {
   id: string
   source: string

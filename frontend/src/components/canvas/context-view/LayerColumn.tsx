@@ -594,6 +594,45 @@ export const LayerColumn = React.memo(function LayerColumn({
     return () => clearTimeout(timer)
   }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
 
+  // ── Expansion reveal ────────────────────────────────────────────────
+  // When a node is expanded, its subtree materializes BELOW it — if the
+  // parent sits near the bottom of the column's viewport (expanding the
+  // last visible row is the common case), every new row lands below the
+  // fold and the expansion reads as a silent no-op ("I expanded and
+  // nothing loaded"). Watch for newly-expanded ids owned by THIS column
+  // and nudge the first row of the new subtree into view once it exists
+  // in the flat tree (skeleton or real child). align:'auto' scrolls the
+  // minimum distance and no-ops when the row is already visible, so
+  // mid-viewport expansions never jump. Pending reveals expire so a
+  // slow child load can't hijack the user's scroll seconds later.
+  const prevExpandedRef = useRef<Set<string>>(expandedNodes)
+  const pendingExpandRevealRef = useRef<Map<string, number>>(new Map())
+  useEffect(() => {
+    const prev = prevExpandedRef.current
+    prevExpandedRef.current = expandedNodes
+    const pending = pendingExpandRevealRef.current
+    expandedNodes.forEach(id => {
+      if (!prev.has(id) && nodeToFlatIndexMap.has(id)) {
+        pending.set(id, Date.now() + 2000)
+      }
+    })
+    pending.forEach((deadline, id) => {
+      if (!expandedNodes.has(id) || deadline < Date.now()) {
+        pending.delete(id)
+        return
+      }
+      const idx = nodeToFlatIndexMap.get(id)
+      if (idx === undefined) return
+      const parentDepth = flatTree[idx]?.depth ?? 0
+      const next = flatTree[idx + 1]
+      // Subtree rows haven't materialized yet — keep waiting (flatTree
+      // changes re-fire this effect).
+      if (!next || next.depth <= parentDepth) return
+      pending.delete(id)
+      virtualizer.scrollToIndex(idx + 1, { align: 'auto', behavior: 'smooth' })
+    })
+  }, [expandedNodes, flatTree, nodeToFlatIndexMap, virtualizer])
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const count = navigableItems.length
     if (count === 0) return

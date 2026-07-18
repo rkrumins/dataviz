@@ -84,9 +84,12 @@ export function CanvasStatusChips({
   if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus) return null
 
   return (
+    // Bottom-RIGHT, beneath the Edge Legend — the bottom-left corner
+    // belongs to the first layer column's cards, and a status surface
+    // must never occlude data.
     <div
-      className="absolute left-3 z-30 flex flex-col items-start gap-1.5 pointer-events-none"
-      style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+      className="absolute right-3 z-30 flex flex-col items-end gap-1.5 pointer-events-none"
+      style={{ bottom: 'calc(1rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
       {showAdaptive && (

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge, PassThroughEdge } from './types'
+import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -117,13 +117,14 @@ export function LineageFlowOverlay({
     label: string
     mx: number
     my: number
+    /** Band endpoints — per-band userSpaceOnUse gradient coordinates.
+     *  (An objectBoundingBox gradient on a straight horizontal stroke
+     *  renders NOTHING per the SVG zero-height-bbox rule.) */
+    sx: number
+    tx: number
+    /** Y at both band ends (pre-sag) — anchors the dock ports. */
+    ey: number
   }>>([])
-  // Pass-through edges — both endpoints off-viewport, path crosses the
-  // visible box. Computed on a debounced settle pass (never per frame).
-  const [passThroughEdges, setPassThroughEdges] = useState<PassThroughEdge[]>([])
-  const passThroughTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const computePassThroughRef = useRef<(() => void) | null>(null)
-
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
@@ -240,6 +241,32 @@ export function LineageFlowOverlay({
         if (el) elementCache.set(id, el)
       }
       return el
+    }
+
+    // Helper: clip box of the column scroller that owns a node element.
+    // The overlay is NOT clipped by column scrollers, but the cards are —
+    // the IntersectionObserver's rootMargin keeps rows "visible" up to
+    // 100px past the clip edge, so anything anchored to such a row would
+    // paint orphaned marks over empty canvas. Rect lookups are cached per
+    // scroller per pass.
+    const clipRects = new Map<Element, DOMRect>()
+    const getClipRect = (el: HTMLElement): DOMRect | null => {
+      const scroller = el.closest('.overflow-y-auto')
+      if (!scroller) return null
+      let r = clipRects.get(scroller)
+      if (!r) {
+        r = scroller.getBoundingClientRect()
+        clipRects.set(scroller, r)
+      }
+      return r
+    }
+    // A row counts as in-column when its vertical center is inside the
+    // owning scroller's clip box (more than half hidden → treat as gone).
+    const isCenterClipped = (el: HTMLElement, rect: DOMRect): boolean => {
+      const clip = getClipRect(el)
+      if (!clip) return false
+      const cy = rect.top + rect.height / 2
+      return cy < clip.top || cy > clip.bottom
     }
 
     // Helper: estimated viewport-space rect for an UNMOUNTED node via the
@@ -460,6 +487,11 @@ export function LineageFlowOverlay({
       if (!visibleEl) return
 
       const vRect = visibleEl.getBoundingClientRect()
+      // Row mostly hidden by its column's clip — its stubs/badges would
+      // anchor to a card the user can't see. Active edges are exempt
+      // (they bridge real cards and carry scroll continuity); these
+      // single-row decorations are not.
+      if (isCenterClipped(visibleEl, vRect)) return
       const gutterX = sourceVisible
         ? vRect.right - containerRect.left + GUTTER_HALF
         : vRect.left - containerRect.left - GUTTER_HALF
@@ -595,6 +627,9 @@ export function LineageFlowOverlay({
         const el = getEl(domId)
         if (!el) return
         const rect = el.getBoundingClientRect()
+        // Rows mostly scrolled past their column's clip edge would leave
+        // floating hairline bars with no visible card ("blank node").
+        if (isCenterClipped(el, rect)) return
         const midY = rect.top + rect.height / 2 - containerRect.top
         const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
         // Position just OUTSIDE the card edge: the overlay sits beneath
@@ -679,105 +714,36 @@ export function LineageFlowOverlay({
           const tx = t.left - containerRect.left - 4
           if (tx <= sx) return // reverse-flow pair — bands read left→right only
           const spread = Math.max((tx - sx) * 0.4, 40)
+          // Gentle sag so the band reads as flow, not a ruler line (and
+          // the path's bbox is never zero-height).
+          const sag = Math.min(28, (tx - sx) * 0.04) + i * 2
           nextRibbons.push({
             key: `${r.sourceLayerId}->${r.targetLayerId}`,
-            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY}, ${tx - spread} ${bandY}, ${tx} ${bandY}`,
+            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY + sag}, ${tx - spread} ${bandY + sag}, ${tx} ${bandY}`,
             width: w,
             label: `${formatRibbonCount(r.count)} flows`,
             mx: (sx + tx) / 2,
-            my: bandY,
+            my: bandY + sag * 0.75,
+            sx,
+            tx,
+            ey: bandY,
           })
         })
       }
       setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
     }
 
-    // Pass-through settle pass — debounced 150ms so the O(projected-edges)
-    // scan never runs on the per-frame path. updateFlow already fires on
-    // every scroll / IO / mutation / resize trigger, so re-arming here
-    // keeps the pass fresh without any new listeners.
-    if (passThroughTimerRef.current) clearTimeout(passThroughTimerRef.current)
-    passThroughTimerRef.current = setTimeout(() => {
-      passThroughTimerRef.current = null
-      computePassThroughRef.current?.()
-    }, 150)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
 
-  // ── Pass-through edges — both endpoints off-viewport, path crosses the
-  // visible box. Runs only on the debounced settle pass above. Cost:
-  // O(projected edges) with O(1) per rejected edge (two Set lookups +
-  // memoized column resolution + interval tests); rect math only for
-  // edges whose horizontal strip crosses the viewport. Endpoint rects
-  // are exact for mounted cards (including mounted-but-horizontally-
-  // off-viewport ones) and virtualizer estimates for unmounted rows.
-  const computePassThrough = useCallback(() => {
-    if (!containerRef.current) return
-    if (!geometryRegistry || geometryRegistry.size === 0) {
-      setPassThroughEdges(prev => (prev.length === 0 ? prev : []))
-      return
-    }
-    const containerRect = containerRef.current.getBoundingClientRect()
-    const viewportRect = containerRef.current.parentElement?.getBoundingClientRect()
-    if (!viewportRect) return
-
-    const colCache = new Map<string, ColumnGeometryApi | null>()
-    const resolveCol = (id: string): ColumnGeometryApi | null => {
-      const cached = colCache.get(id)
-      if (cached !== undefined) return cached
-      let col: ColumnGeometryApi | null = null
-      for (const api of geometryRegistry.values()) {
-        if (api.hasNode(id)) { col = api; break }
-      }
-      colCache.set(id, col)
-      return col
-    }
-    // Exact DOM rect when the card is mounted (horizontal off-viewport
-    // cards are still mounted by their column), estimate otherwise.
-    const rectOf = (id: string, col: ColumnGeometryApi) =>
-      document.getElementById(`layer-node-${id}`)?.getBoundingClientRect() ?? col.getNodeRect(id)
-
-    const result: PassThroughEdge[] = []
-    for (const edge of edges) {
-      if (globalVisibleNodes.has(`layer-node-${edge.source}`)) continue
-      if (globalVisibleNodes.has(`layer-node-${edge.target}`)) continue
-      const srcCol = resolveCol(edge.source)
-      if (!srcCol) continue
-      const tgtCol = resolveCol(edge.target)
-      if (!tgtCol || srcCol === tgtCol) continue
-      const sRect = rectOf(edge.source, srcCol)
-      if (!sRect) continue
-      const tRect = rectOf(edge.target, tgtCol)
-      if (!tRect) continue
-      // X pre-test: the horizontal strip the edge travels must cross the
-      // viewport box.
-      const xA = sRect.right
-      const xB = tRect.left
-      if (Math.max(xA, xB) < viewportRect.left || Math.min(xA, xB) > viewportRect.right) continue
-      // Y test — exact for the monotone cross-column cubic: the curve's
-      // y stays within [sy, ty].
-      const syAbs = sRect.top + sRect.height / 2
-      const tyAbs = tRect.top + tRect.height / 2
-      if (Math.max(syAbs, tyAbs) < viewportRect.top || Math.min(syAbs, tyAbs) > viewportRect.bottom) continue
-
-      // Overlay coords — same anchors and curve family as the main pass.
-      const sx = sRect.right - containerRect.left + 6
-      const sy = syAbs - containerRect.top
-      const tx = tRect.left - containerRect.left - 8
-      const ty = tyAbs - containerRect.top
-      const dist = Math.abs(tx - sx)
-      const spread = Math.max(dist * 0.5, 24)
-      const pathD = `M ${sx} ${sy} C ${sx + spread} ${sy}, ${tx - spread} ${ty}, ${tx} ${ty}`
-      const primaryType = edge.types?.[0] || edge.originalType || ''
-      const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
-      result.push({ id: `pt-${edge.id}`, source: edge.source, target: edge.target, pathD, color })
-    }
-    setPassThroughEdges(prev => (prev.length === 0 && result.length === 0 ? prev : result))
-  }, [edges, geometryRegistry, resolveEdgeColor])
-
-  useEffect(() => {
-    computePassThroughRef.current = computePassThrough
-  }, [computePassThrough])
+  // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
+  // curves for edges whose endpoints were both unmounted. Removed after
+  // repeated user testing: ambient edges anchored to estimated positions
+  // of content that is not on screen consistently read as broken
+  // ("lines going to nodes that don't exist"). Off-screen awareness is
+  // carried by layers that never fake geometry: per-node hairline
+  // indicators, directional badges (count + click-to-jump), density
+  // gutters, and flow ribbons.
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -936,10 +902,6 @@ export function LineageFlowOverlay({
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
-      if (passThroughTimerRef.current !== null) {
-        clearTimeout(passThroughTimerRef.current)
-        passThroughTimerRef.current = null
-      }
     }
   }, [nodes, expandedNodesFingerprint, scheduleUpdate])
 
@@ -1072,17 +1034,11 @@ export function LineageFlowOverlay({
     const gradientKeys = new Set<string>()
     overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
 
-    // Pass-through edges fade at BOTH ends — they enter and exit beyond
-    // the viewport, and the double fade reads as "continues off-screen".
-    const passThroughColors = new Set<string>()
-    passThroughEdges.forEach(e => passThroughColors.add(e.color))
-
     return {
       markerColors: Array.from(markerColors),
       gradientKeys: Array.from(gradientKeys),
-      passThroughColors: Array.from(passThroughColors),
     }
-  }, [visibleEdges, overflowEdges, passThroughEdges])
+  }, [visibleEdges, overflowEdges])
 
   // Display names for badge tooltips — id → name over the rendered node
   // hierarchy (children included so partners below collapsed roots still
@@ -1241,51 +1197,67 @@ export function LineageFlowOverlay({
               </linearGradient>
             )
           })}
-
-          {/* Flow-ribbon gradient — indigo→violet, brightening toward the
-              consumer side so the band itself reads as directional. */}
-          <linearGradient id="flow-ribbon-grad" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.10" />
-            <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.20" />
-            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.30" />
-          </linearGradient>
-
-          {/* Shared pass-through gradients — one per color, fading at both
-              ends along the (predominantly horizontal) travel direction. */}
-          {sharedDefs.passThroughColors.map(c => {
-            const safeId = `pt-${c.replace(/[^a-zA-Z0-9]/g, '')}`
-            return (
-              <linearGradient key={safeId} id={safeId} x1="0" x2="1" y1="0" y2="0">
-                <stop offset="0%" stopColor={c} stopOpacity="0" />
-                <stop offset="15%" stopColor={c} stopOpacity="0.32" />
-                <stop offset="85%" stopColor={c} stopOpacity="0.32" />
-                <stop offset="100%" stopColor={c} stopOpacity="0" />
-              </linearGradient>
-            )
-          })}
         </defs>
         {/* ── Flow ribbons — macro volume bands beneath the edge layer.
             Sankey-style: thickness encodes total edge count between the
-            two layers; the count pill states it exactly. ── */}
-        {computedRibbons.map(r => (
+            two layers; the count pill states it exactly. Per-band
+            userSpaceOnUse gradients (indigo → violet, brightening toward
+            the consumer side) — an objectBoundingBox gradient dies on
+            near-horizontal strokes. ── */}
+        {computedRibbons.map((r, i) => (
           <g key={`ribbon-${r.key}`} className="pointer-events-none">
+            <defs>
+              <linearGradient
+                id={`flow-ribbon-g-${i}`}
+                gradientUnits="userSpaceOnUse"
+                x1={r.sx}
+                x2={r.tx}
+                y1={0}
+                y2={0}
+              >
+                <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.16" />
+                <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.30" />
+                <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.44" />
+              </linearGradient>
+            </defs>
+            {/* Butt caps: round caps turned band ends into detached blobs.
+                Dock ports at each column edge make the band read as
+                volume flowing OUT of one layer INTO the next. */}
             <path
               d={r.pathD}
-              stroke="url(#flow-ribbon-grad)"
+              stroke={`url(#flow-ribbon-g-${i})`}
               strokeWidth={r.width}
               fill="none"
-              strokeLinecap="round"
+              strokeLinecap="butt"
+            />
+            <rect
+              x={r.sx - 1.5}
+              y={r.ey - (r.width * 1.15) / 2}
+              width={3.5}
+              height={r.width * 1.15}
+              rx={1.75}
+              fill="rgb(99, 102, 241)"
+              opacity={0.55}
+            />
+            <rect
+              x={r.tx - 2}
+              y={r.ey - (r.width * 1.15) / 2}
+              width={3.5}
+              height={r.width * 1.15}
+              rx={1.75}
+              fill="rgb(139, 92, 246)"
+              opacity={0.6}
             />
             <g transform={`translate(${r.mx}, ${r.my})`}>
-              <rect x={-30} y={-9.5} width={60} height={19} rx={9.5} fill="rgb(99, 102, 241)" opacity={0.12} />
+              <rect x={-34} y={-10} width={68} height={20} rx={10} fill="var(--color-canvas-elevated, #fff)" opacity={0.85} />
+              <rect x={-34} y={-10} width={68} height={20} rx={10} fill="rgb(99, 102, 241)" opacity={0.10} />
               <text
                 x={0}
                 y={3.5}
                 textAnchor="middle"
-                fontSize="9.5"
-                fontWeight={600}
-                fill="rgb(99, 102, 241)"
-                opacity={0.95}
+                fontSize="10"
+                fontWeight={650}
+                fill="rgb(79, 70, 229)"
               >
                 {r.label}
               </text>
@@ -1578,27 +1550,6 @@ export function LineageFlowOverlay({
             strokeLinecap="round"
             className="pointer-events-none"
           />
-        ))}
-
-        {/* ── Pass-through edges — both endpoints off-viewport but the path
-            crosses the visible box. Estimated geometry (virtualizer
-            offsets), so they render dashed + dimmed in the coalesced
-            style: no gradients, markers, or animation, and never any hit
-            layer. data-edge-* attributes keep the DOM hover-dimming loop
-            consistent — hovering any node dims these like every other
-            non-incident edge. ── */}
-        {passThroughEdges.map(pt => (
-          <g key={pt.id} data-edge-id={pt.id} data-edge-src={pt.source} data-edge-tgt={pt.target}>
-            <path
-              d={pt.pathD}
-              stroke={`url(#pt-${pt.color.replace(/[^a-zA-Z0-9]/g, '')})`}
-              strokeWidth={1.5}
-              fill="none"
-              strokeDasharray="5 5"
-              strokeLinecap="round"
-              className="pointer-events-none"
-            />
-          </g>
         ))}
       </svg>
 
