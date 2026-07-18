@@ -115,6 +115,14 @@ interface PreferencesState {
    */
   showMissingConnectionIndicators: boolean
   toggleMissingConnectionIndicators: () => void
+  /**
+   * Flow ribbons: in Adaptive mode above the edge budget, draw one
+   * Sankey-style band per (source layer → target layer) pair whose
+   * thickness encodes TOTAL edge volume — the macro flow stays legible
+   * while individual curves are budgeted. User-toggleable.
+   */
+  showFlowRibbons: boolean
+  toggleFlowRibbons: () => void
 
 
   // User avatar
@@ -232,6 +240,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showMissingConnectionIndicators: true,
       toggleMissingConnectionIndicators: () =>
         set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
+      showFlowRibbons: true,
+      toggleFlowRibbons: () =>
+        set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
 
       // User avatar
       avatarId: null,

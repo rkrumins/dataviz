@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge, PassThroughEdge } from './types'
+import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -43,6 +44,7 @@ export function LineageFlowOverlay({
   expandingEdgeIds,
   geometryRegistry,
   onRevealNode,
+  flowRibbons,
 }: {
   nodes: any[],
   edges: any[],
@@ -80,6 +82,9 @@ export function LineageFlowOverlay({
   /** Scroll a node into view on both axes (canvas reveal mechanism) —
    *  used by the clickable overflow badges. */
   onRevealNode?: (nodeId: string) => void,
+  /** Macro flow bands per (layer → layer) pair — rendered beneath the
+   *  edge layer in Adaptive's summarized state. */
+  flowRibbons?: FlowRibbon[],
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -99,9 +104,19 @@ export function LineageFlowOverlay({
     count: number
     cx: number; cy: number  // ribbon center
     width: number; height: number
-    /** 'full' = three-layer ribbon (stubs mode); 'quiet' = slim always-on
-     *  tab rendered in every other mode. */
-    variant: 'full' | 'quiet'
+    /** Volume relative to the heaviest visible node (log-scaled 0..1) —
+     *  drives hairline opacity so only hubs stand out. */
+    intensity: number
+  }>>([])
+  // Flow ribbons — macro volume bands between layer columns, computed per
+  // updateFlow frame (≤ MAX_FLOW_RIBBONS DOM rect reads).
+  const [computedRibbons, setComputedRibbons] = useState<Array<{
+    key: string
+    pathD: string
+    width: number
+    label: string
+    mx: number
+    my: number
   }>>([])
   // Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Computed on a debounced settle pass (never per frame).
@@ -556,18 +571,22 @@ export function LineageFlowOverlay({
     // (45%) so it always feels proportional, whether the entity is a
     // tall layer card or a tight leaf row.
     if (nodeStubCounts && nodeStubCounts.size > 0) {
-      // Always-on in/out indicators: every render mode shows whether a
-      // node has loaded lineage on each side. Stubs mode keeps the full
-      // three-layer ribbon; other modes get a QUIET slim tab so the
-      // indicator doesn't double-encode against the materialized edges.
-      // Sized to be confidently visible without dominating the card.
-      // 7px core + 4px halo around it gives a soft glow tab that reads
-      // at a glance. ~5.5px peeks out beyond the card edge (1.5px overlap
-      // hides any hard inboard edge behind the card chrome).
-      const variant: 'full' | 'quiet' = showStubs ? 'full' : 'quiet'
-      const RIBBON_W = variant === 'full' ? 7 : 4
-      const RIBBON_HEIGHT_RATIO = variant === 'full' ? 0.55 : 0.4
-      const RIBBON_INSET = 1.5
+      // Always-on in/out indicators as FLUSH HAIRLINES. Design principle:
+      // ambient marks must only be visible where they carry contrast —
+      // when every row has lineage (the common case), a visible mark per
+      // row is pure noise. So the hairline's opacity scales with the
+      // node's volume RELATIVE to the heaviest visible node: median
+      // nodes fade to near-invisible, hubs stand out. No halo, no
+      // sheen, no peek-out — a 2.5px line hugging the card edge.
+      const RIBBON_W = 4
+      const RIBBON_HEIGHT_RATIO = 0.62
+      let maxCount = 0
+      globalVisibleNodes.forEach(domId => {
+        const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
+        const counts = nodeStubCounts.get(nodeId)
+        if (counts) maxCount = Math.max(maxCount, counts.in, counts.out)
+      })
+      const logMax = Math.log2(1 + Math.max(1, maxCount))
       const newStubs: typeof computedStubs = []
       globalVisibleNodes.forEach(domId => {
         const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
@@ -578,29 +597,30 @@ export function LineageFlowOverlay({
         const rect = el.getBoundingClientRect()
         const midY = rect.top + rect.height / 2 - containerRect.top
         const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
+        // Position just OUTSIDE the card edge: the overlay sits beneath
+        // the card chrome, so anything inside the boundary is covered by
+        // the opaque card. 1px breathing gap keeps it reading as part of
+        // the card's silhouette.
         if (counts.in > 0) {
-          // Inbound ribbon center sits `(RIBBON_W/2 - RIBBON_INSET)` to
-          // the left of the card-left edge — so part of the pill peeks
-          // out, the rest is hidden by the card chrome.
           const cardLeft = rect.left - containerRect.left
           newStubs.push({
             nodeId, side: 'in', count: counts.in,
-            cx: cardLeft - (RIBBON_W / 2 - RIBBON_INSET),
+            cx: cardLeft - RIBBON_W / 2 - 1,
             cy: midY,
             width: RIBBON_W,
             height,
-            variant,
+            intensity: Math.log2(1 + counts.in) / logMax,
           })
         }
         if (counts.out > 0) {
           const cardRight = rect.right - containerRect.left
           newStubs.push({
             nodeId, side: 'out', count: counts.out,
-            cx: cardRight + (RIBBON_W / 2 - RIBBON_INSET),
+            cx: cardRight + RIBBON_W / 2 + 1,
             cy: midY,
             width: RIBBON_W,
             height,
-            variant,
+            intensity: Math.log2(1 + counts.out) / logMax,
           })
         }
       })
@@ -633,6 +653,45 @@ export function LineageFlowOverlay({
     setOverflowBadges(badges)
     setOverflowEdges(trailingEdges)
 
+    // Flow ribbons — one gradient band per (layer → layer) pair, stacked
+    // around the viewport's vertical center, thickness log-scaled to
+    // total volume. Bounded work: ≤ MAX_FLOW_RIBBONS column-rect reads.
+    {
+      const nextRibbons: typeof computedRibbons = []
+      if (flowRibbons && flowRibbons.length > 0) {
+        const maxCount = Math.max(...flowRibbons.map(r => r.count))
+        const widths = flowRibbons.map(r =>
+          Math.max(10, Math.min(38, 10 + 28 * (Math.log2(1 + r.count) / Math.log2(1 + maxCount)))))
+        const GAP = 12
+        const totalH = widths.reduce((a, b) => a + b + GAP, -GAP)
+        const centerY = (viewportRect.top + viewportRect.bottom) / 2 - containerRect.top
+        let yCursor = centerY - totalH / 2
+        flowRibbons.forEach((r, i) => {
+          const w = widths[i]
+          const bandY = yCursor + w / 2
+          yCursor += w + GAP
+          const srcEl = document.querySelector(`[data-layer-id="${CSS.escape(r.sourceLayerId)}"]`)
+          const tgtEl = document.querySelector(`[data-layer-id="${CSS.escape(r.targetLayerId)}"]`)
+          if (!srcEl || !tgtEl) return
+          const s = srcEl.getBoundingClientRect()
+          const t = tgtEl.getBoundingClientRect()
+          const sx = s.right - containerRect.left + 4
+          const tx = t.left - containerRect.left - 4
+          if (tx <= sx) return // reverse-flow pair — bands read left→right only
+          const spread = Math.max((tx - sx) * 0.4, 40)
+          nextRibbons.push({
+            key: `${r.sourceLayerId}->${r.targetLayerId}`,
+            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY}, ${tx - spread} ${bandY}, ${tx} ${bandY}`,
+            width: w,
+            label: `${formatRibbonCount(r.count)} flows`,
+            mx: (sx + tx) / 2,
+            my: bandY,
+          })
+        })
+      }
+      setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
+    }
+
     // Pass-through settle pass — debounced 150ms so the O(projected-edges)
     // scan never runs on the per-frame path. updateFlow already fires on
     // every scroll / IO / mutation / resize trigger, so re-arming here
@@ -643,7 +702,7 @@ export function LineageFlowOverlay({
       computePassThroughRef.current?.()
     }, 150)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
 
   // ── Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Runs only on the debounced settle pass above. Cost:
@@ -735,7 +794,7 @@ export function LineageFlowOverlay({
   // scroll / resize / hover.
   useEffect(() => {
     scheduleUpdate()
-  }, [showStubs, nodeStubCounts, scheduleUpdate])
+  }, [showStubs, nodeStubCounts, flowRibbons, scheduleUpdate])
 
   // ResizeObserver + IntersectionObserver for node elements.
   // Uses MutationObserver to dynamically track layer-node-* elements as they're
@@ -1183,6 +1242,14 @@ export function LineageFlowOverlay({
             )
           })}
 
+          {/* Flow-ribbon gradient — indigo→violet, brightening toward the
+              consumer side so the band itself reads as directional. */}
+          <linearGradient id="flow-ribbon-grad" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.10" />
+            <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.20" />
+            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.30" />
+          </linearGradient>
+
           {/* Shared pass-through gradients — one per color, fading at both
               ends along the (predominantly horizontal) travel direction. */}
           {sharedDefs.passThroughColors.map(c => {
@@ -1197,6 +1264,35 @@ export function LineageFlowOverlay({
             )
           })}
         </defs>
+        {/* ── Flow ribbons — macro volume bands beneath the edge layer.
+            Sankey-style: thickness encodes total edge count between the
+            two layers; the count pill states it exactly. ── */}
+        {computedRibbons.map(r => (
+          <g key={`ribbon-${r.key}`} className="pointer-events-none">
+            <path
+              d={r.pathD}
+              stroke="url(#flow-ribbon-grad)"
+              strokeWidth={r.width}
+              fill="none"
+              strokeLinecap="round"
+            />
+            <g transform={`translate(${r.mx}, ${r.my})`}>
+              <rect x={-30} y={-9.5} width={60} height={19} rx={9.5} fill="rgb(99, 102, 241)" opacity={0.12} />
+              <text
+                x={0}
+                y={3.5}
+                textAnchor="middle"
+                fontSize="9.5"
+                fontWeight={600}
+                fill="rgb(99, 102, 241)"
+                opacity={0.95}
+              >
+                {r.label}
+              </text>
+            </g>
+          </g>
+        ))}
+
         {visibleEdges.map(edge => {
           const isHovered = hoveredEdgeId === edge.id
           const isSourceHovered = hoveredEdgeId === edge.source
@@ -1425,103 +1521,35 @@ export function LineageFlowOverlay({
           )
         })}
 
-        {/* ── Per-node lineage ribbons ────────────────────────────────────
-            Indigo accents that peek out from behind each entity card on
-            the side(s) with lineage. Three layers compose the premium
-            look without external decoration:
-
-              1. Halo  — wider, blurry-tinted pill behind the core, gives
-                         the ribbon a soft glow against the card edge.
-              2. Core  — narrower pill with a vertical fade gradient.
-              3. Sheen — thin highlight stripe inside the core, lifts the
-                         ribbon off the canvas (faux specular).
-
-            The overlay sits at z-[5] beneath the card chrome (z-[10+])
-            so the inboard half of every layer is hidden by the card.
-            Native SVG <title> on each group provides the hover tooltip
-            ("8 incoming connections" / etc.) so the user can confirm
-            meaning. Hover/select the entity materializes the real edges
-            and these indicators recede behind them. ─────────────────── */}
+        {/* ── Per-node lineage hairlines ──────────────────────────────────
+            A single 2.5px indigo line hugging the card edge on each side
+            with lineage. Opacity encodes volume RELATIVE to the heaviest
+            visible node — ambient marks only earn visibility through
+            contrast, so on a canvas where every row has lineage the
+            median rows fade out and only hubs read. Native SVG <title>
+            gives the exact counts on hover. ──────────────────────────── */}
         {computedStubs.length > 0 && (
           <>
             <defs>
-              {/* Halo: wider gradient, lighter tones, generous fade.
-                  Sits behind the core to create a soft glow without
-                  needing an expensive SVG filter. */}
-              <linearGradient id="lineage-ribbon-halo" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(129, 140, 248)" stopOpacity="0" />
-                <stop offset="50%" stopColor="rgb(129, 140, 248)" stopOpacity="0.55" />
-                <stop offset="100%" stopColor="rgb(129, 140, 248)" stopOpacity="0" />
-              </linearGradient>
-              {/* Core: vertical fade with full saturation in the middle.
-                  rgb(79, 70, 229) is indigo-600 — slightly deeper than the
-                  accent-lineage indigo-500 so the ribbon reads as a
-                  punctuated accent against the card. */}
+              {/* Tight end-fade + indigo-600 core — the mark must read as a
+                  confident accent, not a wisp. */}
               <linearGradient id="lineage-ribbon-core" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
-                <stop offset="18%" stopColor="rgb(99, 102, 241)" stopOpacity="0.65" />
-                <stop offset="50%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
-                <stop offset="82%" stopColor="rgb(99, 102, 241)" stopOpacity="0.65" />
-                <stop offset="100%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
-              </linearGradient>
-              {/* Sheen: a thin highlight stripe running down one side of
-                  the core. Adds a subtle "glass" depth so the ribbon
-                  doesn't read as flat fill. */}
-              <linearGradient id="lineage-ribbon-sheen" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgba(255, 255, 255, 0)" />
-                <stop offset="45%" stopColor="rgba(255, 255, 255, 0.35)" />
-                <stop offset="55%" stopColor="rgba(255, 255, 255, 0.35)" />
-                <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+                <stop offset="0%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
+                <stop offset="14%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
+                <stop offset="86%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
+                <stop offset="100%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
               </linearGradient>
             </defs>
             {computedStubs.map(stub => {
               const key = `ribbon-${stub.nodeId}-${stub.side}`
-              // Opacity scales subtly with lineage volume — light pairs
-              // get a quieter ribbon, heavy fan-in nodes get a stronger
-              // accent. log2 cap keeps the difference perceptible
-              // without making heavy-traffic nodes shout.
-              const intensity = Math.min(0.75 + Math.log2(Math.max(1, stub.count)) * 0.06, 1)
               const label = stub.count > 1
                 ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
                 : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
-              // Quiet variant (non-stubs modes): core pill only, dimmer —
-              // an always-on "has lineage this side" tab that doesn't
-              // compete with the materialized edges next to it.
-              if (stub.variant === 'quiet') {
-                return (
-                  <g key={key} className="pointer-events-none" opacity={intensity * 0.55}>
-                    <rect
-                      x={stub.cx - stub.width / 2}
-                      y={stub.cy - stub.height / 2}
-                      width={stub.width}
-                      height={stub.height}
-                      rx={stub.width / 2}
-                      ry={stub.width / 2}
-                      fill="url(#lineage-ribbon-core)"
-                    />
-                    <title>{label}</title>
-                  </g>
-                )
-              }
-              const haloW = stub.width + 6
-              const haloH = stub.height + 4
-              const sheenW = Math.max(1.4, stub.width * 0.38)
-              const sheenInset = stub.side === 'in'
-                ? stub.width * 0.18   // sheen toward the card-facing side
-                : -stub.width * 0.18
               return (
-                <g key={key} className="pointer-events-none" opacity={intensity}>
-                  {/* Halo */}
-                  <rect
-                    x={stub.cx - haloW / 2}
-                    y={stub.cy - haloH / 2}
-                    width={haloW}
-                    height={haloH}
-                    rx={haloW / 2}
-                    ry={haloW / 2}
-                    fill="url(#lineage-ribbon-halo)"
-                  />
-                  {/* Core */}
+                // Floor 0.6: PRESENCE is always clearly visible — users
+                // must see where lineage exists at a glance. Intensity
+                // adds emphasis on top so hubs still stand out.
+                <g key={key} className="pointer-events-none" opacity={0.6 + stub.intensity * 0.4}>
                   <rect
                     x={stub.cx - stub.width / 2}
                     y={stub.cy - stub.height / 2}
@@ -1530,16 +1558,6 @@ export function LineageFlowOverlay({
                     rx={stub.width / 2}
                     ry={stub.width / 2}
                     fill="url(#lineage-ribbon-core)"
-                  />
-                  {/* Sheen */}
-                  <rect
-                    x={stub.cx - sheenW / 2 + sheenInset}
-                    y={stub.cy - stub.height / 2 + 2}
-                    width={sheenW}
-                    height={stub.height - 4}
-                    rx={sheenW / 2}
-                    ry={sheenW / 2}
-                    fill="url(#lineage-ribbon-sheen)"
                   />
                   <title>{label}</title>
                 </g>
