@@ -1,0 +1,68 @@
+# OPS Freshness Cockpit + Unified Refresh API — Design
+
+**Date:** 2026-07-18 · **Status:** approved (user, in-session) · **Scope decision:** Full Approach B (API + audit + Ingestion-tab UI) · **UI placement decision:** Ingestion page → new "Freshness" tab
+
+## Why
+
+The data-freshness convergence feature (docs/features/data-freshness-convergence.md, branch `claude/falkordb-redis-connectivity-va6czv`) built the *machinery* — change-gated signal, cooldown, stale markers, reconciler — but OPS has no cockpit over it: no "cache as-of" timestamp anywhere, no single per-source freshness view (state is scattered across the DB state row, `_AggMeta`, Redis markers/gens/LKG, and the job table), no per-provider action, no audit of who/what triggered refreshes (the reconciler acts invisibly), and the refresh verb is fragmented across source-changed / manual re-aggregate / nothing-for-caches-only. A stray stale marker on a failed source went unnoticed until a subagent stumbled on it — exactly the visibility gap this design closes.
+
+Framing decisions (challenged and settled):
+- Provider-wide refresh is a **guarded batch**, never a hidden loop — provider-wide forced rebuilds are the historical storm shape.
+- No "reload everything on demand": invalidate + stale-while-revalidate + the existing bounded cache-warmer. New machinery observes and steers; it does not add read-path work.
+- The strategic center is **observability of refresh**, not more triggers: the audit trail is core, not a nice-to-have.
+
+## 1. Sources of truth (two additions)
+
+**1a. Cache as-of stamp.** `GraphCache.bump_generation` / `bump_generations` additionally `SET graphcache:genat:{ws}:{ds}:{branch}` = ISO-8601 UTC now (same Redis, no TTL; overwritten each bump; best-effort). Read by the freshness endpoints as "cache as of".
+
+**1b. `refresh_events` table** (management DB, new alembic migration — **revision id ≤32 chars**, CI-gated):
+`id (pk)`, `ts (tz, indexed)`, `workspace_id`, `data_source_id (indexed with ts)`, `provider_id (nullable)`, `origin` (`script|connector|api|drift|reconcile`), `actor` (user id or `internal`), `scope` (`auto|read-caches|rollups|full|batch-item`), `gate` (`changed|unchanged|forced|n/a`), `actions` (JSON: marker_set, gen_bumped, lkg_purged, content_cleared, stats_nudged, job_id, deferred), `outcome` (`accepted|deferred|noop|conflict|error|completed|failed`), `detail` (text, nullable).
+Writers (all best-effort, never block/fail the operation):
+- `signal_source_changed` emits one event per invocation (it is the funnel for origins script/connector/api/drift/reconcile — origin passed through from the caller; the existing `reason` param maps to origin).
+- The aggregation event listener emits a completion event on `job.completed`/`job.failed` (outcome `completed`/`failed`, actions carry job_id).
+Retention: 90 days, swept by the existing reaper/purge-worker pattern (follow `view_activity_log`'s precedent).
+
+## 2. API surface
+
+All on the viz-service admin router (`backend/app/api/v1/endpoints/`), proxy-aware exactly like the existing aggregation routes; control-plane twins where the service must run in-process. RBAC: reads = the ingestion-surface read perms (`workspace:provider:read` / `workspace:datasource:manage` union, per nav_catalogue "ingestion"); actions = `workspace:datasource:manage`. All responses have explicit `response_model` (camelCase alias trap).
+
+**2a. `GET /api/v1/admin/freshness`** — fleet list. Query: `workspaceId?`, `providerId?`, `staleOnly?`, `page/pageSize`. Per row (DB + pipelined Redis ONLY — no FalkorDB probes): ds/ws/provider identity + names, aggregation `status`, `lastAggregatedAt`, `lastMaterializedAt` (state row), `cacheAsOf` (genat stamp), `generation`, stale marker (`reason`, `since`), `cooldownUntil` (derived from last_aggregated_at + AGGREGATION_REBUILD_MIN_INTERVAL_SECS when in window), `storedFingerprint`, `driftLastCheckedAt`/`drifted` (from the scheduler's stored state where available, else null), `runningJobId`, last refresh event summary (origin, outcome, ts). Missing Redis data → nulls, never errors.
+
+**2b. `GET /api/v1/admin/data-sources/{ds_id}/freshness?probe=false`** — the full per-source document: everything in 2a plus LKG key count + oldest age (bounded SCAN), and last 5 refresh events. `probe=true` additionally computes the live fingerprint + physical node/edge counts via `get_schema_stats` under the existing 5s drift timeout, and returns `drifted` computed live. Probe is explicit; never on by default; fleet endpoint never probes. 404 on unknown ds.
+
+**2c. `POST /api/v1/admin/data-sources/{ds_id}/refresh`** — the unified verb. Body `{scope: "auto"|"read-caches"|"rollups"|"full" = "auto", force: bool = false, reason?: string, wait: "none"|"complete" = "none"}`.
+- `auto` → delegates to `signal_source_changed` unchanged (change gate, cooldown, marker, trigger). `force` maps through.
+- `read-caches` → invalidation-only: `provider.clear_content_caches()` + `invalidate_hierarchy_reads` + `purge_lkg(scope, ENDPOINT_AGGREGATED)` (operator says caches are wrong → aggregated LKG goes too) + `mark_stats_changed`. NO marker, NO job. Always runs (no gate).
+- `rollups` → forced rebuild: marker + `trigger` with `force`-style idempotency bypass semantics (cooldown and change-gate bypassed), no read-cache purge beyond what completion does.
+- `full` → `read-caches` steps + `rollups` trigger.
+- `wait: "complete"` → poll the queued job ≤60s, return final state; else return immediately.
+- Response `RefreshResponse`: `{scope, gate, actions: string[], jobId, deferred, eventId, changed}` — says exactly what happened. **404 on unknown ds** (fixes the fails-open E2E finding for this verb; the legacy source-changed route keeps its current behavior).
+- `POST .../source-changed` remains as the stable alias for `scope=auto` (connectors don't churn); `backend/scripts/signal_data_changed.py` gains `--scope` (default auto).
+
+**2d. `POST /api/v1/admin/providers/{provider_id}/refresh`** — guarded batch. Body `{scope="auto", force=false, maxConcurrent=2}`. Enumerates the provider's data sources, runs per-source refresh with bounded concurrency, honoring each source's gate/cooldown unless `force`. Batch state (per-source status/outcome) lives in Redis under a `refreshbatch:{id}` hash, TTL 24h. Returns `{batchId, total}`; **`GET /api/v1/admin/refresh-batches/{id}`** polls progress. Runs where the aggregation service is in-process (control plane; viz proxies), as a background task; one batch per provider at a time (409 on overlap).
+
+## 3. Scheduler / listener integration
+
+No behavioral change. `signal_source_changed` gains the audit emit + an `origin` passthrough; scheduler drift/reconcile calls pass `origin="drift"`/`"reconcile"`; the listener adds the completion/failure audit emit next to its existing marker-clear. Result: every refresh — human, script, connector, or autonomous — is attributable in one table.
+
+## 4. Frontend — Ingestion → "Freshness" tab
+
+- New tab in `frontend/src/pages/IngestionPage.tsx` beside the existing tabs; component tree under `frontend/src/components/admin/Freshness/`.
+- **Fleet table** (React Query, 30s refetchInterval, keys under a new `FRESHNESS_KEYS`): columns — Source (name + provider chip), Aggregation (StatusChip + "updated Xm ago" from lastMaterializedAt/lastAggregatedAt), Cache ("as of Xm ago" from cacheAsOf; em-dash when null), Freshness (badges: "Recomputing · Xm" when marker set, "Drift detected" when drifted, cooldown countdown "next rebuild in Xm"), Last activity (origin + outcome + ago), Actions (dropdown: "Refresh caches" → read-caches, "Rebuild lineage" → rollups w/ confirm, "Full refresh" → full w/ confirm; disabled while a job runs). Plain-language labels; white-label copy; `useDocumentTitle`.
+- **Row drawer**: the full freshness document, "Probe now" button (`?probe=true`, shows live counts + drift), LKG summary, last payload_too_large if surfaced, event history (last 20, origin/outcome/actor/ago).
+- **Provider grouping** with a "Refresh provider…" action → dialog (source count, scope picker, force checkbox with warning copy, cost note) → polls the batch endpoint with progress bar + per-source outcomes.
+- Filters: workspace, provider, "needs attention" (marker set OR drifted OR failed).
+
+## 5. Performance & failure posture
+
+Fleet = one SQL query + pipelined Redis reads; per-source probe explicit and 5s-bounded; audit writes best-effort; batch endpoint is the only fan-out and is visibly bounded + single-flight per provider; zero new read-path work; every new Redis helper follows graph_cache's never-raise conventions. All existing convergence invariants (read paths never trigger work; overlay post-cache; SWR LKG split) unchanged.
+
+## 6. Testing & verification
+
+- Backend: endpoint suites — fleet assembly with fake Redis/DB (nulls on missing), per-source doc ± probe, refresh scope×gate×force×cooldown matrix, 404s, batch bounding + overlap 409 + per-source outcomes, audit emission per origin (signal/drift/reconcile/listener), migration up/down. Run per-file in-container (verify `git branch --show-current` first — concurrent sessions may switch the tree).
+- Frontend: tab tests per the RegistryConnections.test pattern (table renders fleet payload, action calls, badge states); tsc baseline unchanged.
+- Live: extend the E2E recipe — each scope exercised against a real source; audit rows visible; stray-marker scenario (the known `ws_438429af72a9/ds_5181ba1ba07e` marker, if still present, must show as "needs attention" in the tab — a real-world fixture).
+
+## Out of scope (explicitly)
+
+Connector convergence webhooks, SSE freshness stream, Prometheus metrics (Approach C follow-ons); fixing the Redis DB0-vs-CACHE_REDIS_URL keyspace split; CP/worker stdout log visibility; per-view freshness (exists elsewhere).
