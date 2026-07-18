@@ -174,7 +174,7 @@ class AggregationScheduler:
                         try:
                             async with self._session_factory() as s2:
                                 await svc.signal_source_changed(
-                                    ds_id, s2, reason="drift",
+                                    ds_id, s2, reason="drift", origin="drift",
                                 )
                         except Exception as exc:
                             logger.warning(
@@ -230,7 +230,7 @@ class AggregationScheduler:
                                     )
                                     continue
                                 resp = await svc.signal_source_changed(
-                                    ds, s2, reason="reconcile",
+                                    ds, s2, reason="reconcile", origin="reconcile",
                                 )
                             if not resp.changed:
                                 # No real change (the marker was stale from

@@ -119,9 +119,16 @@ def _build(
     trigger_job_id="agg_new",
     trigger_exc=None,
     cooldown=None,
+    emit_raises=False,
 ):
     """Wire a service with all collaborators mocked to record their call
-    order. Returns (svc, session, order, captured)."""
+    order. Returns (svc, session, order, captured). The audit emit
+    (``emit_refresh_event``) is monkeypatched for every test in this file
+    (real DB access has no place in a pure-unit harness); captured event
+    kwargs land on ``svc._events`` so new tests can assert on them without
+    changing this function's return arity. ``emit_raises=True`` simulates
+    a hypothetical break of the "emit never raises" contract, to prove
+    the signal still succeeds regardless."""
     if cooldown is not None:
         monkeypatch.setattr(
             svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", cooldown,
@@ -131,6 +138,18 @@ def _build(
     provider = _FakeProvider(order)
     registry = _FakeRegistry(provider)
     svc = AggregationService(dispatcher=None, registry=registry, session_factory=None)
+
+    events = []
+    svc._events = events
+
+    async def _fake_emit(session_factory_or_none, **kwargs):
+        if emit_raises:
+            raise RuntimeError("emit boom")
+        events.append(kwargs)
+        return f"evt_{len(events)}"
+
+    from backend.app.db.repositories import refresh_events_repo as refresh_events_repo_mod
+    monkeypatch.setattr(refresh_events_repo_mod, "emit_refresh_event", _fake_emit)
 
     async def _fake_fp(prov):
         if fp_timeout:
@@ -450,6 +469,165 @@ def test_cooldown_disabled_always_triggers(monkeypatch):
     assert order == _FULL_SEQUENCE
 
 
+# ── Audit emission: exactly one refresh_events event per invocation ─────
+
+
+def test_noop_emits_single_noop_event(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="SAME"), current_fp="SAME",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is False
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["origin"] == "api"
+    assert evt["actor"] == "internal"
+    assert evt["scope"] == "auto"
+    assert evt["gate"] == "unchanged"
+    assert evt["outcome"] == "noop"
+    assert evt["actions"] is None
+    assert evt["data_source_id"] == "ds-1"
+    assert evt["workspace_id"] == "ws-1"
+    assert resp.event_id == "evt_1"
+
+
+def test_changed_accepted_emits_single_event_with_job_id(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD"),
+        current_fp="NEW",
+        trigger_job_id="agg_123",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["gate"] == "changed"
+    assert evt["outcome"] == "accepted"
+    assert evt["actions"] == {"job_id": "agg_123"}
+    assert resp.event_id == "evt_1"
+
+
+def test_deferred_emits_single_deferred_event(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(100)),
+        current_fp="NEW",
+        cooldown=900,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.deferred is True
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["gate"] == "changed"
+    assert evt["outcome"] == "deferred"
+    assert evt["actions"] is None
+
+
+def test_trigger_conflict_emits_conflict_event(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD"),
+        current_fp="NEW",
+        trigger_exc=ConflictError("job already active"),
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.job_id is None
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["outcome"] == "conflict"
+    assert evt["actions"] is None
+    assert evt["detail"] is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("ontology not assigned"),
+        OntologyResolutionError(types.SimpleNamespace(blocking_reasons=["no_lineage"])),
+    ],
+)
+def test_trigger_resolution_failure_emits_error_event_with_detail(monkeypatch, exc):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD"),
+        current_fp="NEW",
+        trigger_exc=exc,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.job_id is None
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["outcome"] == "error"
+    assert evt["detail"] == type(exc).__name__
+
+
+def test_not_applicable_emits_noop_event(monkeypatch):
+    # Status makes aggregation not applicable — invalidation runs but no
+    # trigger is ever attempted; audit still records exactly one event.
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="skipped", fp="OLD"), current_fp="NEW",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.job_id is None
+    assert len(svc._events) == 1
+    assert svc._events[0]["outcome"] == "noop"
+
+
+def test_force_gate_recorded_and_flagged_in_actions(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="SAME"), current_fp="SAME",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, force=True))
+    assert resp.changed is True
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["gate"] == "forced"
+    # force bypassed the matching gate AND the trigger succeeded — both
+    # show up in actions.
+    assert evt["actions"] == {"job_id": resp.job_id, "force": True}
+
+
+def test_origin_and_actor_passed_through_to_event(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), current_fp="NEW",
+    )
+    _run(svc.signal_source_changed(
+        "ds-1", session, reason="drift", origin="drift", actor="scheduler",
+    ))
+    assert svc._events[0]["origin"] == "drift"
+    assert svc._events[0]["actor"] == "scheduler"
+
+
+def test_emit_failure_does_not_break_signal(monkeypatch):
+    # emit_refresh_event is contractually never-raising, but the signal's
+    # own call site must be defensive regardless — simulate a raise.
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD"),
+        current_fp="NEW",
+        emit_raises=True,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.job_id == "agg_new"
+    assert resp.event_id is None
+    assert order == _FULL_SEQUENCE
+
+
+def test_emit_failure_does_not_break_noop_signal(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="SAME"),
+        current_fp="SAME",
+        emit_raises=True,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is False
+    assert resp.event_id is None
+
+
 # ── Scheduler: act on drift + reconcile stale markers (Task 4) ──────────
 #
 # The scheduler sweep is the backstop that calls signal_source_changed for
@@ -552,10 +730,13 @@ class _FakeSchedSvc:
     """Records signal_source_changed calls; ``responses`` maps ds_id to
     the response to return (default: a plain changed=True stand-in).
     ``cooldown_ds`` is the set of ds_ids the reconciler should treat as
-    still within the rebuild cooldown (skip, don't signal)."""
+    still within the rebuild cooldown (skip, don't signal). ``origins``
+    records each call's ``origin`` kwarg in parallel to ``calls`` (kept
+    separate so existing 3-tuple unpacking of ``calls`` stays untouched)."""
 
     def __init__(self, responses=None, cooldown_ds=None):
         self.calls = []
+        self.origins = []
         self._responses = responses or {}
         self._cooldown_ds = set(cooldown_ds or [])
 
@@ -564,8 +745,10 @@ class _FakeSchedSvc:
 
     async def signal_source_changed(
         self, ds_id, session, *, reason="external_load", force=False,
+        origin="api", actor="internal",
     ):
         self.calls.append((ds_id, reason, session))
+        self.origins.append(origin)
         return self._responses.get(ds_id, types.SimpleNamespace(changed=True))
 
 
@@ -622,6 +805,7 @@ def test_scheduler_drift_signals_with_default_env(monkeypatch):
     assert reason == "drift"
     assert session is not None
     assert session is not factory.created[0]  # fresh session, not the sweep's own
+    assert fake_svc.origins == ["drift"]
 
 
 # ── Scenario 2: flag off → neither path signals; notify-only preserved ──
@@ -666,6 +850,7 @@ def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
 
         async def signal_source_changed(
             self, ds_id, session, *, reason="external_load", force=False,
+            origin="api", actor="internal",
         ):
             self.calls.append((ds_id, reason))
             if ds_id == "ds-1":
@@ -739,6 +924,8 @@ def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
     # handled this tick). ds-2: only the reconciler signals it.
     assert reasons_by_ds["ds-1"] == ["drift"]
     assert reasons_by_ds["ds-2"] == ["reconcile"]
+    # Origins mirror reasons — drift/reconcile carry their own origin.
+    assert fake_svc.origins == ["drift", "reconcile"]
 
 
 # ── Scenario 6: changed=False from a reconcile call clears the marker ───

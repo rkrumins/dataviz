@@ -173,6 +173,10 @@ class AggregationEventListener:
                 await self._clear_stale_marker(
                     payload.get("workspace_id"), data_source_id,
                 )
+                await self._emit_job_event(
+                    data_source_id, payload.get("workspace_id"),
+                    outcome="completed", job_id=payload.get("job_id"),
+                )
             case "purge.completed":
                 await self._sync_data_source(
                     data_source_id,
@@ -191,6 +195,10 @@ class AggregationEventListener:
                 # cached pre-run answers no longer match the store.
                 await self._invalidate_aggregated_cache(
                     payload.get("workspace_id"), data_source_id,
+                )
+                await self._emit_job_event(
+                    data_source_id, payload.get("workspace_id"),
+                    outcome="failed", job_id=payload.get("job_id"),
                 )
             case "job.pending":
                 await self._sync_data_source(
@@ -260,6 +268,38 @@ class AggregationEventListener:
         except Exception as e:
             logger.warning(
                 "Stale-marker clear failed for %s: %s", data_source_id, e,
+            )
+
+    async def _emit_job_event(
+        self, data_source_id: str, workspace_id: Any, *,
+        outcome: str, job_id: Any,
+    ) -> None:
+        """Audit record for a terminal job event (``job.completed`` /
+        ``job.failed``). ``gate="n/a"`` — the change gate is a
+        ``signal_source_changed`` concept, not evaluated here. The event
+        payload carries no trigger-source field today (see
+        ``AggregationEventPublisher.job_completed``/``job_failed``), so
+        origin is always ``"api"`` with ``detail="listener"`` rather than
+        guessing at provenance. Best-effort: never raises."""
+        try:
+            from backend.app.db.repositories.refresh_events_repo import (
+                emit_refresh_event,
+            )
+            await emit_refresh_event(
+                self._session_factory,
+                workspace_id=workspace_id,
+                data_source_id=data_source_id,
+                origin="api",
+                actor="internal",
+                scope="auto",
+                gate="n/a",
+                actions={"job_id": job_id} if job_id else None,
+                outcome=outcome,
+                detail="listener",
+            )
+        except Exception as e:
+            logger.warning(
+                "Audit emit failed for %s (%s): %s", data_source_id, outcome, e,
             )
 
     async def _sync_data_source(self, data_source_id: str, **fields: Any) -> None:

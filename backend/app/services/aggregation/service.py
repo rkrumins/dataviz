@@ -1203,6 +1203,7 @@ class AggregationService:
     async def signal_source_changed(
         self, ds_id: str, session: AsyncSession, *,
         reason: str = "external_load", force: bool = False,
+        origin: str = "api", actor: str = "internal",
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1280,12 +1281,17 @@ class AggregationService:
         # 3. Change gate. A matching fingerprint (and no force) is a no-op —
         # nothing below runs.
         if not force and fingerprints_match(stored_fp, current_fp):
+            event_id = await self._emit_signal_event(
+                workspace_id=workspace_id, ds_id=ds_id, origin=origin,
+                actor=actor, gate="unchanged", actions=None, outcome="noop",
+            )
             return SourceChangedResponse(
                 changed=False,
                 job_id=None,
                 reason=reason,
                 current_fingerprint=current_fp,
                 stored_fingerprint=stored_fp,
+                event_id=event_id,
             )
 
         # Applicability, decided BEFORE marking (C2). Aggregation applies
@@ -1340,6 +1346,8 @@ class AggregationService:
         # or an ontology-resolution failure both leave changed=True/job=None.
         job_id = None
         deferred = False
+        trigger_outcome = None
+        trigger_detail = None
         if applicable:
             if not force and self._within_rebuild_cooldown(state):
                 deferred = True
@@ -1359,17 +1367,21 @@ class AggregationService:
                         session,
                     )
                     job_id = job.id
+                    trigger_outcome = "accepted"
                 except ConflictError:
                     logger.info(
                         "signal_source_changed: rebuild for %s already active — "
                         "idempotency key collapses the duplicate", ds_id,
                     )
+                    trigger_outcome = "conflict"
                 except (OntologyResolutionError, ValueError, NotFoundError) as exc:
                     logger.warning(
                         "signal_source_changed: rebuild trigger for %s could not "
                         "resolve (%s) — caches invalidated, no job queued",
                         ds_id, exc,
                     )
+                    trigger_outcome = "error"
+                    trigger_detail = type(exc).__name__
                 except Exception as exc:
                     # Any other trigger failure (DB/provider blip) must not fail
                     # the signal — the invalidation above already happened.
@@ -1378,6 +1390,23 @@ class AggregationService:
                         "unexpectedly (%s) — caches invalidated, no job queued",
                         ds_id, exc,
                     )
+                    trigger_outcome = "error"
+                    trigger_detail = type(exc).__name__
+
+        # Audit outcome: not-applicable and the unchanged-gate no-op above
+        # both leave nothing queued ("noop"); otherwise deferred/accepted/
+        # conflict/error come straight from the trigger attempt above.
+        outcome = "deferred" if deferred else (trigger_outcome or "noop")
+        actions: Optional[dict] = {}
+        if job_id:
+            actions["job_id"] = job_id
+        if force:
+            actions["force"] = True
+        event_id = await self._emit_signal_event(
+            workspace_id=workspace_id, ds_id=ds_id, origin=origin,
+            actor=actor, gate=("forced" if force else "changed"),
+            actions=(actions or None), outcome=outcome, detail=trigger_detail,
+        )
 
         return SourceChangedResponse(
             changed=True,
@@ -1386,7 +1415,40 @@ class AggregationService:
             current_fingerprint=current_fp,
             stored_fingerprint=stored_fp,
             deferred=deferred,
+            event_id=event_id,
         )
+
+    async def _emit_signal_event(
+        self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
+        detail=None,
+    ) -> Optional[str]:
+        """Best-effort audit emit for one ``signal_source_changed`` outcome.
+
+        ``emit_refresh_event`` already never raises on its own, but this
+        wraps the call anyway — audit writes must never break the signal
+        they record, including if that contract is ever violated."""
+        from backend.app.db.repositories.refresh_events_repo import (
+            emit_refresh_event,
+        )
+        try:
+            return await emit_refresh_event(
+                self._session_factory,
+                workspace_id=workspace_id,
+                data_source_id=ds_id,
+                origin=origin,
+                actor=actor,
+                scope="auto",
+                gate=gate,
+                actions=actions,
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception as exc:
+            logger.warning(
+                "signal_source_changed: audit emit failed for %s: %s",
+                ds_id, exc,
+            )
+            return None
 
     def _within_rebuild_cooldown(self, state) -> bool:
         """True when a rebuild for ``state`` falls inside the throttle

@@ -395,6 +395,10 @@ class SourceChangedResponse(BaseModel):
     # throttled by the cooldown window — the scheduler reconciler queues it
     # once the window elapses.
     deferred: bool = False
+    # Id of the refresh_events audit row this invocation emitted, or None
+    # if the emit failed (audit writes are best-effort — see
+    # emit_refresh_event). Reachable by F3/F4 to avoid a duplicate emit.
+    event_id: Optional[str] = Field(None, alias="eventId")
 
     class Config:
         populate_by_name = True
