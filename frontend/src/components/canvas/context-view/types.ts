@@ -29,6 +29,25 @@ export interface ColumnGeometryApi {
   getNodeRect(nodeId: string): { top: number; height: number; left: number; right: number } | null
 }
 
+/** Docked stand-in chip for an off-screen partner of the FOCUSED
+ *  (selected) node. Rendered as real DOM in the owning column's Anchor
+ *  Rail; the edge overlay anchors focus edges to the chip's actual
+ *  rect — never to an estimated position. */
+export type AnchorProxy = {
+  nodeId: string
+  /** Bundled edge count between the focused node and this partner. */
+  count: number
+  color: string
+  /** Where the real row sits relative to the canvas viewport. */
+  direction: 'up' | 'down'
+}
+
+export type AnchorProxyGroup = {
+  proxies: AnchorProxy[]
+  /** Partners beyond the rail cap — surfaced as "+N · Open lens". */
+  moreCount: number
+}
+
 export type OverflowDirection = 'up' | 'down' | 'left' | 'right'
 
 export type OverflowBadge = {

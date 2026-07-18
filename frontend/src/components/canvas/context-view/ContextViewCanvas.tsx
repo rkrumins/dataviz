@@ -90,7 +90,7 @@ import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
 import { aggregateFlowRibbons } from './flowRibbons'
-import type { ColumnGeometryApi } from './types'
+import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
@@ -2606,6 +2606,21 @@ export function ContextViewCanvas({
     }
   }, [selectedNodeId, drawerNodeId])
 
+  // ── Anchor Rail — the selected node's off-screen partners docked as
+  // proxy chips in their owning columns. The overlay computes the
+  // payload (it owns visibility truth) and pushes it here only on real
+  // content change; columns render the chips; next frame the overlay
+  // anchors the focus edges to the chip rects. Chip click reuses the
+  // reveal mechanism (per-partner Frame); the "+N more" overflow routes
+  // to the Lens — the full, searchable list.
+  const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
+  const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
+    setAnchorProxyGroups(groups)
+  }, [])
+  const handleProxyMore = useCallback(() => {
+    if (selectedNodeId) openLens(selectedNodeId)
+  }, [selectedNodeId, openLens])
+
   // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
   // Never auto-scrolls: business users hate surprise camera moves. The
   // pill appears only when a meaningful share of the selection's
@@ -3180,6 +3195,8 @@ export function ContextViewCanvas({
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
+              focusNodeId={selectedNodeId}
+              onAnchorProxies={handleAnchorProxies}
             />
           )}
 
@@ -3308,6 +3325,9 @@ export function ContextViewCanvas({
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
+                anchorProxies={anchorProxyGroups.get(layer.id)}
+                onProxyReveal={scrollHitIntoView}
+                onProxyMore={handleProxyMore}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}

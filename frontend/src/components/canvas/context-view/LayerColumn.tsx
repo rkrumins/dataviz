@@ -24,7 +24,7 @@ import {
   useMatchUrnSet,
 } from '@/store/searchStore'
 import type { ViewLayerConfig } from '@/types/schema'
-import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
+import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -101,6 +101,13 @@ interface LayerColumnProps {
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Show the connection-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
+  /** Anchor Rail — the selected node's off-screen partners that live in
+   *  THIS column, docked as proxy chips the edge overlay anchors to. */
+  anchorProxies?: AnchorProxyGroup
+  /** Chip click — scroll the real row into view (per-partner Frame). */
+  onProxyReveal?: (nodeId: string) => void
+  /** "+N more" overflow — open the Lineage Lens for the full list. */
+  onProxyMore?: () => void
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -153,6 +160,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   overscan = 15,
   lineageCounts,
   showDensityGutter = false,
+  anchorProxies,
+  onProxyReveal,
+  onProxyMore,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -450,6 +460,13 @@ export const LayerColumn = React.memo(function LayerColumn({
     })
     return map
   }, [flatTree])
+
+  // Anchor Rail chip labels — the proxy's row lives in THIS column's
+  // flat tree, so the display name resolves locally (no extra plumbing).
+  const proxyLabel = useCallback((nodeId: string): string => {
+    const idx = nodeToFlatIndexMap.get(nodeId)
+    return idx !== undefined ? flatTree[idx].node.name : nodeId
+  }, [nodeToFlatIndexMap, flatTree])
 
   // ── Animation batching: track which items are newly appeared (cap at 20) ──
   const prevFlatTreeKeysRef = useRef<Set<string>>(new Set())
@@ -1179,6 +1196,78 @@ export const LayerColumn = React.memo(function LayerColumn({
                 <span className="tabular-nums">{overflowCounts.below} below</span>
               </motion.button>
             )}
+          </AnimatePresence>
+
+          {/* ── Anchor Rail — docked stand-ins for the SELECTED node's
+              off-screen partners that live in this column. Real DOM
+              chips: the edge overlay anchors focus edges to these rects,
+              so "where does this go" always has a visible, named
+              destination — never an estimated position. Click = scroll
+              the real row into view (per-partner Frame); "+N more"
+              routes to the Lineage Lens for the complete searchable
+              list. Offset below/above the count chips so the two
+              surfaces never collide. ── */}
+          <AnimatePresence>
+            {anchorProxies && anchorProxies.proxies.length > 0 && (() => {
+              const upProxies = anchorProxies.proxies.filter(p => p.direction === 'up')
+              const downProxies = anchorProxies.proxies.filter(p => p.direction === 'down')
+              const renderChip = (p: typeof anchorProxies.proxies[number]) => (
+                <button
+                  key={p.nodeId}
+                  id={`anchor-proxy-${p.nodeId}`}
+                  type="button"
+                  data-canvas-interactive
+                  onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
+                  title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
+                  style={{ borderLeft: `2px solid ${p.color}` }}
+                >
+                  {p.direction === 'up'
+                    ? <LucideIcons.ChevronUp className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
+                    : <LucideIcons.ChevronDown className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />}
+                  <span className="truncate">{proxyLabel(p.nodeId)}</span>
+                  {p.count > 1 && (
+                    <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted/70">×{p.count}</span>
+                  )}
+                </button>
+              )
+              const moreChip = anchorProxies.moreCount > 0 && onProxyMore && (
+                <button
+                  key="anchor-more"
+                  type="button"
+                  data-canvas-interactive
+                  onClick={(e) => { e.stopPropagation(); onProxyMore() }}
+                  title="Every connection of the selected entity, grouped and searchable"
+                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                >
+                  <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
+                  +{anchorProxies.moreCount} more · Open lens
+                </button>
+              )
+              return (
+                <motion.div
+                  key="anchor-rail"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
+                  className="pointer-events-none"
+                >
+                  {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
+                    <div className="absolute top-9 left-3 right-3 z-30 flex flex-col gap-1">
+                      {upProxies.map(renderChip)}
+                      {downProxies.length === 0 && moreChip}
+                    </div>
+                  )}
+                  {(downProxies.length > 0) && (
+                    <div className="absolute bottom-9 left-3 right-3 z-30 flex flex-col gap-1">
+                      {downProxies.map(renderChip)}
+                      {moreChip}
+                    </div>
+                  )}
+                </motion.div>
+              )
+            })()}
           </AnimatePresence>
 
           {/* Density gutter — a slim heat strip on the column's right edge
