@@ -290,6 +290,7 @@ export function LineageDisplaySections({
             )
           })}
         </div>
+        {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
       </div>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -355,6 +356,48 @@ export function LineageDisplaySections({
           curated view legitimately excludes upstream/downstream partners.
           This switch shows/hides the "connections not on canvas" alerts. */}
       <MissingConnectionsToggle disabled={disabled} />
+    </div>
+  )
+}
+
+const BUDGET_MIN = 100
+const BUDGET_MAX = 2000
+const BUDGET_STEP = 50
+
+/** Adaptive edge budget — how many of the strongest flows render at once
+ *  above the threshold (and the size of a focused node's materialized
+ *  fan). Reads/writes the persisted preference directly, mirroring the
+ *  self-contained MissingConnectionsToggle pattern. */
+function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
+  const budget = usePreferencesStore((s) => s.autoStubThreshold)
+  const setBudget = usePreferencesStore((s) => s.setAutoStubThreshold)
+  const clamped = Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, budget ?? 500))
+  return (
+    <div className="mt-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Sliders className="w-3 h-3" />
+        <span>Edge Budget</span>
+        <span className="ml-auto tabular-nums text-accent-lineage/80">{clamped.toLocaleString()}</span>
+      </div>
+      <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">
+        How many of the strongest flows stay visible at once on dense
+        graphs. Markers summarize the rest.
+      </p>
+      <input
+        type="range"
+        min={BUDGET_MIN}
+        max={BUDGET_MAX}
+        step={BUDGET_STEP}
+        value={clamped}
+        disabled={disabled}
+        onChange={(e) => setBudget(parseInt(e.target.value, 10))}
+        className="w-full accent-accent-lineage"
+        aria-label="Adaptive edge budget"
+      />
+      <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
+        <span>{BUDGET_MIN} · calm</span>
+        <span>{BUDGET_MAX.toLocaleString()} · detailed</span>
+      </div>
     </div>
   )
 }
