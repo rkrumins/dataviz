@@ -11,7 +11,7 @@
  * (layer re-assignment, initial load).
  */
 
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState, useEffect } from 'react'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
 
@@ -213,6 +213,9 @@ export function useEdgeProjection({
   // callers render a "X edges hidden — expand parents to reveal" badge.
   const unresolvedAggregatedRef = useRef(0)
   const lastWarnAtRef = useRef(0)
+  // Reactive mirror of the ref so callers can render a "N connections couldn't
+  // be placed" banner (the ref alone doesn't trigger a re-render).
+  const [unresolvedAggregatedCount, setUnresolvedAggregatedCount] = useState(0)
 
   // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
   const nodeIndex = useMemo(() => buildNodeIndex(nodesByLayer), [nodesByLayer])
@@ -717,9 +720,19 @@ export function useEdgeProjection({
     })
   }, [projectedEdges, expandedNodes, displayMap, hoveredNodeId])
 
+  // Sync the projection pass's unresolved tally (mutated inside the
+  // projectedEdges memo) into reactive state after each commit. The equality
+  // guard means an unchanged count never re-renders. When flow is off the
+  // projection short-circuits without updating the ref, so read 0 there
+  // rather than a stale positive that would keep the banner up.
+  useEffect(() => {
+    const count = showLineageFlow ? unresolvedAggregatedRef.current : 0
+    setUnresolvedAggregatedCount(prev => (prev === count ? prev : count))
+  }, [projectedEdges, showLineageFlow])
+
   return {
     lineageEdges,
     visibleLineageEdges: visibleLineageEdgesWithDelegation,
-    unresolvedAggregatedCount: unresolvedAggregatedRef.current,
+    unresolvedAggregatedCount,
   }
 }

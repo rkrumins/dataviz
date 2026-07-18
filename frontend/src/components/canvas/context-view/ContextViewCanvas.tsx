@@ -496,6 +496,7 @@ export function ContextViewCanvas({
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
+    staleReason: aggregationStaleReason,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
@@ -2334,7 +2335,7 @@ export function ContextViewCanvas({
   // Edge projection: lineageEdges, visibleLineageEdges
   // Pass the trace-filtered views so projected edges only reference visible
   // nodes; outside trace mode these are pass-through to the originals.
-  const { visibleLineageEdges } = useEdgeProjection({
+  const { visibleLineageEdges, unresolvedAggregatedCount } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
@@ -2699,12 +2700,32 @@ export function ContextViewCanvas({
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {aggregationTruncated && (
+        {(aggregationTruncated || unresolvedAggregatedCount > 0) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+            <span className="font-medium">
+              {[
+                aggregationTruncated
+                  ? 'Showing the largest connections — narrow the selection to see more.'
+                  : null,
+                unresolvedAggregatedCount > 0
+                  ? `${unresolvedAggregatedCount} connection${unresolvedAggregatedCount === 1 ? '' : 's'} couldn't be placed on this canvas.`
+                  : null,
+              ].filter(Boolean).join(' ')}
+            </span>
+          </div>
+        )}
+        {/* Stale-source banner — a source-data change queued/ran a rebuild; the
+            canvas keeps serving the previous rollup (stale-while-revalidate)
+            and self-clears when the rebuild's epoch flip triggers a refetch. */}
+        {aggregationStaleReason === 'source_changed' && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">Source data changed — lineage is being recomputed. Showing the previous rollup.</span>
           </div>
         )}
         {/* Warning: missing ontology configuration */}
