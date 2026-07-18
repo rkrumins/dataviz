@@ -449,7 +449,18 @@ function FlowRibbonsToggle({ disabled }: { disabled: boolean }) {
           <span>Flow ribbons</span>
         </div>
         <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-          Volume bands between layers while edges are summarized
+          Layer-to-layer volume bands (Sankey-style) when flows exceed
+          the edge budget
+        </div>
+        <div
+          className={cn(
+            'text-[10.5px] font-semibold leading-snug mt-1',
+            show ? 'text-accent-lineage' : 'text-ink-muted/60',
+          )}
+        >
+          {show
+            ? 'On — bands appear once edges are summarized'
+            : 'Off'}
         </div>
       </div>
     </button>
