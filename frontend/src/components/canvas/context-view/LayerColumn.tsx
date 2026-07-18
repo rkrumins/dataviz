@@ -30,6 +30,7 @@ import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
+import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -754,6 +755,13 @@ export const LayerColumn = React.memo(function LayerColumn({
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
 
+  // Periphery summary — connections from visible entities to partners
+  // beyond THIS column's fold, computed by the edge overlay. Merged into
+  // the "N above/below" chips so rows and connections read as one
+  // labeled statement ("↑ 97 rows · 306 connections") instead of two
+  // unlabeled numbers in different units floating near each other.
+  const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
+
   const scrollToFlatIndex = useCallback((index: number, align: 'start' | 'end') => {
     if (index < 0 || index >= flatTree.length) return
     virtualizer.scrollToIndex(index, { align, behavior: 'smooth' })
@@ -1159,11 +1167,14 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
-          {/* Top overflow chip — shown when items are clipped above the viewport.
-              Lives outside the scroll container so it stays anchored to the
-              viewport edge instead of scrolling with content. */}
+          {/* Top periphery chip — merges "rows beyond the fold" with the
+              overlay's "connections leading up there" into ONE labeled
+              statement. Lives outside the scroll container so it stays
+              anchored to the viewport edge instead of scrolling with
+              content. Click scrolls the column — the single promise the
+              chip makes. */}
           <AnimatePresence>
-            {overflowCounts.above > 0 && (
+            {(overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
               <motion.button
                 key="above"
                 initial={{ opacity: 0, y: -6 }}
@@ -1171,23 +1182,32 @@ export const LayerColumn = React.memo(function LayerColumn({
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                 onClick={() => scrollToFlatIndex(0, 'start')}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
+                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                 style={{
                   backgroundColor: `${layer.color}22`,
                   color: layer.color,
                   boxShadow: `0 4px 14px ${layer.color}25`,
                 }}
-                title="Scroll to top"
+                title={`${overflowCounts.above.toLocaleString()} row${overflowCounts.above === 1 ? '' : 's'} above the current view${(periphery?.upEdges ?? 0) > 0 ? ` — ${periphery!.upEdges.toLocaleString()} connection${periphery!.upEdges === 1 ? '' : 's'} from entities on screen lead up there (${periphery!.upEntities.toLocaleString()} entit${periphery!.upEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll up.`}
               >
                 <LucideIcons.ChevronUp className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.above} above</span>
+                {overflowCounts.above > 0 && (
+                  <span className="tabular-nums">{overflowCounts.above} row{overflowCounts.above === 1 ? '' : 's'}</span>
+                )}
+                {(periphery?.upEdges ?? 0) > 0 && (
+                  <>
+                    {overflowCounts.above > 0 && <span className="opacity-50">·</span>}
+                    <LucideIcons.GitBranch className="w-2.5 h-2.5 opacity-70" />
+                    <span className="tabular-nums">{periphery!.upEdges} connection{periphery!.upEdges === 1 ? '' : 's'}</span>
+                  </>
+                )}
               </motion.button>
             )}
           </AnimatePresence>
 
-          {/* Bottom overflow chip — shown when items are clipped below the viewport. */}
+          {/* Bottom periphery chip — mirror of the top chip. */}
           <AnimatePresence>
-            {overflowCounts.below > 0 && (
+            {(overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
               <motion.button
                 key="below"
                 initial={{ opacity: 0, y: 6 }}
@@ -1195,16 +1215,25 @@ export const LayerColumn = React.memo(function LayerColumn({
                 exit={{ opacity: 0, y: 6 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                 onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
+                className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                 style={{
                   backgroundColor: `${layer.color}22`,
                   color: layer.color,
                   boxShadow: `0 4px 14px ${layer.color}25`,
                 }}
-                title="Scroll to bottom"
+                title={`${overflowCounts.below.toLocaleString()} row${overflowCounts.below === 1 ? '' : 's'} below the current view${(periphery?.downEdges ?? 0) > 0 ? ` — ${periphery!.downEdges.toLocaleString()} connection${periphery!.downEdges === 1 ? '' : 's'} from entities on screen lead down there (${periphery!.downEntities.toLocaleString()} entit${periphery!.downEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll down.`}
               >
                 <LucideIcons.ChevronDown className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.below} below</span>
+                {overflowCounts.below > 0 && (
+                  <span className="tabular-nums">{overflowCounts.below} row{overflowCounts.below === 1 ? '' : 's'}</span>
+                )}
+                {(periphery?.downEdges ?? 0) > 0 && (
+                  <>
+                    {overflowCounts.below > 0 && <span className="opacity-50">·</span>}
+                    <LucideIcons.GitBranch className="w-2.5 h-2.5 opacity-70" />
+                    <span className="tabular-nums">{periphery!.downEdges} connection{periphery!.downEdges === 1 ? '' : 's'}</span>
+                  </>
+                )}
               </motion.button>
             )}
           </AnimatePresence>

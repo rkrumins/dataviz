@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
+import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -148,6 +150,8 @@ export function LineageFlowOverlay({
   const onAnchorProxiesRef = useRef(onAnchorProxies)
   const railFingerprintRef = useRef('')
   const dockedProxyIdsRef = useRef<Set<string>>(new Set())
+  // Column periphery emission gate (see the summary block in updateFlow).
+  const peripheryFpRef = useRef('')
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
@@ -217,6 +221,10 @@ export function LineageFlowOverlay({
     onAnchorProxiesRef.current = onAnchorProxies
   }, [onAnchorProxies])
 
+  // Clear periphery summaries when the overlay unmounts (lineage flow
+  // toggled off) so columns never show stale connection counts.
+  useEffect(() => () => { useColumnPeripheryStore.getState().clear() }, [])
+
   // Selection changes redraw the overlay so the rail recomputes; the
   // ref keeps updateFlow's identity stable.
   useEffect(() => {
@@ -263,7 +271,7 @@ export function LineageFlowOverlay({
     // partners into up/down/left/right.
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
-    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string> }>()
+    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string>, layerId: string | null }>()
     const trailingEdges: OverflowEdge[] = []
     const bucketStubCount = new Map<string, number>()
 
@@ -671,7 +679,7 @@ export function LineageFlowOverlay({
           )
         : gutterX
       if (!buckets.has(bucketKey)) {
-        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set() })
+        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set(), layerId: partnerLayer })
       }
       const bucket = buckets.get(bucketKey)!
       bucket.gutterXs.push(badgeX)
@@ -797,12 +805,31 @@ export function LineageFlowOverlay({
       setComputedStubs([])
     }
 
+    // Vertical buckets attributed to a column fold into that column's
+    // PERIPHERY SUMMARY — LayerColumn merges them into its own
+    // "↑ N rows · M connections" chips, so rows and connections read as
+    // one labeled statement instead of two unlabeled numbers floating
+    // near each other. Floating badges remain only for buckets that
+    // can't be attributed to a column: all horizontal (left/right)
+    // directions plus the rare unresolvable-partner vertical fallback.
     const badges: OverflowBadge[] = []
+    const peripherySummaries: Record<string, ColumnPeripherySummary> = {}
     buckets.forEach((bucket) => {
       const horizontal = bucket.direction === 'left' || bucket.direction === 'right'
+      if (!horizontal && bucket.layerId) {
+        const s = peripherySummaries[bucket.layerId] ??= { upEdges: 0, upEntities: 0, downEdges: 0, downEntities: 0 }
+        if (bucket.direction === 'up') {
+          s.upEdges += bucket.edgeCount
+          s.upEntities += bucket.partnerSet.size
+        } else {
+          s.downEdges += bucket.edgeCount
+          s.downEntities += bucket.partnerSet.size
+        }
+        return
+      }
       // Left/right badges pin to the visible viewport edge (overlay
-      // coords) at the average row band; up/down badges keep their
-      // gutter-centered placement.
+      // coords) at the average row band; fallback vertical badges keep
+      // their gutter-centered placement.
       const avgX = horizontal
         ? (bucket.direction === 'left'
             ? viewportRect.left - containerRect.left + 30
@@ -822,6 +849,18 @@ export function LineageFlowOverlay({
     setOverflowBadges(badges)
     setOverflowEdges(trailingEdges)
     setProxyEdges(proxyEdgesNext)
+
+    // Periphery emission — through the dedicated store so only the
+    // columns whose numbers changed re-render (never the canvas), and
+    // only when content actually changed (this pass runs per frame).
+    const peripheryFp = Object.keys(peripherySummaries).sort().map(k => {
+      const s = peripherySummaries[k]
+      return `${k}:${s.upEdges}:${s.upEntities}:${s.downEdges}:${s.downEntities}`
+    }).join('|')
+    if (peripheryFp !== peripheryFpRef.current) {
+      peripheryFpRef.current = peripheryFp
+      useColumnPeripheryStore.getState().setSummaries(peripherySummaries)
+    }
 
     // Rail payload — pushed to React only on real content change (this
     // pass runs per frame during scroll). The docked-id set updates in
