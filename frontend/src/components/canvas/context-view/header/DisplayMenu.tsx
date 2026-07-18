@@ -161,9 +161,15 @@ export function DisplayMenu({
                 right: anchor.right,
                 width: POPOVER_WIDTH,
                 zIndex: 1000,
+                // The menu can outgrow the window (Canvas + Lineage
+                // sections) — cap it to the space below the trigger and
+                // let the BODY scroll. Without this it clipped with no
+                // way to reach the lower settings.
+                maxHeight: `calc(100vh - ${anchor.top}px - 16px)`,
               }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="flex flex-col rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
               {/* Section: Canvas */}
               <div className="px-3 pt-3 pb-1 flex items-center gap-2 border-b border-black/[0.06] dark:border-white/[0.04]">
                 <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-accent-lineage/25 to-purple-500/15 flex items-center justify-center">
@@ -218,6 +224,7 @@ export function DisplayMenu({
                 onToggleEdgeDirection={onToggleEdgeDirection}
                 disabled={!lineageEnabled}
               />
+              </div>
             </motion.div>
           )}
         </>,

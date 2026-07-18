@@ -835,18 +835,22 @@ export function LineageFlowOverlay({
         }
         return
       }
-      // Left/right badges pin to the visible viewport edge (overlay
-      // coords) at the average row band; fallback vertical badges keep
-      // their gutter-centered placement.
-      const avgX = horizontal
-        ? (bucket.direction === 'left'
-            ? viewportRect.left - containerRect.left + 30
-            : viewportRect.right - containerRect.left - 30)
-        : bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length
+      // SCROLLPORT-relative coordinates — the badge layer is a sticky
+      // pin at the scroll container's viewport corner. Content-space
+      // coordinates here previously EXTENDED the scrollable area: an
+      // HTML badge placed at "viewport right" in content space sits
+      // past the columns, so every scroll revealed more scrollable
+      // width — the canvas scrolled horizontally forever.
+      const viewX = (x: number) => x + containerRect.left - viewportRect.left
+      const viewY = (y: number) => y + containerRect.top - viewportRect.top
       const avgY = bucket.ys.reduce((a, b) => a + b, 0) / bucket.ys.length
       badges.push({
-        gutterX: avgX,
-        y: avgY,
+        gutterX: horizontal
+          ? (bucket.direction === 'left' ? 30 : viewportRect.width - 30)
+          : viewX(bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length),
+        y: horizontal
+          ? viewY(avgY)
+          : (bucket.direction === 'up' ? 52 : viewportRect.height - 30),
         direction: bucket.direction,
         count: bucket.edgeCount,
         color: bucket.colors[0] || '#3b82f6',
@@ -1807,7 +1811,12 @@ export function LineageFlowOverlay({
         buttons opt back in, so canvas interactions beneath are
         unaffected. Tooltip lists off-screen partners; click reveals the
         nearest one via the canvas's two-axis reveal mechanism. ── */}
-    <div className="absolute inset-0 pointer-events-none z-40">
+    {/* Zero-size sticky pin at the scrollport's top-left corner: badges
+        position in VIEWPORT coordinates inside it, so they can never
+        extend the scrollable area (content-space badges at "viewport
+        right" previously made the canvas scroll horizontally forever —
+        each scroll pushed the badge, and the scroll extent, further). */}
+    <div className="sticky top-0 left-0 z-40 h-0 w-0 overflow-visible pointer-events-none">
       {overflowBadges.map((badge, i) => {
         const isHorizontal = badge.direction === 'left' || badge.direction === 'right'
         const rotation = badge.direction === 'up' ? undefined
@@ -1825,12 +1834,8 @@ export function LineageFlowOverlay({
             className="absolute pointer-events-none"
             style={{
               left: badge.gutterX,
-              ...(isHorizontal
-                ? { top: badge.y, transform: 'translate(-50%, -50%)' }
-                : {
-                    transform: 'translateX(-50%)',
-                    ...(badge.direction === 'up' ? { top: 52 } : { bottom: 12 }),
-                  }),
+              top: badge.y,
+              transform: isHorizontal ? 'translate(-50%, -50%)' : 'translateX(-50%)',
             }}
           >
             <InfoTooltip

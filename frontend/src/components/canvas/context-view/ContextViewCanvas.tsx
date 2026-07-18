@@ -43,6 +43,7 @@ import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
+import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
@@ -1357,6 +1358,13 @@ export function ContextViewCanvas({
   const sortedLayers = useMemo(() =>
     [...activeLayers].sort((a, b) => a.order - b.order),
     [activeLayers]
+  )
+
+  // Layer Strip chips — stable identity so the strip's scroll-measure
+  // effect doesn't re-attach on unrelated canvas re-renders.
+  const stripLayers = useMemo(
+    () => sortedLayers.map(l => ({ id: l.id, name: l.name, color: l.color || '#6366f1' })),
+    [sortedLayers],
   )
 
   // Monotonic version counter — replaces brittle fingerprint sampling.
@@ -3144,7 +3152,7 @@ export function ContextViewCanvas({
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.18 }}
               className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(1.25rem + var(--trace-dock-height, 0px))' }}
+              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
               data-canvas-interactive
             >
               <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
@@ -3184,7 +3192,7 @@ export function ContextViewCanvas({
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.18 }}
               className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(1.25rem + var(--trace-dock-height, 0px))' }}
+              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
               data-canvas-interactive
             >
               <Crosshair className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
@@ -3210,6 +3218,22 @@ export function ContextViewCanvas({
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Layer Strip — docked horizontal navigator: you-are-here chips
+            per layer, click-to-jump, add-layer (draft) and Fit. Frame-
+            anchored (never in scroll content). */}
+        <LayerStrip
+          layers={stripLayers}
+          scrollRef={horizontalScrollRef}
+          // "+" routes to the existing AddLayerColumn at the canvas end —
+          // one deliberate creation flow (name input there), not a
+          // second create path.
+          onAddLayer={isDraft ? () => {
+            const el = horizontalScrollRef.current
+            el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
+          } : undefined}
+          onFit={handleFitToWidth}
+        />
 
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
