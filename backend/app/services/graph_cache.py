@@ -41,6 +41,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
 
 from pydantic import BaseModel
@@ -56,6 +57,12 @@ T = TypeVar("T", bound=BaseModel)
 
 _KEY_PREFIX = "graphcache:v1"
 _GEN_PREFIX = "graphcache:gen"
+# Cache-as-of stamp: the ISO timestamp of the last generation bump for a
+# scope — the OPS Freshness Cockpit's "as of" signal for cached reads.
+# Written alongside the generation counter in bump_generation(s); read via
+# get_cache_as_of(). Best-effort, same fail-open conventions as the rest
+# of this module.
+_GENAT_PREFIX = "graphcache:genat"
 
 
 # ─── env-safe parsing ──────────────────────────────────────────────────
@@ -391,6 +398,9 @@ class GraphCache:
         """
         try:
             await self._redis.incr(_gen_key(scope))
+            await self._redis.set(
+                _genat_key(scope), datetime.now(timezone.utc).isoformat(),
+            )
         except RedisError as exc:
             logger.warning(
                 "graph_cache: generation bump failed for %s (%s); "
@@ -407,8 +417,10 @@ class GraphCache:
             return
         try:
             pipe = self._redis.pipeline(transaction=False)
+            now_iso = datetime.now(timezone.utc).isoformat()
             for scope in scopes:
                 pipe.incr(_gen_key(scope))
+                pipe.set(_genat_key(scope), now_iso)
             await pipe.execute()
         except RedisError as exc:
             logger.warning(
@@ -588,6 +600,10 @@ class GraphCache:
 
 def _gen_key(scope: CacheScope) -> str:
     return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
+
+
+def _genat_key(scope: CacheScope) -> str:
+    return f"{_GENAT_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
 
 
 def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any]) -> str:
@@ -812,6 +828,28 @@ async def get_source_stale_reason(
     except Exception as exc:
         logger.warning(
             "graph_cache: get_source_stale_reason failed for %s/%s: %s", ws, ds, exc,
+        )
+        return None
+
+
+async def get_cache_as_of(
+    workspace_id: str, data_source_id: str, branch_id: str = "",
+) -> Optional[str]:
+    """Read the cache-as-of stamp — the ISO timestamp of the last
+    ``bump_generation``/``bump_generations`` call for this scope. Returns
+    ``None`` on empty ids, cache miss, or any Redis error; this is a
+    best-effort freshness signal for the OPS Freshness Cockpit, never a
+    hard dependency."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id=str(branch_id))
+        return await cache._redis.get(_genat_key(scope))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: get_cache_as_of failed for %s/%s: %s", ws, ds, exc,
         )
         return None
 

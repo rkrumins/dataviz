@@ -248,6 +248,90 @@ async def test_bump_generations_pipelines_incrs() -> None:
     redis.incr.assert_not_awaited()  # nothing bumped outside the pipeline
 
 
+# ─── genat cache-as-of stamp (OPS Freshness Cockpit foundation) ────────
+
+@pytest.mark.asyncio
+async def test_bump_generation_sets_genat_stamp() -> None:
+    from datetime import datetime
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    await cache.bump_generation(CacheScope("ws1", "ds1"))
+
+    redis.set.assert_awaited_once()
+    key_arg = redis.set.call_args.args[0]
+    value_arg = redis.set.call_args.args[1]
+    assert graph_cache._GENAT_PREFIX in key_arg
+    assert "ws1" in key_arg and "ds1" in key_arg
+    # Value round-trips through fromisoformat without raising.
+    datetime.fromisoformat(value_arg)
+
+
+@pytest.mark.asyncio
+async def test_bump_generations_pipelines_genat_sets() -> None:
+    """Bulk bumps set the genat stamp in the SAME pipeline — one genat SET
+    per scope, no extra round-trips."""
+    from unittest.mock import MagicMock
+
+    redis = _make_redis()
+    pipe = MagicMock()
+    pipe.incr = MagicMock()
+    pipe.set = MagicMock()
+    pipe.execute = AsyncMock(return_value=[1] * 5)
+    redis.pipeline = MagicMock(return_value=pipe)
+    cache = GraphCache(redis)
+
+    scopes = [CacheScope(f"ws{i}", f"ds{i}") for i in range(5)]
+    await cache.bump_generations(scopes)
+
+    assert pipe.incr.call_count == 5
+    assert pipe.set.call_count == 5
+    pipe.execute.assert_awaited_once()
+    redis.set.assert_not_awaited()  # nothing set outside the pipeline
+
+
+@pytest.mark.asyncio
+async def test_get_cache_as_of_returns_value_on_hit(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(return_value="2026-07-18T12:00:00+00:00")
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    value = await graph_cache.get_cache_as_of("ws1", "ds1")
+    assert value == "2026-07-18T12:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_get_cache_as_of_returns_none_on_miss(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(return_value=None)
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    assert await graph_cache.get_cache_as_of("ws1", "ds1") is None
+
+
+@pytest.mark.asyncio
+async def test_get_cache_as_of_returns_none_on_redis_error(monkeypatch) -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    assert await graph_cache.get_cache_as_of("ws1", "ds1") is None
+
+
+@pytest.mark.asyncio
+async def test_get_cache_as_of_guards_empty_ids(monkeypatch) -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    assert await graph_cache.get_cache_as_of("", "ds1") is None
+    assert await graph_cache.get_cache_as_of("ws1", "") is None
+    redis.get.assert_not_called()
+
+
 # ─── fail-open semantics ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
