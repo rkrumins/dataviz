@@ -122,6 +122,8 @@ export function LineageFlowOverlay({
      *  renders NOTHING per the SVG zero-height-bbox rule.) */
     sx: number
     tx: number
+    /** Y at both band ends (pre-sag) — anchors the dock ports. */
+    ey: number
   }>>([])
   // Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Computed on a debounced settle pass (never per frame).
@@ -696,6 +698,7 @@ export function LineageFlowOverlay({
             my: bandY + sag * 0.75,
             sx,
             tx,
+            ey: bandY,
           })
         })
       }
@@ -1288,12 +1291,33 @@ export function LineageFlowOverlay({
                 <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.44" />
               </linearGradient>
             </defs>
+            {/* Butt caps: round caps turned band ends into detached blobs.
+                Dock ports at each column edge make the band read as
+                volume flowing OUT of one layer INTO the next. */}
             <path
               d={r.pathD}
               stroke={`url(#flow-ribbon-g-${i})`}
               strokeWidth={r.width}
               fill="none"
-              strokeLinecap="round"
+              strokeLinecap="butt"
+            />
+            <rect
+              x={r.sx - 1.5}
+              y={r.ey - (r.width * 1.15) / 2}
+              width={3.5}
+              height={r.width * 1.15}
+              rx={1.75}
+              fill="rgb(99, 102, 241)"
+              opacity={0.55}
+            />
+            <rect
+              x={r.tx - 2}
+              y={r.ey - (r.width * 1.15) / 2}
+              width={3.5}
+              height={r.width * 1.15}
+              rx={1.75}
+              fill="rgb(139, 92, 246)"
+              opacity={0.6}
             />
             <g transform={`translate(${r.mx}, ${r.my})`}>
               <rect x={-34} y={-10} width={68} height={20} rx={10} fill="var(--color-canvas-elevated, #fff)" opacity={0.85} />
