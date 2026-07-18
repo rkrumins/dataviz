@@ -117,6 +117,11 @@ export function LineageFlowOverlay({
     label: string
     mx: number
     my: number
+    /** Band endpoints — per-band userSpaceOnUse gradient coordinates.
+     *  (An objectBoundingBox gradient on a straight horizontal stroke
+     *  renders NOTHING per the SVG zero-height-bbox rule.) */
+    sx: number
+    tx: number
   }>>([])
   // Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Computed on a debounced settle pass (never per frame).
@@ -679,13 +684,18 @@ export function LineageFlowOverlay({
           const tx = t.left - containerRect.left - 4
           if (tx <= sx) return // reverse-flow pair — bands read left→right only
           const spread = Math.max((tx - sx) * 0.4, 40)
+          // Gentle sag so the band reads as flow, not a ruler line (and
+          // the path's bbox is never zero-height).
+          const sag = Math.min(28, (tx - sx) * 0.04) + i * 2
           nextRibbons.push({
             key: `${r.sourceLayerId}->${r.targetLayerId}`,
-            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY}, ${tx - spread} ${bandY}, ${tx} ${bandY}`,
+            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY + sag}, ${tx - spread} ${bandY + sag}, ${tx} ${bandY}`,
             width: w,
             label: `${formatRibbonCount(r.count)} flows`,
             mx: (sx + tx) / 2,
-            my: bandY,
+            my: bandY + sag * 0.75,
+            sx,
+            tx,
           })
         })
       }
@@ -1242,14 +1252,6 @@ export function LineageFlowOverlay({
             )
           })}
 
-          {/* Flow-ribbon gradient — indigo→violet, brightening toward the
-              consumer side so the band itself reads as directional. */}
-          <linearGradient id="flow-ribbon-grad" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.10" />
-            <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.20" />
-            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.30" />
-          </linearGradient>
-
           {/* Shared pass-through gradients — one per color, fading at both
               ends along the (predominantly horizontal) travel direction. */}
           {sharedDefs.passThroughColors.map(c => {
@@ -1266,26 +1268,43 @@ export function LineageFlowOverlay({
         </defs>
         {/* ── Flow ribbons — macro volume bands beneath the edge layer.
             Sankey-style: thickness encodes total edge count between the
-            two layers; the count pill states it exactly. ── */}
-        {computedRibbons.map(r => (
+            two layers; the count pill states it exactly. Per-band
+            userSpaceOnUse gradients (indigo → violet, brightening toward
+            the consumer side) — an objectBoundingBox gradient dies on
+            near-horizontal strokes. ── */}
+        {computedRibbons.map((r, i) => (
           <g key={`ribbon-${r.key}`} className="pointer-events-none">
+            <defs>
+              <linearGradient
+                id={`flow-ribbon-g-${i}`}
+                gradientUnits="userSpaceOnUse"
+                x1={r.sx}
+                x2={r.tx}
+                y1={0}
+                y2={0}
+              >
+                <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.16" />
+                <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.30" />
+                <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.44" />
+              </linearGradient>
+            </defs>
             <path
               d={r.pathD}
-              stroke="url(#flow-ribbon-grad)"
+              stroke={`url(#flow-ribbon-g-${i})`}
               strokeWidth={r.width}
               fill="none"
               strokeLinecap="round"
             />
             <g transform={`translate(${r.mx}, ${r.my})`}>
-              <rect x={-30} y={-9.5} width={60} height={19} rx={9.5} fill="rgb(99, 102, 241)" opacity={0.12} />
+              <rect x={-34} y={-10} width={68} height={20} rx={10} fill="var(--color-canvas-elevated, #fff)" opacity={0.85} />
+              <rect x={-34} y={-10} width={68} height={20} rx={10} fill="rgb(99, 102, 241)" opacity={0.10} />
               <text
                 x={0}
                 y={3.5}
                 textAnchor="middle"
-                fontSize="9.5"
-                fontWeight={600}
-                fill="rgb(99, 102, 241)"
-                opacity={0.95}
+                fontSize="10"
+                fontWeight={650}
+                fill="rgb(79, 70, 229)"
               >
                 {r.label}
               </text>
