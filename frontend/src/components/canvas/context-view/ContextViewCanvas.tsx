@@ -3237,11 +3237,16 @@ export function ContextViewCanvas({
             style={{
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
-              // Canvas zoom — CSS scale on the columns area. Width/height
-              // are pre-compensated so the inner flex layout stays truthful
-              // at non-100% zoom; the outer overflow-auto handles scrolling.
-              transform: canvasZoom !== 1 ? `scale(${canvasZoom})` : undefined,
-              transformOrigin: 'top left',
+              // Canvas zoom — CSS `zoom` (NOT transform: scale). zoom is a
+              // LAYOUT-affecting scale: the wrapper's 100/zoom% size lays
+              // out back to exactly 100% of the scroll container, so the
+              // scrollable area always equals the visible content. A
+              // transform here left a 100/zoom% layout-sized ghost scroll
+              // region (transforms never affect layout), letting users
+              // scroll far past the canvas into emptiness — and wheel
+              // scrolls chained into that ghost area instead of the
+              // columns' internal lists.
+              zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
               height: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
             }}

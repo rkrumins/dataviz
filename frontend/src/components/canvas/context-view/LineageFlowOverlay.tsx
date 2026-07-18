@@ -243,6 +243,32 @@ export function LineageFlowOverlay({
       return el
     }
 
+    // Helper: clip box of the column scroller that owns a node element.
+    // The overlay is NOT clipped by column scrollers, but the cards are —
+    // the IntersectionObserver's rootMargin keeps rows "visible" up to
+    // 100px past the clip edge, so anything anchored to such a row would
+    // paint orphaned marks over empty canvas. Rect lookups are cached per
+    // scroller per pass.
+    const clipRects = new Map<Element, DOMRect>()
+    const getClipRect = (el: HTMLElement): DOMRect | null => {
+      const scroller = el.closest('.overflow-y-auto')
+      if (!scroller) return null
+      let r = clipRects.get(scroller)
+      if (!r) {
+        r = scroller.getBoundingClientRect()
+        clipRects.set(scroller, r)
+      }
+      return r
+    }
+    // A row counts as in-column when its vertical center is inside the
+    // owning scroller's clip box (more than half hidden → treat as gone).
+    const isCenterClipped = (el: HTMLElement, rect: DOMRect): boolean => {
+      const clip = getClipRect(el)
+      if (!clip) return false
+      const cy = rect.top + rect.height / 2
+      return cy < clip.top || cy > clip.bottom
+    }
+
     // Helper: estimated viewport-space rect for an UNMOUNTED node via the
     // column geometry registry (≤ a handful of columns; pure Map lookups
     // until the owning column is found).
@@ -461,6 +487,11 @@ export function LineageFlowOverlay({
       if (!visibleEl) return
 
       const vRect = visibleEl.getBoundingClientRect()
+      // Row mostly hidden by its column's clip — its stubs/badges would
+      // anchor to a card the user can't see. Active edges are exempt
+      // (they bridge real cards and carry scroll continuity); these
+      // single-row decorations are not.
+      if (isCenterClipped(visibleEl, vRect)) return
       const gutterX = sourceVisible
         ? vRect.right - containerRect.left + GUTTER_HALF
         : vRect.left - containerRect.left - GUTTER_HALF
@@ -596,6 +627,9 @@ export function LineageFlowOverlay({
         const el = getEl(domId)
         if (!el) return
         const rect = el.getBoundingClientRect()
+        // Rows mostly scrolled past their column's clip edge would leave
+        // floating hairline bars with no visible card ("blank node").
+        if (isCenterClipped(el, rect)) return
         const midY = rect.top + rect.height / 2 - containerRect.top
         const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
         // Position just OUTSIDE the card edge: the overlay sits beneath
