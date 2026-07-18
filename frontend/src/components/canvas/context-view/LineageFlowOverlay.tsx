@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge, PassThroughEdge } from './types'
+import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -125,12 +125,6 @@ export function LineageFlowOverlay({
     /** Y at both band ends (pre-sag) — anchors the dock ports. */
     ey: number
   }>>([])
-  // Pass-through edges — both endpoints off-viewport, path crosses the
-  // visible box. Computed on a debounced settle pass (never per frame).
-  const [passThroughEdges, setPassThroughEdges] = useState<PassThroughEdge[]>([])
-  const passThroughTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const computePassThroughRef = useRef<(() => void) | null>(null)
-
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
@@ -705,105 +699,17 @@ export function LineageFlowOverlay({
       setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
     }
 
-    // Pass-through settle pass — debounced 150ms so the O(projected-edges)
-    // scan never runs on the per-frame path. updateFlow already fires on
-    // every scroll / IO / mutation / resize trigger, so re-arming here
-    // keeps the pass fresh without any new listeners.
-    if (passThroughTimerRef.current) clearTimeout(passThroughTimerRef.current)
-    passThroughTimerRef.current = setTimeout(() => {
-      passThroughTimerRef.current = null
-      computePassThroughRef.current?.()
-    }, 150)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
 
-  // ── Pass-through edges — both endpoints off-viewport, path crosses the
-  // visible box. Runs only on the debounced settle pass above.
-  //
-  // BUDGETED: on tall columns nearly EVERY projected edge's span crosses
-  // the viewport, so an uncapped pass explodes into a moiré fan of
-  // thousands of estimated dashes (and thousands of DOM-geometry reads).
-  // Edges are examined strongest-first (bundled edge count) and the pass
-  // stops at PASS_THROUGH_CAP accepted / PASS_THROUGH_EXAMINE_CAP
-  // examined — this is a summary layer, not an exhaustive one; badges,
-  // gutters, and ribbons carry the rest.
-  const computePassThrough = useCallback(() => {
-    if (!containerRef.current) return
-    if (!geometryRegistry || geometryRegistry.size === 0) {
-      setPassThroughEdges(prev => (prev.length === 0 ? prev : []))
-      return
-    }
-    const containerRect = containerRef.current.getBoundingClientRect()
-    const viewportRect = containerRef.current.parentElement?.getBoundingClientRect()
-    if (!viewportRect) return
-
-    const PASS_THROUGH_CAP = 120
-    const PASS_THROUGH_EXAMINE_CAP = 2500
-
-    const colCache = new Map<string, ColumnGeometryApi | null>()
-    const resolveCol = (id: string): ColumnGeometryApi | null => {
-      const cached = colCache.get(id)
-      if (cached !== undefined) return cached
-      let col: ColumnGeometryApi | null = null
-      for (const api of geometryRegistry.values()) {
-        if (api.hasNode(id)) { col = api; break }
-      }
-      colCache.set(id, col)
-      return col
-    }
-    // Exact DOM rect when the card is mounted (horizontal off-viewport
-    // cards are still mounted by their column), estimate otherwise.
-    const rectOf = (id: string, col: ColumnGeometryApi) =>
-      document.getElementById(`layer-node-${id}`)?.getBoundingClientRect() ?? col.getNodeRect(id)
-
-    // Strongest-first ordering so the cap keeps the flows that matter.
-    const ranked = [...edges].sort((a, b) =>
-      ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0)))
-
-    const result: PassThroughEdge[] = []
-    let examined = 0
-    for (const edge of ranked) {
-      if (result.length >= PASS_THROUGH_CAP) break
-      if (++examined > PASS_THROUGH_EXAMINE_CAP) break
-      if (globalVisibleNodes.has(`layer-node-${edge.source}`)) continue
-      if (globalVisibleNodes.has(`layer-node-${edge.target}`)) continue
-      const srcCol = resolveCol(edge.source)
-      if (!srcCol) continue
-      const tgtCol = resolveCol(edge.target)
-      if (!tgtCol || srcCol === tgtCol) continue
-      const sRect = rectOf(edge.source, srcCol)
-      if (!sRect) continue
-      const tRect = rectOf(edge.target, tgtCol)
-      if (!tRect) continue
-      // X pre-test: the horizontal strip the edge travels must cross the
-      // viewport box.
-      const xA = sRect.right
-      const xB = tRect.left
-      if (Math.max(xA, xB) < viewportRect.left || Math.min(xA, xB) > viewportRect.right) continue
-      // Y test — exact for the monotone cross-column cubic: the curve's
-      // y stays within [sy, ty].
-      const syAbs = sRect.top + sRect.height / 2
-      const tyAbs = tRect.top + tRect.height / 2
-      if (Math.max(syAbs, tyAbs) < viewportRect.top || Math.min(syAbs, tyAbs) > viewportRect.bottom) continue
-
-      // Overlay coords — same anchors and curve family as the main pass.
-      const sx = sRect.right - containerRect.left + 6
-      const sy = syAbs - containerRect.top
-      const tx = tRect.left - containerRect.left - 8
-      const ty = tyAbs - containerRect.top
-      const dist = Math.abs(tx - sx)
-      const spread = Math.max(dist * 0.5, 24)
-      const pathD = `M ${sx} ${sy} C ${sx + spread} ${sy}, ${tx - spread} ${ty}, ${tx} ${ty}`
-      const primaryType = edge.types?.[0] || edge.originalType || ''
-      const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
-      result.push({ id: `pt-${edge.id}`, source: edge.source, target: edge.target, pathD, color })
-    }
-    setPassThroughEdges(prev => (prev.length === 0 && result.length === 0 ? prev : result))
-  }, [edges, geometryRegistry, resolveEdgeColor])
-
-  useEffect(() => {
-    computePassThroughRef.current = computePassThrough
-  }, [computePassThrough])
+  // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
+  // curves for edges whose endpoints were both unmounted. Removed after
+  // repeated user testing: ambient edges anchored to estimated positions
+  // of content that is not on screen consistently read as broken
+  // ("lines going to nodes that don't exist"). Off-screen awareness is
+  // carried by layers that never fake geometry: per-node hairline
+  // indicators, directional badges (count + click-to-jump), density
+  // gutters, and flow ribbons.
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -962,10 +868,6 @@ export function LineageFlowOverlay({
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
-      if (passThroughTimerRef.current !== null) {
-        clearTimeout(passThroughTimerRef.current)
-        passThroughTimerRef.current = null
-      }
     }
   }, [nodes, expandedNodesFingerprint, scheduleUpdate])
 
@@ -1098,17 +1000,11 @@ export function LineageFlowOverlay({
     const gradientKeys = new Set<string>()
     overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
 
-    // Pass-through edges fade at BOTH ends — they enter and exit beyond
-    // the viewport, and the double fade reads as "continues off-screen".
-    const passThroughColors = new Set<string>()
-    passThroughEdges.forEach(e => passThroughColors.add(e.color))
-
     return {
       markerColors: Array.from(markerColors),
       gradientKeys: Array.from(gradientKeys),
-      passThroughColors: Array.from(passThroughColors),
     }
-  }, [visibleEdges, overflowEdges, passThroughEdges])
+  }, [visibleEdges, overflowEdges])
 
   // Display names for badge tooltips — id → name over the rendered node
   // hierarchy (children included so partners below collapsed roots still
@@ -1263,20 +1159,6 @@ export function LineageFlowOverlay({
               <linearGradient key={safeId} id={safeId} {...axis}>
                 <stop offset="0%" stopColor={c} stopOpacity="0.35" />
                 <stop offset="70%" stopColor={c} stopOpacity="0.12" />
-                <stop offset="100%" stopColor={c} stopOpacity="0" />
-              </linearGradient>
-            )
-          })}
-
-          {/* Shared pass-through gradients — one per color, fading at both
-              ends along the (predominantly horizontal) travel direction. */}
-          {sharedDefs.passThroughColors.map(c => {
-            const safeId = `pt-${c.replace(/[^a-zA-Z0-9]/g, '')}`
-            return (
-              <linearGradient key={safeId} id={safeId} x1="0" x2="1" y1="0" y2="0">
-                <stop offset="0%" stopColor={c} stopOpacity="0" />
-                <stop offset="15%" stopColor={c} stopOpacity="0.32" />
-                <stop offset="85%" stopColor={c} stopOpacity="0.32" />
                 <stop offset="100%" stopColor={c} stopOpacity="0" />
               </linearGradient>
             )
@@ -1634,27 +1516,6 @@ export function LineageFlowOverlay({
             strokeLinecap="round"
             className="pointer-events-none"
           />
-        ))}
-
-        {/* ── Pass-through edges — both endpoints off-viewport but the path
-            crosses the visible box. Estimated geometry (virtualizer
-            offsets), so they render dashed + dimmed in the coalesced
-            style: no gradients, markers, or animation, and never any hit
-            layer. data-edge-* attributes keep the DOM hover-dimming loop
-            consistent — hovering any node dims these like every other
-            non-incident edge. ── */}
-        {passThroughEdges.map(pt => (
-          <g key={pt.id} data-edge-id={pt.id} data-edge-src={pt.source} data-edge-tgt={pt.target}>
-            <path
-              d={pt.pathD}
-              stroke={`url(#pt-${pt.color.replace(/[^a-zA-Z0-9]/g, '')})`}
-              strokeWidth={1.5}
-              fill="none"
-              strokeDasharray="5 5"
-              strokeLinecap="round"
-              className="pointer-events-none"
-            />
-          </g>
         ))}
       </svg>
 
