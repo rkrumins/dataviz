@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
+import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
+import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
+import type { AnchorProxyCandidate } from './anchorRail'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -45,6 +47,8 @@ export function LineageFlowOverlay({
   geometryRegistry,
   onRevealNode,
   flowRibbons,
+  focusNodeId,
+  onAnchorProxies,
 }: {
   nodes: any[],
   edges: any[],
@@ -85,6 +89,12 @@ export function LineageFlowOverlay({
   /** Macro flow bands per (layer → layer) pair — rendered beneath the
    *  edge layer in Adaptive's summarized state. */
   flowRibbons?: FlowRibbon[],
+  /** The SELECTED node driving the Anchor Rail — its off-screen partners
+   *  dock as proxy chips in their owning columns. */
+  focusNodeId?: string | null,
+  /** Rail payload per layer id — called only when the rail content
+   *  actually changes (the compute pass runs per frame). */
+  onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -125,6 +135,19 @@ export function LineageFlowOverlay({
     /** Y at both band ends (pre-sag) — anchors the dock ports. */
     ey: number
   }>>([])
+  // Proxy edges — focus edges docked to Anchor Rail chips. The chip is a
+  // real rendered element, so this is measured geometry (unlike the
+  // removed pass-through layer, which drew to estimates).
+  const [proxyEdges, setProxyEdges] = useState<Array<{
+    id: string; source: string; target: string; pathD: string; color: string
+  }>>([])
+  // Rail bookkeeping — refs so updateFlow never needs new dependencies.
+  // dockedProxyIds bounds per-frame DOM lookups to chips that actually
+  // exist (≤ rail cap per column), regardless of the focus node's fan.
+  const focusNodeIdRef = useRef<string | null>(null)
+  const onAnchorProxiesRef = useRef(onAnchorProxies)
+  const railFingerprintRef = useRef('')
+  const dockedProxyIdsRef = useRef<Set<string>>(new Set())
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
@@ -189,6 +212,17 @@ export function LineageFlowOverlay({
       }
     })
   }, [])
+
+  useEffect(() => {
+    onAnchorProxiesRef.current = onAnchorProxies
+  }, [onAnchorProxies])
+
+  // Selection changes redraw the overlay so the rail recomputes; the
+  // ref keeps updateFlow's identity stable.
+  useEffect(() => {
+    focusNodeIdRef.current = focusNodeId ?? null
+    scheduleUpdate()
+  }, [focusNodeId, scheduleUpdate])
 
   // Update paths function with optimizations
   const updateFlow = useCallback(() => {
@@ -278,6 +312,28 @@ export function LineageFlowOverlay({
         if (api.hasNode(nodeId)) return api.getNodeRect(nodeId)
       }
       return null
+    }
+
+    // ── Anchor Rail collection (focus-scoped) ───────────────────────────
+    // Edges incident to the SELECTED node whose partner row is scrolled
+    // out of its column dock that partner as a proxy chip. Aggregation is
+    // O(focus-incident candidate edges); the layer lookup is cached per
+    // partner.
+    const focusId = focusNodeIdRef.current
+    const focusDomId = focusId ? `layer-node-${focusId}` : null
+    const proxyCandidates = new Map<string, AnchorProxyCandidate>()
+    const proxyEdgesNext: Array<{ id: string; source: string; target: string; pathD: string; color: string }> = []
+    const owningLayerCache = new Map<string, string | null>()
+    const findOwningLayer = (nodeId: string): string | null => {
+      if (!geometryRegistry) return null
+      const cached = owningLayerCache.get(nodeId)
+      if (cached !== undefined) return cached
+      let hit: string | null = null
+      for (const [layerId, api] of geometryRegistry.entries()) {
+        if (api.hasNode(nodeId)) { hit = layerId; break }
+      }
+      owningLayerCache.set(nodeId, hit)
+      return hit
     }
 
     // Collect only edges with at least one endpoint currently in the
@@ -533,6 +589,59 @@ export function LineageFlowOverlay({
       const primaryType = edge.types?.[0] || edge.originalType || ''
       const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
 
+      // ── Anchor Rail docking ───────────────────────────────────────────
+      // Focus-incident edge whose partner is scrolled away VERTICALLY in
+      // an on-screen column: dock the partner as a proxy chip there.
+      // (Horizontally off-viewport columns can't host a visible chip —
+      // those keep the existing left/right badges.) When the chip is
+      // already mounted, the edge anchors to its real rect and replaces
+      // the anonymous stub/badge — identity instead of a count. DOM
+      // lookups are gated on the docked-id set, so a hub with a huge fan
+      // costs Map increments only.
+      if (
+        focusDomId &&
+        (sourceId === focusDomId || targetId === focusDomId) &&
+        (direction === 'up' || direction === 'down')
+      ) {
+        const owningLayer = findOwningLayer(partnerId)
+        if (owningLayer) {
+          const bundleCount = (edge.edgeCount as number) || 1
+          const prev = proxyCandidates.get(partnerId)
+          if (prev) prev.count += bundleCount
+          else proxyCandidates.set(partnerId, { nodeId: partnerId, layerId: owningLayer, count: bundleCount, color, direction })
+          if (dockedProxyIdsRef.current.has(partnerId)) {
+            const chipEl = document.getElementById(`anchor-proxy-${partnerId}`)
+            if (chipEl) {
+              const cRect = chipEl.getBoundingClientRect()
+              const chipCy = (cRect.top + cRect.bottom) / 2 - containerRect.top
+              const chipCx = (cRect.left + cRect.right) / 2 - containerRect.left
+              const focusCx = (vRect.left + vRect.right) / 2 - containerRect.left
+              let pathD: string
+              if (Math.abs(chipCx - focusCx) < 40) {
+                // Same column — bow out through the left lane.
+                const px = vRect.left - containerRect.left - 8
+                const ex2 = cRect.left - containerRect.left - 4
+                const bow = Math.min(px, ex2) - 36
+                pathD = `M ${px} ${sy} C ${bow} ${sy}, ${bow} ${chipCy}, ${ex2} ${chipCy}`
+              } else if (chipCx > focusCx) {
+                const px = vRect.right - containerRect.left + 6
+                const ex2 = cRect.left - containerRect.left - 4
+                pathD = `M ${px} ${sy} C ${px + (ex2 - px) * 0.4} ${sy}, ${ex2 - (ex2 - px) * 0.15} ${chipCy}, ${ex2} ${chipCy}`
+              } else {
+                const px = vRect.left - containerRect.left - 8
+                const ex2 = cRect.right - containerRect.left + 4
+                pathD = `M ${px} ${sy} C ${px + (ex2 - px) * 0.4} ${sy}, ${ex2 - (ex2 - px) * 0.15} ${chipCy}, ${ex2} ${chipCy}`
+              }
+              proxyEdgesNext.push({
+                id: `proxy-edge-${edge.source}-${edge.target}`,
+                source: sourceId, target: targetId, pathD, color,
+              })
+              return // the docked edge replaces the stub/badge for this connection
+            }
+          }
+        }
+      }
+
       const isHorizontal = direction === 'left' || direction === 'right'
       // Vertical buckets group by gutter x; horizontal buckets group by
       // the visible endpoint's row band so badges land next to the rows
@@ -687,6 +796,30 @@ export function LineageFlowOverlay({
     })
     setOverflowBadges(badges)
     setOverflowEdges(trailingEdges)
+    setProxyEdges(proxyEdgesNext)
+
+    // Rail payload — pushed to React only on real content change (this
+    // pass runs per frame during scroll). The docked-id set updates in
+    // lockstep so next frame's edges anchor to the freshly-mounted chips.
+    //
+    // TRANSIENT-EMPTY GUARD: an empty candidate frame while the SAME node
+    // stays focused is visibility flicker (observer rebuild, resize
+    // churn), not user intent — emitting it would unmount the chips and,
+    // worse, feed an emit → canvas re-render → observer churn → emit
+    // oscillation. Keep the existing rail through those frames; the rail
+    // clears when focus changes or ends.
+    const railGroups = groupAnchorProxies(proxyCandidates.values())
+    const railFp = anchorRailFingerprint(focusId, railGroups)
+    const prevFp = railFingerprintRef.current
+    const prevFocusId = prevFp === '' ? null : prevFp.split('|', 1)[0]
+    const transientEmpty = railFp === '' && focusId !== null && prevFocusId === focusId
+    if (railFp !== prevFp && !transientEmpty) {
+      railFingerprintRef.current = railFp
+      dockedProxyIdsRef.current = new Set(
+        Array.from(railGroups.values()).flatMap(g => g.proxies.map(p => p.nodeId)),
+      )
+      onAnchorProxiesRef.current?.(railFp === '' ? new Map() : railGroups, focusId)
+    }
 
     // Flow ribbons — one gradient band per (layer → layer) pair, stacked
     // around the viewport's vertical center, thickness log-scaled to
@@ -840,9 +973,29 @@ export function LineageFlowOverlay({
     // the common parent that contains both.
     const observeRoot = container.parentElement || container
 
-    // Scan for already-present node elements
+    // Scan for already-present node elements. SEED visibility synchronously
+    // from rect math (mirroring the IO config: window root + 100px margin):
+    // this effect re-runs whenever the node set changes identity, and its
+    // cleanup just cleared globalVisibleNodes — waiting for the async
+    // IntersectionObserver callbacks would leave the edge layer BLANK for
+    // a frame or more on every rebuild (visible as edges blinking on
+    // graph updates). The IO then confirms/corrects the seeded state.
+    const seedVisibility = (el: Element) => {
+      if (!el.id || globalVisibleNodes.has(el.id)) return
+      const r = el.getBoundingClientRect()
+      if (
+        r.bottom >= -100 && r.top <= window.innerHeight + 100 &&
+        r.right >= -100 && r.left <= window.innerWidth + 100 &&
+        (r.width > 0 || r.height > 0)
+      ) {
+        globalVisibleNodes.add(el.id)
+      }
+    }
     const scanAndObserve = () => {
-      observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => observeElement(el))
+      observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => {
+        seedVisibility(el)
+        observeElement(el)
+      })
     }
     scanAndObserve()
 
@@ -1550,6 +1703,24 @@ export function LineageFlowOverlay({
             strokeLinecap="round"
             className="pointer-events-none"
           />
+        ))}
+
+        {/* ── Proxy edges — the selected node's connections docked to
+            Anchor Rail chips. The chip is real rendered DOM, so this is
+            measured geometry. Solid and near-full opacity: these ARE the
+            focused node's flows, each with a named destination. ── */}
+        {proxyEdges.map(pe => (
+          <g key={pe.id} data-edge-id={pe.id} data-edge-src={pe.source} data-edge-tgt={pe.target}>
+            <path
+              d={pe.pathD}
+              stroke={pe.color}
+              strokeWidth={1.6}
+              fill="none"
+              opacity={0.85}
+              strokeLinecap="round"
+              className="pointer-events-none"
+            />
+          </g>
         ))}
       </svg>
 

@@ -13,7 +13,7 @@
  * is a 1-line import change per consumer.
  */
 
-import { useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import {
   useSchemaStore,
@@ -78,16 +78,24 @@ export function useViewSchemaIsReady(): boolean {
   return ctx ? true : !isLoading
 }
 
-/** Returns a function to check if an edge type is a containment edge. */
+/** Returns a function to check if an edge type is a containment edge.
+ *
+ *  Memoized on the type list: consumers pass this predicate into memo
+ *  dependency arrays (useContainmentHierarchy treats a predicate identity
+ *  change as "ontology changed" and does a FULL hierarchy rebuild). An
+ *  unmemoized closure here meant every canvas re-render rebuilt the
+ *  containment hierarchy — new map identities → new flat tree → the edge
+ *  overlay's observers tore down and every edge blinked. */
 export function useViewIsContainmentEdge(): (edgeType: string) => boolean {
   const types = useViewContainmentEdgeTypes()
-  return (edgeType: string) => isContainmentEdgeType(edgeType, types)
+  return useCallback((edgeType: string) => isContainmentEdgeType(edgeType, types), [types])
 }
 
-/** Returns a function to check if an edge type is a lineage edge. */
+/** Returns a function to check if an edge type is a lineage edge.
+ *  Memoized for the same reason as useViewIsContainmentEdge. */
 export function useViewIsLineageEdge(): (edgeType: string) => boolean {
   const types = useViewLineageEdgeTypes()
-  return (edgeType: string) => isLineageEdgeType(edgeType, types)
+  return useCallback((edgeType: string) => isLineageEdgeType(edgeType, types), [types])
 }
 
 /** Entity type definition (by id) for the current view's ontology.
