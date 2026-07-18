@@ -48,6 +48,9 @@ export interface CanvasContextMenuProps {
     onDeleteNode?: (id: string) => void
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
+    /** Open the Lineage Lens on this node — its immediate connections,
+     *  grouped and searchable. */
+    onFocusConnections?: (id: string) => void
     onCopyUrn?: (id: string) => void
     /** Arm edge connect-mode from this node */
     onConnect?: (sourceId: string) => void
@@ -82,6 +85,7 @@ export function CanvasContextMenu({
     onDeleteNode,
     onCreateChild,
     onTraceNode,
+    onFocusConnections,
     onCopyUrn,
     onConnect,
     onLinkNode,
@@ -156,6 +160,16 @@ export function CanvasContextMenu({
                     icon: 'GitBranch',
                     shortcut: 'T',
                     onClick: () => { onTraceNode(target.id); onClose() }
+                })
+            }
+
+            if (onFocusConnections) {
+                result.push({
+                    id: 'focus-connections',
+                    label: 'Focus Connections',
+                    icon: 'Focus',
+                    shortcut: 'F',
+                    onClick: () => { onFocusConnections(target.id); onClose() }
                 })
             }
 
@@ -296,7 +310,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode,
+    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, layers, onMoveToLayer, onClose])
 
