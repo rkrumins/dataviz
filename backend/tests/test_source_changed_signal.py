@@ -615,6 +615,10 @@ def test_not_applicable_emits_noop_event(monkeypatch):
         "job_id": None,
         "deferred": False,
     }
+    # Distinguishes this noop from the unchanged-gate noop (evt["detail"]
+    # is None there) — the cockpit needs to tell "nothing changed" apart
+    # from "changed, but aggregation doesn't apply to this source".
+    assert evt["detail"] == "not_applicable"
 
 
 def test_force_gate_recorded_and_flagged_in_actions(monkeypatch):

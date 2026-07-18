@@ -1405,6 +1405,11 @@ class AggregationService:
                     )
                     trigger_outcome = "error"
                     trigger_detail = type(exc).__name__
+        else:
+            # Distinguishes this noop from the unchanged-gate noop above —
+            # the cockpit needs to tell "nothing changed" apart from
+            # "changed, but aggregation doesn't apply to this source".
+            trigger_detail = "not_applicable"
 
         # Audit outcome: not-applicable and the unchanged-gate no-op above
         # both leave nothing queued ("noop"); otherwise deferred/accepted/
