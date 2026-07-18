@@ -718,12 +718,15 @@ export function LineageFlowOverlay({
   }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
 
   // ── Pass-through edges — both endpoints off-viewport, path crosses the
-  // visible box. Runs only on the debounced settle pass above. Cost:
-  // O(projected edges) with O(1) per rejected edge (two Set lookups +
-  // memoized column resolution + interval tests); rect math only for
-  // edges whose horizontal strip crosses the viewport. Endpoint rects
-  // are exact for mounted cards (including mounted-but-horizontally-
-  // off-viewport ones) and virtualizer estimates for unmounted rows.
+  // visible box. Runs only on the debounced settle pass above.
+  //
+  // BUDGETED: on tall columns nearly EVERY projected edge's span crosses
+  // the viewport, so an uncapped pass explodes into a moiré fan of
+  // thousands of estimated dashes (and thousands of DOM-geometry reads).
+  // Edges are examined strongest-first (bundled edge count) and the pass
+  // stops at PASS_THROUGH_CAP accepted / PASS_THROUGH_EXAMINE_CAP
+  // examined — this is a summary layer, not an exhaustive one; badges,
+  // gutters, and ribbons carry the rest.
   const computePassThrough = useCallback(() => {
     if (!containerRef.current) return
     if (!geometryRegistry || geometryRegistry.size === 0) {
@@ -733,6 +736,9 @@ export function LineageFlowOverlay({
     const containerRect = containerRef.current.getBoundingClientRect()
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect()
     if (!viewportRect) return
+
+    const PASS_THROUGH_CAP = 120
+    const PASS_THROUGH_EXAMINE_CAP = 2500
 
     const colCache = new Map<string, ColumnGeometryApi | null>()
     const resolveCol = (id: string): ColumnGeometryApi | null => {
@@ -750,8 +756,15 @@ export function LineageFlowOverlay({
     const rectOf = (id: string, col: ColumnGeometryApi) =>
       document.getElementById(`layer-node-${id}`)?.getBoundingClientRect() ?? col.getNodeRect(id)
 
+    // Strongest-first ordering so the cap keeps the flows that matter.
+    const ranked = [...edges].sort((a, b) =>
+      ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0)))
+
     const result: PassThroughEdge[] = []
-    for (const edge of edges) {
+    let examined = 0
+    for (const edge of ranked) {
+      if (result.length >= PASS_THROUGH_CAP) break
+      if (++examined > PASS_THROUGH_EXAMINE_CAP) break
       if (globalVisibleNodes.has(`layer-node-${edge.source}`)) continue
       if (globalVisibleNodes.has(`layer-node-${edge.target}`)) continue
       const srcCol = resolveCol(edge.source)
