@@ -597,11 +597,15 @@ export function LineageFlowOverlay({
         const rect = el.getBoundingClientRect()
         const midY = rect.top + rect.height / 2 - containerRect.top
         const height = Math.max(14, rect.height * RIBBON_HEIGHT_RATIO)
+        // Position just OUTSIDE the card edge: the overlay sits beneath
+        // the card chrome, so anything inside the boundary is covered by
+        // the opaque card. 1px breathing gap keeps it reading as part of
+        // the card's silhouette.
         if (counts.in > 0) {
           const cardLeft = rect.left - containerRect.left
           newStubs.push({
             nodeId, side: 'in', count: counts.in,
-            cx: cardLeft + RIBBON_W / 2,
+            cx: cardLeft - RIBBON_W / 2 - 1,
             cy: midY,
             width: RIBBON_W,
             height,
@@ -612,7 +616,7 @@ export function LineageFlowOverlay({
           const cardRight = rect.right - containerRect.left
           newStubs.push({
             nodeId, side: 'out', count: counts.out,
-            cx: cardRight - RIBBON_W / 2,
+            cx: cardRight + RIBBON_W / 2 + 1,
             cy: midY,
             width: RIBBON_W,
             height,
@@ -1540,7 +1544,10 @@ export function LineageFlowOverlay({
                 ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
                 : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
               return (
-                <g key={key} className="pointer-events-none" opacity={0.12 + stub.intensity * 0.68}>
+                // Floor 0.35: PRESENCE is always discernible — users must
+                // see where lineage exists at a glance. Intensity adds
+                // emphasis on top so hubs still stand out.
+                <g key={key} className="pointer-events-none" opacity={0.35 + stub.intensity * 0.5}>
                   <rect
                     x={stub.cx - stub.width / 2}
                     y={stub.cy - stub.height / 2}
