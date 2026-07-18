@@ -30,6 +30,8 @@ import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
+import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -690,8 +692,16 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
   }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect])
 
-  // Get total items at current level
-  const visibleCount = flatTree.length
+  // Entity rows currently in the tree (expanded children included).
+  // Auxiliary rows — search boxes, skeletons, load-more, failed
+  // placeholders — are UI, not entities: counting them pushed the header
+  // past the loaded total ("402 / 400"). Entity rows are a strict subset
+  // of loaded entities, so X ≤ Y holds by construction.
+  const visibleCount = useMemo(
+    () => flatTree.reduce((acc, it) =>
+      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore ? 0 : 1), 0),
+    [flatTree],
+  )
 
   // ── Overflow chips: track scroll position so we can show accurate
   // "↑ N above / ↓ N below" indicators that respond to user scroll. ─────────
@@ -745,6 +755,13 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
+
+  // Periphery summary — connections from visible entities to partners
+  // beyond THIS column's fold, computed by the edge overlay. Merged into
+  // the "N above/below" chips so rows and connections read as one
+  // labeled statement ("↑ 97 rows · 306 connections") instead of two
+  // unlabeled numbers in different units floating near each other.
+  const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
 
   const scrollToFlatIndex = useCallback((index: number, align: 'start' | 'end') => {
     if (index < 0 || index >= flatTree.length) return
@@ -1034,7 +1051,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <span className="text-[10px] font-semibold tracking-wide">Loading…</span>
                   </motion.div>
                 ) : (
-                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]">
+                  <div
+                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]"
+                    title={`${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
+                  >
                     <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
                       {visibleCount}
                     </span>
@@ -1148,53 +1168,148 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
-          {/* Top overflow chip — shown when items are clipped above the viewport.
-              Lives outside the scroll container so it stays anchored to the
-              viewport edge instead of scrolling with content. */}
+          {/* ── Periphery scrims — "content continues" affordances at the
+              column edges. A gradient veil lets the boundary rows fade
+              out beneath it (the veil IS the signal that more follows),
+              and one compact centered label states exactly how much:
+              "↑ N more · M connections". Scrims float, so scrolling
+              never shifts layout, and unlike the old floating pill the
+              occlusion reads as an intentional fade — never as chrome
+              covering a card. Click scrolls the column. ── */}
           <AnimatePresence>
-            {overflowCounts.above > 0 && (
-              <motion.button
-                key="above"
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
+            {(overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
+              <motion.div
+                key="periphery-top"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(0, 'start')}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title="Scroll to top"
+                className="absolute top-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronUp className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.above} above</span>
-              </motion.button>
+                <div className="h-12 bg-gradient-to-b from-canvas via-canvas/70 to-transparent" />
+                <InfoTooltip
+                  side="bottom"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.above.toLocaleString()} more row{overflowCounts.above === 1 ? '' : 's'} above
+                      </p>
+                      {(periphery?.upEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            entities on screen lead up there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.upPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.upEntities > periphery!.upPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.upEntities - periphery!.upPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(0, 'start')}
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronUp className="w-3 h-3" />
+                    {overflowCounts.above > 0 && (
+                      <span className="tabular-nums">{overflowCounts.above.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.upEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
+              </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Bottom overflow chip — shown when items are clipped below the viewport. */}
+          {/* Bottom periphery scrim — mirror of the top. */}
           <AnimatePresence>
-            {overflowCounts.below > 0 && (
-              <motion.button
-                key="below"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
+            {(overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
+              <motion.div
+                key="periphery-bottom"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title="Scroll to bottom"
+                className="absolute bottom-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronDown className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.below} below</span>
-              </motion.button>
+                <div className="h-12 bg-gradient-to-t from-canvas via-canvas/70 to-transparent" />
+                <InfoTooltip
+                  side="top"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.below.toLocaleString()} more row{overflowCounts.below === 1 ? '' : 's'} below
+                      </p>
+                      {(periphery?.downEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            entities on screen lead down there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.downPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.downEntities > periphery!.downPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.downEntities - periphery!.downPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronDown className="w-3 h-3" />
+                    {overflowCounts.below > 0 && (
+                      <span className="tabular-nums">{overflowCounts.below.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.downEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
+              </motion.div>
             )}
           </AnimatePresence>
 
@@ -1254,13 +1369,13 @@ export const LayerColumn = React.memo(function LayerColumn({
                   className="pointer-events-none"
                 >
                   {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
-                    <div className="absolute top-9 left-3 right-3 z-30 flex flex-col gap-1">
+                    <div className="absolute top-12 left-3 right-3 z-30 flex flex-col gap-1">
                       {upProxies.map(renderChip)}
                       {downProxies.length === 0 && moreChip}
                     </div>
                   )}
                   {(downProxies.length > 0) && (
-                    <div className="absolute bottom-9 left-3 right-3 z-30 flex flex-col gap-1">
+                    <div className="absolute bottom-12 left-3 right-3 z-30 flex flex-col gap-1">
                       {downProxies.map(renderChip)}
                       {moreChip}
                     </div>

@@ -1411,6 +1411,24 @@ export function ContextViewCanvas({
     setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
     horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
   }, [setCanvasZoom, sortedLayers.length])
+
+  // Measure the outer container's CLASSIC horizontal scrollbar into
+  // --canvas-hsb (0 for macOS overlay scrollbars). Percentage heights
+  // ignore scrollbar gutters, so without this the columns overflow the
+  // visible area by the scrollbar height and their bottom edge (and the
+  // bottom periphery scrims) clips below the fold.
+  useEffect(() => {
+    const el = horizontalScrollRef.current
+    if (!el) return
+    const update = () => {
+      el.style.setProperty('--canvas-hsb', `${Math.max(0, el.offsetHeight - el.clientHeight)}px`)
+    }
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
@@ -3344,9 +3362,18 @@ export function ContextViewCanvas({
               // scroll far past the canvas into emptiness — and wheel
               // scrolls chained into that ghost area instead of the
               // columns' internal lists.
+              //
+              // --canvas-hsb: measured height of the container's CLASSIC
+              // horizontal scrollbar (0 for macOS overlay scrollbars).
+              // Percentage heights resolve against a box that ignores
+              // the scrollbar, so a plain 100% overflows the visible
+              // area by the scrollbar height — clipping the columns'
+              // bottom edge (and the bottom periphery scrims) below the
+              // fold. Subtracting the measured gutter makes the column
+              // bottom land exactly at the visible edge at every zoom.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
+              height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
             }}
           >
             {sortedLayers.map((layer) => (
