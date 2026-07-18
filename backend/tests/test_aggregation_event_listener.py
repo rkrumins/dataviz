@@ -8,6 +8,8 @@ without an explicit purge a completed aggregation run kept serving
 pre-run (often empty) answers for up to the LKG TTL.
 """
 import asyncio
+import json
+import types
 from unittest.mock import AsyncMock
 
 from backend.app.services.aggregation.event_listener import AggregationEventListener
@@ -18,12 +20,28 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _listener(monkeypatch, *, emit_raises=False):
-    """Builds a bare listener with ``emit_refresh_event`` monkeypatched
-    (a pure-unit harness has no business opening a real DB session);
-    captured event kwargs land on ``lst._events``."""
+class _NullSessionCM:
+    """Trivial async context manager standing in for a real DB session —
+    the fake ``list_refresh_events`` below never touches it."""
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _listener(monkeypatch, *, emit_raises=False, prior_events=None):
+    """Builds a bare listener with ``emit_refresh_event``/``list_refresh_events``
+    monkeypatched (a pure-unit harness has no business opening a real DB
+    session); captured event kwargs land on ``lst._events``.
+
+    ``prior_events`` seeds the fake ``list_refresh_events`` result (a list
+    of ``types.SimpleNamespace(outcome=..., actions=<json str>, origin=...,
+    actor=...)``) for the origin-provenance lookup tests; defaults to no
+    prior events (lookup finds nothing, falls back to origin="api")."""
     lst = AggregationEventListener.__new__(AggregationEventListener)
-    lst._session_factory = None
+    lst._session_factory = lambda: _NullSessionCM()
 
     events = []
     lst._events = events
@@ -36,6 +54,11 @@ def _listener(monkeypatch, *, emit_raises=False):
 
     from backend.app.db.repositories import refresh_events_repo as refresh_events_repo_mod
     monkeypatch.setattr(refresh_events_repo_mod, "emit_refresh_event", _fake_emit)
+
+    async def _fake_list(session, data_source_id, limit=20):
+        return prior_events or []
+
+    monkeypatch.setattr(refresh_events_repo_mod, "list_refresh_events", _fake_list)
 
     return lst
 
@@ -323,3 +346,84 @@ def test_emit_failure_does_not_break_job_failed_handling(monkeypatch):
     }))
 
     assert synced["ds"] == "ds_1"
+
+
+# ── Origin-provenance lookup: reuse the accepting signal event's origin ──
+
+
+def _accepted_row(job_id, origin, actor="internal"):
+    return types.SimpleNamespace(
+        outcome="accepted",
+        actions=json.dumps({"job_id": job_id, "deferred": False}),
+        origin=origin,
+        actor=actor,
+    )
+
+
+def test_job_completed_reuses_origin_from_matching_accepted_event(monkeypatch):
+    """A scheduler-driven drift rebuild's completion must carry
+    origin="drift" (not "api") — found via the last 10 refresh_events
+    rows for this source, matched by job_id inside the actions JSON."""
+    lst = _listener(monkeypatch, prior_events=[
+        _accepted_row("agg_9", origin="unrelated", actor="internal"),
+        _accepted_row("agg_1", origin="drift", actor="scheduler"),
+    ])
+    lst._sync_data_source = AsyncMock()
+    cache = AsyncMock()
+    cache.purge_lkg = AsyncMock(return_value=0)
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+    monkeypatch.setattr(gc_module, "clear_source_stale", AsyncMock())
+
+    _run(lst._handle_event({
+        "type": "job.completed",
+        "payload": {"job_id": "agg_1", "data_source_id": "ds_1", "workspace_id": "ws_1"},
+    }))
+
+    assert len(lst._events) == 1
+    assert lst._events[0]["origin"] == "drift"
+    assert lst._events[0]["actor"] == "scheduler"
+
+
+def test_job_completed_falls_back_to_api_when_no_matching_event(monkeypatch):
+    lst = _listener(monkeypatch, prior_events=[
+        _accepted_row("agg_other", origin="drift"),  # different job_id
+    ])
+    lst._sync_data_source = AsyncMock()
+    cache = AsyncMock()
+    cache.purge_lkg = AsyncMock(return_value=0)
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+    monkeypatch.setattr(gc_module, "clear_source_stale", AsyncMock())
+
+    _run(lst._handle_event({
+        "type": "job.completed",
+        "payload": {"job_id": "agg_1", "data_source_id": "ds_1", "workspace_id": "ws_1"},
+    }))
+
+    assert lst._events[0]["origin"] == "api"
+    assert lst._events[0]["actor"] == "internal"
+
+
+def test_job_failed_origin_lookup_failure_falls_back_to_api(monkeypatch):
+    """The lookup itself must never break the listener — a raising
+    list_refresh_events (or a broken session factory) falls back to
+    origin="api" rather than propagating."""
+    lst = _listener(monkeypatch)
+
+    async def _raising_list(session, data_source_id, limit=20):
+        raise RuntimeError("db boom")
+
+    from backend.app.db.repositories import refresh_events_repo as refresh_events_repo_mod
+    monkeypatch.setattr(refresh_events_repo_mod, "list_refresh_events", _raising_list)
+
+    lst._sync_data_source = AsyncMock()
+    cache = AsyncMock()
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+
+    _run(lst._handle_event({
+        "type": "job.failed",
+        "payload": {"job_id": "agg_1", "data_source_id": "ds_1", "workspace_id": "ws_1"},
+    }))
+
+    assert len(lst._events) == 1
+    assert lst._events[0]["origin"] == "api"
+    assert lst._events[0]["actor"] == "internal"

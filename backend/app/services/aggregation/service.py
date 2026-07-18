@@ -1283,7 +1283,7 @@ class AggregationService:
         if not force and fingerprints_match(stored_fp, current_fp):
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
-                actor=actor, gate="unchanged", actions=None, outcome="noop",
+                actor=actor, gate="unchanged", actions={}, outcome="noop",
             )
             return SourceChangedResponse(
                 changed=False,
@@ -1314,19 +1314,32 @@ class AggregationService:
             mark_source_stale,
         )
 
+        # Audit spec §1b: booleans/counts of what actually ran here, for
+        # the actions dict on the eventual emit below.
+        marker_set = False
+        content_cleared = False
+        gen_bumped = False
+        lkg_purged = 0
+        stats_nudged = False
+
         if workspace_id:
             if applicable:
                 # The literal the read-path overlay + FE banner contract on
                 # (backend/common/models/graph.py, ContextViewCanvas.tsx) —
                 # NOT the signal reason, which stays for the response + logs.
                 await mark_source_stale(workspace_id, ds_id, "source_changed")
+                marker_set = True
             else:
                 await clear_source_stale(workspace_id, ds_id)
         if provider is not None:
             await provider.clear_content_caches()
+            content_cleared = True
         if workspace_id:
-            await invalidate_hierarchy_reads(workspace_id, ds_id)
+            purge_count = await invalidate_hierarchy_reads(workspace_id, ds_id)
+            gen_bumped = purge_count is not None
+            lkg_purged = purge_count or 0
         if workspace_id:
+            stats_nudged = True
             try:
                 from backend.insights_service.enqueue import mark_stats_changed
                 await mark_stats_changed(ds_id, workspace_id)
@@ -1397,15 +1410,23 @@ class AggregationService:
         # both leave nothing queued ("noop"); otherwise deferred/accepted/
         # conflict/error come straight from the trigger attempt above.
         outcome = "deferred" if deferred else (trigger_outcome or "noop")
-        actions: Optional[dict] = {}
-        if job_id:
-            actions["job_id"] = job_id
+        # Spec §1b: the changed path always records what ran, even when
+        # every field is False/0/None (e.g. no workspace_id at all).
+        actions: dict = {
+            "marker_set": marker_set,
+            "gen_bumped": gen_bumped,
+            "lkg_purged": lkg_purged,
+            "content_cleared": content_cleared,
+            "stats_nudged": stats_nudged,
+            "job_id": job_id,
+            "deferred": deferred,
+        }
         if force:
             actions["force"] = True
         event_id = await self._emit_signal_event(
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
-            actions=(actions or None), outcome=outcome, detail=trigger_detail,
+            actions=actions, outcome=outcome, detail=trigger_detail,
         )
 
         return SourceChangedResponse(

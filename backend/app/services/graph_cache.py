@@ -727,7 +727,7 @@ async def invalidate_aggregated_reads(
 
 async def invalidate_hierarchy_reads(
     workspace_id: str, data_source_id: str,
-) -> None:
+) -> Optional[int]:
     """Invalidate the hierarchy read caches (children, top-level, trace,
     layer-assignment, canvas, …) after an event that changed the
     underlying graph — e.g. an external load that wrote FalkorDB directly,
@@ -741,9 +741,14 @@ async def invalidate_hierarchy_reads(
     matches the live overlay and is the best degraded-read answer
     available; :func:`invalidate_aggregated_reads` purges it once the
     aggregation rebuild completes. Best-effort: never raises.
+
+    Returns the non-aggregated LKG entry count purged, or ``None`` if
+    skipped (missing ids) or the invalidation itself failed — callers
+    that need to know whether the generation bump actually happened
+    (e.g. audit recording) can treat ``None`` as "didn't run".
     """
     if not workspace_id or not data_source_id:
-        return
+        return None
     try:
         cache = get_graph_cache()
         scope = CacheScope(
@@ -757,11 +762,13 @@ async def invalidate_hierarchy_reads(
             "hierarchy-read caches invalidated for %s/%s (%d non-aggregated LKG purged)",
             workspace_id, data_source_id, removed,
         )
+        return removed
     except Exception as exc:
         logger.warning(
             "hierarchy-read cache invalidation failed for %s/%s: %s",
             workspace_id, data_source_id, exc,
         )
+        return None
 
 
 # ─── Stale-source marker (stale-while-revalidate flag) ─────────────────

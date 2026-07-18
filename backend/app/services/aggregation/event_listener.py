@@ -270,17 +270,52 @@ class AggregationEventListener:
                 "Stale-marker clear failed for %s: %s", data_source_id, e,
             )
 
+    async def _lookup_origin_for_job(
+        self, data_source_id: str, job_id: Any,
+    ) -> tuple[str, str]:
+        """Best-effort provenance lookup: scan the last 10 refresh_events
+        rows for this data source for the ``accepted`` row whose
+        ``actions.job_id`` matches, and reuse ITS origin/actor — a
+        scheduler-driven drift/reconcile rebuild must not get
+        misattributed to origin="api" just because the listener can't
+        see the trigger source (the event payload doesn't carry one).
+        Falls back to ("api", "internal") on no match, no job_id, or any
+        failure. Bounded to 10 rows; no new query shape."""
+        if not job_id:
+            return "api", "internal"
+        try:
+            from backend.app.db.repositories.refresh_events_repo import (
+                list_refresh_events,
+            )
+            async with self._session_factory() as session:
+                events = await list_refresh_events(session, data_source_id, limit=10)
+            for evt in events:
+                if evt.outcome != "accepted" or not evt.actions:
+                    continue
+                try:
+                    actions = json.loads(evt.actions)
+                except (TypeError, ValueError):
+                    continue
+                if actions.get("job_id") == job_id:
+                    return evt.origin, evt.actor
+        except Exception as e:
+            logger.warning(
+                "Origin lookup failed for %s (job %s): %s",
+                data_source_id, job_id, e,
+            )
+        return "api", "internal"
+
     async def _emit_job_event(
         self, data_source_id: str, workspace_id: Any, *,
         outcome: str, job_id: Any,
     ) -> None:
         """Audit record for a terminal job event (``job.completed`` /
         ``job.failed``). ``gate="n/a"`` — the change gate is a
-        ``signal_source_changed`` concept, not evaluated here. The event
-        payload carries no trigger-source field today (see
-        ``AggregationEventPublisher.job_completed``/``job_failed``), so
-        origin is always ``"api"`` with ``detail="listener"`` rather than
-        guessing at provenance. Best-effort: never raises."""
+        ``signal_source_changed`` concept, not evaluated here. Origin/actor
+        are looked up from the accepting signal event when findable (see
+        ``_lookup_origin_for_job``); otherwise ``origin="api"``. Best-effort:
+        never raises."""
+        origin, actor = await self._lookup_origin_for_job(data_source_id, job_id)
         try:
             from backend.app.db.repositories.refresh_events_repo import (
                 emit_refresh_event,
@@ -289,8 +324,8 @@ class AggregationEventListener:
                 self._session_factory,
                 workspace_id=workspace_id,
                 data_source_id=data_source_id,
-                origin="api",
-                actor="internal",
+                origin=origin,
+                actor=actor,
                 scope="auto",
                 gate="n/a",
                 actions={"job_id": job_id} if job_id else None,

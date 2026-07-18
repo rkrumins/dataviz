@@ -120,6 +120,7 @@ def _build(
     trigger_exc=None,
     cooldown=None,
     emit_raises=False,
+    invalidate_purge_count=2,
 ):
     """Wire a service with all collaborators mocked to record their call
     order. Returns (svc, session, order, captured). The audit emit
@@ -171,6 +172,7 @@ def _build(
 
     async def _fake_invalidate(ws, ds_):
         order.append("invalidate_hierarchy_reads")
+        return invalidate_purge_count
 
     monkeypatch.setattr(graph_cache_mod, "invalidate_hierarchy_reads", _fake_invalidate)
 
@@ -485,7 +487,7 @@ def test_noop_emits_single_noop_event(monkeypatch):
     assert evt["scope"] == "auto"
     assert evt["gate"] == "unchanged"
     assert evt["outcome"] == "noop"
-    assert evt["actions"] is None
+    assert evt["actions"] == {}  # nothing ran — spec §1b
     assert evt["data_source_id"] == "ds-1"
     assert evt["workspace_id"] == "ws-1"
     assert resp.event_id == "evt_1"
@@ -504,7 +506,15 @@ def test_changed_accepted_emits_single_event_with_job_id(monkeypatch):
     evt = svc._events[0]
     assert evt["gate"] == "changed"
     assert evt["outcome"] == "accepted"
-    assert evt["actions"] == {"job_id": "agg_123"}
+    assert evt["actions"] == {
+        "marker_set": True,
+        "gen_bumped": True,
+        "lkg_purged": 2,
+        "content_cleared": True,
+        "stats_nudged": True,
+        "job_id": "agg_123",
+        "deferred": False,
+    }
     assert resp.event_id == "evt_1"
 
 
@@ -521,7 +531,17 @@ def test_deferred_emits_single_deferred_event(monkeypatch):
     evt = svc._events[0]
     assert evt["gate"] == "changed"
     assert evt["outcome"] == "deferred"
-    assert evt["actions"] is None
+    # Steps 4-7 (invalidation) ran before the cooldown throttled only the
+    # rebuild — marker/content/gen/stats all show True, job_id stays None.
+    assert evt["actions"] == {
+        "marker_set": True,
+        "gen_bumped": True,
+        "lkg_purged": 2,
+        "content_cleared": True,
+        "stats_nudged": True,
+        "job_id": None,
+        "deferred": True,
+    }
 
 
 def test_trigger_conflict_emits_conflict_event(monkeypatch):
@@ -536,7 +556,15 @@ def test_trigger_conflict_emits_conflict_event(monkeypatch):
     assert len(svc._events) == 1
     evt = svc._events[0]
     assert evt["outcome"] == "conflict"
-    assert evt["actions"] is None
+    assert evt["actions"] == {
+        "marker_set": True,
+        "gen_bumped": True,
+        "lkg_purged": 2,
+        "content_cleared": True,
+        "stats_nudged": True,
+        "job_id": None,
+        "deferred": False,
+    }
     assert evt["detail"] is None
 
 
@@ -560,6 +588,8 @@ def test_trigger_resolution_failure_emits_error_event_with_detail(monkeypatch, e
     evt = svc._events[0]
     assert evt["outcome"] == "error"
     assert evt["detail"] == type(exc).__name__
+    assert evt["actions"]["job_id"] is None
+    assert evt["actions"]["marker_set"] is True
 
 
 def test_not_applicable_emits_noop_event(monkeypatch):
@@ -572,7 +602,19 @@ def test_not_applicable_emits_noop_event(monkeypatch):
     assert resp.changed is True
     assert resp.job_id is None
     assert len(svc._events) == 1
-    assert svc._events[0]["outcome"] == "noop"
+    evt = svc._events[0]
+    assert evt["outcome"] == "noop"
+    # marker_set is False (clear_source_stale ran instead of mark), but
+    # the rest of the invalidation sequence still ran and is recorded.
+    assert evt["actions"] == {
+        "marker_set": False,
+        "gen_bumped": True,
+        "lkg_purged": 2,
+        "content_cleared": True,
+        "stats_nudged": True,
+        "job_id": None,
+        "deferred": False,
+    }
 
 
 def test_force_gate_recorded_and_flagged_in_actions(monkeypatch):
@@ -586,7 +628,16 @@ def test_force_gate_recorded_and_flagged_in_actions(monkeypatch):
     assert evt["gate"] == "forced"
     # force bypassed the matching gate AND the trigger succeeded — both
     # show up in actions.
-    assert evt["actions"] == {"job_id": resp.job_id, "force": True}
+    assert evt["actions"] == {
+        "marker_set": True,
+        "gen_bumped": True,
+        "lkg_purged": 2,
+        "content_cleared": True,
+        "stats_nudged": True,
+        "job_id": resp.job_id,
+        "deferred": False,
+        "force": True,
+    }
 
 
 def test_origin_and_actor_passed_through_to_event(monkeypatch):
