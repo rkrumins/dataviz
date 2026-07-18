@@ -21,8 +21,11 @@ export const CANVAS_ZOOM_STEP = 0.05
 /**
  * How lineage edges render on the canvas.
  *  - 'stubs'  : every node with lineage shows a small stub; real edges materialize on hover/click.
- *  - 'auto'   : real edges always render; above `autoStubThreshold` stub indicators appear and
- *               hover/selection narrows the set to focus-incident edges for emphasis.
+ *  - 'auto'   : all real edges below `autoStubThreshold`; above it the STRONGEST flows (by
+ *               bundled edge count) render up to the threshold as a budget, per-node
+ *               indicators summarize the rest, and hover/selection materializes a node's
+ *               (also budget-capped) fan. A status chip reports shown/total with
+ *               escalation to 'raw'.
  *  - 'raw'    : every fetched edge renders as a real edge (legacy behavior). Prompts at >5,000.
  */
 export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
