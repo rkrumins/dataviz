@@ -51,10 +51,11 @@ export type AnchorProxyGroup = {
 export type OverflowDirection = 'up' | 'down' | 'left' | 'right'
 
 export type OverflowBadge = {
-  /** Horizontal center of the badge in the gutter (relative to container) */
+  /** Horizontal center of the badge, SCROLLPORT-relative (the badge
+   *  layer is sticky-pinned to the scroll container's viewport —
+   *  content-space coordinates would extend the scrollable area). */
   gutterX: number
-  /** Vertical anchor (relative to container) — used by left/right badges;
-   *  up/down badges keep their fixed top/bottom placement. */
+  /** Vertical center of the badge, scrollport-relative. */
   y: number
   direction: OverflowDirection
   count: number
