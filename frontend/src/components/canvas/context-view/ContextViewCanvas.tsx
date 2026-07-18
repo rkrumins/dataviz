@@ -3201,7 +3201,21 @@ export function ContextViewCanvas({
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}
-          onLocateAll={locateManyOnCanvas}
+          onLocateAll={(ids) => {
+            // "Reveal all on canvas" IS a frame action — land the user in
+            // the same framed-mode chrome as the Frame pill so the state
+            // is named and has an explicit exit. Select the focal node so
+            // the canvas focus matches what the lens was showing (guarded:
+            // selectNode toggles OFF when re-selecting the current
+            // selection).
+            const focal = lensStack[lensStack.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length })
+            }
+            void locateManyOnCanvas(ids)
+          }}
           onTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
         />
 
@@ -3523,6 +3537,7 @@ export function ContextViewCanvas({
           })
         } : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
+        onFocusConnections={openLens}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={canEditGraph ? interactions.editEdge : undefined}
         onDeleteEdge={canEditGraph ? interactions.deleteEdge : undefined}
