@@ -3302,7 +3302,7 @@ export function ContextViewCanvas({
                 geometryRegistry={columnGeometryRegistry}
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
-                showDensityGutter={isStubsMode && showLineageFlow}
+                showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}

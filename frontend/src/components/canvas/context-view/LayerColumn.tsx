@@ -701,6 +701,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // lineage counts of its rows. Normalized 0..1 for the heat strip.
   const densityBuckets = useMemo(() => {
     if (!showDensityGutter || !lineageCounts || lineageCounts.size === 0 || flatTree.length === 0) return null
+    // Too few rows to have off-screen mass worth mapping.
+    if (flatTree.length < 24) return null
     const n = Math.min(48, flatTree.length)
     const vals = new Array<number>(n).fill(0)
     flatTree.forEach((item, idx) => {
@@ -711,7 +713,14 @@ export const LayerColumn = React.memo(function LayerColumn({
     })
     const max = Math.max(...vals)
     if (max <= 0) return null
-    return vals.map(v => v / max)
+    const normalized = vals.map(v => v / max)
+    // Contrast gate: a heatmap with no contrast is just a stripe. When
+    // density is near-uniform (most buckets close to the max), the strip
+    // carries no information — hide it entirely rather than render a
+    // solid bar that reads as a broken border.
+    const hot = normalized.filter(v => v > 0.55).length
+    if (hot / normalized.length > 0.6) return null
+    return normalized
   }, [showDensityGutter, lineageCounts, flatTree])
 
   // Click on the gutter → jump the column to the corresponding tree region.
@@ -1142,16 +1151,18 @@ export const LayerColumn = React.memo(function LayerColumn({
               type="button"
               data-canvas-interactive
               onClick={handleGutterClick}
-              title="Connection density — click to jump"
-              className="absolute right-0 top-1 bottom-1 w-[5px] z-20 pointer-events-auto cursor-pointer rounded-full overflow-hidden flex flex-col opacity-70 hover:opacity-100 hover:w-[7px] transition-all"
+              title="Connection density across this column — click to jump"
+              className="absolute right-[2px] top-8 bottom-8 w-[4px] z-20 pointer-events-auto cursor-pointer flex flex-col gap-[1px] opacity-60 hover:opacity-100 transition-opacity"
             >
               {densityBuckets.map((v, i) => (
                 <span
                   key={i}
-                  className="flex-1 w-full"
+                  className="flex-1 w-full rounded-full"
                   style={{
-                    backgroundColor: v > 0
-                      ? `rgba(99, 102, 241, ${(0.12 + v * 0.7).toFixed(3)})`
+                    // Floor at 0.15: cool zones stay invisible; only real
+                    // concentrations mark the strip.
+                    backgroundColor: v > 0.15
+                      ? `rgba(99, 102, 241, ${(0.15 + Math.pow(v, 1.5) * 0.65).toFixed(3)})`
                       : 'transparent',
                   }}
                 />
