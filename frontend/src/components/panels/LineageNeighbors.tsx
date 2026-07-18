@@ -19,13 +19,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   useSchemaStore,
-  normalizeEdgeType,
-  isContainmentEdgeType,
   useContainmentEdgeTypes,
 } from '@/store/schema'
+import {
+  deriveNeighborRecords,
+  type NeighborDirection,
+  type NeighborRecord,
+} from '@/lib/lineage-neighbors'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
@@ -47,15 +50,7 @@ interface LineageNeighborsProps {
 
 type SortMode = 'default' | 'name-asc' | 'name-desc'
 
-type Direction = 'incoming' | 'outgoing'
-
-interface NeighborRecord {
-  edge: LineageEdge
-  neighborId: string
-  neighborNode: LineageNode | undefined
-  direction: Direction
-  edgeTypeNorm: string
-}
+type Direction = NeighborDirection
 
 export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageNeighborsProps) {
   const rawEdges = useCanvasStore((s) => s.edges)
@@ -112,28 +107,12 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   }, [nodes])
 
   // Lineage-only neighbors. Containment edges (structural parent ↔ child) are
-  // filtered out — the section is about flow lineage.
-  const { incomingRecords, outgoingRecords } = useMemo(() => {
-    const incoming: NeighborRecord[] = []
-    const outgoing: NeighborRecord[] = []
-    for (const e of edges) {
-      const isIn = e.target === nodeId && e.source !== nodeId
-      const isOut = e.source === nodeId && e.target !== nodeId
-      if (!isIn && !isOut) continue
-      const edgeTypeNorm = normalizeEdgeType(e)
-      if (isContainmentEdgeType(edgeTypeNorm, containmentEdgeTypes)) continue
-      const record: NeighborRecord = {
-        edge: e,
-        neighborId: isIn ? e.source : e.target,
-        neighborNode: nodeMap.get(isIn ? e.source : e.target),
-        direction: isIn ? 'incoming' : 'outgoing',
-        edgeTypeNorm,
-      }
-      if (isIn) incoming.push(record)
-      else outgoing.push(record)
-    }
-    return { incomingRecords: incoming, outgoingRecords: outgoing }
-  }, [edges, nodeMap, nodeId, containmentEdgeTypes])
+  // filtered out — the section is about flow lineage. Shared derivation with
+  // the canvas Lineage Lens so both surfaces always agree.
+  const { incomingRecords, outgoingRecords } = useMemo(
+    () => deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes),
+    [edges, nodeMap, nodeId, containmentEdgeTypes],
+  )
 
   const incomingCount = incomingRecords.length
   const outgoingCount = outgoingRecords.length
