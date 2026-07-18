@@ -907,6 +907,23 @@ export const LayerColumn = React.memo(function LayerColumn({
         </div>
       )}
 
+      {/* ── Custom-width chip — visible (on column hover) whenever this
+          layer has a resized width. Names the current width and offers
+          the one-click reset, so the double-click gesture on the handle
+          doesn't have to be discovered to get back to defaults. ── */}
+      {!isCollapsed && customWidth !== null && (
+        <button
+          type="button"
+          data-canvas-interactive
+          onClick={() => setCustomWidth(null)}
+          title={`This layer has a custom width (${customWidth}px). Click to reset to the default width — or double-click the drag handle on the column edge.`}
+          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 backdrop-blur-sm border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
+        >
+          <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
+          Reset width · {customWidth}px
+        </button>
+      )}
+
       {/* Layer Header - Glass morphism style + drag target (4.3).
           When collapsed, the header is the only content in the column; it
           stretches (`flex-1`) so every collapsed column shares the same
