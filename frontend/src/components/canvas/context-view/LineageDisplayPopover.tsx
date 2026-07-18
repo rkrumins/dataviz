@@ -23,6 +23,7 @@ import {
   Settings2,
   Sliders,
   Unlink,
+  Waves,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
@@ -291,6 +292,7 @@ export function LineageDisplaySections({
           })}
         </div>
         {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
+        {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
       </div>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -399,6 +401,58 @@ function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
         <span>{BUDGET_MAX.toLocaleString()} · detailed</span>
       </div>
     </div>
+  )
+}
+
+/** Flow ribbons on/off — Sankey-style macro volume bands between layer
+ *  columns while Adaptive is summarizing. Self-contained store access,
+ *  mirroring MissingConnectionsToggle. */
+function FlowRibbonsToggle({ disabled }: { disabled: boolean }) {
+  const show = usePreferencesStore((s) => s.showFlowRibbons) ?? true
+  const toggle = usePreferencesStore((s) => s.toggleFlowRibbons)
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={show}
+      disabled={disabled}
+      onClick={toggle}
+      className={cn(
+        'mt-2 w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+        disabled && 'cursor-not-allowed',
+        show
+          ? 'bg-accent-lineage/12 border-accent-lineage/35 shadow-sm shadow-accent-lineage/10'
+          : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+      )}
+    >
+      <div
+        className={cn(
+          'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+          show ? 'bg-accent-lineage/85' : 'bg-ink-muted/25 dark:bg-white/15',
+        )}
+      >
+        <div
+          className={cn(
+            'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+            show ? 'left-[15px]' : 'left-[2px]',
+          )}
+        />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            'text-[12px] font-medium leading-tight flex items-center gap-1.5',
+            show ? 'text-accent-lineage' : 'text-ink',
+          )}
+        >
+          <Waves className="w-3.5 h-3.5" strokeWidth={2.2} />
+          <span>Flow ribbons</span>
+        </div>
+        <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+          Volume bands between layers while edges are summarized
+        </div>
+      </div>
+    </button>
   )
 }
 

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge, PassThroughEdge } from './types'
+import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -43,6 +44,7 @@ export function LineageFlowOverlay({
   expandingEdgeIds,
   geometryRegistry,
   onRevealNode,
+  flowRibbons,
 }: {
   nodes: any[],
   edges: any[],
@@ -80,6 +82,9 @@ export function LineageFlowOverlay({
   /** Scroll a node into view on both axes (canvas reveal mechanism) —
    *  used by the clickable overflow badges. */
   onRevealNode?: (nodeId: string) => void,
+  /** Macro flow bands per (layer → layer) pair — rendered beneath the
+   *  edge layer in Adaptive's summarized state. */
+  flowRibbons?: FlowRibbon[],
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -102,6 +107,16 @@ export function LineageFlowOverlay({
     /** 'full' = three-layer ribbon (stubs mode); 'quiet' = slim always-on
      *  tab rendered in every other mode. */
     variant: 'full' | 'quiet'
+  }>>([])
+  // Flow ribbons — macro volume bands between layer columns, computed per
+  // updateFlow frame (≤ MAX_FLOW_RIBBONS DOM rect reads).
+  const [computedRibbons, setComputedRibbons] = useState<Array<{
+    key: string
+    pathD: string
+    width: number
+    label: string
+    mx: number
+    my: number
   }>>([])
   // Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Computed on a debounced settle pass (never per frame).
@@ -633,6 +648,45 @@ export function LineageFlowOverlay({
     setOverflowBadges(badges)
     setOverflowEdges(trailingEdges)
 
+    // Flow ribbons — one gradient band per (layer → layer) pair, stacked
+    // around the viewport's vertical center, thickness log-scaled to
+    // total volume. Bounded work: ≤ MAX_FLOW_RIBBONS column-rect reads.
+    {
+      const nextRibbons: typeof computedRibbons = []
+      if (flowRibbons && flowRibbons.length > 0) {
+        const maxCount = Math.max(...flowRibbons.map(r => r.count))
+        const widths = flowRibbons.map(r =>
+          Math.max(10, Math.min(38, 10 + 28 * (Math.log2(1 + r.count) / Math.log2(1 + maxCount)))))
+        const GAP = 12
+        const totalH = widths.reduce((a, b) => a + b + GAP, -GAP)
+        const centerY = (viewportRect.top + viewportRect.bottom) / 2 - containerRect.top
+        let yCursor = centerY - totalH / 2
+        flowRibbons.forEach((r, i) => {
+          const w = widths[i]
+          const bandY = yCursor + w / 2
+          yCursor += w + GAP
+          const srcEl = document.querySelector(`[data-layer-id="${CSS.escape(r.sourceLayerId)}"]`)
+          const tgtEl = document.querySelector(`[data-layer-id="${CSS.escape(r.targetLayerId)}"]`)
+          if (!srcEl || !tgtEl) return
+          const s = srcEl.getBoundingClientRect()
+          const t = tgtEl.getBoundingClientRect()
+          const sx = s.right - containerRect.left + 4
+          const tx = t.left - containerRect.left - 4
+          if (tx <= sx) return // reverse-flow pair — bands read left→right only
+          const spread = Math.max((tx - sx) * 0.4, 40)
+          nextRibbons.push({
+            key: `${r.sourceLayerId}->${r.targetLayerId}`,
+            pathD: `M ${sx} ${bandY} C ${sx + spread} ${bandY}, ${tx - spread} ${bandY}, ${tx} ${bandY}`,
+            width: w,
+            label: `${formatRibbonCount(r.count)} flows`,
+            mx: (sx + tx) / 2,
+            my: bandY,
+          })
+        })
+      }
+      setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
+    }
+
     // Pass-through settle pass — debounced 150ms so the O(projected-edges)
     // scan never runs on the per-frame path. updateFlow already fires on
     // every scroll / IO / mutation / resize trigger, so re-arming here
@@ -643,7 +697,7 @@ export function LineageFlowOverlay({
       computePassThroughRef.current?.()
     }, 150)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
 
   // ── Pass-through edges — both endpoints off-viewport, path crosses the
   // visible box. Runs only on the debounced settle pass above. Cost:
@@ -735,7 +789,7 @@ export function LineageFlowOverlay({
   // scroll / resize / hover.
   useEffect(() => {
     scheduleUpdate()
-  }, [showStubs, nodeStubCounts, scheduleUpdate])
+  }, [showStubs, nodeStubCounts, flowRibbons, scheduleUpdate])
 
   // ResizeObserver + IntersectionObserver for node elements.
   // Uses MutationObserver to dynamically track layer-node-* elements as they're
@@ -1183,6 +1237,14 @@ export function LineageFlowOverlay({
             )
           })}
 
+          {/* Flow-ribbon gradient — indigo→violet, brightening toward the
+              consumer side so the band itself reads as directional. */}
+          <linearGradient id="flow-ribbon-grad" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.10" />
+            <stop offset="55%" stopColor="rgb(129, 140, 248)" stopOpacity="0.20" />
+            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0.30" />
+          </linearGradient>
+
           {/* Shared pass-through gradients — one per color, fading at both
               ends along the (predominantly horizontal) travel direction. */}
           {sharedDefs.passThroughColors.map(c => {
@@ -1197,6 +1259,35 @@ export function LineageFlowOverlay({
             )
           })}
         </defs>
+        {/* ── Flow ribbons — macro volume bands beneath the edge layer.
+            Sankey-style: thickness encodes total edge count between the
+            two layers; the count pill states it exactly. ── */}
+        {computedRibbons.map(r => (
+          <g key={`ribbon-${r.key}`} className="pointer-events-none">
+            <path
+              d={r.pathD}
+              stroke="url(#flow-ribbon-grad)"
+              strokeWidth={r.width}
+              fill="none"
+              strokeLinecap="round"
+            />
+            <g transform={`translate(${r.mx}, ${r.my})`}>
+              <rect x={-30} y={-9.5} width={60} height={19} rx={9.5} fill="rgb(99, 102, 241)" opacity={0.12} />
+              <text
+                x={0}
+                y={3.5}
+                textAnchor="middle"
+                fontSize="9.5"
+                fontWeight={600}
+                fill="rgb(99, 102, 241)"
+                opacity={0.95}
+              >
+                {r.label}
+              </text>
+            </g>
+          </g>
+        ))}
+
         {visibleEdges.map(edge => {
           const isHovered = hoveredEdgeId === edge.id
           const isSourceHovered = hoveredEdgeId === edge.source

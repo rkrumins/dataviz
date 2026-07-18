@@ -96,6 +96,11 @@ interface LayerColumnProps {
   /** Virtualizer overscan override — the canvas shrinks it at zoom-out
    *  (the enlarged layout viewport already supplies the extra rows). */
   overscan?: number
+  /** Per-node lineage in/out counts (from the canvas's projected set) —
+   *  drives the density gutter. */
+  lineageCounts?: Map<string, { in: number; out: number }>
+  /** Show the connection-density gutter (summarized edge modes only). */
+  showDensityGutter?: boolean
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -146,6 +151,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   revealTarget,
   geometryRegistry,
   overscan = 15,
+  lineageCounts,
+  showDensityGutter = false,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -688,6 +695,33 @@ export const LayerColumn = React.memo(function LayerColumn({
     virtualizer.scrollToIndex(index, { align, behavior: 'smooth' })
   }, [virtualizer, flatTree.length])
 
+  // ── Density gutter buckets ────────────────────────────────────────────────
+  // Where does connection mass live across the WHOLE column (not just the
+  // viewport)? Bucket the flat tree by index; each bucket sums the in+out
+  // lineage counts of its rows. Normalized 0..1 for the heat strip.
+  const densityBuckets = useMemo(() => {
+    if (!showDensityGutter || !lineageCounts || lineageCounts.size === 0 || flatTree.length === 0) return null
+    const n = Math.min(48, flatTree.length)
+    const vals = new Array<number>(n).fill(0)
+    flatTree.forEach((item, idx) => {
+      if (item.isSkeleton || item.isSearchBox || item.isFailed || item.isLoadMore) return
+      const c = lineageCounts.get(item.node.id)
+      if (!c) return
+      vals[Math.min(n - 1, Math.floor((idx / flatTree.length) * n))] += c.in + c.out
+    })
+    const max = Math.max(...vals)
+    if (max <= 0) return null
+    return vals.map(v => v / max)
+  }, [showDensityGutter, lineageCounts, flatTree])
+
+  // Click on the gutter → jump the column to the corresponding tree region.
+  const handleGutterClick = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    if (rect.height <= 0 || flatTree.length === 0) return
+    const fraction = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+    scrollToFlatIndex(Math.min(flatTree.length - 1, Math.floor(fraction * flatTree.length)), 'start')
+  }, [flatTree.length, scrollToFlatIndex])
+
   // ── Geometry API registration ─────────────────────────────────────────────
   // Exposes estimated row rects to the edge overlay WITHOUT mounting rows.
   // Offsets come from the virtualizer's measurements cache (exact for
@@ -1098,6 +1132,32 @@ export const LayerColumn = React.memo(function LayerColumn({
               </motion.button>
             )}
           </AnimatePresence>
+
+          {/* Density gutter — a slim heat strip on the column's right edge
+              showing where connection mass lives across the FULL scroll
+              range (the budget/stub modes summarize edges, this shows
+              where the summarized mass is). Click a hot zone to jump. */}
+          {densityBuckets && (
+            <button
+              type="button"
+              data-canvas-interactive
+              onClick={handleGutterClick}
+              title="Connection density — click to jump"
+              className="absolute right-0 top-1 bottom-1 w-[5px] z-20 pointer-events-auto cursor-pointer rounded-full overflow-hidden flex flex-col opacity-70 hover:opacity-100 hover:w-[7px] transition-all"
+            >
+              {densityBuckets.map((v, i) => (
+                <span
+                  key={i}
+                  className="flex-1 w-full"
+                  style={{
+                    backgroundColor: v > 0
+                      ? `rgba(99, 102, 241, ${(0.12 + v * 0.7).toFixed(3)})`
+                      : 'transparent',
+                  }}
+                />
+              ))}
+            </button>
+          )}
 
           <div
             ref={scrollContainerRef}

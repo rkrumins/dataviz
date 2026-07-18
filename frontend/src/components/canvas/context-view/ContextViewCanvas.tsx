@@ -89,6 +89,7 @@ import { LayerColumn } from './LayerColumn'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
+import { aggregateFlowRibbons } from './flowRibbons'
 import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -197,6 +198,7 @@ export function ContextViewCanvas({
   // Missing-link alerts are optional: Views are subsets of a Data Source,
   // so links to out-of-view entities can be expected rather than a problem.
   const showMissingConnectionIndicators = usePreferencesStore((s) => s.showMissingConnectionIndicators) ?? true
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? true
   const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
@@ -2509,6 +2511,20 @@ export function ContextViewCanvas({
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
   const effectiveLineageEdges = edgePresentation.edges
 
+  // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
+  // EVERY projected edge (not just the budgeted subset) so the bands show
+  // the true totals the budget summarizes. Only in Adaptive's summarized
+  // state; user-toggleable.
+  const flowRibbons = useMemo(() => {
+    if (!showFlowRibbons || !isStubsMode || lineageRenderMode !== 'auto') return undefined
+    const ribbons = aggregateFlowRibbons(
+      visibleLineageEdges,
+      nodeLayerMap,
+      sortedLayers.map(l => l.id),
+    )
+    return ribbons.length > 0 ? ribbons : undefined
+  }, [showFlowRibbons, isStubsMode, lineageRenderMode, visibleLineageEdges, nodeLayerMap, sortedLayers])
+
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
   // canvas never appears frozen during the /trace/expand round-trip.
@@ -3163,6 +3179,7 @@ export function ContextViewCanvas({
               expandingEdgeIds={expandingEdgeIds}
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
+              flowRibbons={flowRibbons}
             />
           )}
 
@@ -3284,6 +3301,8 @@ export function ContextViewCanvas({
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}
                 overscan={effectiveOverscan}
+                lineageCounts={nodeStubCounts}
+                showDensityGutter={isStubsMode && showLineageFlow}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
