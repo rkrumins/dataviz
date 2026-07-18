@@ -1121,7 +1121,7 @@ function LayerEditor({
                   <input
                     type="checkbox"
                     id={`unassigned-${layer.id}`}
-                    checked={layer.showUnassigned !== false}
+                    checked={layer.showUnassigned === true}
                     onChange={(e) => onUpdate({ showUnassigned: e.target.checked })}
                     className="rounded border-glass-border text-accent-lineage focus:ring-accent-lineage"
                   />

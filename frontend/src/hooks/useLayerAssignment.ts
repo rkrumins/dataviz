@@ -63,6 +63,9 @@ export interface UseLayerAssignmentResult {
   /** Final effective layer per node id — exposed for layer-ordinal lookups
    *  by the canvas (e.g. left/right neighbor sort for trace pinning). */
   nodeLayerMap: Map<string, string>
+  /** Loaded nodes that resolved to NO layer and therefore render nowhere.
+   *  Surfaced so the canvas can tell the user instead of hiding them. */
+  unassignedNodes: Array<{ id: string; data?: Record<string, unknown> }>
 }
 
 // ============================================
@@ -184,6 +187,15 @@ export function useLayerAssignment({
     // honoured when it still names a layer that exists here.
     const validLayerIds = new Set(sortedLayers.map(l => l.id))
 
+    // Open-scope fallback: a layer opting in via `showUnassigned` receives
+    // root entities that match nothing else, instead of those entities
+    // silently vanishing from the canvas. Curated views keep their
+    // closed-scope drop semantics (the wizard is the source of truth
+    // there); the canvas surfaces the count separately.
+    const unassignedFallbackLayerId = !viewIsCurated
+      ? sortedLayers.find(l => l.showUnassigned === true)?.id
+      : undefined
+
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
     // Root-level nodes use the priority chain below, with closed-scope
@@ -259,6 +271,8 @@ export function useLayerAssignment({
             myLayerId = ruleAssignments.get(nodeId)
           } else if (inheritedLayerId) {
             myLayerId = inheritedLayerId
+          } else if (unassignedFallbackLayerId) {
+            myLayerId = unassignedFallbackLayerId
           }
         }
       }
@@ -498,5 +512,14 @@ export function useLayerAssignment({
     return map
   }, [nodesByLayer])
 
-  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap }
+  // Loaded nodes that render nowhere — absent from every layer's emitted
+  // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
+  // canvas actually shows.
+  const unassignedNodes = useMemo(
+    () => nodes.filter((n: { id: string }) => !nodeLayerMap.has(n.id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nodeEdgeFingerprint, nodeLayerMap],
+  )
+
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }
 }

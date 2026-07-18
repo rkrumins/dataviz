@@ -42,6 +42,8 @@ export interface ComprehensionToolsProps {
   subtleCanvasTreeLines: boolean
   onToggleSubtleCanvasTreeLines: () => void
   onResetCanvasDisplaySettings: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
   lineageRenderMode: LineageRenderMode
   onSetLineageRenderMode: (mode: LineageRenderMode) => void
   showEdgeDirection: boolean
@@ -86,6 +88,7 @@ export function ComprehensionTools({
   subtleCanvasTreeLines,
   onToggleSubtleCanvasTreeLines,
   onResetCanvasDisplaySettings,
+  onFitToWidth,
   lineageRenderMode,
   onSetLineageRenderMode,
   showEdgeDirection,
@@ -163,6 +166,7 @@ export function ComprehensionTools({
         subtleTreeLines={subtleCanvasTreeLines}
         onToggleSubtleTreeLines={onToggleSubtleCanvasTreeLines}
         onReset={onResetCanvasDisplaySettings}
+        onFitToWidth={onFitToWidth}
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={onSetLineageRenderMode}
         showEdgeDirection={showEdgeDirection}

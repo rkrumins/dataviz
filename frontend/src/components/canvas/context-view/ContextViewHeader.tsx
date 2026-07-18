@@ -142,6 +142,8 @@ export interface ContextViewHeaderProps {
   subtleCanvasTreeLines: boolean
   onToggleSubtleCanvasTreeLines: () => void
   onResetCanvasDisplaySettings: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
 }
 
 export function ContextViewHeader({
@@ -199,6 +201,7 @@ export function ContextViewHeader({
   subtleCanvasTreeLines,
   onToggleSubtleCanvasTreeLines,
   onResetCanvasDisplaySettings,
+  onFitToWidth,
 }: ContextViewHeaderProps) {
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
@@ -214,6 +217,7 @@ export function ContextViewHeader({
     subtleCanvasTreeLines,
     onToggleSubtleCanvasTreeLines,
     onResetCanvasDisplaySettings,
+    onFitToWidth,
     lineageRenderMode,
     onSetLineageRenderMode,
     showEdgeDirection,

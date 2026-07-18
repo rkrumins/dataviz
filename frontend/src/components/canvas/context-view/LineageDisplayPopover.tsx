@@ -51,7 +51,7 @@ const DENSITY_OPTIONS: DensityOption[] = [
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
-    description: 'Real edges on small graphs, stubs above the size threshold',
+    description: 'All edges stay visible; dense graphs simplify styling and spotlight what you hover',
   },
   {
     mode: 'raw',

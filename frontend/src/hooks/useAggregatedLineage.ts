@@ -30,6 +30,11 @@ export interface AggregatedEdgeState {
     state: ExpansionState
     /** Detailed edges (populated when expanded) */
     detailedEdges: GraphEdge[]
+    /** Total underlying edges (the aggregated edgeCount) — the denominator
+     *  for "showing X of Y" when detail is truncated. */
+    detailTotal?: number
+    /** True when more underlying edges exist than are loaded. */
+    detailTruncated?: boolean
 }
 
 export interface UseAggregatedLineageOptions {
@@ -64,6 +69,10 @@ export interface UseAggregatedLineageResult {
 
     /** Expand an aggregated edge to show detailed edges */
     expandEdge: (aggregatedEdgeId: string) => Promise<void>
+
+    /** Fetch the next page of underlying edges for an expanded aggregated
+     *  edge whose detail was truncated. */
+    loadMoreDetail: (aggregatedEdgeId: string) => Promise<void>
 
     /** Collapse an expanded edge back to aggregated state */
     collapseEdge: (aggregatedEdgeId: string) => void
@@ -128,6 +137,9 @@ interface CacheEntry {
 const aggregatedEdgeCache = new Map<string, CacheEntry>()
 const CACHE_MAX_ENTRIES = 200
 const AGGREGATED_FETCH_BATCH_SIZE = 500
+/** Page size for aggregated-edge detail expansion. The backend EdgeQuery
+ *  default is 100, which silently under-delivered on large bundles. */
+const AGG_EXPAND_LIMIT = 1000
 
 // Cross-canvas invalidation. A draft save changes which rollups the server reports (the
 // draft overlay adjusts main's aggregated edges by the draft's lineage delta), but the
@@ -381,16 +393,20 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         })
 
         try {
-            // Fetch detailed edges strictly between source and target
-            // We optimized the backend to handle sourceUrns + targetUrns efficiently.
+            // Fetch detailed edges strictly between source and target.
+            // Explicit limit: the backend EdgeQuery default is 100, which
+            // silently truncated bundles advertising thousands of edges.
+            // 1000 matches what the canvas can usefully absorb via the
+            // coalesced tier; beyond that, loadMoreDetail pages onward.
             const edges = await provider.getEdges({
                 sourceUrns: [edgeState.aggregated.sourceUrn],
                 targetUrns: [edgeState.aggregated.targetUrn],
+                limit: AGG_EXPAND_LIMIT,
             })
 
-            // No need to filter extensively client-side if backend does its job,
-            // but we keep a sanity check just in case.
-            const relevantEdges = edges
+            const detailTotal = edgeState.aggregated.edgeCount
+            const detailTruncated = edges.length >= AGG_EXPAND_LIMIT
+                && (detailTotal ?? 0) > edges.length
 
             setAggregatedEdges(prev => {
                 const next = new Map(prev)
@@ -399,7 +415,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                     next.set(aggregatedEdgeId, {
                         ...current,
                         state: 'expanded',
-                        detailedEdges: relevantEdges,
+                        detailedEdges: edges,
+                        detailTotal,
+                        detailTruncated,
                     })
                 }
                 return next
@@ -415,6 +433,39 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 return next
             })
             setError(err instanceof Error ? err.message : 'Failed to expand edge')
+        }
+    }, [aggregatedEdges, provider])
+
+    // Fetch the next page of underlying edges for a truncated expansion
+    const loadMoreDetail = useCallback(async (aggregatedEdgeId: string) => {
+        const edgeState = aggregatedEdges.get(aggregatedEdgeId)
+        if (!edgeState || !provider) return
+        if (edgeState.state !== 'expanded' || !edgeState.detailTruncated) return
+
+        try {
+            const more = await provider.getEdges({
+                sourceUrns: [edgeState.aggregated.sourceUrn],
+                targetUrns: [edgeState.aggregated.targetUrn],
+                offset: edgeState.detailedEdges.length,
+                limit: AGG_EXPAND_LIMIT,
+            })
+            setAggregatedEdges(prev => {
+                const next = new Map(prev)
+                const current = next.get(aggregatedEdgeId)
+                if (current) {
+                    const seen = new Set(current.detailedEdges.map(e => e.id))
+                    const merged = [...current.detailedEdges, ...more.filter(e => !seen.has(e.id))]
+                    next.set(aggregatedEdgeId, {
+                        ...current,
+                        detailedEdges: merged,
+                        detailTruncated: more.length >= AGG_EXPAND_LIMIT
+                            && (current.detailTotal ?? 0) > merged.length,
+                    })
+                }
+                return next
+            })
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load more edges')
         }
     }, [aggregatedEdges, provider])
 
@@ -530,6 +581,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         granularity,
         fetchAggregated,
         expandEdge,
+        loadMoreDetail,
         collapseEdge,
         toggleEdge,
         isExpanded,

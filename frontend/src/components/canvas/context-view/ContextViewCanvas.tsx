@@ -86,6 +86,9 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import { CanvasStatusChips } from './CanvasStatusChips'
+import { computeFitZoom } from './fitZoom'
+import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
@@ -165,6 +168,9 @@ export function ContextViewCanvas({
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
+  const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
+  const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
@@ -496,6 +502,8 @@ export function ContextViewCanvas({
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
+    error: aggregationError,
+    loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
@@ -569,11 +577,20 @@ export function ContextViewCanvas({
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
   // (The context-menu mutation entry points are draft-gated separately.)
+  // Fit-to-width / lens handlers are defined further down (they need
+  // sortedLayers / lens state); ref indirection avoids the TDZ.
+  const fitToWidthRef = useRef<(() => void) | null>(null)
+  const focusLensRef = useRef<(() => void) | null>(null)
+  const zoomShortcutHandlers = useMemo(() => ({
+    onFitView: () => fitToWidthRef.current?.(),
+    onZoomPreset: (level: 1 | 2 | 3) => setCanvasZoom([0.5, 0.75, 1][level - 1]),
+    onFocusLens: () => focusLensRef.current?.(),
+  }), [setCanvasZoom])
   useCanvasKeyboard({
     enabled: true,
     handlers: isDraft
-      ? interactions.keyboardHandlers
-      : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers }
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -1219,6 +1236,25 @@ export function ContextViewCanvas({
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
+  // Zoom changes move every node card, but nothing else forces the edge
+  // overlay to recompute geometry. Double-rAF so the transform commits
+  // before the redraw reads fresh rects.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.())
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [canvasZoom])
+
+  // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
+  // pre-compensation enlarges the scroll viewport in layout px), so the
+  // extra coverage comes from the larger window — overscan can shrink to
+  // keep total mounted rows bounded.
+  const effectiveOverscan = useMemo(
+    () => Math.min(15, Math.max(5, Math.round(15 * canvasZoom))),
+    [canvasZoom],
+  )
+
   // Drawer-aware horizontal autoscroll: when a side panel opens (EntityDrawer
   // for selected nodes or EdgeDetailPanel for selected edges) the right edge
   // of the canvas is reserved via padding, but a node already sitting on the
@@ -1359,8 +1395,19 @@ export function ContextViewCanvas({
     [activeView?.content, activeReferenceLayout],
   )
 
+  // Fit-to-width: intrinsic width from state (scrollWidth lies under the
+  // 100/zoom% compensation). Column collapse state is LayerColumn-local,
+  // so v1 assumes all columns expanded — a safe over-estimate that only
+  // makes the fitted zoom slightly smaller.
+  const handleFitToWidth = useCallback(() => {
+    const viewport = horizontalScrollRef.current?.clientWidth ?? 0
+    setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
+    horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
+  }, [setCanvasZoom, sortedLayers.length])
+  useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1596,7 +1643,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
+  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -1742,6 +1789,13 @@ export function ContextViewCanvas({
     },
     [revealAndFocus],
   )
+
+  // Registry of per-column imperative geometry APIs, keyed by layer id.
+  // Identity-stable Map (state initializer, never re-set) — columns
+  // register/unregister via effect; the edge overlay reads it
+  // imperatively (pass-through detection, badge partner positions) so
+  // no React state churn is involved.
+  const [columnGeometryRegistry] = useState(() => new Map<string, ColumnGeometryApi>())
 
   // Reveal-into-view: the LayerColumn that owns the hit URN uses its
   // virtualizer's scrollToIndex (DOM scrollIntoView can't work — rows
@@ -2334,7 +2388,7 @@ export function ContextViewCanvas({
   // Edge projection: lineageEdges, visibleLineageEdges
   // Pass the trace-filtered views so projected edges only reference visible
   // nodes; outside trace mode these are pass-through to the originals.
-  const { visibleLineageEdges } = useEdgeProjection({
+  const { visibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
@@ -2382,8 +2436,9 @@ export function ContextViewCanvas({
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
-  // suppresses them in favour of per-node stub indicators; `auto` flips
-  // between the two based on `autoStubThreshold`. The mode resolves
+  // suppresses them in favour of per-node stub indicators; `auto` keeps
+  // every edge rendered but adds stub indicators and focus emphasis
+  // above `autoStubThreshold`. The mode resolves
   // identically in trace and browse — trace mode no longer bypasses the
   // gate. Trace's focus-incident edges stay materialized via
   // `effectiveLineageEdges` so the anchor is always legible.
@@ -2393,12 +2448,20 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Effective edge set passed to the renderer. In stubs mode edges
-  // incident to the hovered, selected, or trace-focus node materialize
-  // (so the user can drill in by interacting and the trace anchor stays
-  // unmissable); the canvas otherwise stays light.
+  // Effective edge set passed to the renderer. In explicit 'stubs' mode
+  // ("On Hover") only edges incident to the hovered, selected, or
+  // trace-focus node materialize (so the user can drill in by
+  // interacting and the trace anchor stays unmissable); the canvas
+  // otherwise stays light by design. 'auto' ("Adaptive") must never
+  // blank or churn the canvas: it always passes the full projected set
+  // with a stable identity — LineageFlowOverlay's render tiers and
+  // viewport virtualization absorb the density, and its DOM
+  // hover-dimming handles focus emphasis without an O(edges) index
+  // rebuild per hover — so expanding past the threshold can't make
+  // edges disappear.
   const effectiveLineageEdges = useMemo(() => {
     if (!isStubsMode) return visibleLineageEdges
+    if (lineageRenderMode === 'auto') return visibleLineageEdges
     const focusIds = new Set<string>()
     if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
@@ -2407,7 +2470,7 @@ export function ContextViewCanvas({
     return visibleLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
-  }, [visibleLineageEdges, isStubsMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+  }, [visibleLineageEdges, isStubsMode, lineageRenderMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -2430,14 +2493,14 @@ export function ContextViewCanvas({
     return ids
   }, [trace.expandingPairs, effectiveLineageEdges, displayMap])
 
-  // Per-node lineage counts in stubs mode. Drives the small partial-edge
-  // markers on each entity card — a quiet inbound arrow on the left when
-  // `in > 0`, a quiet outbound arrow on the right when `out > 0`. Counts
-  // come from the full projected set (not the hover-filtered slice) so
-  // the markers reflect the entity's true lineage volume regardless of
-  // which edges happen to be materialized for the current hover.
+  // Per-node lineage counts. Drives the in/out indicators on each entity
+  // card — computed in EVERY render mode so a node always communicates
+  // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
+  // quiet tab otherwise; see LineageFlowOverlay). Counts come from the
+  // full projected set (not the hover-filtered slice) so the markers
+  // reflect the entity's true lineage volume regardless of which edges
+  // happen to be materialized for the current hover.
   const nodeStubCounts = useMemo(() => {
-    if (!isStubsMode) return new Map<string, { in: number; out: number }>()
     const counts = new Map<string, { in: number; out: number }>()
     for (const e of visibleLineageEdges) {
       const s = counts.get(e.source) ?? { in: 0, out: 0 }
@@ -2448,7 +2511,34 @@ export function ContextViewCanvas({
       counts.set(e.target, t)
     }
     return counts
-  }, [visibleLineageEdges, isStubsMode])
+  }, [visibleLineageEdges])
+
+  // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  const unassignedEntities = useMemo(() =>
+    unassignedNodes.map((n) => ({
+      id: n.id,
+      label: (n.data?.label ?? n.data?.businessLabel ?? n.id) as string,
+      type: n.data?.type as string | undefined,
+    })), [unassignedNodes])
+  // Truncated aggregated expansions: summed shown/total across all expanded
+  // bundles whose detail was capped, plus a load-more that pages each one.
+  const aggDetailStatus = useMemo(() => {
+    let shown = 0
+    let total = 0
+    const truncatedIds: string[] = []
+    aggregatedEdges.forEach((state, id) => {
+      if (state.state === 'expanded' && state.detailTruncated) {
+        shown += state.detailedEdges.length
+        total += state.detailTotal ?? state.detailedEdges.length
+        truncatedIds.push(id)
+      }
+    })
+    return { shown, total, truncatedIds }
+  }, [aggregatedEdges])
+  const handleLoadMoreAggDetail = useCallback(() => {
+    aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
+  }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
@@ -2663,6 +2753,7 @@ export function ContextViewCanvas({
         onRedo={redoStagedChange}
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
+        onFitToWidth={handleFitToWidth}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
@@ -2699,12 +2790,33 @@ export function ContextViewCanvas({
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {aggregationTruncated && (
+        {(aggregationTruncated || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
             <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+          </div>
+        )}
+        {/* Edge-fetch integrity banner — an edge query failed and was
+            swallowed to keep nodes rendering; the canvas may be missing
+            connections. Retry re-hydrates and refetches aggregated edges. */}
+        {(edgeFetchFailures > 0 || aggregationError) && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">Some connections could not be loaded — the canvas may be incomplete.</span>
+            <button
+              className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
+              onClick={() => {
+                clearEdgeFetchFailures()
+                invalidateAggregatedEdges()
+                retryHydration()
+              }}
+            >
+              Retry
+            </button>
           </div>
         )}
         {/* Warning: missing ontology configuration */}
@@ -2840,6 +2952,18 @@ export function ContextViewCanvas({
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
         </div>
 
+        {/* Status chips — loaded-but-hidden data (unresolved edges,
+            unassigned entities, truncated aggregated detail). The canvas
+            never hides lineage silently. */}
+        <CanvasStatusChips
+          unresolvedEdgeCount={unresolvedEdgeCount}
+          unassignedEntities={unassignedEntities}
+          onOpenEntity={openNodeDrawer}
+          aggDetailShown={aggDetailStatus.shown}
+          aggDetailTotal={aggDetailStatus.total}
+          onLoadMoreDetail={handleLoadMoreAggDetail}
+        />
+
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
             empty model, and the first-steps companion while building. Both are
             scoped to kind === 'blank' so every other view is untouched.
@@ -2894,6 +3018,8 @@ export function ContextViewCanvas({
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
               expandingEdgeIds={expandingEdgeIds}
+              geometryRegistry={columnGeometryRegistry}
+              onRevealNode={scrollHitIntoView}
             />
           )}
 
@@ -3013,6 +3139,8 @@ export function ContextViewCanvas({
                 onReorderLayer={isDraft ? reorderLayer : undefined}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
+                geometryRegistry={columnGeometryRegistry}
+                overscan={effectiveOverscan}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}

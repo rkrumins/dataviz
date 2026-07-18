@@ -46,6 +46,12 @@ export interface CanvasKeyboardHandlers {
     onRedo?: () => void
     /** Open command palette */
     onCommandPalette?: () => void
+    /** Fit the canvas to the viewport width (Cmd/Ctrl+0) */
+    onFitView?: () => void
+    /** Jump to a zoom preset (Cmd/Ctrl+1/2/3) */
+    onZoomPreset?: (level: 1 | 2 | 3) => void
+    /** Open the Lineage Lens on the selected node (F) */
+    onFocusLens?: () => void
 }
 
 export interface UseCanvasKeyboardOptions {
@@ -116,6 +122,20 @@ export function useCanvasKeyboard({
             return
         }
         
+        // Fit to width: Cmd/Ctrl + 0
+        if (isMod && e.key === '0') {
+            e.preventDefault()
+            handlersRef.current.onFitView?.()
+            return
+        }
+
+        // Zoom presets: Cmd/Ctrl + 1 / 2 / 3
+        if (isMod && (e.key === '1' || e.key === '2' || e.key === '3')) {
+            e.preventDefault()
+            handlersRef.current.onZoomPreset?.(Number(e.key) as 1 | 2 | 3)
+            return
+        }
+
         // Select All: Cmd/Ctrl + A
         if (isMod && e.key === 'a') {
             e.preventDefault()
@@ -200,6 +220,13 @@ export function useCanvasKeyboard({
             handlersRef.current.onConnectMode?.()
             return
         }
+
+        // Lineage Lens: F (no modifier — mirrors T for trace)
+        if (e.key === 'f' && !isMod) {
+            e.preventDefault()
+            handlersRef.current.onFocusLens?.()
+            return
+        }
     }, [enabled, defaultDelete, defaultCancel])
     
     // Attach event listener
@@ -234,7 +261,10 @@ export const KEYBOARD_SHORTCUTS = [
     { key: 'Enter', action: 'Edit Selected' },
     { key: 'Escape', action: 'Cancel / Deselect' },
     { key: 'T', action: 'Trace Lineage' },
+    { key: 'F', action: 'Focus Connections' },
     { key: 'N', action: 'New Entity' },
+    { key: '⌘/Ctrl + 0', action: 'Fit to Width' },
+    { key: '⌘/Ctrl + 1/2/3', action: 'Zoom 50% / 75% / 100%' },
 ]
 
 export default useCanvasKeyboard

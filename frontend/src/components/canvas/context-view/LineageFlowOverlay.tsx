@@ -1,7 +1,9 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { ComputedEdge, OverflowBadge, OverflowEdge } from './types'
+import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge, PassThroughEdge } from './types'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useHoveredNodeId } from '@/hooks/useHighlightState'
+import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -39,6 +41,8 @@ export function LineageFlowOverlay({
   onEdgeDoubleClick,
   showDirection = true,
   expandingEdgeIds,
+  geometryRegistry,
+  onRevealNode,
 }: {
   nodes: any[],
   edges: any[],
@@ -69,6 +73,13 @@ export function LineageFlowOverlay({
   showDirection?: boolean,
   /** Edge ids whose drill-down is in flight — pulses them via `.nx-edge-expanding`. */
   expandingEdgeIds?: Set<string>,
+  /** Per-column geometry APIs (keyed by layer id) — estimated row rects
+   *  for unmounted rows, used by pass-through detection and badge
+   *  partner classification. */
+  geometryRegistry?: ReadonlyMap<string, ColumnGeometryApi>,
+  /** Scroll a node into view on both axes (canvas reveal mechanism) —
+   *  used by the clickable overflow badges. */
+  onRevealNode?: (nodeId: string) => void,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -88,7 +99,15 @@ export function LineageFlowOverlay({
     count: number
     cx: number; cy: number  // ribbon center
     width: number; height: number
+    /** 'full' = three-layer ribbon (stubs mode); 'quiet' = slim always-on
+     *  tab rendered in every other mode. */
+    variant: 'full' | 'quiet'
   }>>([])
+  // Pass-through edges — both endpoints off-viewport, path crosses the
+  // visible box. Computed on a debounced settle pass (never per frame).
+  const [passThroughEdges, setPassThroughEdges] = useState<PassThroughEdge[]>([])
+  const passThroughTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const computePassThroughRef = useRef<(() => void) | null>(null)
 
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
@@ -187,9 +206,14 @@ export function LineageFlowOverlay({
     const GUTTER_HALF = 24
     const BADGE_BUCKET = 80
     const MAX_STUBS_PER_BUCKET = 6
+    const MAX_BADGE_PARTNERS = 8
     const containerH = containerRect.height
+    // Visible viewport box — the overlay's parent IS the outer
+    // overflow-auto scroll container. Used to classify off-screen
+    // partners into up/down/left/right.
+    const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
-    const buckets = new Map<string, { gutterXs: number[], direction: 'up' | 'down', colors: string[], edgeCount: number }>()
+    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[] }>()
     const trailingEdges: OverflowEdge[] = []
     const bucketStubCount = new Map<string, number>()
 
@@ -201,6 +225,17 @@ export function LineageFlowOverlay({
         if (el) elementCache.set(id, el)
       }
       return el
+    }
+
+    // Helper: estimated viewport-space rect for an UNMOUNTED node via the
+    // column geometry registry (≤ a handful of columns; pure Map lookups
+    // until the owning column is found).
+    const estimateNodeRect = (nodeId: string): { top: number; height: number; left: number; right: number } | null => {
+      if (!geometryRegistry) return null
+      for (const api of geometryRegistry.values()) {
+        if (api.hasNode(nodeId)) return api.getNodeRect(nodeId)
+      }
+      return null
     }
 
     // Collect only edges with at least one endpoint currently in the
@@ -418,11 +453,32 @@ export function LineageFlowOverlay({
         : vRect.left - containerRect.left - 8
       const sy = vRect.top + vRect.height / 2 - containerRect.top
 
-      let direction: 'up' | 'down'
+      // 4-way partner classification: exact DOM rect when the partner is
+      // mounted (including mounted-but-horizontally-off-viewport cards),
+      // registry estimate for vertically-unmounted rows, legacy y-guess
+      // as a last resort. Dominant overshoot axis picks the direction so
+      // horizontal scrolling gets left/right badges instead of a
+      // meaningless up/down.
+      const partnerId = offscreenNodeId.slice('layer-node-'.length)
       const offscreenEl = getEl(offscreenNodeId)
-      if (offscreenEl) {
-        const oRect = offscreenEl.getBoundingClientRect()
-        direction = (oRect.top + oRect.height / 2) < (containerRect.top + containerRect.height / 2) ? 'up' : 'down'
+      const pRect = offscreenEl?.getBoundingClientRect() ?? estimateNodeRect(partnerId)
+      let direction: OverflowDirection
+      let partnerY: number | null = null
+      if (pRect) {
+        const px = (pRect.left + pRect.right) / 2
+        const py = pRect.top + pRect.height / 2
+        partnerY = py - containerRect.top
+        const dx = px < viewportRect.left ? px - viewportRect.left : px > viewportRect.right ? px - viewportRect.right : 0
+        const dy = py < viewportRect.top ? py - viewportRect.top : py > viewportRect.bottom ? py - viewportRect.bottom : 0
+        if (dx === 0 && dy === 0) {
+          // Inside the viewport box but outside the IO margin edge case —
+          // keep the legacy vertical guess.
+          direction = sy > containerH * 0.5 ? 'up' : 'down'
+        } else if (Math.abs(dy) >= Math.abs(dx)) {
+          direction = dy < 0 ? 'up' : 'down'
+        } else {
+          direction = dx < 0 ? 'left' : 'right'
+        }
       } else {
         direction = sy > containerH * 0.5 ? 'up' : 'down'
       }
@@ -430,21 +486,43 @@ export function LineageFlowOverlay({
       const primaryType = edge.types?.[0] || edge.originalType || ''
       const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
 
-      const bucketKey = `${Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
+      const isHorizontal = direction === 'left' || direction === 'right'
+      // Vertical buckets group by gutter x; horizontal buckets group by
+      // the visible endpoint's row band so badges land next to the rows
+      // whose partners are off-screen sideways.
+      const bucketKey = isHorizontal
+        ? `${direction}-${Math.round(sy / BADGE_BUCKET) * BADGE_BUCKET}`
+        : `${Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
       if (!buckets.has(bucketKey)) {
-        buckets.set(bucketKey, { gutterXs: [], direction, colors: [], edgeCount: 0 })
+        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [] })
       }
       const bucket = buckets.get(bucketKey)!
       bucket.gutterXs.push(gutterX)
+      bucket.ys.push(sy)
       bucket.edgeCount++
       if (!bucket.colors.includes(color)) bucket.colors.push(color)
+      if (bucket.partnerIds.length < MAX_BADGE_PARTNERS && !bucket.partnerIds.includes(partnerId)) {
+        bucket.partnerIds.push(partnerId)
+      }
 
       const stubCount = bucketStubCount.get(bucketKey) ?? 0
       if (stubCount >= MAX_STUBS_PER_BUCKET) return
       bucketStubCount.set(bucketKey, stubCount + 1)
 
-      const ey = direction === 'up' ? 0 : containerH
-      const ex = gutterX + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
+      let ex: number
+      let ey: number
+      if (isHorizontal) {
+        // Exit horizontally toward the viewport edge, nudged a few px
+        // toward the partner's row when known, fanned vertically per stub.
+        ex = direction === 'left'
+          ? viewportRect.left - containerRect.left
+          : viewportRect.right - containerRect.left
+        const nudge = partnerY !== null ? Math.max(-24, Math.min(24, partnerY - sy)) : 0
+        ey = sy + nudge + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
+      } else {
+        ey = direction === 'up' ? 0 : containerH
+        ex = gutterX + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
+      }
 
       const cp1x = sx + (ex - sx) * 0.4
       const cp2x = ex
@@ -477,13 +555,18 @@ export function LineageFlowOverlay({
     // The ribbon vertical extent is sized to the card's own height
     // (45%) so it always feels proportional, whether the entity is a
     // tall layer card or a tight leaf row.
-    if (showStubs && nodeStubCounts && nodeStubCounts.size > 0) {
+    if (nodeStubCounts && nodeStubCounts.size > 0) {
+      // Always-on in/out indicators: every render mode shows whether a
+      // node has loaded lineage on each side. Stubs mode keeps the full
+      // three-layer ribbon; other modes get a QUIET slim tab so the
+      // indicator doesn't double-encode against the materialized edges.
       // Sized to be confidently visible without dominating the card.
       // 7px core + 4px halo around it gives a soft glow tab that reads
       // at a glance. ~5.5px peeks out beyond the card edge (1.5px overlap
       // hides any hard inboard edge behind the card chrome).
-      const RIBBON_W = 7
-      const RIBBON_HEIGHT_RATIO = 0.55
+      const variant: 'full' | 'quiet' = showStubs ? 'full' : 'quiet'
+      const RIBBON_W = variant === 'full' ? 7 : 4
+      const RIBBON_HEIGHT_RATIO = variant === 'full' ? 0.55 : 0.4
       const RIBBON_INSET = 1.5
       const newStubs: typeof computedStubs = []
       globalVisibleNodes.forEach(domId => {
@@ -506,6 +589,7 @@ export function LineageFlowOverlay({
             cy: midY,
             width: RIBBON_W,
             height,
+            variant,
           })
         }
         if (counts.out > 0) {
@@ -516,6 +600,7 @@ export function LineageFlowOverlay({
             cy: midY,
             width: RIBBON_W,
             height,
+            variant,
           })
         }
       })
@@ -526,18 +611,114 @@ export function LineageFlowOverlay({
 
     const badges: OverflowBadge[] = []
     buckets.forEach((bucket) => {
-      const avgX = bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length
+      const horizontal = bucket.direction === 'left' || bucket.direction === 'right'
+      // Left/right badges pin to the visible viewport edge (overlay
+      // coords) at the average row band; up/down badges keep their
+      // gutter-centered placement.
+      const avgX = horizontal
+        ? (bucket.direction === 'left'
+            ? viewportRect.left - containerRect.left + 30
+            : viewportRect.right - containerRect.left - 30)
+        : bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length
+      const avgY = bucket.ys.reduce((a, b) => a + b, 0) / bucket.ys.length
       badges.push({
         gutterX: avgX,
+        y: avgY,
         direction: bucket.direction,
         count: bucket.edgeCount,
         color: bucket.colors[0] || '#3b82f6',
+        partnerIds: bucket.partnerIds,
       })
     })
     setOverflowBadges(badges)
     setOverflowEdges(trailingEdges)
+
+    // Pass-through settle pass — debounced 150ms so the O(projected-edges)
+    // scan never runs on the per-frame path. updateFlow already fires on
+    // every scroll / IO / mutation / resize trigger, so re-arming here
+    // keeps the pass fresh without any new listeners.
+    if (passThroughTimerRef.current) clearTimeout(passThroughTimerRef.current)
+    passThroughTimerRef.current = setTimeout(() => {
+      passThroughTimerRef.current = null
+      computePassThroughRef.current?.()
+    }, 150)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry])
+
+  // ── Pass-through edges — both endpoints off-viewport, path crosses the
+  // visible box. Runs only on the debounced settle pass above. Cost:
+  // O(projected edges) with O(1) per rejected edge (two Set lookups +
+  // memoized column resolution + interval tests); rect math only for
+  // edges whose horizontal strip crosses the viewport. Endpoint rects
+  // are exact for mounted cards (including mounted-but-horizontally-
+  // off-viewport ones) and virtualizer estimates for unmounted rows.
+  const computePassThrough = useCallback(() => {
+    if (!containerRef.current) return
+    if (!geometryRegistry || geometryRegistry.size === 0) {
+      setPassThroughEdges(prev => (prev.length === 0 ? prev : []))
+      return
+    }
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const viewportRect = containerRef.current.parentElement?.getBoundingClientRect()
+    if (!viewportRect) return
+
+    const colCache = new Map<string, ColumnGeometryApi | null>()
+    const resolveCol = (id: string): ColumnGeometryApi | null => {
+      const cached = colCache.get(id)
+      if (cached !== undefined) return cached
+      let col: ColumnGeometryApi | null = null
+      for (const api of geometryRegistry.values()) {
+        if (api.hasNode(id)) { col = api; break }
+      }
+      colCache.set(id, col)
+      return col
+    }
+    // Exact DOM rect when the card is mounted (horizontal off-viewport
+    // cards are still mounted by their column), estimate otherwise.
+    const rectOf = (id: string, col: ColumnGeometryApi) =>
+      document.getElementById(`layer-node-${id}`)?.getBoundingClientRect() ?? col.getNodeRect(id)
+
+    const result: PassThroughEdge[] = []
+    for (const edge of edges) {
+      if (globalVisibleNodes.has(`layer-node-${edge.source}`)) continue
+      if (globalVisibleNodes.has(`layer-node-${edge.target}`)) continue
+      const srcCol = resolveCol(edge.source)
+      if (!srcCol) continue
+      const tgtCol = resolveCol(edge.target)
+      if (!tgtCol || srcCol === tgtCol) continue
+      const sRect = rectOf(edge.source, srcCol)
+      if (!sRect) continue
+      const tRect = rectOf(edge.target, tgtCol)
+      if (!tRect) continue
+      // X pre-test: the horizontal strip the edge travels must cross the
+      // viewport box.
+      const xA = sRect.right
+      const xB = tRect.left
+      if (Math.max(xA, xB) < viewportRect.left || Math.min(xA, xB) > viewportRect.right) continue
+      // Y test — exact for the monotone cross-column cubic: the curve's
+      // y stays within [sy, ty].
+      const syAbs = sRect.top + sRect.height / 2
+      const tyAbs = tRect.top + tRect.height / 2
+      if (Math.max(syAbs, tyAbs) < viewportRect.top || Math.min(syAbs, tyAbs) > viewportRect.bottom) continue
+
+      // Overlay coords — same anchors and curve family as the main pass.
+      const sx = sRect.right - containerRect.left + 6
+      const sy = syAbs - containerRect.top
+      const tx = tRect.left - containerRect.left - 8
+      const ty = tyAbs - containerRect.top
+      const dist = Math.abs(tx - sx)
+      const spread = Math.max(dist * 0.5, 24)
+      const pathD = `M ${sx} ${sy} C ${sx + spread} ${sy}, ${tx - spread} ${ty}, ${tx} ${ty}`
+      const primaryType = edge.types?.[0] || edge.originalType || ''
+      const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
+      result.push({ id: `pt-${edge.id}`, source: edge.source, target: edge.target, pathD, color })
+    }
+    setPassThroughEdges(prev => (prev.length === 0 && result.length === 0 ? prev : result))
+  }, [edges, geometryRegistry, resolveEdgeColor])
+
+  useEffect(() => {
+    computePassThroughRef.current = computePassThrough
+  }, [computePassThrough])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -696,6 +877,10 @@ export function LineageFlowOverlay({
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
+      if (passThroughTimerRef.current !== null) {
+        clearTimeout(passThroughTimerRef.current)
+        passThroughTimerRef.current = null
+      }
     }
   }, [nodes, expandedNodesFingerprint, scheduleUpdate])
 
@@ -828,8 +1013,84 @@ export function LineageFlowOverlay({
     const gradientKeys = new Set<string>()
     overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
 
-    return { markerColors: Array.from(markerColors), gradientKeys: Array.from(gradientKeys) }
-  }, [visibleEdges, overflowEdges])
+    // Pass-through edges fade at BOTH ends — they enter and exit beyond
+    // the viewport, and the double fade reads as "continues off-screen".
+    const passThroughColors = new Set<string>()
+    passThroughEdges.forEach(e => passThroughColors.add(e.color))
+
+    return {
+      markerColors: Array.from(markerColors),
+      gradientKeys: Array.from(gradientKeys),
+      passThroughColors: Array.from(passThroughColors),
+    }
+  }, [visibleEdges, overflowEdges, passThroughEdges])
+
+  // Display names for badge tooltips — id → name over the rendered node
+  // hierarchy (children included so partners below collapsed roots still
+  // resolve).
+  const nodeNameById = useMemo(() => {
+    const m = new Map<string, string>()
+    const stack: Array<{ id?: string; name?: string; children?: unknown[] }> = [...nodes]
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (!n?.id) continue
+      if (!m.has(n.id)) m.set(n.id, n.name ?? n.id)
+      if (Array.isArray(n.children)) stack.push(...(n.children as typeof stack))
+    }
+    return m
+  }, [nodes])
+
+  // Badge click → reveal the nearest off-screen partner (estimated
+  // distance to the viewport center; ≤ MAX_BADGE_PARTNERS lookups).
+  const handleBadgeClick = useCallback((badge: OverflowBadge) => {
+    if (!onRevealNode || badge.partnerIds.length === 0) return
+    let pick = badge.partnerIds[0]
+    const vp = containerRef.current?.parentElement?.getBoundingClientRect()
+    if (vp && badge.partnerIds.length > 1) {
+      const centerX = vp.left + vp.width / 2
+      const centerY = vp.top + vp.height / 2
+      let best = Infinity
+      for (const id of badge.partnerIds) {
+        let rect: { top: number; height: number; left: number; right: number } | null =
+          document.getElementById(`layer-node-${id}`)?.getBoundingClientRect() ?? null
+        if (!rect && geometryRegistry) {
+          for (const api of geometryRegistry.values()) {
+            if (api.hasNode(id)) { rect = api.getNodeRect(id); break }
+          }
+        }
+        if (!rect) continue
+        const d = Math.abs(rect.top + rect.height / 2 - centerY)
+          + Math.abs((rect.left + rect.right) / 2 - centerX)
+        if (d < best) { best = d; pick = id }
+      }
+    }
+    onRevealNode(pick)
+  }, [onRevealNode, geometryRegistry])
+
+  // Hit-layer handlers — hoisted so the extracted HitLayer / FocusHitLayer
+  // components below can share them.
+  const handleHitEnter = useCallback((edgeId: string, e: React.MouseEvent) => {
+    setHoveredEdgeId(edgeId)
+    setHoverMousePos({ x: e.clientX, y: e.clientY })
+  }, [])
+  const handleHitMove = useCallback((e: React.MouseEvent) => {
+    setHoverMousePos({ x: e.clientX, y: e.clientY })
+  }, [])
+  const handleHitLeave = useCallback(() => {
+    setHoveredEdgeId(null)
+    setHoverMousePos(null)
+  }, [])
+  const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    selectEdge(edgeId)
+    if (!isEdgePanelOpen) toggleEdgePanel()
+  }, [selectEdge, isEdgePanelOpen, toggleEdgePanel])
+  const handleHitDoubleClick = useCallback((edgeId: string, e: React.MouseEvent) => {
+    if (!onEdgeDoubleClick) return
+    e.stopPropagation()
+    e.preventDefault()
+    onEdgeDoubleClick(edgeId)
+  }, [onEdgeDoubleClick])
 
   return (
     <>
@@ -904,16 +1165,33 @@ export function LineageFlowOverlay({
             )
           })}
 
-          {/* Shared overflow gradients — one per color+direction */}
+          {/* Shared overflow gradients — one per color+direction. Vertical
+              directions fade along y, horizontal (left/right) along x —
+              always from the visible node toward the exit edge. */}
           {sharedDefs.gradientKeys.map(key => {
             const [c, dir] = key.split('|')
             const safeId = `of-${c.replace(/[^a-zA-Z0-9]/g, '')}-${dir}`
-            const y1 = dir === 'up' ? '100%' : '0%'
-            const y2 = dir === 'up' ? '0%' : '100%'
+            const axis = dir === 'left' || dir === 'right'
+              ? { x1: dir === 'left' ? '100%' : '0%', x2: dir === 'left' ? '0%' : '100%', y1: '0', y2: '0' }
+              : { x1: '0', x2: '0', y1: dir === 'up' ? '100%' : '0%', y2: dir === 'up' ? '0%' : '100%' }
             return (
-              <linearGradient key={safeId} id={safeId} x1="0" x2="0" y1={y1} y2={y2}>
+              <linearGradient key={safeId} id={safeId} {...axis}>
                 <stop offset="0%" stopColor={c} stopOpacity="0.35" />
                 <stop offset="70%" stopColor={c} stopOpacity="0.12" />
+                <stop offset="100%" stopColor={c} stopOpacity="0" />
+              </linearGradient>
+            )
+          })}
+
+          {/* Shared pass-through gradients — one per color, fading at both
+              ends along the (predominantly horizontal) travel direction. */}
+          {sharedDefs.passThroughColors.map(c => {
+            const safeId = `pt-${c.replace(/[^a-zA-Z0-9]/g, '')}`
+            return (
+              <linearGradient key={safeId} id={safeId} x1="0" x2="1" y1="0" y2="0">
+                <stop offset="0%" stopColor={c} stopOpacity="0" />
+                <stop offset="15%" stopColor={c} stopOpacity="0.32" />
+                <stop offset="85%" stopColor={c} stopOpacity="0.32" />
                 <stop offset="100%" stopColor={c} stopOpacity="0" />
               </linearGradient>
             )
@@ -1203,15 +1481,34 @@ export function LineageFlowOverlay({
               // accent. log2 cap keeps the difference perceptible
               // without making heavy-traffic nodes shout.
               const intensity = Math.min(0.75 + Math.log2(Math.max(1, stub.count)) * 0.06, 1)
+              const label = stub.count > 1
+                ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
+                : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
+              // Quiet variant (non-stubs modes): core pill only, dimmer —
+              // an always-on "has lineage this side" tab that doesn't
+              // compete with the materialized edges next to it.
+              if (stub.variant === 'quiet') {
+                return (
+                  <g key={key} className="pointer-events-none" opacity={intensity * 0.55}>
+                    <rect
+                      x={stub.cx - stub.width / 2}
+                      y={stub.cy - stub.height / 2}
+                      width={stub.width}
+                      height={stub.height}
+                      rx={stub.width / 2}
+                      ry={stub.width / 2}
+                      fill="url(#lineage-ribbon-core)"
+                    />
+                    <title>{label}</title>
+                  </g>
+                )
+              }
               const haloW = stub.width + 6
               const haloH = stub.height + 4
               const sheenW = Math.max(1.4, stub.width * 0.38)
               const sheenInset = stub.side === 'in'
                 ? stub.width * 0.18   // sheen toward the card-facing side
                 : -stub.width * 0.18
-              const label = stub.count > 1
-                ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
-                : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
               return (
                 <g key={key} className="pointer-events-none" opacity={intensity}>
                   {/* Halo */}
@@ -1264,64 +1561,126 @@ export function LineageFlowOverlay({
             className="pointer-events-none"
           />
         ))}
+
+        {/* ── Pass-through edges — both endpoints off-viewport but the path
+            crosses the visible box. Estimated geometry (virtualizer
+            offsets), so they render dashed + dimmed in the coalesced
+            style: no gradients, markers, or animation, and never any hit
+            layer. data-edge-* attributes keep the DOM hover-dimming loop
+            consistent — hovering any node dims these like every other
+            non-incident edge. ── */}
+        {passThroughEdges.map(pt => (
+          <g key={pt.id} data-edge-id={pt.id} data-edge-src={pt.source} data-edge-tgt={pt.target}>
+            <path
+              d={pt.pathD}
+              stroke={`url(#pt-${pt.color.replace(/[^a-zA-Z0-9]/g, '')})`}
+              strokeWidth={1.5}
+              fill="none"
+              strokeDasharray="5 5"
+              strokeLinecap="round"
+              className="pointer-events-none"
+            />
+          </g>
+        ))}
       </svg>
 
-      {/* ── Overflow indicators — centered in column gutters at top/bottom ── */}
+      {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
+          stacking context so it always sits above the column content (z-10)
+          and the EntityDrawer (z-50). See issue #2 fix. */}
+    </div>
+
+    {/* ── Overflow badges — interactive. A sibling of the visual layer at
+        z-40 (above the z-30 columns) so the badge buttons are actually
+        hit-testable; the wrapper stays pointer-events-none and only the
+        buttons opt back in, so canvas interactions beneath are
+        unaffected. Tooltip lists off-screen partners; click reveals the
+        nearest one via the canvas's two-axis reveal mechanism. ── */}
+    <div className="absolute inset-0 pointer-events-none z-40">
       {overflowBadges.map((badge, i) => {
-        const isUp = badge.direction === 'up'
+        const isHorizontal = badge.direction === 'left' || badge.direction === 'right'
+        const rotation = badge.direction === 'up' ? undefined
+          : badge.direction === 'down' ? 'rotate(180deg)'
+          : badge.direction === 'left' ? 'rotate(-90deg)'
+          : 'rotate(90deg)'
+        const shown = badge.partnerIds
+          .map(id => nodeNameById.get(id) ?? id)
+        const extra = badge.count - badge.partnerIds.length
         return (
           <div
             key={`overflow-${i}`}
             className="absolute pointer-events-none"
             style={{
               left: badge.gutterX,
-              transform: 'translateX(-50%)',
-              ...(isUp ? { top: 52 } : { bottom: 12 }),
-              zIndex: 20,
+              ...(isHorizontal
+                ? { top: badge.y, transform: 'translate(-50%, -50%)' }
+                : {
+                    transform: 'translateX(-50%)',
+                    ...(badge.direction === 'up' ? { top: 52 } : { bottom: 12 }),
+                  }),
             }}
           >
-            <div
-              className="flex flex-col items-center gap-0.5"
-              style={{ color: badge.color }}
+            <InfoTooltip
+              side={isHorizontal ? (badge.direction === 'left' ? 'right' : 'left') : 'bottom'}
+              content={
+                <div>
+                  <p className="font-semibold mb-1">
+                    {badge.count} off-screen connection{badge.count === 1 ? '' : 's'}
+                  </p>
+                  {shown.map((name, j) => (
+                    <div key={j} className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: badge.color }}
+                      />
+                      <span className="truncate text-ink-muted">{name}</span>
+                    </div>
+                  ))}
+                  {extra > 0 && <p className="text-ink-muted/70 mt-0.5">+{extra} more</p>}
+                  <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll to it</p>
+                </div>
+              }
             >
-              {/* Chevron */}
-              <svg
-                width="14" height="14" viewBox="0 0 14 14" fill="none"
-                style={isUp ? undefined : { transform: 'rotate(180deg)' }}
-              >
-                <path
-                  d="M3 8.5L7 4.5L11 8.5"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              {/* Count */}
-              <span
-                className="text-[10px] font-semibold tabular-nums leading-none"
-                style={{ opacity: 0.85 }}
-              >
-                {badge.count}
-              </span>
-              {/* Accent line */}
-              <div
-                className="rounded-full"
+              {/* Glass pill — same visual family as the column's
+                  "N above / N below" chips (rounded-full, backdrop blur,
+                  color-tinted glass, soft color glow, scale on hover) so
+                  the off-screen affordances read as one system. */}
+              <button
+                type="button"
+                data-canvas-interactive
+                className="pointer-events-auto flex items-center gap-1 px-2 py-[3px] rounded-full backdrop-blur-md border border-white/10 shadow-md cursor-pointer hover:scale-105 active:scale-95 transition-transform"
                 style={{
-                  width: Math.min(24, 8 + badge.count * 3),
-                  height: 2,
-                  backgroundColor: badge.color,
-                  opacity: 0.4,
+                  color: badge.color,
+                  backgroundColor: `${badge.color}22`,
+                  boxShadow: `0 4px 14px ${badge.color}25`,
                 }}
-              />
-            </div>
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleBadgeClick(badge)
+                }}
+              >
+                {/* Chevron */}
+                <svg
+                  width="12" height="12" viewBox="0 0 14 14" fill="none"
+                  className="flex-shrink-0"
+                  style={rotation ? { transform: rotation } : undefined}
+                >
+                  <path
+                    d="M3 8.5L7 4.5L11 8.5"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {/* Count */}
+                <span className="text-[10px] font-semibold tabular-nums leading-none">
+                  {badge.count}
+                </span>
+              </button>
+            </InfoTooltip>
           </div>
         )
       })}
-
-      {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
-          stacking context so it always sits above the column content (z-10)
-          and the EntityDrawer (z-50). See issue #2 fix. */}
     </div>
     {hoveredEdgeId && hoverMousePos && (() => {
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)
@@ -1431,52 +1790,112 @@ export function LineageFlowOverlay({
      *  whole canvas clickable at high edge density — clicks anywhere off an
      *  edge fall through to the node layer below.
      *
-     *  Density gate: above HIT_DENSITY_LIMIT visible edges, the per-edge hit
-     *  path overlay would still form a coverage mesh that occludes nodes. In
-     *  that regime we skip the hit layer entirely; users interact with edges
-     *  via the trace dock / EdgeLegend instead. Nodes always remain clickable.
+     *  Density gate: above HIT_DENSITY_LIMIT visible edges, a full per-edge
+     *  hit overlay would form a coverage mesh that occludes nodes. In that
+     *  regime we render a FOCUS-scoped hit layer instead: edges incident to
+     *  the hovered/selected node (bounded by one node's fan, not the canvas
+     *  total) stay hoverable and clickable, so every visible relationship
+     *  remains interrogable at any density. Nodes always remain clickable.
      */}
-    {visibleEdges.length <= 1200 && (
-    <div className="absolute inset-0 pointer-events-none z-20">
-      <svg className="w-full h-full overflow-visible pointer-events-none">
-        {visibleEdges.map(edge => {
-          const { pathD } = edge
-          return (
-            <path
-              key={`hit-${edge.id}`}
-              d={pathD}
-              fill="none"
-              stroke="transparent"
-              strokeWidth={6}
-              style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
-              data-canvas-interactive
-              onMouseEnter={(e) => {
-                setHoveredEdgeId(edge.id)
-                setHoverMousePos({ x: e.clientX, y: e.clientY })
-              }}
-              onMouseMove={(e) => {
-                setHoverMousePos({ x: e.clientX, y: e.clientY })
-              }}
-              onMouseLeave={() => {
-                setHoveredEdgeId(null)
-                setHoverMousePos(null)
-              }}
-              onClick={(e) => {
-                e.stopPropagation()
-                selectEdge(edge.id)
-                if (!isEdgePanelOpen) toggleEdgePanel()
-              }}
-              onDoubleClick={onEdgeDoubleClick ? (e) => {
-                e.stopPropagation()
-                e.preventDefault()
-                onEdgeDoubleClick(edge.id)
-              } : undefined}
-            />
-          )
-        })}
-      </svg>
-    </div>
+    {visibleEdges.length <= HIT_DENSITY_LIMIT ? (
+      <HitLayer
+        edges={visibleEdges}
+        onEnter={handleHitEnter}
+        onMove={handleHitMove}
+        onLeave={handleHitLeave}
+        onClickEdge={handleHitClick}
+        onDoubleClickEdge={handleHitDoubleClick}
+      />
+    ) : (
+      <FocusHitLayer
+        visibleEdges={visibleEdges}
+        hoveredEdgeId={hoveredEdgeId}
+        highlightedEdges={highlightedEdges}
+        isHighlightActive={isHighlightActive}
+        onEnter={handleHitEnter}
+        onMove={handleHitMove}
+        onLeave={handleHitLeave}
+        onClickEdge={handleHitClick}
+        onDoubleClickEdge={handleHitDoubleClick}
+      />
     )}
     </>
   )
+}
+
+const HIT_DENSITY_LIMIT = 1200
+
+type HitLayerHandlers = {
+  onEnter: (edgeId: string, e: React.MouseEvent) => void
+  onMove: (e: React.MouseEvent) => void
+  onLeave: () => void
+  onClickEdge: (edgeId: string, e: React.MouseEvent) => void
+  onDoubleClickEdge: (edgeId: string, e: React.MouseEvent) => void
+}
+
+function HitLayer({ edges, onEnter, onMove, onLeave, onClickEdge, onDoubleClickEdge }: {
+  edges: ComputedEdge[]
+} & HitLayerHandlers) {
+  return (
+    <div className="absolute inset-0 pointer-events-none z-20">
+      <svg className="w-full h-full overflow-visible pointer-events-none">
+        {edges.map(edge => (
+          <path
+            key={`hit-${edge.id}`}
+            d={edge.pathD}
+            fill="none"
+            stroke="transparent"
+            strokeWidth={6}
+            style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+            data-canvas-interactive
+            onMouseEnter={(e) => onEnter(edge.id, e)}
+            onMouseMove={onMove}
+            onMouseLeave={onLeave}
+            onClick={(e) => onClickEdge(edge.id, e)}
+            onDoubleClick={(e) => onDoubleClickEdge(edge.id, e)}
+          />
+        ))}
+      </svg>
+    </div>
+  )
+}
+
+/** Keeps the last non-null value alive for `ms` after it clears, so the
+ *  pointer can travel from a node card onto an incident edge's hit path
+ *  without the path unmounting underneath it. */
+function useLingering(value: string | null, ms: number): string | null {
+  const [lingered, setLingered] = useState<string | null>(value)
+  useEffect(() => {
+    if (value !== null) {
+      // rAF defers the write off the effect's synchronous path; the
+      // rendered output uses `value` directly while it's non-null, so
+      // the one-frame lag is unobservable.
+      const raf = requestAnimationFrame(() => setLingered(value))
+      return () => cancelAnimationFrame(raf)
+    }
+    const timer = setTimeout(() => setLingered(null), ms)
+    return () => clearTimeout(timer)
+  }, [value, ms])
+  return value ?? lingered
+}
+
+/** Focus-scoped hit layer for above-HIT_DENSITY_LIMIT density: only edges
+ *  incident to the hovered node, the selection-highlighted set, or the
+ *  currently hovered edge get hit paths. Mounts useHoveredNodeId in this
+ *  child so its rAF-driven re-renders never touch the main overlay. */
+function FocusHitLayer({ visibleEdges, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
+  visibleEdges: ComputedEdge[]
+  hoveredEdgeId: string | null
+  highlightedEdges?: Set<string>
+  isHighlightActive?: boolean
+} & HitLayerHandlers) {
+  const hoveredNodeId = useHoveredNodeId()
+  const effectiveNode = useLingering(hoveredNodeId, 400)
+  const focus = useMemo(() => visibleEdges.filter(e =>
+    (effectiveNode !== null && (e.source === effectiveNode || e.target === effectiveNode)) ||
+    (isHighlightActive && highlightedEdges?.has(e.id)) ||
+    e.id === hoveredEdgeId
+  ), [visibleEdges, effectiveNode, isHighlightActive, highlightedEdges, hoveredEdgeId])
+  if (focus.length === 0) return null
+  return <HitLayer edges={focus} {...handlers} />
 }
