@@ -88,6 +88,7 @@ import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
+import { LineageLens } from './LineageLens'
 import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -193,6 +194,9 @@ export function ContextViewCanvas({
   // undefined for that cohort until the next setter fires.
   const canvasZoom = usePreferencesStore((s) => s.canvasZoom) ?? 1
   const setCanvasZoom = usePreferencesStore((s) => s.setCanvasZoom)
+  // Missing-link alerts are optional: Views are subsets of a Data Source,
+  // so links to out-of-view entities can be expected rather than a problem.
+  const showMissingConnectionIndicators = usePreferencesStore((s) => s.showMissingConnectionIndicators) ?? true
   const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
@@ -2540,6 +2544,49 @@ export function ContextViewCanvas({
     aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
   }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
+  // ── Lineage Lens — ego-graph overlay (focal stack; empty = closed) ────
+  const [lensStack, setLensStack] = useState<string[]>([])
+  const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
+  const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
+  const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
+  const lensClose = useCallback(() => setLensStack([]), [])
+  useEffect(() => {
+    focusLensRef.current = () => {
+      const target = selectedNodeId ?? drawerNodeId
+      if (target) setLensStack([target])
+    }
+  }, [selectedNodeId, drawerNodeId])
+
+  // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
+  // Never auto-scrolls: business users hate surprise camera moves. The
+  // pill appears only when a meaningful share of the selection's
+  // neighborhood is outside the viewport, and dismisses on deselect.
+  const [framePill, setFramePill] = useState<{ nodeId: string; neighborIds: string[]; offCount: number } | null>(null)
+  useEffect(() => {
+    // rAF defers both the DOM measurement (post-paint rects) and the
+    // state write off the effect's synchronous path.
+    const raf = requestAnimationFrame(() => {
+      if (!selectedNodeId) { setFramePill(null); return }
+      const neighborIds = new Set<string>()
+      for (const e of visibleLineageEdges) {
+        if (e.source === selectedNodeId && e.target !== selectedNodeId) neighborIds.add(e.target)
+        else if (e.target === selectedNodeId && e.source !== selectedNodeId) neighborIds.add(e.source)
+      }
+      if (neighborIds.size === 0) { setFramePill(null); return }
+      const box = horizontalScrollRef.current?.getBoundingClientRect()
+      let off = 0
+      neighborIds.forEach(id => {
+        const el = document.getElementById(`layer-node-${id}`)
+        if (!el || !box) { off++; return }
+        const r = el.getBoundingClientRect()
+        if (r.bottom < box.top || r.top > box.bottom || r.right < box.left || r.left > box.right) off++
+      })
+      const ids = [...neighborIds]
+      setFramePill(off / ids.length > 0.3 ? { nodeId: selectedNodeId, neighborIds: ids, offCount: off } : null)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [selectedNodeId, visibleLineageEdges])
+
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
     selectedNodeId, visibleLineageEdges: effectiveLineageEdges,
@@ -2956,12 +3003,58 @@ export function ContextViewCanvas({
             unassigned entities, truncated aggregated detail). The canvas
             never hides lineage silently. */}
         <CanvasStatusChips
-          unresolvedEdgeCount={unresolvedEdgeCount}
+          unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
+        />
+
+        {/* Frame pill — selection has off-screen neighbors; offer to frame
+            them (never auto-scroll) or open the lens. */}
+        <AnimatePresence>
+          {framePill && (
+            <motion.div
+              key={`frame-pill-${framePill.nodeId}`}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.18 }}
+              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
+              style={{ bottom: 'calc(1.25rem + var(--trace-dock-height, 0px))' }}
+              data-canvas-interactive
+            >
+              <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
+              <span>connection{framePill.offCount === 1 ? '' : 's'} off-screen</span>
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+                onClick={() => { void locateManyOnCanvas(framePill.neighborIds); setFramePill(null) }}
+              >
+                Frame
+              </button>
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+                onClick={() => { openLens(framePill.nodeId); setFramePill(null) }}
+              >
+                Open lens
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Lineage Lens — ego-graph overlay (portal to body). */}
+        <LineageLens
+          lensStack={lensStack}
+          onRecenter={lensRecenter}
+          onBack={lensBack}
+          onClose={lensClose}
+          onRevealOnCanvas={revealAndFocus}
+          onOpenDetails={openNodeDrawer}
+          onLocateAll={locateManyOnCanvas}
+          onTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
         />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
@@ -3208,6 +3301,7 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
+            onFocusConnections={openLens}
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
             onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
             onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}

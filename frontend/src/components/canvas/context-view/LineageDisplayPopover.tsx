@@ -22,9 +22,10 @@ import {
   MoveRight,
   Settings2,
   Sliders,
+  Unlink,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { LineageRenderMode } from '@/store/preferences'
+import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
 
 interface LineageDisplayPopoverProps {
   lineageRenderMode: LineageRenderMode
@@ -347,6 +348,72 @@ export function LineageDisplaySections({
           </div>
         </button>
       </div>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Missing connections — Views are subsets of a Data Source, so a
+          curated view legitimately excludes upstream/downstream partners.
+          This switch shows/hides the "connections not on canvas" alerts. */}
+      <MissingConnectionsToggle disabled={disabled} />
+    </div>
+  )
+}
+
+function MissingConnectionsToggle({ disabled }: { disabled: boolean }) {
+  const show = usePreferencesStore((s) => s.showMissingConnectionIndicators)
+  const toggle = usePreferencesStore((s) => s.toggleMissingConnectionIndicators)
+  return (
+    <div className="px-3 pt-2.5 pb-3">
+      <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Unlink className="w-3 h-3" />
+        <span>Missing Connections</span>
+      </div>
+      <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+        Alert when links reference entities outside this view. Views are
+        subsets — hide this if out-of-view partners are expected.
+      </p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={show}
+        disabled={disabled}
+        onClick={toggle}
+        className={cn(
+          'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+          disabled && 'cursor-not-allowed',
+          show
+            ? 'bg-amber-500/12 border-amber-500/35 shadow-sm shadow-amber-500/10 dark:bg-amber-400/15 dark:border-amber-400/30'
+            : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+        )}
+      >
+        <div
+          className={cn(
+            'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+            show ? 'bg-amber-500/85 dark:bg-amber-400/80' : 'bg-ink-muted/25 dark:bg-white/15',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+              show ? 'left-[15px]' : 'left-[2px]',
+            )}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              'text-[12px] font-medium leading-tight flex items-center gap-1.5',
+              show ? 'text-amber-700 dark:text-amber-300' : 'text-ink',
+            )}
+          >
+            <Unlink className="w-3.5 h-3.5" strokeWidth={2.2} />
+            <span>Missing-link alerts</span>
+          </div>
+          <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+            {show ? 'Currently visible' : 'Currently hidden'}
+          </div>
+        </div>
+      </button>
     </div>
   )
 }

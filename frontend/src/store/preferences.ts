@@ -104,6 +104,14 @@ interface PreferencesState {
    */
   lineageBundleFanIn: number
   setLineageBundleFanIn: (n: number) => void
+  /**
+   * Show the "N connections not on canvas" indicators. Views are subsets
+   * of a Data Source — a curated view legitimately excludes upstream /
+   * downstream partners, so the missing-link alerts are informative for
+   * some users and noise for others. Toggleable from Display → Lineage.
+   */
+  showMissingConnectionIndicators: boolean
+  toggleMissingConnectionIndicators: () => void
 
 
   // User avatar
@@ -218,6 +226,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       setAutoStubThreshold: (autoStubThreshold) => set({ autoStubThreshold }),
       lineageBundleFanIn: 1,
       setLineageBundleFanIn: (lineageBundleFanIn) => set({ lineageBundleFanIn }),
+      showMissingConnectionIndicators: true,
+      toggleMissingConnectionIndicators: () =>
+        set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
 
       // User avatar
       avatarId: null,
