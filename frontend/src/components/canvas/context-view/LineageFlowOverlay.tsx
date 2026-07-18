@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
-import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -817,13 +817,21 @@ export function LineageFlowOverlay({
     buckets.forEach((bucket) => {
       const horizontal = bucket.direction === 'left' || bucket.direction === 'right'
       if (!horizontal && bucket.layerId) {
-        const s = peripherySummaries[bucket.layerId] ??= { upEdges: 0, upEntities: 0, downEdges: 0, downEntities: 0 }
+        const s = peripherySummaries[bucket.layerId] ??= { upEdges: 0, upEntities: 0, upPartnerIds: [], downEdges: 0, downEntities: 0, downPartnerIds: [] }
         if (bucket.direction === 'up') {
           s.upEdges += bucket.edgeCount
           s.upEntities += bucket.partnerSet.size
+          for (const id of bucket.partnerIds) {
+            if (s.upPartnerIds.length >= PERIPHERY_PARTNER_CAP) break
+            if (!s.upPartnerIds.includes(id)) s.upPartnerIds.push(id)
+          }
         } else {
           s.downEdges += bucket.edgeCount
           s.downEntities += bucket.partnerSet.size
+          for (const id of bucket.partnerIds) {
+            if (s.downPartnerIds.length >= PERIPHERY_PARTNER_CAP) break
+            if (!s.downPartnerIds.includes(id)) s.downPartnerIds.push(id)
+          }
         }
         return
       }
@@ -855,7 +863,7 @@ export function LineageFlowOverlay({
     // only when content actually changed (this pass runs per frame).
     const peripheryFp = Object.keys(peripherySummaries).sort().map(k => {
       const s = peripherySummaries[k]
-      return `${k}:${s.upEdges}:${s.upEntities}:${s.downEdges}:${s.downEntities}`
+      return `${k}:${s.upEdges}:${s.upEntities}:${s.upPartnerIds.join(',')}:${s.downEdges}:${s.downEntities}:${s.downPartnerIds.join(',')}`
     }).join('|')
     if (peripheryFp !== peripheryFpRef.current) {
       peripheryFpRef.current = peripheryFp

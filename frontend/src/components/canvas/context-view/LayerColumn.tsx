@@ -31,6 +31,7 @@ import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -1186,27 +1187,59 @@ export const LayerColumn = React.memo(function LayerColumn({
                 className="absolute top-0 inset-x-0 z-20 pointer-events-none"
               >
                 <div className="h-12 bg-gradient-to-b from-canvas via-canvas/70 to-transparent" />
-                <button
-                  type="button"
-                  data-canvas-interactive
-                  onClick={() => scrollToFlatIndex(0, 'start')}
-                  title={`${overflowCounts.above.toLocaleString()} more row${overflowCounts.above === 1 ? '' : 's'} above the current view${(periphery?.upEdges ?? 0) > 0 ? ` — ${periphery!.upEdges.toLocaleString()} connection${periphery!.upEdges === 1 ? '' : 's'} from entities on screen lead up there (${periphery!.upEntities.toLocaleString()} entit${periphery!.upEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll up.`}
-                  className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                  style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                <InfoTooltip
+                  side="bottom"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.above.toLocaleString()} more row{overflowCounts.above === 1 ? '' : 's'} above
+                      </p>
+                      {(periphery?.upEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            entities on screen lead up there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.upPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.upEntities > periphery!.upPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.upEntities - periphery!.upPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
+                    </div>
+                  }
                 >
-                  <LucideIcons.ChevronUp className="w-3 h-3" />
-                  {overflowCounts.above > 0 && (
-                    <span className="tabular-nums">{overflowCounts.above.toLocaleString()} more</span>
-                  )}
-                  {(periphery?.upEdges ?? 0) > 0 && (
-                    <>
-                      {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
-                      <span className="tabular-nums opacity-80">
-                        {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
-                      </span>
-                    </>
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(0, 'start')}
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronUp className="w-3 h-3" />
+                    {overflowCounts.above > 0 && (
+                      <span className="tabular-nums">{overflowCounts.above.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.upEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
               </motion.div>
             )}
           </AnimatePresence>
@@ -1223,27 +1256,59 @@ export const LayerColumn = React.memo(function LayerColumn({
                 className="absolute bottom-0 inset-x-0 z-20 pointer-events-none"
               >
                 <div className="h-12 bg-gradient-to-t from-canvas via-canvas/70 to-transparent" />
-                <button
-                  type="button"
-                  data-canvas-interactive
-                  onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                  title={`${overflowCounts.below.toLocaleString()} more row${overflowCounts.below === 1 ? '' : 's'} below the current view${(periphery?.downEdges ?? 0) > 0 ? ` — ${periphery!.downEdges.toLocaleString()} connection${periphery!.downEdges === 1 ? '' : 's'} from entities on screen lead down there (${periphery!.downEntities.toLocaleString()} entit${periphery!.downEntities === 1 ? 'y' : 'ies'})` : ''}. Click to scroll down.`}
-                  className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                  style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                <InfoTooltip
+                  side="top"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.below.toLocaleString()} more row{overflowCounts.below === 1 ? '' : 's'} below
+                      </p>
+                      {(periphery?.downEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            entities on screen lead down there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.downPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.downEntities > periphery!.downPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.downEntities - periphery!.downPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
+                    </div>
+                  }
                 >
-                  <LucideIcons.ChevronDown className="w-3 h-3" />
-                  {overflowCounts.below > 0 && (
-                    <span className="tabular-nums">{overflowCounts.below.toLocaleString()} more</span>
-                  )}
-                  {(periphery?.downEdges ?? 0) > 0 && (
-                    <>
-                      {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
-                      <span className="tabular-nums opacity-80">
-                        {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
-                      </span>
-                    </>
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronDown className="w-3 h-3" />
+                    {overflowCounts.below > 0 && (
+                      <span className="tabular-nums">{overflowCounts.below.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.downEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
               </motion.div>
             )}
           </AnimatePresence>

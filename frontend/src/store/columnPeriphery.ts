@@ -17,9 +17,17 @@ export type ColumnPeripherySummary = {
    *  column's fold, and the distinct partner entities they lead to. */
   upEdges: number
   upEntities: number
+  /** Sample of partner node ids above the fold (capped) — the chips'
+   *  hover panel names them; they live in THIS column so the column
+   *  resolves display names locally. */
+  upPartnerIds: string[]
   downEdges: number
   downEntities: number
+  downPartnerIds: string[]
 }
+
+/** Cap on named partners carried per direction (tooltip sample size). */
+export const PERIPHERY_PARTNER_CAP = 8
 
 interface ColumnPeripheryState {
   summaries: Record<string, ColumnPeripherySummary>
