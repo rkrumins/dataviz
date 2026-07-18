@@ -202,17 +202,27 @@ class AggregationScheduler:
                     for ws, ds in to_reconcile[:_MAX_STALE_RECONCILE_PER_TICK]:
                         try:
                             async with self._session_factory() as s2:
-                                # I1: within the rebuild cooldown the first
-                                # signal already invalidated — re-signaling now
-                                # would re-invalidate every tick for the whole
-                                # window. Load the state row (fresh session) and
-                                # defer until the tick after the window elapses.
+                                # I1: don't re-signal while a rebuild is already
+                                # in flight or the cooldown is still open. Load
+                                # the state row (fresh session) and defer when:
+                                #   * a rebuild is queued ("pending") or actively
+                                #     "running" — its job.completed clears the
+                                #     marker + writes the fresh fingerprint, so
+                                #     re-signaling now only re-invalidates (gen
+                                #     bump + ancestors-cache clear the rebuild
+                                #     worker itself consumes) and then hits
+                                #     ConflictError, every tick for the whole job
+                                #     duration; OR
+                                #   * we're inside the rebuild cooldown window.
                                 state = await s2.get(
                                     AggregationDataSourceStateORM, ds,
                                 )
-                                if svc._within_rebuild_cooldown(state):
+                                if state is not None and (
+                                    state.aggregation_status in ("pending", "running")
+                                    or svc._within_rebuild_cooldown(state)
+                                ):
                                     logger.debug(
-                                        "stale-marker reconcile: %s within "
+                                        "stale-marker reconcile: %s in-flight/"
                                         "cooldown — deferring", ds,
                                     )
                                     continue

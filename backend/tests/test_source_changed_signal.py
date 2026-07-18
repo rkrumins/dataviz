@@ -493,8 +493,9 @@ class _SchedSession:
     for a signal_source_changed call needs none (signal_source_changed
     itself is faked, so it never touches this session)."""
 
-    def __init__(self, exec_results=None):
+    def __init__(self, exec_results=None, status_by_ds=None):
         self._exec_results = list(exec_results or [])
+        self._status_by_ds = status_by_ds or {}
 
     async def __aenter__(self):
         return self
@@ -508,10 +509,13 @@ class _SchedSession:
         return _SchedExecResult([])
 
     async def get(self, orm, key):
-        # The reconciler loads the state row (fresh session) before a
-        # cooldown check; ``data_source_id`` is all _FakeSchedSvc keys on.
+        # The reconciler loads the state row (fresh session) before its
+        # in-flight/cooldown pre-check. ``aggregation_status`` defaults to
+        # "ready" (neither in-flight nor cooldown) so a source signals
+        # unless a test marks it pending/running via ``status_by_ds``.
         return types.SimpleNamespace(
             data_source_id=key, workspace_id="ws", last_aggregated_at=None,
+            aggregation_status=self._status_by_ds.get(key, "ready"),
         )
 
 
@@ -521,21 +525,22 @@ def _sched_state(ds_id="ds-1", ws="ws-1", fp="OLD"):
     )
 
 
-def _sched_session_factory(states):
+def _sched_session_factory(states, status_by_ds=None):
     """First call returns the sweep session (drift query returns
     ``states``, the watchdog query after it returns no stale jobs);
     every later call returns a FRESH throwaway session — asserting a
     signal call's session is not the sweep's own proves the "fresh
-    session per signal" rule."""
+    session per signal" rule. ``status_by_ds`` seeds the state-row
+    ``aggregation_status`` the reconciler's in-flight pre-check reads."""
     created = []
 
     def factory():
         if not created:
             s = _SchedSession(exec_results=[
                 _SchedExecResult(states), _SchedExecResult([]),
-            ])
+            ], status_by_ds=status_by_ds)
         else:
-            s = _SchedSession()
+            s = _SchedSession(status_by_ds=status_by_ds)
         created.append(s)
         return s
 
@@ -828,6 +833,36 @@ def test_scheduler_reconciler_skips_in_cooldown_marked_source(monkeypatch):
     _run(sched._tick())
 
     assert [c[0] for c in fake_svc.calls] == ["ds-3"]
+
+
+def test_scheduler_reconciler_skips_in_flight_rebuild(monkeypatch):
+    # Marked sources whose rebuild is already IN FLIGHT — queued ("pending")
+    # or actively "running" — must NOT be re-signaled every tick even once
+    # the cooldown has elapsed: the running job's job.completed clears the
+    # marker and writes the fresh fingerprint. Only a marked source with no
+    # in-flight rebuild ("ready") is reconciled.
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2"), ("ws-3", "ds-3"), ("ws-4", "ds-4")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    fake_svc = _FakeSchedSvc()  # nothing in cooldown
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory(
+        [_sched_state(ds_id="ds-1")],
+        status_by_ds={"ds-2": "pending", "ds-3": "running"},  # ds-4 → "ready"
+    )
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    # ds-2 (pending) and ds-3 (running) deferred; only ds-4 (ready) signaled.
+    assert [c[0] for c in fake_svc.calls] == ["ds-4"]
 
 
 if __name__ == "__main__":
