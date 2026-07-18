@@ -95,6 +95,7 @@ class AggregationScheduler:
         from .service import get_active_service
         from backend.app.services.graph_cache import (
             clear_source_stale,
+            get_source_stale_reason,
             list_stale_sources,
         )
 
@@ -140,6 +141,19 @@ class AggregationScheduler:
                         # Note: we do NOT change aggregation_status here.
                         # The frontend polls for drift via the readiness endpoint.
                         # The user decides whether to re-aggregate.
+                        #
+                        # I1: a source already carrying a stale marker had its
+                        # full invalidation at the first signal; the reconciler
+                        # below owns its re-signal cadence (cooldown-aware).
+                        # Re-signaling it on the drift path would re-invalidate
+                        # every 60s tick — leave it out of drifted_ids so the
+                        # reconciler picks it up instead. (Guarded by the flag:
+                        # when off, drifted_ids is never consumed, so the marker
+                        # lookup would be pointless work.)
+                        if _DRIFT_AUTO_REBUILD and await get_source_stale_reason(
+                            state.workspace_id, state.data_source_id,
+                        ):
+                            continue
                         drifted_ids.append(state.data_source_id)
                 except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(
@@ -188,6 +202,20 @@ class AggregationScheduler:
                     for ws, ds in to_reconcile[:_MAX_STALE_RECONCILE_PER_TICK]:
                         try:
                             async with self._session_factory() as s2:
+                                # I1: within the rebuild cooldown the first
+                                # signal already invalidated — re-signaling now
+                                # would re-invalidate every tick for the whole
+                                # window. Load the state row (fresh session) and
+                                # defer until the tick after the window elapses.
+                                state = await s2.get(
+                                    AggregationDataSourceStateORM, ds,
+                                )
+                                if svc._within_rebuild_cooldown(state):
+                                    logger.debug(
+                                        "stale-marker reconcile: %s within "
+                                        "cooldown — deferring", ds,
+                                    )
+                                    continue
                                 resp = await svc.signal_source_changed(
                                     ds, s2, reason="reconcile",
                                 )

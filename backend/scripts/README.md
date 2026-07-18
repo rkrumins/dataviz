@@ -338,8 +338,10 @@ python -m backend.scripts.signal_data_changed --data-source-id ds_abc123
 ```
 
 The signal is change-gated (a no-op when the graph fingerprint is unchanged)
-and idempotent, so it is safe to run after every load. Pass `--force` to
-invalidate and rebuild regardless of the fingerprint.
+and idempotent, so it is safe to run after every load. The change gate
+compares label/type **counts**, so a re-parent or property-only change with no
+count delta reads as unchanged — pass `--force` to invalidate and rebuild
+regardless of the fingerprint.
 
 External connectors that can't shell out should call the authenticated admin
 API instead: `POST /api/v1/admin/data-sources/{id}/source-changed`.

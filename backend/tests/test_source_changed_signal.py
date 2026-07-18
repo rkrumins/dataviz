@@ -68,6 +68,29 @@ class _FakeSession:
         return None
 
 
+class _MemRedis:
+    """In-memory async Redis stand-in — enough for the real
+    mark_source_stale/get_source_stale_reason marker round-trip (C1)."""
+
+    def __init__(self):
+        self.store = {}
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+        return True
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def delete(self, *keys):
+        removed = 0
+        for k in keys:
+            if k in self.store:
+                del self.store[k]
+                removed += 1
+        return removed
+
+
 def _state(status="ready", fp="STORED", ws="ws-1", last_aggregated_at=None):
     return types.SimpleNamespace(
         data_source_id="ds-1",
@@ -104,6 +127,7 @@ def _build(
             svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", cooldown,
         )
     order = []
+    captured = {}
     provider = _FakeProvider(order)
     registry = _FakeRegistry(provider)
     svc = AggregationService(dispatcher=None, registry=registry, session_factory=None)
@@ -117,8 +141,14 @@ def _build(
 
     async def _fake_mark_stale(ws, ds_, reason):
         order.append("mark_source_stale")
+        captured["mark_reason"] = reason
 
     monkeypatch.setattr(graph_cache_mod, "mark_source_stale", _fake_mark_stale)
+
+    async def _fake_clear_stale(ws, ds_):
+        order.append("clear_source_stale")
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _fake_clear_stale)
 
     async def _fake_invalidate(ws, ds_):
         order.append("invalidate_hierarchy_reads")
@@ -129,8 +159,6 @@ def _build(
         order.append("mark_stats_changed")
 
     monkeypatch.setattr(enqueue_mod, "mark_stats_changed", _fake_stats)
-
-    captured = {}
 
     async def _fake_trigger(ds_id, request, trigger_source, session):
         order.append("trigger")
@@ -189,6 +217,9 @@ def test_mismatch_runs_full_sequence_in_order(monkeypatch):
     assert order == _FULL_SEQUENCE
     assert captured["trigger_source"] == "api"
     assert captured["request"].idempotency_key == "source-changed:NEW"
+    # C1: the marker is written with the literal the overlay/FE contract on,
+    # NOT the signal reason ("external_load" here).
+    assert captured["mark_reason"] == "source_changed"
 
 
 # ── Scenario 3: force overrides a matching gate ─────────────────────────
@@ -252,12 +283,88 @@ def test_no_state_row_invalidates_but_skips_trigger(monkeypatch):
     assert resp.changed is True
     assert resp.job_id is None
     assert resp.stored_fingerprint is None
-    assert "mark_source_stale" in order
+    # No state row → status "none" → aggregation not applicable → the marker
+    # is NOT set (nothing would clear it) and any prior marker is cleared,
+    # but hierarchy convergence + stats still run. (C2)
+    assert "mark_source_stale" not in order
+    assert "clear_source_stale" in order
     assert "clear_content_caches" in order
     assert "invalidate_hierarchy_reads" in order
     assert "mark_stats_changed" in order
     # No state row → status "none" → aggregation not applicable → no trigger.
     assert "trigger" not in order
+
+
+# ── C2: applicability decided before marking ────────────────────────────
+
+
+def test_not_applicable_status_clears_marker_and_skips_trigger(monkeypatch):
+    # A state row exists but its status makes aggregation not applicable
+    # ("skipped"): the marker is NOT set, any prior marker is cleared, and
+    # hierarchy + stats still converge — but no rebuild is queued. (C2)
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="skipped", fp="OLD"), current_fp="NEW",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.job_id is None
+    assert "mark_source_stale" not in order
+    assert order == [
+        "clear_source_stale",
+        "clear_content_caches",
+        "invalidate_hierarchy_reads",
+        "mark_stats_changed",
+    ]
+    assert "trigger" not in order
+
+
+# ── C1: marker WRITE → overlay READ, no mocking of the marker value ─────
+
+
+def test_signal_marker_reads_back_as_source_changed_via_overlay(monkeypatch):
+    """Integration seam whose absence hid C1: the marker the signal WRITES
+    (real mark_source_stale) must READ back through the graph.py overlay's
+    real get_source_stale_reason as the literal 'source_changed' — whatever
+    the signal reason. Neither the marker value nor the read is mocked."""
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    real_cache = graph_cache_mod.GraphCache(_MemRedis())
+    monkeypatch.setattr(graph_cache_mod, "get_graph_cache", lambda: real_cache)
+
+    order = []
+    svc = AggregationService(
+        dispatcher=None, registry=_FakeRegistry(_FakeProvider(order)),
+        session_factory=None,
+    )
+
+    async def _fake_fp(prov):
+        return "NEW"
+
+    monkeypatch.setattr(svc_mod, "compute_graph_fingerprint", _fake_fp)
+
+    async def _noop_invalidate(ws, ds_):
+        pass
+
+    monkeypatch.setattr(graph_cache_mod, "invalidate_hierarchy_reads", _noop_invalidate)
+
+    async def _noop_stats(ds_, ws):
+        pass
+
+    monkeypatch.setattr(enqueue_mod, "mark_stats_changed", _noop_stats)
+
+    async def _fake_trigger(ds_id, request, trigger_source, session):
+        return types.SimpleNamespace(id="agg_x")
+
+    monkeypatch.setattr(svc, "trigger", _fake_trigger)
+
+    session = _FakeSession(state=_state(status="ready", fp="OLD", ws="ws-1"))
+    resp = _run(svc.signal_source_changed("ds-1", session, reason="drift"))
+    assert resp.changed is True
+    assert resp.reason == "drift"  # response reason is untouched
+
+    # The read the overlay in graph.py performs (same function object).
+    surfaced = _run(graph_module.get_source_stale_reason("ws-1", "ds-1"))
+    assert surfaced == "source_changed"
 
 
 # ── Scenario 6: fingerprint compute times out → treated as changed ──────
@@ -400,6 +507,13 @@ class _SchedSession:
             return self._exec_results.pop(0)
         return _SchedExecResult([])
 
+    async def get(self, orm, key):
+        # The reconciler loads the state row (fresh session) before a
+        # cooldown check; ``data_source_id`` is all _FakeSchedSvc keys on.
+        return types.SimpleNamespace(
+            data_source_id=key, workspace_id="ws", last_aggregated_at=None,
+        )
+
 
 def _sched_state(ds_id="ds-1", ws="ws-1", fp="OLD"):
     return types.SimpleNamespace(
@@ -431,11 +545,17 @@ def _sched_session_factory(states):
 
 class _FakeSchedSvc:
     """Records signal_source_changed calls; ``responses`` maps ds_id to
-    the response to return (default: a plain changed=True stand-in)."""
+    the response to return (default: a plain changed=True stand-in).
+    ``cooldown_ds`` is the set of ds_ids the reconciler should treat as
+    still within the rebuild cooldown (skip, don't signal)."""
 
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, cooldown_ds=None):
         self.calls = []
         self._responses = responses or {}
+        self._cooldown_ds = set(cooldown_ds or [])
+
+    def _within_rebuild_cooldown(self, state):
+        return getattr(state, "data_source_id", None) in self._cooldown_ds
 
     async def signal_source_changed(
         self, ds_id, session, *, reason="external_load", force=False,
@@ -466,12 +586,21 @@ def _empty_stale(monkeypatch):
     monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
 
 
+def _no_marker(monkeypatch):
+    """No source carries a stale marker — the drift path signals every
+    drifted source (the marker-skip in I1 never fires)."""
+    async def _reason(ws, ds):
+        return None
+    monkeypatch.setattr(graph_cache_mod, "get_source_stale_reason", _reason)
+
+
 # ── Scenario 1: drift + default env → signal awaited (ds_id, "drift", session)
 
 
 def test_scheduler_drift_signals_with_default_env(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
+    _no_marker(monkeypatch)
     _empty_stale(monkeypatch)
 
     fake_svc = _FakeSchedSvc()
@@ -523,6 +652,7 @@ def test_scheduler_flag_off_disables_both_paths(monkeypatch):
 def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
+    _no_marker(monkeypatch)
     _empty_stale(monkeypatch)
 
     class _FailingThenOkSvc:
@@ -555,6 +685,7 @@ def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
 def test_scheduler_no_active_service_is_noop(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
+    _no_marker(monkeypatch)
 
     list_calls = []
 
@@ -580,6 +711,7 @@ def test_scheduler_no_active_service_is_noop(monkeypatch):
 def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)  # ds-1 (the only swept source) drifts
+    _no_marker(monkeypatch)  # ds-1 has no marker → drift path signals it
 
     async def _list_stale():
         return [("ws-1", "ds-1"), ("ws-2", "ds-2")]
@@ -635,6 +767,67 @@ def test_scheduler_reconciler_clears_marker_when_unchanged(monkeypatch):
 
     assert [c[0] for c in fake_svc.calls] == ["ds-2"]
     assert clear_calls == [("ws-2", "ds-2")]
+
+
+# ── I1: drift path skips already-marked sources; reconciler skips cooldown
+
+
+def test_scheduler_drift_skips_already_marked_source(monkeypatch):
+    # ds-1 drifts AND already carries a stale marker: the drift path must
+    # NOT re-signal it (its invalidation happened at first signal); the
+    # reconciler owns it from here and signals it with reason="reconcile".
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _all_drift(monkeypatch)
+
+    async def _reason(ws, ds):
+        return "source_changed" if ds == "ds-1" else None
+
+    monkeypatch.setattr(graph_cache_mod, "get_source_stale_reason", _reason)
+
+    async def _list_stale():
+        return [("ws-1", "ds-1")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    fake_svc = _FakeSchedSvc()  # ds-1 not in cooldown → reconciler signals it
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    reasons_by_ds: dict[str, list[str]] = {}
+    for ds_id, reason, _session in fake_svc.calls:
+        reasons_by_ds.setdefault(ds_id, []).append(reason)
+
+    # Only the reconciler signaled ds-1 — the drift path skipped it.
+    assert reasons_by_ds == {"ds-1": ["reconcile"]}
+
+
+def test_scheduler_reconciler_skips_in_cooldown_marked_source(monkeypatch):
+    # ds-2 (in cooldown) and ds-3 (past cooldown) are both marked stale and
+    # neither drifts this tick. The reconciler must skip ds-2 (its
+    # invalidation already happened; re-signaling would churn every tick)
+    # and signal only ds-3.
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)  # drift path unused (nothing drifts)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2"), ("ws-3", "ds-3")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    fake_svc = _FakeSchedSvc(cooldown_ds={"ds-2"})
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-3"]
 
 
 if __name__ == "__main__":

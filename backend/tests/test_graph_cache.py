@@ -57,10 +57,17 @@ class _NestedAggregated(BaseModel):
 
 
 class _CanvasBootstrapLike(BaseModel):
-    """Minimal stand-in for a canvas bootstrap/expand result, which embeds
-    an AggregatedEdgeResult under ``.aggregated``."""
+    """Minimal stand-in for a canvas bootstrap result, which embeds an
+    AggregatedEdgeResult under ``.aggregated``."""
     nodes: list = []
     aggregated: Any = None
+
+
+class _CanvasExpandLike(BaseModel):
+    """Minimal stand-in for a canvas EXPAND result, which embeds its
+    AggregatedEdgeResult under ``.aggregated_delta`` (NOT ``.aggregated``)."""
+    children: list = []
+    aggregated_delta: Any = None
 
 
 def _make_redis() -> AsyncMock:
@@ -422,6 +429,36 @@ async def test_nested_aggregated_truncated_forces_negative_ttl() -> None:
     )
 
     assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    # T1-3: an incomplete nested payload must also skip the LKG mirror — a
+    # degraded snapshot must never become the outage fallback.
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+@pytest.mark.asyncio
+async def test_nested_aggregated_delta_truncated_forces_negative_ttl_and_no_lkg() -> None:
+    """Canvas EXPAND embeds its AggregatedEdgeResult under
+    ``.aggregated_delta`` (not ``.aggregated``); a truncated delta must
+    still force the negative TTL on the outer result AND skip the LKG
+    mirror — otherwise a degraded expand caches at full TTL and mirrors
+    into LKG (I2)."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_CanvasExpandLike(
+        children=[1], aggregated_delta=_NestedAggregated(truncated=True),
+    ))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_CanvasExpandLike,
+    )
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
 
 
 # ─── hierarchy invalidation w/ aggregated-LKG carve-out (R4) ───────────

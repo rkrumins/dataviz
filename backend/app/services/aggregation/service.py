@@ -1288,16 +1288,34 @@ class AggregationService:
                 stored_fingerprint=stored_fp,
             )
 
+        # Applicability, decided BEFORE marking (C2). Aggregation applies
+        # only to a source whose state row carries a materializing status;
+        # a never-aggregated / skipped source (incl. no state row → "none")
+        # still gets hierarchy convergence but must NOT be marked stale —
+        # nothing would ever clear the marker (no rebuild job), so the gate
+        # keeps evaluating changed=True and the reconciler re-signals every
+        # tick forever. Any marker a prior (then-applicable) signal left is
+        # cleared here instead.
+        status = (state.aggregation_status if state else None) or "none"
+        applicable = status not in self._AGG_NOT_APPLICABLE
+
         # 4-7. Best-effort convergence (sequential awaits; the helpers never
         # raise). workspace-scoped helpers only fire once a workspace is
         # known; content-cache clear needs a resolved provider.
         from backend.app.services.graph_cache import (
+            clear_source_stale,
             invalidate_hierarchy_reads,
             mark_source_stale,
         )
 
         if workspace_id:
-            await mark_source_stale(workspace_id, ds_id, reason)
+            if applicable:
+                # The literal the read-path overlay + FE banner contract on
+                # (backend/common/models/graph.py, ContextViewCanvas.tsx) —
+                # NOT the signal reason, which stays for the response + logs.
+                await mark_source_stale(workspace_id, ds_id, "source_changed")
+            else:
+                await clear_source_stale(workspace_id, ds_id)
         if provider is not None:
             await provider.clear_content_caches()
         if workspace_id:
@@ -1322,8 +1340,7 @@ class AggregationService:
         # or an ontology-resolution failure both leave changed=True/job=None.
         job_id = None
         deferred = False
-        status = (state.aggregation_status if state else None) or "none"
-        if status not in self._AGG_NOT_APPLICABLE:
+        if applicable:
             if not force and self._within_rebuild_cooldown(state):
                 deferred = True
                 logger.info(

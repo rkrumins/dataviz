@@ -660,9 +660,14 @@ def _is_empty_result(result: BaseModel) -> bool:
 def _is_incomplete_result(result: BaseModel) -> bool:
     """Truncated/degraded/stale results must not be pinned for the full
     TTL as if they were complete — cache them only for the negative
-    window. Checks the result itself and a nested ``aggregated`` payload
-    (canvas bootstrap/expand embed an AggregatedEdgeResult)."""
-    for obj in (result, getattr(result, "aggregated", None)):
+    window. Checks the result itself and its nested AggregatedEdgeResult
+    payloads: ``aggregated`` (canvas bootstrap) and ``aggregated_delta``
+    (canvas expand)."""
+    for obj in (
+        result,
+        getattr(result, "aggregated", None),
+        getattr(result, "aggregated_delta", None),
+    ):
         if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
             return True
     return False
