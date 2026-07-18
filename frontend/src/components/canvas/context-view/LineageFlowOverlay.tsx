@@ -801,9 +801,19 @@ export function LineageFlowOverlay({
     // Rail payload — pushed to React only on real content change (this
     // pass runs per frame during scroll). The docked-id set updates in
     // lockstep so next frame's edges anchor to the freshly-mounted chips.
+    //
+    // TRANSIENT-EMPTY GUARD: an empty candidate frame while the SAME node
+    // stays focused is visibility flicker (observer rebuild, resize
+    // churn), not user intent — emitting it would unmount the chips and,
+    // worse, feed an emit → canvas re-render → observer churn → emit
+    // oscillation. Keep the existing rail through those frames; the rail
+    // clears when focus changes or ends.
     const railGroups = groupAnchorProxies(proxyCandidates.values())
     const railFp = anchorRailFingerprint(focusId, railGroups)
-    if (railFp !== railFingerprintRef.current) {
+    const prevFp = railFingerprintRef.current
+    const prevFocusId = prevFp === '' ? null : prevFp.split('|', 1)[0]
+    const transientEmpty = railFp === '' && focusId !== null && prevFocusId === focusId
+    if (railFp !== prevFp && !transientEmpty) {
       railFingerprintRef.current = railFp
       dockedProxyIdsRef.current = new Set(
         Array.from(railGroups.values()).flatMap(g => g.proxies.map(p => p.nodeId)),
@@ -963,9 +973,29 @@ export function LineageFlowOverlay({
     // the common parent that contains both.
     const observeRoot = container.parentElement || container
 
-    // Scan for already-present node elements
+    // Scan for already-present node elements. SEED visibility synchronously
+    // from rect math (mirroring the IO config: window root + 100px margin):
+    // this effect re-runs whenever the node set changes identity, and its
+    // cleanup just cleared globalVisibleNodes — waiting for the async
+    // IntersectionObserver callbacks would leave the edge layer BLANK for
+    // a frame or more on every rebuild (visible as edges blinking on
+    // graph updates). The IO then confirms/corrects the seeded state.
+    const seedVisibility = (el: Element) => {
+      if (!el.id || globalVisibleNodes.has(el.id)) return
+      const r = el.getBoundingClientRect()
+      if (
+        r.bottom >= -100 && r.top <= window.innerHeight + 100 &&
+        r.right >= -100 && r.left <= window.innerWidth + 100 &&
+        (r.width > 0 || r.height > 0)
+      ) {
+        globalVisibleNodes.add(el.id)
+      }
+    }
     const scanAndObserve = () => {
-      observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => observeElement(el))
+      observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => {
+        seedVisibility(el)
+        observeElement(el)
+      })
     }
     scanAndObserve()
 
