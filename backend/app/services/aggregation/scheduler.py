@@ -205,9 +205,12 @@ class AggregationScheduler:
                                 # I1: don't re-signal while a rebuild is already
                                 # in flight or the cooldown is still open. Load
                                 # the state row (fresh session) and defer when:
-                                #   * a rebuild is queued ("pending") or actively
-                                #     "running" — its job.completed clears the
-                                #     marker + writes the fresh fingerprint, so
+                                #   * a rebuild is in flight — the state row says
+                                #     "pending" for the whole job lifetime (the
+                                #     listener's "running" goes to the public
+                                #     mirror, not this row; matched here only as
+                                #     futureproofing) — its job.completed clears
+                                #     the marker + writes the fresh fingerprint, so
                                 #     re-signaling now only re-invalidates (gen
                                 #     bump + ancestors-cache clear the rebuild
                                 #     worker itself consumes) and then hits
