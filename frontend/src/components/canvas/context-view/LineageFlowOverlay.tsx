@@ -578,8 +578,8 @@ export function LineageFlowOverlay({
       // node's volume RELATIVE to the heaviest visible node: median
       // nodes fade to near-invisible, hubs stand out. No halo, no
       // sheen, no peek-out — a 2.5px line hugging the card edge.
-      const RIBBON_W = 2.5
-      const RIBBON_HEIGHT_RATIO = 0.5
+      const RIBBON_W = 4
+      const RIBBON_HEIGHT_RATIO = 0.62
       let maxCount = 0
       globalVisibleNodes.forEach(domId => {
         const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
@@ -596,7 +596,7 @@ export function LineageFlowOverlay({
         if (!el) return
         const rect = el.getBoundingClientRect()
         const midY = rect.top + rect.height / 2 - containerRect.top
-        const height = Math.max(14, rect.height * RIBBON_HEIGHT_RATIO)
+        const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
         // Position just OUTSIDE the card edge: the overlay sits beneath
         // the card chrome, so anything inside the boundary is covered by
         // the opaque card. 1px breathing gap keeps it reading as part of
@@ -1531,11 +1531,13 @@ export function LineageFlowOverlay({
         {computedStubs.length > 0 && (
           <>
             <defs>
+              {/* Tight end-fade + indigo-600 core — the mark must read as a
+                  confident accent, not a wisp. */}
               <linearGradient id="lineage-ribbon-core" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
-                <stop offset="25%" stopColor="rgb(99, 102, 241)" stopOpacity="0.9" />
-                <stop offset="75%" stopColor="rgb(99, 102, 241)" stopOpacity="0.9" />
-                <stop offset="100%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
+                <stop offset="0%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
+                <stop offset="14%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
+                <stop offset="86%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
+                <stop offset="100%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
               </linearGradient>
             </defs>
             {computedStubs.map(stub => {
@@ -1544,10 +1546,10 @@ export function LineageFlowOverlay({
                 ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
                 : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
               return (
-                // Floor 0.35: PRESENCE is always discernible — users must
-                // see where lineage exists at a glance. Intensity adds
-                // emphasis on top so hubs still stand out.
-                <g key={key} className="pointer-events-none" opacity={0.35 + stub.intensity * 0.5}>
+                // Floor 0.6: PRESENCE is always clearly visible — users
+                // must see where lineage exists at a glance. Intensity
+                // adds emphasis on top so hubs still stand out.
+                <g key={key} className="pointer-events-none" opacity={0.6 + stub.intensity * 0.4}>
                   <rect
                     x={stub.cx - stub.width / 2}
                     y={stub.cy - stub.height / 2}
