@@ -93,6 +93,9 @@ interface LayerColumnProps {
    *  by layer id) so the edge overlay can estimate row positions for
    *  unmounted rows via the virtualizer's measurements cache. */
   geometryRegistry?: Map<string, ColumnGeometryApi>
+  /** Virtualizer overscan override — the canvas shrinks it at zoom-out
+   *  (the enlarged layout viewport already supplies the extra rows). */
+  overscan?: number
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -142,6 +145,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
+  overscan = 15,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -490,7 +494,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       if (item.isLoadMore) return rowHeights.loadMore
       return item.depth === 0 ? rowHeights.root : rowHeights.child
     },
-    overscan: 15,
+    overscan,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 

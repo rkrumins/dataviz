@@ -245,6 +245,8 @@ interface DisplaySettingsSectionsProps {
   onToggleTypeBadge: () => void
   subtleTreeLines: boolean
   onToggleSubtleTreeLines: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
 }
 
 /**
@@ -261,6 +263,7 @@ export function DisplaySettingsSections({
   onToggleTypeBadge,
   subtleTreeLines,
   onToggleSubtleTreeLines,
+  onFitToWidth,
 }: DisplaySettingsSectionsProps) {
   const zoomPct = formatZoom(canvasZoom)
   const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
@@ -321,6 +324,16 @@ export function DisplaySettingsSections({
           >
             100%
           </button>
+          {onFitToWidth && (
+            <button
+              type="button"
+              onClick={onFitToWidth}
+              title="Fit all layers into the viewport width (⌘/Ctrl+0)"
+              className="flex-shrink-0 px-2 h-7 rounded-lg text-[10.5px] font-semibold text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+            >
+              Fit
+            </button>
+          )}
         </div>
       </div>
 

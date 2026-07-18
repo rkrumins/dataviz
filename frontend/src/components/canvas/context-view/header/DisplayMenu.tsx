@@ -34,6 +34,8 @@ export interface DisplayMenuProps {
   subtleTreeLines: boolean | undefined
   onToggleSubtleTreeLines: () => void
   onReset: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
 
   // Lineage appearance — edge density / direction arrows
   lineageRenderMode: LineageRenderMode
@@ -58,6 +60,7 @@ export function DisplayMenu({
   subtleTreeLines: subtleTreeLinesRaw,
   onToggleSubtleTreeLines,
   onReset,
+  onFitToWidth,
   lineageRenderMode,
   onSetLineageRenderMode,
   showEdgeDirection,
@@ -189,6 +192,7 @@ export function DisplayMenu({
                 onToggleTypeBadge={onToggleTypeBadge}
                 subtleTreeLines={subtleTreeLines}
                 onToggleSubtleTreeLines={onToggleSubtleTreeLines}
+                onFitToWidth={onFitToWidth}
               />
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />

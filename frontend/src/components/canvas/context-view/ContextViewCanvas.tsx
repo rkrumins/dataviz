@@ -87,6 +87,7 @@ import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { CanvasStatusChips } from './CanvasStatusChips'
+import { computeFitZoom } from './fitZoom'
 import type { ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -576,11 +577,20 @@ export function ContextViewCanvas({
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
   // (The context-menu mutation entry points are draft-gated separately.)
+  // Fit-to-width / lens handlers are defined further down (they need
+  // sortedLayers / lens state); ref indirection avoids the TDZ.
+  const fitToWidthRef = useRef<(() => void) | null>(null)
+  const focusLensRef = useRef<(() => void) | null>(null)
+  const zoomShortcutHandlers = useMemo(() => ({
+    onFitView: () => fitToWidthRef.current?.(),
+    onZoomPreset: (level: 1 | 2 | 3) => setCanvasZoom([0.5, 0.75, 1][level - 1]),
+    onFocusLens: () => focusLensRef.current?.(),
+  }), [setCanvasZoom])
   useCanvasKeyboard({
     enabled: true,
     handlers: isDraft
-      ? interactions.keyboardHandlers
-      : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers }
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -1226,6 +1236,25 @@ export function ContextViewCanvas({
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
+  // Zoom changes move every node card, but nothing else forces the edge
+  // overlay to recompute geometry. Double-rAF so the transform commits
+  // before the redraw reads fresh rects.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.())
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [canvasZoom])
+
+  // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
+  // pre-compensation enlarges the scroll viewport in layout px), so the
+  // extra coverage comes from the larger window — overscan can shrink to
+  // keep total mounted rows bounded.
+  const effectiveOverscan = useMemo(
+    () => Math.min(15, Math.max(5, Math.round(15 * canvasZoom))),
+    [canvasZoom],
+  )
+
   // Drawer-aware horizontal autoscroll: when a side panel opens (EntityDrawer
   // for selected nodes or EdgeDetailPanel for selected edges) the right edge
   // of the canvas is reserved via padding, but a node already sitting on the
@@ -1365,6 +1394,17 @@ export function ContextViewCanvas({
     () => deriveEntityScope(activeView?.content, activeReferenceLayout),
     [activeView?.content, activeReferenceLayout],
   )
+
+  // Fit-to-width: intrinsic width from state (scrollWidth lies under the
+  // 100/zoom% compensation). Column collapse state is LayerColumn-local,
+  // so v1 assumes all columns expanded — a safe over-estimate that only
+  // makes the fitted zoom slightly smaller.
+  const handleFitToWidth = useCallback(() => {
+    const viewport = horizontalScrollRef.current?.clientWidth ?? 0
+    setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
+    horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
+  }, [setCanvasZoom, sortedLayers.length])
+  useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
@@ -2713,6 +2753,7 @@ export function ContextViewCanvas({
         onRedo={redoStagedChange}
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
+        onFitToWidth={handleFitToWidth}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
@@ -3099,6 +3140,7 @@ export function ContextViewCanvas({
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}
+                overscan={effectiveOverscan}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
