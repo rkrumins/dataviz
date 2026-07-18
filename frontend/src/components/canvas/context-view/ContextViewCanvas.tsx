@@ -2564,28 +2564,35 @@ export function ContextViewCanvas({
   const [framePill, setFramePill] = useState<{ nodeId: string; neighborIds: string[]; offCount: number } | null>(null)
   useEffect(() => {
     // rAF defers both the DOM measurement (post-paint rects) and the
-    // state write off the effect's synchronous path.
+    // state write off the effect's synchronous path. Deps use the STABLE
+    // edge fingerprint (+ ref read) — the projected array's identity
+    // churns per hover via delegation stamping, and re-measuring a hub
+    // node's whole fan on every hover flick would jank. Measurement is
+    // sampled: past the cap the neighborhood is off-screen-heavy by
+    // construction, and the pill's decision doesn't need exact counts.
+    const MEASURE_CAP = 300
     const raf = requestAnimationFrame(() => {
       if (!selectedNodeId) { setFramePill(null); return }
       const neighborIds = new Set<string>()
-      for (const e of visibleLineageEdges) {
+      for (const e of visibleLineageEdgesRef.current) {
         if (e.source === selectedNodeId && e.target !== selectedNodeId) neighborIds.add(e.target)
         else if (e.target === selectedNodeId && e.source !== selectedNodeId) neighborIds.add(e.source)
       }
       if (neighborIds.size === 0) { setFramePill(null); return }
       const box = horizontalScrollRef.current?.getBoundingClientRect()
+      const ids = [...neighborIds]
+      const sample = ids.slice(0, MEASURE_CAP)
       let off = 0
-      neighborIds.forEach(id => {
+      for (const id of sample) {
         const el = document.getElementById(`layer-node-${id}`)
-        if (!el || !box) { off++; return }
+        if (!el || !box) { off++; continue }
         const r = el.getBoundingClientRect()
         if (r.bottom < box.top || r.top > box.bottom || r.right < box.left || r.left > box.right) off++
-      })
-      const ids = [...neighborIds]
-      setFramePill(off / ids.length > 0.3 ? { nodeId: selectedNodeId, neighborIds: ids, offCount: off } : null)
+      }
+      setFramePill(off / sample.length > 0.3 ? { nodeId: selectedNodeId, neighborIds: ids, offCount: off } : null)
     })
     return () => cancelAnimationFrame(raf)
-  }, [selectedNodeId, visibleLineageEdges])
+  }, [selectedNodeId, visibleLineageEdgesFingerprint])
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
@@ -3009,6 +3016,7 @@ export function ContextViewCanvas({
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
+          viewScope={activeEntityScope}
         />
 
         {/* Frame pill — selection has off-screen neighbors; offer to frame

@@ -687,14 +687,15 @@ export function useEdgeProjection({
 
   const projectedEdges = projection.edges
 
-  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
-  //
-  // The heavy edge projection above doesn't re-run on hover. This cheap pass
-  // stamps isDelegated/isResidual on the already-projected edges.
-  const visibleLineageEdgesWithDelegation = useMemo(() => {
-    if (projectedEdges.length === 0) return projectedEdges
-
-    // Build expanded parent info
+  // ── Delegation context — hover-INDEPENDENT so the per-hover pass below
+  // stays a single O(E) map. expandedParentInfo: expanded parents with
+  // loaded children (+ partial-load flag). coveredPairs: delegation
+  // coverage — a rolled-up parent-level edge may only be hidden
+  // (isDelegated) when finer child-level edges actually exist for the
+  // same lifted pair; an edge whose OWN pair never appears as a lifted
+  // pair has no finer substitute (container-own lineage) and must stay
+  // visible.
+  const delegationContext = useMemo(() => {
     const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
     expandedNodes.forEach(nodeId => {
       const node = displayMap.get(nodeId)
@@ -708,18 +709,9 @@ export function useEdgeProjection({
       }
     })
 
-    // If no expanded parents with children, skip the mapping
-    if (expandedParentInfo.size === 0) return projectedEdges
-
-    // Delegation coverage: a rolled-up parent-level edge may only be
-    // hidden (isDelegated) when finer child-level edges actually exist to
-    // represent it. Lift every projected edge's endpoints to their
-    // expanded parent (when they have one) and record the lifted pair —
-    // an edge whose OWN pair never appears as a lifted pair has no finer
-    // substitute (container-own lineage) and must stay visible.
     const containmentParentMap = browseBundleParentMap ?? traceBundleParentMap
     const coveredPairs = new Set<string>()
-    if (containmentParentMap) {
+    if (containmentParentMap && expandedParentInfo.size > 0) {
       for (const edge of projectedEdges) {
         const sParent = containmentParentMap.get(edge.source)
         const tParent = containmentParentMap.get(edge.target)
@@ -730,6 +722,19 @@ export function useEdgeProjection({
         }
       }
     }
+    return { expandedParentInfo, coveredPairs }
+  }, [projectedEdges, expandedNodes, displayMap, browseBundleParentMap, traceBundleParentMap])
+
+  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
+  //
+  // The heavy edge projection above doesn't re-run on hover. This cheap pass
+  // stamps isDelegated/isResidual on the already-projected edges.
+  const visibleLineageEdgesWithDelegation = useMemo(() => {
+    if (projectedEdges.length === 0) return projectedEdges
+    const { expandedParentInfo, coveredPairs } = delegationContext
+
+    // If no expanded parents with children, skip the mapping
+    if (expandedParentInfo.size === 0) return projectedEdges
 
     return projectedEdges.map(edge => {
       const sourceExpanded = expandedParentInfo.get(edge.source)
@@ -749,7 +754,7 @@ export function useEdgeProjection({
         isResidual: anyPartial ? !isEndpointHovered : false,
       }
     })
-  }, [projectedEdges, expandedNodes, displayMap, hoveredNodeId, browseBundleParentMap, traceBundleParentMap])
+  }, [projectedEdges, delegationContext, hoveredNodeId])
 
   return {
     lineageEdges,

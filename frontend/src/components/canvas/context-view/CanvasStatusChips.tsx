@@ -18,6 +18,7 @@
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
 import { Unlink, Layers, ListPlus } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 const CHIP_CLASS =
@@ -39,6 +40,7 @@ export function CanvasStatusChips({
   aggDetailShown,
   aggDetailTotal,
   onLoadMoreDetail,
+  viewScope = 'all',
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -49,6 +51,13 @@ export function CanvasStatusChips({
   aggDetailShown: number
   aggDetailTotal: number
   onLoadMoreDetail?: () => void
+  /**
+   * Scope of the active view. Views are subsets of a Data Source: in a
+   * CURATED view, links to out-of-view entities are EXPECTED (the user
+   * chose the subset), so the chips use neutral informational wording
+   * instead of implying something is missing or broken.
+   */
+  viewScope?: 'all' | 'curated'
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -70,20 +79,32 @@ export function CanvasStatusChips({
           content={
             <div>
               <p className="font-semibold mb-1">
-                {unresolvedEdgeCount.toLocaleString()} connection{unresolvedEdgeCount === 1 ? '' : 's'} not shown
+                {unresolvedEdgeCount.toLocaleString()} connection{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
+                {viewScope === 'curated' ? 'lead outside this view' : 'not shown'}
               </p>
-              <p className="text-ink-muted">
-                These edges reference entities that aren&apos;t loaded on the canvas
-                or aren&apos;t assigned to any layer. Load or assign those entities
-                to see the connections.
-              </p>
+              {viewScope === 'curated' ? (
+                <p className="text-ink-muted">
+                  This view is a curated subset of the data source — these links
+                  reference entities that aren&apos;t part of the view&apos;s
+                  assignments. That&apos;s expected; add those entities to the
+                  view to see the connections.
+                </p>
+              ) : (
+                <p className="text-ink-muted">
+                  These edges reference entities that aren&apos;t loaded on the canvas
+                  or aren&apos;t assigned to any layer. Load or assign those entities
+                  to see the connections.
+                </p>
+              )}
             </div>
           }
         >
           <div className={CHIP_CLASS}>
-            <Unlink className="w-3 h-3 text-amber-500/80" />
+            <Unlink className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
             <span className="tabular-nums">{unresolvedEdgeCount.toLocaleString()}</span>
-            <span className="text-ink-muted/70">connections not on canvas</span>
+            <span className="text-ink-muted/70">
+              {viewScope === 'curated' ? 'connections outside this view' : 'connections not on canvas'}
+            </span>
           </div>
         </InfoTooltip>
       )}
@@ -92,9 +113,11 @@ export function CanvasStatusChips({
         <PopoverPrimitive.Root open={unassignedOpen} onOpenChange={setUnassignedOpen}>
           <PopoverPrimitive.Trigger asChild>
             <button type="button" className={`${CHIP_CLASS} cursor-pointer hover:scale-105 active:scale-95 transition-transform`}>
-              <Layers className="w-3 h-3 text-amber-500/80" />
+              <Layers className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
               <span className="tabular-nums">{unassignedEntities.length.toLocaleString()}</span>
-              <span className="text-ink-muted/70">entities not in any layer</span>
+              <span className="text-ink-muted/70">
+                {viewScope === 'curated' ? 'loaded entities not in this view' : 'entities not in any layer'}
+              </span>
             </button>
           </PopoverPrimitive.Trigger>
           <PopoverPrimitive.Portal>
@@ -105,7 +128,9 @@ export function CanvasStatusChips({
               className="z-[9999] w-72 rounded-lg border border-glass-border/80 bg-canvas-elevated/95 backdrop-blur-md shadow-xl shadow-black/40 p-2"
             >
               <p className="px-1.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
-                Loaded but not rendered — assign to a layer to show
+                {viewScope === 'curated'
+                  ? 'Loaded but not part of this view — assign to include'
+                  : 'Loaded but not rendered — assign to a layer to show'}
               </p>
               <div className="max-h-64 overflow-y-auto custom-scrollbar">
                 {unassignedEntities.slice(0, UNASSIGNED_LIST_CAP).map(e => (
