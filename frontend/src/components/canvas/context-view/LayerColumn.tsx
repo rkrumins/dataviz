@@ -690,8 +690,16 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
   }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect])
 
-  // Get total items at current level
-  const visibleCount = flatTree.length
+  // Entity rows currently in the tree (expanded children included).
+  // Auxiliary rows — search boxes, skeletons, load-more, failed
+  // placeholders — are UI, not entities: counting them pushed the header
+  // past the loaded total ("402 / 400"). Entity rows are a strict subset
+  // of loaded entities, so X ≤ Y holds by construction.
+  const visibleCount = useMemo(
+    () => flatTree.reduce((acc, it) =>
+      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore ? 0 : 1), 0),
+    [flatTree],
+  )
 
   // ── Overflow chips: track scroll position so we can show accurate
   // "↑ N above / ↓ N below" indicators that respond to user scroll. ─────────
@@ -1034,7 +1042,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <span className="text-[10px] font-semibold tracking-wide">Loading…</span>
                   </motion.div>
                 ) : (
-                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]">
+                  <div
+                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]"
+                    title={`${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
+                  >
                     <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
                       {visibleCount}
                     </span>

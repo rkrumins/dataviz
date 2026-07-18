@@ -62,6 +62,10 @@ export type OverflowBadge = {
   /** Off-screen partner node ids for tooltip / click-to-jump, capped at
    *  MAX_BADGE_PARTNERS; `count` keeps the true total. */
   partnerIds: string[]
+  /** Distinct off-screen partner ENTITIES (uncapped). `count` counts
+   *  connections; the tooltip's "+N more" must subtract entities from
+   *  entities, never from `count`. */
+  partnerTotal: number
 }
 
 /** A partial edge drawn from a visible node toward the container boundary,

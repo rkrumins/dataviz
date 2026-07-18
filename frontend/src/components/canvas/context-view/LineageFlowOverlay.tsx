@@ -263,7 +263,7 @@ export function LineageFlowOverlay({
     // partners into up/down/left/right.
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
-    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[] }>()
+    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string> }>()
     const trailingEdges: OverflowEdge[] = []
     const bucketStubCount = new Map<string, number>()
 
@@ -643,19 +643,27 @@ export function LineageFlowOverlay({
       }
 
       const isHorizontal = direction === 'left' || direction === 'right'
-      // Vertical buckets group by gutter x; horizontal buckets group by
+      // Vertical buckets group PER LAYER (owning column of the visible
+      // endpoint) so each column shows exactly one up-badge and one
+      // down-badge whose count is that layer's off-screen connections —
+      // positional 80px buckets split one layer's count into several
+      // arbitrary badges. Gutter-x bucketing remains the fallback when
+      // the registry can't resolve a column. Horizontal buckets group by
       // the visible endpoint's row band so badges land next to the rows
       // whose partners are off-screen sideways.
       const bucketKey = isHorizontal
         ? `${direction}-${Math.round(sy / BADGE_BUCKET) * BADGE_BUCKET}`
-        : `${Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
+        : `${findOwningLayer(visibleNodeId.slice('layer-node-'.length)) ?? Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
       if (!buckets.has(bucketKey)) {
-        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [] })
+        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set() })
       }
       const bucket = buckets.get(bucketKey)!
       bucket.gutterXs.push(gutterX)
       bucket.ys.push(sy)
       bucket.edgeCount++
+      // Distinct partner ENTITIES — kept separately from edgeCount so the
+      // tooltip's "+N more" never subtracts entities from edges.
+      bucket.partnerSet.add(partnerId)
       if (!bucket.colors.includes(color)) bucket.colors.push(color)
       if (bucket.partnerIds.length < MAX_BADGE_PARTNERS && !bucket.partnerIds.includes(partnerId)) {
         bucket.partnerIds.push(partnerId)
@@ -792,6 +800,7 @@ export function LineageFlowOverlay({
         count: bucket.edgeCount,
         color: bucket.colors[0] || '#3b82f6',
         partnerIds: bucket.partnerIds,
+        partnerTotal: bucket.partnerSet.size,
       })
     })
     setOverflowBadges(badges)
@@ -1744,7 +1753,9 @@ export function LineageFlowOverlay({
           : 'rotate(90deg)'
         const shown = badge.partnerIds
           .map(id => nodeNameById.get(id) ?? id)
-        const extra = badge.count - badge.partnerIds.length
+        // Entities minus entities — subtracting the shown ENTITY names
+        // from the CONNECTION count produced fictional "+178 more" lines.
+        const extra = badge.partnerTotal - badge.partnerIds.length
         return (
           <div
             key={`overflow-${i}`}
@@ -1775,7 +1786,7 @@ export function LineageFlowOverlay({
                       <span className="truncate text-ink-muted">{name}</span>
                     </div>
                   ))}
-                  {extra > 0 && <p className="text-ink-muted/70 mt-0.5">+{extra} more</p>}
+                  {extra > 0 && <p className="text-ink-muted/70 mt-0.5">+{extra} more {extra === 1 ? 'entity' : 'entities'}</p>}
                   <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll to it</p>
                 </div>
               }
