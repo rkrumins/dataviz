@@ -182,6 +182,25 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const shouldShowGhosts = isHydratingInitial && layerHasConfiguredSources
 
+  // Per-layer custom width (resize handle on the right edge). Persisted
+  // across sessions; null = default 320–480 flex range. When set, the
+  // column pins to the exact width (min == max) so dragging feels 1:1.
+  const [customWidth, setCustomWidthState] = useState<number | null>(() => {
+    try {
+      const w = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')[layer.id]
+      return typeof w === 'number' ? w : null
+    } catch { return null }
+  })
+  const setCustomWidth = useCallback((w: number | null) => {
+    setCustomWidthState(w)
+    try {
+      const all = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')
+      if (w === null) delete all[layer.id]
+      else all[layer.id] = w
+      localStorage.setItem('nx-layer-widths', JSON.stringify(all))
+    } catch { /* storage unavailable — session-only width */ }
+  }, [layer.id])
+
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -852,12 +871,41 @@ export const LayerColumn = React.memo(function LayerColumn({
         // inherited CSS property, so without this explicit `auto` chevrons,
         // headers, and node cards would inherit `none` and become inert.
         "flex flex-col relative group/column transition-all duration-300 pointer-events-auto",
-        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1 min-w-[320px] max-w-[480px]"
+        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1"
       )}
+      style={!isCollapsed ? { minWidth: customWidth ?? 320, maxWidth: customWidth ?? 480 } : undefined}
       layout
     >
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
+
+      {/* ── Resize handle — drag the column's right edge (260–560px);
+          double-click resets to the default width. Width persists per
+          layer across sessions. ── */}
+      {!isCollapsed && (
+        <div
+          data-canvas-interactive
+          onPointerDown={(e) => {
+            e.preventDefault()
+            const startX = e.clientX
+            const startW = customWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            const onMove = (ev: PointerEvent) => {
+              setCustomWidth(Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX))))
+            }
+            const onUp = () => {
+              window.removeEventListener('pointermove', onMove)
+              window.removeEventListener('pointerup', onUp)
+            }
+            window.addEventListener('pointermove', onMove)
+            window.addEventListener('pointerup', onUp)
+          }}
+          onDoubleClick={() => setCustomWidth(null)}
+          title="Drag to resize this layer · double-click to reset"
+          className="absolute -right-1 top-0 bottom-0 w-2 z-30 cursor-col-resize opacity-0 group-hover/column:opacity-100 transition-opacity"
+        >
+          <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[3px] rounded-full bg-accent-lineage/40" />
+        </div>
+      )}
 
       {/* Layer Header - Glass morphism style + drag target (4.3).
           When collapsed, the header is the only content in the column; it
