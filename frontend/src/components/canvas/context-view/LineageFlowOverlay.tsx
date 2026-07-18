@@ -643,22 +643,38 @@ export function LineageFlowOverlay({
       }
 
       const isHorizontal = direction === 'left' || direction === 'right'
-      // Vertical buckets group PER LAYER (owning column of the visible
-      // endpoint) so each column shows exactly one up-badge and one
-      // down-badge whose count is that layer's off-screen connections —
-      // positional 80px buckets split one layer's count into several
-      // arbitrary badges. Gutter-x bucketing remains the fallback when
-      // the registry can't resolve a column. Horizontal buckets group by
-      // the visible endpoint's row band so badges land next to the rows
-      // whose partners are off-screen sideways.
+      // Vertical buckets group PER LAYER — the layer that OWNS THE
+      // PARTNER, because an up/down badge is a navigation promise:
+      // "scroll THIS column up/down to find these". Keying/positioning
+      // on the visible endpoint's column drew "↑ 86" over a column with
+      // one entity while all 86 partners lived in a different column
+      // (and clicking it scrolled that other column). One up-badge and
+      // one down-badge per partner column, count = that layer's
+      // off-screen connections; gutter-x bucketing remains the fallback
+      // when the registry can't resolve the partner. Horizontal buckets
+      // group by the visible endpoint's row band so badges land next to
+      // the rows whose partners are off-screen sideways.
+      const partnerLayer = isHorizontal ? null : findOwningLayer(partnerId)
       const bucketKey = isHorizontal
         ? `${direction}-${Math.round(sy / BADGE_BUCKET) * BADGE_BUCKET}`
-        : `${findOwningLayer(visibleNodeId.slice('layer-node-'.length)) ?? Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
+        : `${partnerLayer ?? Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
+      // Badge x — over the PARTNER's column when its rect (real or
+      // registry-estimated) is known, clamped into the viewport;
+      // otherwise the visible endpoint's gutter.
+      const badgeX = !isHorizontal && pRect
+        ? Math.max(
+            viewportRect.left - containerRect.left + 40,
+            Math.min(
+              viewportRect.right - containerRect.left - 40,
+              (pRect.left + pRect.right) / 2 - containerRect.left,
+            ),
+          )
+        : gutterX
       if (!buckets.has(bucketKey)) {
         buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set() })
       }
       const bucket = buckets.get(bucketKey)!
-      bucket.gutterXs.push(gutterX)
+      bucket.gutterXs.push(badgeX)
       bucket.ys.push(sy)
       bucket.edgeCount++
       // Distinct partner ENTITIES — kept separately from edgeCount so the
