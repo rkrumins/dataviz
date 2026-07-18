@@ -2440,41 +2440,74 @@ export function ContextViewCanvas({
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
-  // suppresses them in favour of per-node stub indicators; `auto` keeps
-  // every edge rendered but adds stub indicators and focus emphasis
-  // above `autoStubThreshold`. The mode resolves
-  // identically in trace and browse — trace mode no longer bypasses the
-  // gate. Trace's focus-incident edges stay materialized via
-  // `effectiveLineageEdges` so the anchor is always legible.
+  // suppresses ambient edges in favour of per-node indicators (hover /
+  // selection materializes); `auto` renders everything below
+  // `autoStubThreshold` and switches to a BUDGETED presentation above it.
+  // The mode resolves identically in trace and browse — trace mode no
+  // longer bypasses the gate. Trace's focus-incident edges stay
+  // materialized via `effectiveLineageEdges` so the anchor is legible.
   const isStubsMode = useMemo(() => {
     if (lineageRenderMode === 'raw') return false
     if (lineageRenderMode === 'stubs') return true
     return visibleLineageEdges.length > autoStubThreshold
   }, [lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Effective edge set passed to the renderer. In explicit 'stubs' mode
-  // ("On Hover") only edges incident to the hovered, selected, or
-  // trace-focus node materialize (so the user can drill in by
-  // interacting and the trace anchor stays unmissable); the canvas
-  // otherwise stays light by design. 'auto' ("Adaptive") must never
-  // blank or churn the canvas: it always passes the full projected set
-  // with a stable identity — LineageFlowOverlay's render tiers and
-  // viewport virtualization absorb the density, and its DOM
-  // hover-dimming handles focus emphasis without an O(edges) index
-  // rebuild per hover — so expanding past the threshold can't make
-  // edges disappear.
-  const effectiveLineageEdges = useMemo(() => {
-    if (!isStubsMode) return visibleLineageEdges
-    if (lineageRenderMode === 'auto') return visibleLineageEdges
+  // Significance ranking: bundled edge count first (a 600-edge bundle IS
+  // the macro flow), confidence as the tie-break.
+  const bySignificance = (a: { edgeCount?: number; confidence?: number }, b: { edgeCount?: number; confidence?: number }) =>
+    ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0))
+
+  // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
+  // instead of cliffing (old behavior: all ambient edges vanished at
+  // once) or dumping (interim behavior: a 40k-path hairball): the
+  // STRONGEST flows render ambiently up to the budget, and the long
+  // tail is declared — per-node in/out indicators carry presence +
+  // counts, and a status chip reports "showing N strongest of M" with
+  // escalation to All Edges. Nothing is lost silently; the canvas stays
+  // readable; SVG path count stays bounded regardless of graph size.
+  const rankedAmbientEdges = useMemo(() => {
+    if (!isStubsMode || lineageRenderMode !== 'auto') return null
+    return [...visibleLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
+  }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
+
+  // Effective edge set passed to the renderer, plus the shown/total
+  // bookkeeping the status chips surface. Focus (hover / selection /
+  // trace anchor) materializes incident edges in every stub-y mode, but
+  // a hub's fan is ALSO capped at the strongest `autoStubThreshold` —
+  // 650 curves at once is noise; the Lineage Lens enumerates the full
+  // fan properly and the chip points there.
+  const edgePresentation = useMemo(() => {
+    if (!isStubsMode) {
+      return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
+    }
+    const ambient = rankedAmbientEdges ?? []
+    const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
     const focusIds = new Set<string>()
     if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
     if (trace.isTracing && trace.result?.focusId) focusIds.add(trace.result.focusId)
-    if (focusIds.size === 0) return []
-    return visibleLineageEdges.filter(e =>
+    if (focusIds.size === 0) {
+      return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
+    }
+    const focusAll = visibleLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
-  }, [visibleLineageEdges, isStubsMode, lineageRenderMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+    const focus = focusAll.length > autoStubThreshold
+      ? [...focusAll].sort(bySignificance).slice(0, autoStubThreshold)
+      : focusAll
+    if (ambient.length === 0) {
+      return { edges: focus, ambientShown: 0, ambientTotal, focusShown: focus.length, focusTotal: focusAll.length }
+    }
+    const focusIdsSet = new Set(focus.map(e => e.id))
+    return {
+      edges: [...focus, ...ambient.filter(e => !focusIdsSet.has(e.id))],
+      ambientShown: ambient.length,
+      ambientTotal,
+      focusShown: focus.length,
+      focusTotal: focusAll.length,
+    }
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+  const effectiveLineageEdges = edgePresentation.edges
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -3017,6 +3050,15 @@ export function ContextViewCanvas({
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
           viewScope={activeEntityScope}
+          adaptiveShown={edgePresentation.ambientShown}
+          adaptiveTotal={edgePresentation.ambientTotal}
+          onShowAllEdges={() => setLineageRenderMode('raw')}
+          focusShown={edgePresentation.focusShown}
+          focusTotal={edgePresentation.focusTotal}
+          onOpenFocusLens={() => {
+            const target = selectedNodeId ?? hoveredNodeId ?? drawerNodeId
+            if (target) openLens(target)
+          }}
         />
 
         {/* Frame pill — selection has off-screen neighbors; offer to frame

@@ -52,7 +52,7 @@ const DENSITY_OPTIONS: DensityOption[] = [
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
-    description: 'All edges stay visible; dense graphs simplify styling and spotlight what you hover',
+    description: 'Strongest flows stay visible on dense graphs; markers summarize the rest — hover or select to focus',
   },
   {
     mode: 'raw',

@@ -17,7 +17,7 @@
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus } from 'lucide-react'
+import { Unlink, Layers, ListPlus, GitBranch, Focus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
@@ -41,6 +41,12 @@ export function CanvasStatusChips({
   aggDetailTotal,
   onLoadMoreDetail,
   viewScope = 'all',
+  adaptiveShown,
+  adaptiveTotal,
+  onShowAllEdges,
+  focusShown,
+  focusTotal,
+  onOpenFocusLens,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -58,14 +64,24 @@ export function CanvasStatusChips({
    * instead of implying something is missing or broken.
    */
   viewScope?: 'all' | 'curated'
+  /** Adaptive ambient budget: strongest flows shown / total projected. */
+  adaptiveShown?: number
+  adaptiveTotal?: number
+  onShowAllEdges?: () => void
+  /** Focus fan cap: strongest incident edges shown / node's full fan. */
+  focusShown?: number
+  focusTotal?: number
+  onOpenFocusLens?: () => void
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
+  const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
+  const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus) return null
 
   return (
     <div
@@ -73,6 +89,73 @@ export function CanvasStatusChips({
       style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
+      {showAdaptive && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">Adaptive edge density</p>
+              <p className="text-ink-muted">
+                Showing the {adaptiveShown!.toLocaleString()} strongest flows of{' '}
+                {adaptiveTotal!.toLocaleString()} on this canvas. The in/out markers on
+                each entity summarize the rest — hover or select an entity to focus its
+                connections, or show everything.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <GitBranch className="w-3 h-3 text-accent-lineage/80" />
+            <span>
+              Top <span className="tabular-nums">{adaptiveShown!.toLocaleString()}</span> of{' '}
+              <span className="tabular-nums">{adaptiveTotal!.toLocaleString()}</span> flows
+            </span>
+            {onShowAllEdges && (
+              <button
+                type="button"
+                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                onClick={onShowAllEdges}
+              >
+                Show all
+              </button>
+            )}
+          </div>
+        </InfoTooltip>
+      )}
+
+      {showFocus && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">Large connection fan</p>
+              <p className="text-ink-muted">
+                This entity has {focusTotal!.toLocaleString()} connections — showing the{' '}
+                {focusShown!.toLocaleString()} strongest on canvas. The Lens lists every
+                connection, grouped and searchable.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <Focus className="w-3 h-3 text-accent-lineage/80" />
+            <span>
+              Strongest <span className="tabular-nums">{focusShown!.toLocaleString()}</span> of{' '}
+              <span className="tabular-nums">{focusTotal!.toLocaleString()}</span>
+            </span>
+            {onOpenFocusLens && (
+              <button
+                type="button"
+                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                onClick={onOpenFocusLens}
+              >
+                Open lens
+              </button>
+            )}
+          </div>
+        </InfoTooltip>
+      )}
+
       {showUnresolved && (
         <InfoTooltip
           side="right"
