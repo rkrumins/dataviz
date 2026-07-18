@@ -29,6 +29,7 @@ from .schemas import (
     DataSourceReadinessResponse,
     DriftCheckResponse,
     PaginatedJobsResponse,
+    RefreshResponse,
     ResumeOverrides,
     SourceChangedResponse,
 )
@@ -50,6 +51,13 @@ logger = logging.getLogger(__name__)
 AGGREGATION_REBUILD_MIN_INTERVAL_SECS = int(
     __import__("os").getenv("AGGREGATION_REBUILD_MIN_INTERVAL_SECS", "900")
 )
+
+# Bounds for ``refresh_source(wait="complete")`` — it polls a queued rebuild
+# to a terminal status before returning, so an operator can refresh-then-read
+# synchronously. Kept short: the caller is holding a request open. Read at
+# call time (module-global lookup) so tests can shrink the window.
+_REFRESH_WAIT_TIMEOUT_S = 60
+_REFRESH_WAIT_INTERVAL_S = 2
 
 # Process-wide handle to the wired AggregationService (set at startup by
 # main.py in direct mode / controlplane.py on the CP). Lets non-HTTP
@@ -1498,6 +1506,261 @@ class AggregationService:
             ref_dt = ref_dt.replace(tzinfo=timezone.utc)
         elapsed = (datetime.now(timezone.utc) - ref_dt).total_seconds()
         return elapsed < AGGREGATION_REBUILD_MIN_INTERVAL_SECS
+
+    # ── Unified refresh verb (operator-facing) ──────────────────────
+
+    _JOB_TERMINAL = ("completed", "failed", "cancelled")
+
+    async def refresh_source(
+        self, ds_id: str, session: AsyncSession, *,
+        scope: str = "auto", force: bool = False, reason: Optional[str] = None,
+        actor: str = "internal", origin: str = "api", wait: str = "none",
+    ) -> RefreshResponse:
+        """One operator-facing refresh verb over the convergence primitives.
+
+        Four scopes, one dispatch, NO new mechanisms:
+
+          * ``auto``        — delegate verbatim to :meth:`signal_source_changed`
+            (the change-gated signal). It owns both the gate AND its own audit
+            event; this verb reuses that event id and NEVER emits a second one.
+          * ``read-caches`` — no gate, no marker, no rebuild: clear content
+            caches, invalidate hierarchy reads, purge the aggregated LKG too
+            (an explicit operator refresh drops the degraded-read fallback the
+            signal deliberately keeps), and nudge stats.
+          * ``rollups``     — mark the source stale and queue a rebuild with a
+            FRESH idempotency key every call, bypassing the cooldown / dedup
+            gate by construction (an explicit refresh must always do work).
+          * ``full``        — the read-caches steps, then the rollups steps.
+
+        Exactly ONE audit event per call. An unknown ``ds_id`` (neither an
+        aggregation state row nor a workspace data-source row) raises
+        ``NotFoundError`` BEFORE any side effect. Best-effort throughout: once
+        invalidation has begun nothing raises back to the caller — a rebuild
+        conflict or resolution failure is recorded, not propagated.
+        """
+        from .models import AggregationDataSourceStateORM
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        # 0. Existence gate + workspace resolution (mirrors the signal's
+        # state-row load + public-row fallback). A ds that matches neither
+        # row 404s here, BEFORE any cache/marker/trigger side effect.
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        workspace_id = state.workspace_id if state else None
+        ds_orm = None
+        if not workspace_id:
+            ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds_orm is not None and ds_orm.deleted_at is None:
+                workspace_id = ds_orm.workspace_id
+        if state is None and ds_orm is None:
+            raise NotFoundError(f"Data source {ds_id} not found")
+
+        # 1. auto — delegate to the signal, which owns the change gate and
+        # emits its own event; reuse that event id, never emit a second.
+        if scope == "auto":
+            signal = await self.signal_source_changed(
+                ds_id, session, force=force, origin=origin, actor=actor,
+                **({"reason": reason} if reason else {}),
+            )
+            gate = "forced" if force else (
+                "changed" if signal.changed else "unchanged"
+            )
+            actions: List[str] = []
+            if signal.job_id:
+                actions.append("rebuild_queued")
+            elif signal.deferred:
+                actions.append("rebuild_deferred")
+            elif signal.changed:
+                actions.append("invalidated")
+            if wait == "complete" and signal.job_id:
+                actions.append(
+                    await self._wait_for_job(ds_id, signal.job_id, session)
+                )
+            return RefreshResponse(
+                scope="auto", gate=gate, changed=signal.changed,
+                actions=actions, job_id=signal.job_id,
+                deferred=signal.deferred, event_id=signal.event_id,
+            )
+
+        # Non-auto scopes own their single audit event. ``audit`` mirrors the
+        # signal's §1b actions-dict keys for what actually ran here.
+        actions = []
+        audit: dict = {
+            "marker_set": False, "gen_bumped": False, "lkg_purged": 0,
+            "content_cleared": False, "stats_nudged": False,
+            "job_id": None, "deferred": False,
+        }
+
+        # 2. read-caches steps (also the first half of ``full``). No gate.
+        if scope in ("read-caches", "full"):
+            from backend.app.services.graph_cache import (
+                CacheScope,
+                ENDPOINT_AGGREGATED,
+                get_graph_cache,
+                invalidate_hierarchy_reads,
+            )
+            provider = None
+            _timeout = float(
+                __import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5")
+            )
+            try:
+                provider = await asyncio.wait_for(
+                    self._registry.get_provider_for_workspace(
+                        workspace_id, session, data_source_id=ds_id,
+                    ),
+                    timeout=_timeout,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "refresh_source: provider resolution failed for %s: %s",
+                    ds_id, exc,
+                )
+            if provider is not None:
+                await provider.clear_content_caches()
+                audit["content_cleared"] = True
+                actions.append("content_cleared")
+            if workspace_id:
+                purge_count = await invalidate_hierarchy_reads(workspace_id, ds_id)
+                audit["gen_bumped"] = purge_count is not None
+                audit["lkg_purged"] = purge_count or 0
+                actions.append("hierarchy_invalidated")
+                # The aggregated LKG goes too — the signal keeps it as the
+                # degraded-read fallback until its own rebuild lands, but an
+                # explicit operator refresh drops it (operator override).
+                agg_purged = await get_graph_cache().purge_lkg(
+                    CacheScope(
+                        workspace_id=str(workspace_id),
+                        data_source_id=str(ds_id), branch_id="",
+                    ),
+                    ENDPOINT_AGGREGATED,
+                )
+                audit["aggregated_lkg_purged"] = agg_purged
+                actions.append("aggregated_lkg_purged")
+                audit["stats_nudged"] = True
+                actions.append("stats_nudged")
+                try:
+                    from backend.insights_service.enqueue import mark_stats_changed
+                    await mark_stats_changed(ds_id, workspace_id)
+                except Exception as exc:
+                    logger.warning(
+                        "refresh_source: stats nudge failed for %s: %s",
+                        ds_id, exc,
+                    )
+
+        # 3. rollups steps (also the second half of ``full``). Marker + a
+        # rebuild with a fresh idempotency key — cooldown / dedup gate bypass
+        # by construction. A trigger failure after the marker was set must
+        # NOT propagate (the marker already happened); it is recorded instead.
+        job_id = None
+        outcome = "accepted"
+        detail = None
+        if scope in ("rollups", "full"):
+            if workspace_id:
+                from backend.app.services.graph_cache import mark_source_stale
+                await mark_source_stale(workspace_id, ds_id, "source_changed")
+                audit["marker_set"] = True
+                actions.append("marker_set")
+            from uuid import uuid4
+            try:
+                job = await self.trigger(
+                    ds_id,
+                    AggregationTriggerRequest(
+                        idempotency_key=f"refresh-rollups:{uuid4().hex}",
+                    ),
+                    "api",
+                    session,
+                )
+                job_id = job.id
+                actions.append("rebuild_queued")
+            except ConflictError:
+                logger.info(
+                    "refresh_source: rollups rebuild for %s already active — "
+                    "idempotency collapses the duplicate", ds_id,
+                )
+                outcome = "conflict"
+                actions.append("rebuild_conflict")
+            except (OntologyResolutionError, ValueError, NotFoundError) as exc:
+                logger.warning(
+                    "refresh_source: rollups rebuild for %s could not resolve "
+                    "(%s) — caches invalidated, no job queued", ds_id, exc,
+                )
+                outcome = "error"
+                detail = type(exc).__name__
+                actions.append("rebuild_error")
+            except Exception as exc:
+                logger.warning(
+                    "refresh_source: rollups rebuild for %s failed unexpectedly "
+                    "(%s) — no job queued", ds_id, exc,
+                )
+                outcome = "error"
+                detail = type(exc).__name__
+                actions.append("rebuild_error")
+            audit["job_id"] = job_id
+
+        # One audit event per call (the wait status below is response-only,
+        # never recorded — the audit records the operation, not the poll).
+        event_id = await self._emit_scope_event(
+            workspace_id=workspace_id, ds_id=ds_id, origin=origin, actor=actor,
+            scope=scope, gate="n/a", actions=audit, outcome=outcome,
+            detail=detail,
+        )
+
+        # 4. Optional synchronous wait for a queued rebuild.
+        if wait == "complete" and job_id:
+            actions.append(await self._wait_for_job(ds_id, job_id, session))
+
+        return RefreshResponse(
+            scope=scope, gate="n/a", changed=True, actions=actions,
+            job_id=job_id, deferred=False, event_id=event_id,
+        )
+
+    async def _wait_for_job(
+        self, ds_id: str, job_id: str, session: AsyncSession,
+    ) -> str:
+        """Poll a queued rebuild to a terminal status, bounded by
+        ``_REFRESH_WAIT_TIMEOUT_S``. Returns ``job:<status>`` on a terminal
+        job or ``job:timeout`` if the window elapses first. Best-effort: a
+        transient job-lookup failure is retried, never raised."""
+        interval = _REFRESH_WAIT_INTERVAL_S
+        polls = max(1, _REFRESH_WAIT_TIMEOUT_S // interval)
+        for _ in range(polls):
+            try:
+                job = await self.get_job(ds_id, job_id, session)
+            except Exception:
+                job = None
+            if job is not None and job.status in self._JOB_TERMINAL:
+                return f"job:{job.status}"
+            await asyncio.sleep(interval)
+        return "job:timeout"
+
+    async def _emit_scope_event(
+        self, *, workspace_id, ds_id, origin, actor, scope, gate, actions,
+        outcome, detail=None,
+    ) -> Optional[str]:
+        """Best-effort audit emit for one ``refresh_source`` outcome — the
+        non-auto twin of :meth:`_emit_signal_event`, carrying the caller's
+        scope/gate (the signal's is always ``auto``). Audit writes must never
+        break the refresh they record."""
+        from backend.app.db.repositories.refresh_events_repo import (
+            emit_refresh_event,
+        )
+        try:
+            return await emit_refresh_event(
+                self._session_factory,
+                workspace_id=workspace_id,
+                data_source_id=ds_id,
+                origin=origin,
+                actor=actor,
+                scope=scope,
+                gate=gate,
+                actions=actions,
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception as exc:
+            logger.warning(
+                "refresh_source: audit emit failed for %s: %s", ds_id, exc,
+            )
+            return None
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 

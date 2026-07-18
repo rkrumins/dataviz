@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -398,6 +398,55 @@ class SourceChangedResponse(BaseModel):
     # Id of the refresh_events audit row this invocation emitted, or None
     # if the emit failed (audit writes are best-effort — see
     # emit_refresh_event). Reachable by F3/F4 to avoid a duplicate emit.
+    event_id: Optional[str] = Field(None, alias="eventId")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Unified refresh verb (operator-facing) ───────────────────────────
+
+
+class RefreshRequest(BaseModel):
+    """Body for the unified ``refresh_source`` verb — every field optional.
+
+    ``scope`` selects what converges:
+      * ``auto``        — delegate to the change-gated source-changed signal.
+      * ``read-caches`` — clear content + hierarchy + aggregated-LKG caches
+                          and nudge stats (no change gate, no rebuild).
+      * ``rollups``     — mark stale + queue an aggregation rebuild.
+      * ``full``        — read-caches steps, then rollups steps.
+
+    ``force`` only affects ``auto`` (it overrides the change gate); the other
+    scopes act unconditionally by construction. ``wait='complete'`` blocks on
+    a queued rebuild (bounded) so a caller can refresh-then-read synchronously.
+    """
+    scope: Literal["auto", "read-caches", "rollups", "full"] = "auto"
+    force: bool = Field(False)
+    reason: Optional[str] = None
+    wait: Literal["none", "complete"] = "none"
+
+    class Config:
+        populate_by_name = True
+
+
+class RefreshResponse(BaseModel):
+    """Result of one ``refresh_source`` invocation.
+
+    ``changed`` mirrors the ``auto`` change gate; the forced scopes always
+    act, so it is True for them. ``gate`` is ``forced|changed|unchanged`` for
+    ``auto`` and ``n/a`` for the other scopes. ``actions`` is the ordered list
+    of what ran (plus a terminal ``job:<status>``/``job:timeout`` when
+    ``wait='complete'`` polled a rebuild). ``event_id`` is the single
+    refresh_events audit row this invocation is attributed to (the signal's
+    own row for ``auto``, this verb's for the others).
+    """
+    scope: str
+    gate: str
+    changed: bool
+    actions: List[str] = Field(default_factory=list)
+    job_id: Optional[str] = Field(None, alias="jobId")
+    deferred: bool = False
     event_id: Optional[str] = Field(None, alias="eventId")
 
     class Config:
