@@ -88,6 +88,15 @@ so moving the pointer toward a chip doesn't dismiss it. Unlocks zero-click
 "where does this go" while browsing.
 **Effort:** S. **Value:** high.
 
+### 4b. Column widths in the view definition (backend persistence)
+Custom layer widths currently persist per-browser (localStorage). Promote
+them into the view layout (`referenceLayout` → per-layer `width`), saved via
+the existing `persistReferenceLayout` path in draft mode and read by all
+viewers of a published view — a curated view then ships its column widths to
+every consumer. Keep localStorage as the viewer-local override.
+**Effort:** S–M (schema field + save/read wiring). **Value:** medium-high
+for shared curated views.
+
 ## P2 — Near-term
 
 5. **Anchor Rail phase 2 — ambient top-K** per column in Adaptive mode
