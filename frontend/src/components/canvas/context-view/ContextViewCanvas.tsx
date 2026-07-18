@@ -42,6 +42,7 @@ import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/feat
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { Crosshair, X } from 'lucide-react'
 import { useRevealNode } from '@/hooks/useRevealNode'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
@@ -2626,6 +2627,28 @@ export function ContextViewCanvas({
   // pill appears only when a meaningful share of the selection's
   // neighborhood is outside the viewport, and dismisses on deselect.
   const [framePill, setFramePill] = useState<{ nodeId: string; neighborIds: string[]; offCount: number } | null>(null)
+
+  // ── Framed-mode chrome — explicit exit for the framed state ──────────
+  // Clicking "Frame" reveals + centers the selection's neighborhood, and
+  // the focus dimming makes the canvas read as a MODE — but the only way
+  // out was the undiscoverable Esc. This context drives a persistent
+  // pill that names the state, offers an explicit "Exit frame" (which
+  // mirrors Esc exactly: clear the selection), and shows the Esc hint so
+  // the shortcut becomes learnable. Dismissed automatically when the
+  // framed selection changes or clears.
+  const [framedContext, setFramedContext] = useState<{ nodeId: string; count: number } | null>(null)
+  useEffect(() => {
+    if (!framedContext) return
+    if (selectedNodeId === framedContext.nodeId) return
+    // rAF-deferred like the framePill effect — keeps the reset out of the
+    // synchronous render/effect path (react-hooks/set-state-in-effect).
+    const raf = requestAnimationFrame(() => setFramedContext(null))
+    return () => cancelAnimationFrame(raf)
+  }, [selectedNodeId, framedContext])
+  const exitFrame = useCallback(() => {
+    useCanvasStore.getState().clearSelection()
+    setFramedContext(null)
+  }, [])
   useEffect(() => {
     // rAF defers both the DOM measurement (post-paint rects) and the
     // state write off the effect's synchronous path. Deps use the STABLE
@@ -3111,7 +3134,11 @@ export function ContextViewCanvas({
               <button
                 type="button"
                 className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
-                onClick={() => { void locateManyOnCanvas(framePill.neighborIds); setFramePill(null) }}
+                onClick={() => {
+                  setFramedContext({ nodeId: framePill.nodeId, count: framePill.neighborIds.length })
+                  void locateManyOnCanvas(framePill.neighborIds)
+                  setFramePill(null)
+                }}
               >
                 Frame
               </button>
@@ -3121,6 +3148,46 @@ export function ContextViewCanvas({
                 onClick={() => { openLens(framePill.nodeId); setFramePill(null) }}
               >
                 Open lens
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Framed-mode chrome — persistent while the framed selection is
+            active. Names the state, provides the explicit exit the offer
+            pill (above) morphs into, and teaches the Esc shortcut. Same
+            bottom-center slot as the offer for spatial continuity. */}
+        <AnimatePresence>
+          {framedContext && selectedNodeId === framedContext.nodeId && (
+            <motion.div
+              key="framed-chrome"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.98 }}
+              transition={{ duration: 0.18 }}
+              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
+              style={{ bottom: 'calc(1.25rem + var(--trace-dock-height, 0px))' }}
+              data-canvas-interactive
+            >
+              <Crosshair className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+              <span className="min-w-0 max-w-[280px] truncate">
+                Framing{' '}
+                <span className="font-semibold text-ink">
+                  {nodeMap.get(framedContext.nodeId)?.data.label ?? framedContext.nodeId}
+                </span>
+                {' '}· <span className="tabular-nums">{framedContext.count}</span>{' '}
+                connection{framedContext.count === 1 ? '' : 's'}
+              </span>
+              <kbd className="flex-shrink-0 px-1.5 py-0.5 rounded-md border border-white/10 bg-white/[0.04] text-[9.5px] font-semibold uppercase tracking-wide text-ink-muted/70">
+                Esc
+              </kbd>
+              <button
+                type="button"
+                onClick={exitFrame}
+                className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-full font-semibold bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25 active:scale-95 transition-all"
+              >
+                <X className="w-3 h-3" />
+                Exit frame
               </button>
             </motion.div>
           )}
