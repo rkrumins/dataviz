@@ -12,6 +12,7 @@ import {
   BookOpen,
   Sparkles,
   Rocket,
+  Check,
 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { tabForPath, type NavigationTab } from '@/store/navigation'
@@ -336,9 +337,11 @@ function OnboardingRing({ done, total }: { done: number; total: number }) {
 
 /**
  * A progress-aware entry into the onboarding hub, opening the Help drawer's
- * Getting Started view. Auto-hides once every step is complete, so it never
- * lingers for a fully set-up user. The product tour appears as a step here only
- * when the ``toursEnabled`` flag is on (handled in useOnboardingProgress).
+ * Getting Started view. Always present (so the hub — and the product tour, when
+ * enabled — stay one click away), but it drops its accent "nudge" chrome for a
+ * calm, checked state once every step is done, so it never nags a set-up user.
+ * The product tour appears as a step in the hub only when the ``toursEnabled``
+ * flag is on (handled in useOnboardingProgress).
  */
 function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
   const { completedCount, total, allDone, isLoading } = useOnboardingProgress()
@@ -359,8 +362,8 @@ function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
     if (openTimer.current) clearTimeout(openTimer.current)
   }, [])
 
-  // Nothing to nudge once setup is complete (or before the counts load).
-  if (isLoading || allDone) return null
+  // Wait for the first counts to settle so the row doesn't flash a wrong state.
+  if (isLoading) return null
 
   const countLabel = `${completedCount}/${total}`
   const reveal = collapsed
@@ -373,11 +376,14 @@ function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
         ref={btnRef}
         onClick={() => openGettingStarted()}
         {...reveal}
-        aria-label={`Getting started — ${countLabel} steps complete`}
+        aria-label={allDone ? 'Getting started — all steps complete' : `Getting started — ${countLabel} steps complete`}
         className={cn(
           "w-full flex items-center rounded-lg transition-all duration-150",
-          "border border-accent-lineage/25 bg-accent-lineage/[0.05] text-ink-secondary",
-          "hover:text-ink hover:bg-accent-lineage/[0.09] hover:border-accent-lineage/40",
+          allDone
+            // Calm once there's nothing left to do — reads like the other footer links.
+            ? "text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+            // A gentle nudge while steps remain.
+            : "border border-accent-lineage/25 bg-accent-lineage/[0.05] text-ink-secondary hover:text-ink hover:bg-accent-lineage/[0.09] hover:border-accent-lineage/40",
           collapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2",
         )}
       >
@@ -391,8 +397,14 @@ function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
           <>
             <span className="flex-1 text-left text-xs font-semibold">Getting started</span>
             <span className="flex items-center gap-1.5 shrink-0">
-              <span className="text-2xs font-semibold text-ink-muted tabular-nums">{countLabel}</span>
-              <OnboardingRing done={completedCount} total={total} />
+              {allDone ? (
+                <Check className="w-4 h-4 text-emerald-500" />
+              ) : (
+                <>
+                  <span className="text-2xs font-semibold text-ink-muted tabular-nums">{countLabel}</span>
+                  <OnboardingRing done={completedCount} total={total} />
+                </>
+              )}
             </span>
           </>
         )}
@@ -400,7 +412,9 @@ function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
 
       {tooltipOpen && collapsed && (
         <SidebarTooltip anchorRef={btnRef}>
-          <span className="text-sm font-semibold text-ink whitespace-nowrap">Getting started · {countLabel}</span>
+          <span className="text-sm font-semibold text-ink whitespace-nowrap">
+            {allDone ? 'Getting started · Complete' : `Getting started · ${countLabel}`}
+          </span>
         </SidebarTooltip>
       )}
     </>
