@@ -40,6 +40,7 @@ work established, and the prioritized road ahead.
 | Adaptive edge density | Edge Budget (strongest-first, user-tweakable 100–2000), focus fan cap, status chips, flow ribbons (opt-in), density gutters, hairline in/out indicators |
 | Zoom | CSS `zoom`-based (layout-truthful), fit-to-width, presets, redraw wiring |
 | Lineage Lens | Ego-graph overlay, grouped/searchable, re-center stack, entry points: drawer, `f`, right-click "Focus Connections", overflow chips |
+| Lens on-demand fetch | Every visited focal node's true 1-hop lineage + partner names fetched from the provider on open/walk/drill (lens-local, never mutates canvas scope); O(degree) indexed derivation; per-node loading/error/truncation narration; drill fetches an aggregate's underlying edges via the expandEdge pair query |
 | Anchor Rail (phase 1) | Selection-scoped docked partner proxies; real-DOM chip anchoring; click-to-reveal; "+N more · Open lens" |
 | Framed mode | Explicit exit chrome with Esc hint; unified entry from Frame pill and Lens "Reveal all" |
 | Column periphery | Edge scrims ("↑ N more · M connections") with named-partner hover panels, per-layer calculated, store-isolated |

@@ -10,9 +10,14 @@
  * per-row actions reveal the neighbor on the canvas or open its
  * details; the footer escalates to full Trace.
  *
- * Data comes from the same source as the drawer's LineageNeighbors
- * section (canvas visibleEdges with raw-edges fallback, via the shared
- * deriveNeighborRecords helper) so counts always agree with the canvas.
+ * Data comes from the canvas store (visibleEdges with raw-edges
+ * fallback, via the shared deriveNeighborRecords helper) MERGED with
+ * on-demand fetched lineage for every visited focal node (see
+ * useLensLineage): the lens tells the truth about the DATA SOURCE, not
+ * just about what happens to be hydrated on the canvas. Fetched edges
+ * that the store already represents — same id, same endpoint pair, or
+ * rolled up into an aggregate touching the same endpoint — are deduped
+ * so counts stay truthful at one granularity.
  *
  * Styling is dual-theme (black/* light + white/* dark overlay pairs) on
  * a SOLID elevated surface — translucent glass over a busy canvas read
@@ -28,6 +33,7 @@ import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useContainmentEdgeTypes } from '@/store/schema'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
+import { EDGE_FETCH_LIMIT } from './useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 
@@ -61,6 +67,20 @@ export interface LineageLensProps {
     loading: boolean
     records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
   } | null
+  /** On-demand fetched lineage for visited focal nodes (useLensLineage).
+   *  Lens-local only — never part of the canvas store. */
+  supplementalEdges?: LineageEdge[]
+  supplementalNodes?: Map<string, LineageNode>
+  /** Per-focal fetch status; absent id = no fetch attempted. */
+  fetchStatus?: Map<string, 'loading' | 'done' | 'error'>
+  /** Focal nodes whose fetch hit the per-direction edge cap. */
+  fetchTruncatedIds?: Set<string>
+  onRetryFetch?: (nodeId: string) => void
+  /** Underlying edges fetched per drilled aggregate (aggregate edge id). */
+  drillEdges?: Map<string, LineageEdge[]>
+  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
+  /** Fetch an aggregated row's underlying connections on drill. */
+  onDrillFetch?: (edge: LineageEdge) => void
 }
 
 export function LineageLens({
@@ -76,6 +96,14 @@ export function LineageLens({
   onLocateAll,
   onTrace,
   externalPreview,
+  supplementalEdges,
+  supplementalNodes,
+  fetchStatus,
+  fetchTruncatedIds,
+  onRetryFetch,
+  drillEdges,
+  drillStatus,
+  onDrillFetch,
 }: LineageLensProps) {
   const nodeId = lensStack[lensStack.length - 1] ?? null
 
@@ -115,13 +143,74 @@ export function LineageLens({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [nodeId, onClose, lensStack.length, onBack])
 
+  // Open gate for every canvas-scale memo below: this component is
+  // always mounted, and a closed lens must cost nothing when the
+  // (potentially very large) node/edge sets churn.
+  const lensOpen = lensStack.length > 0
+
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>()
+    if (!lensOpen) return m
+    // Fetched partners first; store nodes win (they carry full canvas data).
+    if (supplementalNodes) for (const [id, n] of supplementalNodes) m.set(id, n)
     for (const n of nodes) m.set(n.id, n)
     return m
-  }, [nodes])
+  }, [nodes, supplementalNodes, lensOpen])
 
-  const edges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+  // Store edges (canvas truth) merged with on-demand fetched edges
+  // (data-source truth). A fetched edge is redundant — and skipped —
+  // when the store already represents that connection: identical id,
+  // identical (source, target, edgeType) pair, or rolled up into an
+  // aggregate that shares an endpoint with it (the aggregate row shows
+  // it at coarser granularity, and the drill below resolves it). An
+  // aggregate between two OTHER nodes does NOT cover it — that's
+  // exactly the invisible-lineage case this merge exists to fix.
+  const edges = useMemo(() => {
+    const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
+    if (!supplementalEdges || supplementalEdges.length === 0) return base
+    const seenIds = new Set<string>()
+    const seenPairs = new Set<string>()
+    const coveringAggregates = new Map<string, Array<{ s: string; t: string }>>()
+    const pairKey = (e: LineageEdge) => `${e.source}\u0000${e.target}\u0000${(e.data?.edgeType as string) ?? ''}`
+    for (const e of base) {
+      seenIds.add(e.id)
+      seenPairs.add(pairKey(e))
+      for (const rid of e.data?.sourceEdges ?? []) {
+        const list = coveringAggregates.get(rid) ?? []
+        list.push({ s: e.source, t: e.target })
+        coveringAggregates.set(rid, list)
+      }
+    }
+    const merged = [...base]
+    for (const e of supplementalEdges) {
+      if (seenIds.has(e.id) || seenPairs.has(pairKey(e))) continue
+      const covers = coveringAggregates.get(e.id)
+      if (covers?.some(({ s, t }) => s === e.source || t === e.source || s === e.target || t === e.target)) continue
+      merged.push(e)
+    }
+    return merged
+  }, [visibleEdges, rawEdges, supplementalEdges])
+
+  // Endpoint index — one O(E) pass per edge-set change so everything
+  // downstream (hop columns, trail metadata, the classic body) works in
+  // O(degree of the node), not O(all edges) per hop. At canvas scale
+  // (100k+ edges, multi-hop walks) the naive full-array scan per hop is
+  // the difference between instant and seconds. The open gate is a
+  // boolean, so opening builds once and walking doesn't rebuild.
+  const edgesByEndpoint = useMemo(() => {
+    const m = new Map<string, LineageEdge[]>()
+    if (!lensOpen) return m
+    const add = (k: string, e: LineageEdge) => {
+      const list = m.get(k)
+      if (list) list.push(e)
+      else m.set(k, [e])
+    }
+    for (const e of edges) {
+      add(e.source, e)
+      if (e.target !== e.source) add(e.target, e)
+    }
+    return m
+  }, [edges, lensOpen])
 
   // Hop metadata — direction + edge type for each trail transition,
   // derived from loaded edges. Lets the trail read as a sentence
@@ -134,7 +223,7 @@ export function LineageLens({
       const prev = lensStack[i - 1]
       const curr = lensStack[i]
       let found: { downstream: boolean; edgeType: string } | null = null
-      for (const e of edges) {
+      for (const e of edgesByEndpoint.get(curr) ?? []) {
         if (e.source === prev && e.target === curr) {
           found = { downstream: true, edgeType: (e.data?.edgeType as string) || '' }
           break
@@ -147,7 +236,7 @@ export function LineageLens({
       meta.push(found)
     }
     return meta
-  }, [lensStack, edges])
+  }, [lensStack, edgesByEndpoint])
 
   // Deep walks middle-truncate so the endpoints (the part people care
   // about) stay visible; the gap chip expands the full trail.
@@ -166,8 +255,10 @@ export function LineageLens({
   // Frontier records per hop — the columns' contents. Walk length is
   // short and this recomputes only when the walk or edge set changes.
   const hopRecords = useMemo(
-    () => lensStack.map(id => deriveNeighborRecords(id, edges, nodeMap, containmentEdgeTypes)),
-    [lensStack, edges, nodeMap, containmentEdgeTypes],
+    // Indexed: each hop scans only its own incident edges, not the
+    // whole edge set (deriveNeighborRecords filters by endpoint anyway).
+    () => lensStack.map(id => deriveNeighborRecords(id, edgesByEndpoint.get(id) ?? [], nodeMap, containmentEdgeTypes)),
+    [lensStack, edgesByEndpoint, nodeMap, containmentEdgeTypes],
   )
 
   // ── Containment drill — refine an aggregated row to its constituent
@@ -177,8 +268,10 @@ export function LineageLens({
   const rawEdgeById = useMemo(() => {
     const m = new Map<string, LineageEdge>()
     for (const e of rawEdges) m.set(e.id, e)
+    // Fetched edges resolve drill constituents the canvas never loaded.
+    if (supplementalEdges) for (const e of supplementalEdges) { if (!m.has(e.id)) m.set(e.id, e) }
     return m
-  }, [rawEdges])
+  }, [rawEdges, supplementalEdges])
   const [drilledRows, setDrilledRows] = useState<Set<string>>(() => new Set())
   const toggleDrill = (key: string) => setDrilledRows(prev => {
     const next = new Set(prev)
@@ -199,9 +292,9 @@ export function LineageLens({
 
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
-      ? deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes)
+      ? deriveNeighborRecords(nodeId, edgesByEndpoint.get(nodeId) ?? [], nodeMap, containmentEdgeTypes)
       : { incomingRecords: [], outgoingRecords: [] }),
-    [nodeId, edges, nodeMap, containmentEdgeTypes],
+    [nodeId, edgesByEndpoint, nodeMap, containmentEdgeTypes],
   )
 
   if (!nodeId) return null
@@ -210,6 +303,7 @@ export function LineageLens({
   const focalLabel = labelOf(nodeId, focalNode)
   const focalType = (focalNode?.data?.type as string) ?? 'entity'
   const focalColor = generateColorFromType(focalType)
+  const focalFetch = fetchStatus?.get(nodeId)
 
   const q = query.trim().toLowerCase()
   const filterFn = (r: NeighborRecord) =>
@@ -251,10 +345,15 @@ export function LineageLens({
             </div>
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
-              <p className="text-[10.5px] text-ink-muted leading-tight">
-                {lensStack.length > 1
-                  ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
-                  : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}`}
+              <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
+                <span>
+                  {lensStack.length > 1
+                    ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
+                    : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}`}
+                </span>
+                {focalFetch === 'loading' && (
+                  <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
+                )}
               </p>
             </div>
             {lensStack.length > 1 && (
@@ -401,6 +500,31 @@ export function LineageLens({
             </div>
           )}
 
+          {/* ── Fetch narration — the lens fetches each visited node's
+              lineage from the data source on demand; a failed or capped
+              fetch is SAID, never silently rendered as "no connections". ── */}
+          {focalFetch === 'error' && (
+            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
+              <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+              <span>Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s already loaded on the canvas.</span>
+              {onRetryFetch && (
+                <button
+                  type="button"
+                  onClick={() => onRetryFetch(nodeId)}
+                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+          {focalFetch === 'done' && fetchTruncatedIds?.has(nodeId) && (
+            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
+              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
+              <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source. Use the filter to narrow.</span>
+            </div>
+          )}
+
           {/* ── Walk body (Miller columns) — one column per hop, oldest
               on the left, the current frontier widest on the right. Each
               column lists its hop's frontier in the LOCKED direction;
@@ -427,6 +551,7 @@ export function LineageLens({
                   .slice(0, 200)
                 const hopLabel = labelOf(hopId, nodeMap.get(hopId))
                 const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
+                const hopFetch = fetchStatus?.get(hopId)
                 return (
                   <motion.div
                     key={`walk-col-${hopId}-${i}`}
@@ -440,7 +565,10 @@ export function LineageLens({
                     <div className="flex items-center gap-1.5 px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.06]">
                       <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: hopColor }} />
                       <span className="truncate text-[11.5px] font-semibold text-ink">{hopLabel}</span>
-                      <span className="ml-auto flex-shrink-0 text-[10px] tabular-nums text-ink-muted/70">
+                      <span className="ml-auto flex-shrink-0 flex items-center gap-1 text-[10px] tabular-nums text-ink-muted/70">
+                        {hopFetch === 'loading' && (
+                          <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
+                        )}
                         {byNeighbor.size}
                       </span>
                     </div>
@@ -454,12 +582,21 @@ export function LineageLens({
                         const canDrill = !!aggData?.isAggregated
                           && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
                         const drilled = canDrill && drilledRows.has(drillKey)
-                        const constituents = drilled
-                          ? (aggData?.sourceEdges ?? []).map(eid => rawEdgeById.get(eid)).filter((e): e is LineageEdge => !!e).slice(0, 50)
-                          : []
-                        const missing = drilled
-                          ? Math.max(0, (aggData?.sourceEdgeCount ?? 0) - constituents.length)
-                          : 0
+                        // Constituents = locally loaded raw edges ∪ edges
+                        // fetched on demand for this drill, deduped by id.
+                        const drillState = drilled ? drillStatus?.get(rec.edge.id) : undefined
+                        let constituents: LineageEdge[] = []
+                        let missing = 0
+                        if (drilled) {
+                          const local = (aggData?.sourceEdges ?? [])
+                            .map(eid => rawEdgeById.get(eid))
+                            .filter((e): e is LineageEdge => !!e)
+                          const seenConstituent = new Set(local.map(e => e.id))
+                          const fetched = (drillEdges?.get(rec.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
+                          const all = [...local, ...fetched]
+                          constituents = all.slice(0, 50)
+                          missing = Math.max(0, Math.max(aggData?.sourceEdgeCount ?? 0, all.length) - constituents.length)
+                        }
                         return (
                           <div key={rid}>
                             <div className="flex items-stretch">
@@ -483,7 +620,19 @@ export function LineageLens({
                               {canDrill && (
                                 <button
                                   type="button"
-                                  onClick={() => toggleDrill(drillKey)}
+                                  onClick={() => {
+                                    // Opening a drill with incomplete local
+                                    // coverage fetches the underlying edges
+                                    // on demand (idempotent per aggregate).
+                                    if (!drilledRows.has(drillKey) && onDrillFetch && !drillEdges?.has(rec.edge.id)) {
+                                      let localCount = 0
+                                      for (const eid of aggData?.sourceEdges ?? []) {
+                                        if (rawEdgeById.has(eid)) localCount++
+                                      }
+                                      if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(rec.edge)
+                                    }
+                                    toggleDrill(drillKey)
+                                  }}
                                   title={drilled
                                     ? 'Collapse back to the rolled-up connection'
                                     : `Refine — see the ${(aggData?.sourceEdgeCount ?? 0).toLocaleString()} underlying connection${(aggData?.sourceEdgeCount ?? 0) === 1 ? '' : 's'} this rolls up`}
@@ -513,14 +662,37 @@ export function LineageLens({
                                     </div>
                                   )
                                 })}
-                                {constituents.length === 0 && (
+                                {drillState === 'loading' && (
+                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
+                                    <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
+                                    Fetching underlying connections…
+                                  </div>
+                                )}
+                                {drillState === 'error' && (
+                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+                                    <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                    <span>Couldn&apos;t fetch the underlying connections.</span>
+                                    {onDrillFetch && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onDrillFetch(rec.edge)}
+                                        className="font-semibold hover:underline"
+                                      >
+                                        Retry
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                {constituents.length === 0 && drillState !== 'loading' && drillState !== 'error' && (
                                   <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
-                                    Constituent connections aren&apos;t loaded — drill this edge on the canvas to fetch them.
+                                    {drillState === 'done'
+                                      ? 'No underlying connections found between these entities.'
+                                      : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
                                   </p>
                                 )}
-                                {missing > 0 && constituents.length > 0 && (
+                                {missing > 0 && constituents.length > 0 && drillState !== 'loading' && (
                                   <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                                    +{missing.toLocaleString()} more not loaded
+                                    +{missing.toLocaleString()} more (showing the first {constituents.length})
                                   </p>
                                 )}
                               </div>
@@ -529,10 +701,20 @@ export function LineageLens({
                         )
                       })}
                       {byNeighbor.size === 0 && (
-                        <p className="px-3 py-3 text-[11px] text-ink-muted/70 italic leading-snug">
-                          No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections loaded here —
-                          the walk ends, or flip the direction.
-                        </p>
+                        hopFetch === 'loading' ? (
+                          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-ink-muted/70">
+                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+                            Fetching lineage…
+                          </div>
+                        ) : (
+                          <p className="px-3 py-3 text-[11px] text-ink-muted/70 italic leading-snug">
+                            {hopFetch === 'done'
+                              // A completed fetch makes this a claim about the
+                              // data source, not about what happens to be loaded.
+                              ? <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections in the data source — the walk ends here, or flip the direction.</>
+                              : <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections loaded here — the walk ends, or flip the direction.</>}
+                          </p>
+                        )
                       )}
                     </div>
                   </motion.div>
@@ -547,6 +729,7 @@ export function LineageLens({
               records={incomingRecords.filter(filterFn)}
               totalCount={incomingRecords.length}
               direction="incoming"
+              fetchState={focalFetch}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -589,6 +772,7 @@ export function LineageLens({
               records={outgoingRecords.filter(filterFn)}
               totalCount={outgoingRecords.length}
               direction="outgoing"
+              fetchState={focalFetch}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -713,6 +897,7 @@ function NeighborColumn({
   records,
   totalCount,
   direction,
+  fetchState,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -722,6 +907,9 @@ function NeighborColumn({
   records: NeighborRecord[]
   totalCount: number
   direction: 'incoming' | 'outgoing'
+  /** On-demand fetch status for the focal node — keeps an in-flight
+   *  fetch from reading as "no connections". */
+  fetchState?: 'loading' | 'done' | 'error'
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -764,14 +952,26 @@ function NeighborColumn({
       </div>
       <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
         {records.length === 0 && (
-          <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
-            <LucideIcons.CircleSlash className="w-5 h-5 text-ink-muted/40" />
-            <p className="text-[11px] text-ink-muted/70 leading-snug">
-              {totalCount === 0
-                ? `No ${isIn ? 'upstream sources' : 'downstream consumers'} on this canvas`
-                : 'No matches for this filter'}
-            </p>
-          </div>
+          totalCount === 0 && fetchState === 'loading' ? (
+            <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
+              <LucideIcons.Loader2 className="w-5 h-5 animate-spin text-accent-lineage/60" />
+              <p className="text-[11px] text-ink-muted/70 leading-snug">
+                Fetching {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
+              <LucideIcons.CircleSlash className="w-5 h-5 text-ink-muted/40" />
+              <p className="text-[11px] text-ink-muted/70 leading-snug">
+                {totalCount === 0
+                  // Post-fetch this is a data-source claim, not a canvas one.
+                  ? fetchState === 'done'
+                    ? `No ${isIn ? 'upstream sources' : 'downstream consumers'} in the data source`
+                    : `No ${isIn ? 'upstream sources' : 'downstream consumers'} on this canvas`
+                  : 'No matches for this filter'}
+              </p>
+            </div>
+          )
         )}
         {groups.map(([type, rows]) => {
           const unloaded = type === 'not loaded'

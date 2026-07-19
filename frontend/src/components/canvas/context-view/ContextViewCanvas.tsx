@@ -92,6 +92,7 @@ import { LayerColumn } from './LayerColumn'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
+import { useLensLineage } from './useLensLineage'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
@@ -2644,6 +2645,10 @@ export function ContextViewCanvas({
   const lensWalkTo = useCallback((index: number, nodeId: string) =>
     setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
   const lensClose = useCallback(() => setLensStack([]), [])
+  // On-demand lineage for every visited focal node — the lens tells the
+  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
+  // Lens-local (never written to the canvas store), cached per session.
+  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -3389,6 +3394,14 @@ export function ContextViewCanvas({
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
           lensStack={lensStack}
+          supplementalEdges={lensLineage.supplementalEdges}
+          supplementalNodes={lensLineage.supplementalNodes}
+          fetchStatus={lensLineage.status}
+          fetchTruncatedIds={lensLineage.truncatedIds}
+          onRetryFetch={lensLineage.retry}
+          drillEdges={lensLineage.drillEdges}
+          drillStatus={lensLineage.drillStatus}
+          onDrillFetch={lensLineage.fetchDrill}
           externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
