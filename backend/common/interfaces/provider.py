@@ -143,7 +143,11 @@ class GraphDataProvider(ABC):
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> List[GraphNode]:
+        """`sort_direction` ('asc' | 'desc') orders on `sort_property` server-side.
+        A cursor is direction-bound: providers reject a cursor minted under the
+        other direction (ValueError → 400 at the endpoint)."""
         pass
 
     async def get_children_with_edges(
@@ -157,6 +161,7 @@ class GraphDataProvider(ABC):
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         """Get children with containment and optionally lineage edges in one round-trip.
 
@@ -168,6 +173,7 @@ class GraphDataProvider(ABC):
             parent_urn, edge_types=edge_types,
             search_query=search_query, offset=offset, limit=limit,
             sort_property=sort_property, cursor=cursor,
+            sort_direction=sort_direction,
         )
         child_urns = [c.urn for c in children]
         all_urns = [parent_urn] + child_urns
@@ -215,6 +221,7 @@ class GraphDataProvider(ABC):
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         """Return instances that have no incoming containment edge.
 
@@ -408,7 +415,17 @@ class GraphDataProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+    async def get_nodes_by_layer(
+        self,
+        layer_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        sort_direction: str = "asc",
+        cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
+        """Nodes whose `layerAssignment` equals `layer_id`, ordered by
+        (displayName, urn) in `sort_direction`. `cursor` (keyset, optional)
+        takes precedence over `offset` when supported by the provider."""
         pass
 
     # ==========================================

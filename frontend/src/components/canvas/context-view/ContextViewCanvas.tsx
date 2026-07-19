@@ -76,7 +76,7 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-import type { ViewLayerConfig, DisplayRuleConfig } from '@/types/schema'
+import type { ViewLayerConfig, DisplayRuleConfig, LayerNodeSortMode } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -715,7 +715,11 @@ export function ContextViewCanvas({
   const currentLayout = useCallback((): NormalizedReferenceLayout => {
     const view = useSchemaStore.getState().getActiveView()
     const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
-    return { layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers, assignments: norm.assignments }
+    return {
+      layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers,
+      assignments: norm.assignments,
+      ...(norm.defaultNodeSortMode ? { defaultNodeSortMode: norm.defaultNodeSortMode } : {}),
+    }
   }, [])
 
   const persistReferenceLayout = useCallback((next: NormalizedReferenceLayout) => {
@@ -725,10 +729,15 @@ export function ContextViewCanvas({
     // implicitly: an open view stays 'all' (assigns render via the canonical map, not the scope),
     // a curated view stays 'curated'. `view` here is pre-write, so its layout is the pre-gesture one.
     const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
-    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes). Mirror
-    // the pinned scope into content.entityScope locally so it's explicit for the NEXT gesture (the
-    // durable updateViewLayout writes it too).
-    const referenceLayout = { layers: next.layers, assignments: next.assignments }
+    // Canonical-clean: layers + assignments (+ the defaultNodeSortMode side-field, which must ride the
+    // wholesale write or it would be wiped by every gesture). Mirror the pinned scope into
+    // content.entityScope locally so it's explicit for the NEXT gesture (the durable updateViewLayout
+    // writes it too).
+    const referenceLayout = {
+      layers: next.layers,
+      assignments: next.assignments,
+      ...(next.defaultNodeSortMode ? { defaultNodeSortMode: next.defaultNodeSortMode } : {}),
+    }
     useSchemaStore.getState().updateView(view.id, {
       layout: { ...(view.layout ?? {}), referenceLayout },
       content: { ...view.content, entityScope },
@@ -1410,6 +1419,17 @@ export function ContextViewCanvas({
     [activeView?.content, activeReferenceLayout],
   )
 
+  // ─── Node sort modes ────────────────────────────────────────────────────────
+  // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
+  // overrides (both in referenceLayout). Ephemeral state: session-local asc/desc
+  // overrides so read-only viewers can re-sort a column without persisting
+  // anything. Reset on view switch.
+  const viewDefaultSortMode = activeReferenceLayout.defaultNodeSortMode ?? 'alpha-asc'
+  const [sortOverrides, setSortOverrides] = useState<ReadonlyMap<string, 'alpha-asc' | 'alpha-desc'>>(
+    () => new Map(),
+  )
+  useEffect(() => { setSortOverrides(new Map()) }, [activeView?.id])
+
   // Fit-to-width: intrinsic width from state (scrollWidth lies under the
   // 100/zoom% compensation). Column collapse state is LayerColumn-local,
   // so v1 assumes all columns expanded — a safe over-estimate that only
@@ -1446,7 +1466,24 @@ export function ContextViewCanvas({
     nodeMap, childMap, parentMap,
     assignments: activeReferenceLayout.assignments,
     entityScope: activeEntityScope,
+    defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
+    sortOverrides,
   })
+
+  // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
+  // sort handlers keep a stable identity and LayerColumn's memo holds).
+  const nodesByLayerRef = useRef(nodesByLayer)
+  nodesByLayerRef.current = nodesByLayer
+
+  // Live context for resolving a parent's effective child-sort direction inside
+  // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
+  // nodeLayerMap would re-mint it every canvas mutation and bust LayerColumn's memo).
+  const sortDirectionCtxRef = useRef({
+    nodeLayerMap, layers: sortedLayers, overrides: sortOverrides, dflt: viewDefaultSortMode,
+  })
+  sortDirectionCtxRef.current = {
+    nodeLayerMap, layers: sortedLayers, overrides: sortOverrides, dflt: viewDefaultSortMode,
+  }
 
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
   // ref declaration near the interactions call). Read lazily by onNodeCopied /
@@ -1597,7 +1634,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'delete' | 'reorder',
+    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -1669,6 +1706,58 @@ export function ContextViewCanvas({
     stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
+  const sortModeLabel = (mode: 'alpha-asc' | 'alpha-desc') => (mode === 'alpha-desc' ? 'Z → A' : 'A → Z')
+
+  // Set a layer's node sort mode. Draft → persisted on the layer config (staged, undoable).
+  // Read-only → session-local override (asc/desc only; the menu disables Custom there).
+  const handleSetLayerSortMode = useCallback((layerId: string, mode: LayerNodeSortMode | null) => {
+    if (!isDraft) {
+      if (mode === 'custom') return
+      setSortOverrides(prev => {
+        const next = new Map(prev)
+        if (mode === null) next.delete(layerId)
+        else next.set(layerId, mode)
+        return next
+      })
+      return
+    }
+    // Draft: drop any ephemeral override so the persisted mode is what renders.
+    setSortOverrides(prev => {
+      if (!prev.has(layerId)) return prev
+      const next = new Map(prev)
+      next.delete(layerId)
+      return next
+    })
+    const before = currentLayout()
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    // Custom seeds orderKeys from the column's CURRENT visual order (full, un-traced roots).
+    const seedOrder = mode === 'custom'
+      ? (nodesByLayerRef.current.get(layerId) ?? []).map(n => n.id)
+      : undefined
+    const after = layerOps.setLayerNodeSortMode(before, layerId, mode, seedOrder)
+    if (after === before) return
+    persistReferenceLayout(after)
+    const label = mode === null
+      ? `View default (${sortModeLabel(before.defaultNodeSortMode ?? 'alpha-asc')})`
+      : mode === 'custom' ? 'Custom order' : sortModeLabel(mode)
+    stageLayerChange(`layer-sort:${layerId}`, before, after, 'sort', `Sort “${layer.name}”: ${label}`)
+  }, [isDraft, currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // "Apply to all layers": promote this column's asc/desc mode to the view default and
+  // clear other columns' asc/desc overrides (custom layers keep their arrangement).
+  const handleApplySortToView = useCallback((layerId: string) => {
+    const before = currentLayout()
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    const effective = layer.nodeSortMode ?? before.defaultNodeSortMode ?? 'alpha-asc'
+    if (effective === 'custom') return
+    const after = layerOps.setViewDefaultSortMode(before, effective)
+    setSortOverrides(prev => (prev.size > 0 ? new Map() : prev))
+    persistReferenceLayout(after)
+    stageLayerChange('view-sort', before, after, 'sort', `Default sort: ${sortModeLabel(effective)} (all layers)`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
     // The builder store's open() runs the ensureDraftOpen guard itself.
@@ -1677,6 +1766,23 @@ export function ContextViewCanvas({
 
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
+
+  // Direction-aware child loading: a parent's children load server-sorted per
+  // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
+  // their children still load asc). Resolved via refs so this wrapper keeps
+  // one identity for LayerColumn's memo.
+  const layerSortDirectionFor = useCallback((nodeId: string): 'asc' | 'desc' => {
+    const ctx = sortDirectionCtxRef.current
+    const layerId = ctx.nodeLayerMap.get(nodeId)
+    if (!layerId) return 'asc'
+    const layer = ctx.layers.find(l => l.id === layerId)
+    const mode = ctx.overrides.get(layerId) ?? layer?.nodeSortMode ?? ctx.dflt
+    return mode === 'alpha-desc' ? 'desc' : 'asc'
+  }, [])
+  const loadChildrenSorted = useCallback(
+    (parentId: string) => loadChildren(parentId, { sortDirection: layerSortDirectionFor(parentId) }),
+    [loadChildren, layerSortDirectionFor],
+  )
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -1761,9 +1867,55 @@ export function ContextViewCanvas({
       if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
 
       autoLoadedFirstPageRef.current.add(nodeId)
-      void loadChildren(nodeId)
+      void loadChildrenSorted(nodeId)
     }
-  }, [expandedNodes, displayMap, childMap, loadingNodes, failedNodes, loadChildren, trace.isTracing])
+  }, [expandedNodes, displayMap, childMap, loadingNodes, failedNodes, loadChildrenSorted, trace.isTracing])
+
+  // Direction-flip refetch policy: when a layer's effective asc/desc flips,
+  // pages already loaded for PARTIALLY-loaded parents in that layer were
+  // fetched under the old direction — re-sorting them client-side would show
+  // the wrong window (the alphabetical head relabeled as the tail). Drop those
+  // loaded subtrees (sparing unsaved optimistic creates) so the auto-load
+  // effect above refetches page 1 under the new direction; FULLY-loaded
+  // parents keep their rows and simply re-sort in useLayerAssignment.
+  const prevLayerDirectionsRef = useRef<Map<string, 'asc' | 'desc'>>(new Map())
+  useEffect(() => {
+    const dirByLayer = new Map<string, 'asc' | 'desc'>()
+    sortedLayers.forEach(l => {
+      const mode = sortOverrides.get(l.id) ?? l.nodeSortMode ?? viewDefaultSortMode
+      dirByLayer.set(l.id, mode === 'alpha-desc' ? 'desc' : 'asc')
+    })
+    const prev = prevLayerDirectionsRef.current
+    prevLayerDirectionsRef.current = dirByLayer
+    const flipped = new Set(
+      [...dirByLayer].filter(([id, d]) => prev.has(id) && prev.get(id) !== d).map(([id]) => id),
+    )
+    if (flipped.size === 0) return
+
+    const dropIds = new Set<string>()
+    const refetchParents: string[] = []
+    for (const [nodeId, layerId] of nodeLayerMap) {
+      if (!flipped.has(layerId) || !expandedNodes.has(nodeId)) continue
+      const kids = childMap.get(nodeId) ?? []
+      if (kids.length === 0) continue
+      const childCount = (displayMap.get(nodeId)?.data?.childCount as number) ?? 0
+      if (childCount > 0 && kids.length >= childCount) continue // fully loaded — exact client re-sort
+      refetchParents.push(nodeId)
+      const stack = [...kids]
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        if ((displayMap.get(id)?.data as Record<string, unknown> | undefined)?.isPending === 'create') continue
+        dropIds.add(id)
+        for (const childId of childMap.get(id) ?? []) stack.push(childId)
+      }
+    }
+    if (dropIds.size === 0) return
+    useCanvasStore.getState().removeNodes([...dropIds])
+    // Re-arm the auto-loader for the affected parents so their first page
+    // refetches immediately under the new direction.
+    for (const parentId of refetchParents) autoLoadedFirstPageRef.current.delete(parentId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedLayers, sortOverrides, viewDefaultSortMode])
 
   // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
   // expands collapsed ancestors (lazy-loading from the backend if needed),
@@ -1773,7 +1925,7 @@ export function ContextViewCanvas({
   const revealAndFocus = useRevealNode({
     parentMap,
     setExpandedNodes,
-    loadChildren,
+    loadChildren: loadChildrenSorted,
     provider,
     focus: (id: string) => {
       const el = document.getElementById(`layer-node-${id}`)
@@ -1850,7 +2002,7 @@ export function ContextViewCanvas({
   // coexist with the entity-drawer reveal hook above).
   const revealSearchHit = useRevealSearchHit({
     setExpandedNodes,
-    loadChildren,
+    loadChildren: loadChildrenSorted,
     provider,
     scrollIntoView: scrollHitIntoView,
   })
@@ -2213,7 +2365,7 @@ export function ContextViewCanvas({
         // density-tier renderer + browse-mode bundling now absorb the
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
-        await loadChildren(nodeId)
+        await loadChildrenSorted(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
@@ -2382,7 +2534,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
 
 
 
@@ -3440,7 +3592,7 @@ export function ContextViewCanvas({
                 isHighlightActive={isHighlightActive}
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
-                onLoadMore={loadChildren}
+                onLoadMore={loadChildrenSorted}
                 onSearchChildren={searchChildren}
                 isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
@@ -3451,6 +3603,14 @@ export function ContextViewCanvas({
                 onRenameLayer={isDraft ? renameLayer : undefined}
                 onDeleteLayer={isDraft ? deleteLayer : undefined}
                 onReorderLayer={isDraft ? reorderLayer : undefined}
+                // Node sorting — the menu is available to everyone (viewers get a
+                // session-local asc/desc); persisted actions are draft-gated inside.
+                sortMode={sortOverrides.get(layer.id) ?? layer.nodeSortMode ?? viewDefaultSortMode}
+                sortIsOverride={sortOverrides.has(layer.id) || layer.nodeSortMode != null}
+                viewDefaultSortMode={viewDefaultSortMode}
+                canPersistSort={isDraft}
+                onSetSortMode={handleSetLayerSortMode}
+                onApplySortToView={handleApplySortToView}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}

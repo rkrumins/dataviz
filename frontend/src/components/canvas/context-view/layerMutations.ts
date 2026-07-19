@@ -7,7 +7,9 @@
  * where off-by-ones hide. The handlers in ContextViewCanvas (addLayer/renameLayer/deleteLayer/
  * reorderLayer) are thin wrappers that mint ids/persist; all the list logic lives here.
  */
-import type { ViewLayerConfig } from '@/types/schema'
+import type { LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import { compareOrderKeys, generateNKeysBetween } from '@/utils/orderKeys'
 
 const renumber = (layers: ViewLayerConfig[]): ViewLayerConfig[] =>
   layers.map((l, i) => (l.order === i ? l : { ...l, order: i }))
@@ -45,4 +47,70 @@ export function reorderLayer(layers: ViewLayerConfig[], draggedId: string, targe
   const targetPos = without.findIndex((l) => l.id === targetId)
   const insertAt = fromIdx < toIdx ? targetPos + 1 : targetPos
   return renumber([...without.slice(0, insertAt), dragged, ...without.slice(insertAt)])
+}
+
+/**
+ * Set (or clear, with `mode === null`) a layer's `nodeSortMode` override. Operates on the full
+ * `NormalizedReferenceLayout` because entering 'custom' also SEEDS `orderKey`s: the layer's existing
+ * UNKEYED assignment entries get fractional keys following `seedOrder` (the column's current visual
+ * root ids), appended after the largest already-existing key so re-entering custom is idempotent and
+ * never reshuffles keys a user already arranged. Leaving custom keeps the keys — they are inert in
+ * alpha modes, so flipping back restores the manual arrangement. No-op returns the same layout.
+ */
+export function setLayerNodeSortMode(
+  layout: NormalizedReferenceLayout,
+  layerId: string,
+  mode: LayerNodeSortMode | null,
+  seedOrder?: string[],
+): NormalizedReferenceLayout {
+  const target = layout.layers.find((l) => l.id === layerId)
+  if (!target) return layout
+  const modeUnchanged = mode === null ? target.nodeSortMode === undefined : target.nodeSortMode === mode
+  if (modeUnchanged && mode !== 'custom') return layout // re-selecting 'custom' may still need seeding
+  const layers = layout.layers.map((l) => {
+    if (l.id !== layerId) return l
+    if (mode === null) {
+      const { nodeSortMode: _drop, ...rest } = l
+      return rest as ViewLayerConfig
+    }
+    return { ...l, nodeSortMode: mode }
+  })
+
+  let assignments = layout.assignments
+  if (mode === 'custom' && seedOrder && seedOrder.length > 0) {
+    const existingKeys = Object.values(layout.assignments)
+      .filter((e) => e.layerId === layerId && e.orderKey)
+      .map((e) => e.orderKey as string)
+      .sort(compareOrderKeys)
+    const last = existingKeys.length > 0 ? existingKeys[existingKeys.length - 1] : null
+    const toSeed = seedOrder.filter((urn) => {
+      const entry = layout.assignments[urn]
+      return entry?.layerId === layerId && !entry.orderKey
+    })
+    if (toSeed.length > 0) {
+      const keys = generateNKeysBetween(last, null, toSeed.length)
+      assignments = { ...layout.assignments }
+      toSeed.forEach((urn, i) => {
+        assignments[urn] = { ...assignments[urn], orderKey: keys[i] }
+      })
+    }
+  }
+  return { ...layout, layers, assignments }
+}
+
+/**
+ * Set the view-wide `defaultNodeSortMode` and clear every layer's asc/desc override so all columns
+ * follow it ("Apply to all layers"). Layers in 'custom' mode keep their override — a manual
+ * arrangement is a deliberate per-layer choice a view-wide default must not destroy.
+ */
+export function setViewDefaultSortMode(
+  layout: NormalizedReferenceLayout,
+  mode: 'alpha-asc' | 'alpha-desc',
+): NormalizedReferenceLayout {
+  const layers = layout.layers.map((l) => {
+    if (!l.nodeSortMode || l.nodeSortMode === 'custom') return l
+    const { nodeSortMode: _drop, ...rest } = l
+    return rest as ViewLayerConfig
+  })
+  return { ...layout, layers, defaultNodeSortMode: mode }
 }

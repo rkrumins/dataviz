@@ -20,6 +20,7 @@ from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
     merge_display_rules_3way,
+    merge_default_sort_3way,
 )
 
 
@@ -370,3 +371,88 @@ class TestDisplayRulesMerge:
         merged["displayRules"] = rules
         assert _ids(merged) == ["l1", "l2"]
         assert merged["displayRules"] == _dr("a", "draft")
+
+
+class TestNodeOrderingFields:
+    """`layer.nodeSortMode` / `assignment.orderKey` ride the whole-value keyed
+    merge; the scalar `defaultNodeSortMode` side-field has its own 3-way merge
+    (`merge_default_sort_3way`), composed by promote_overlay like displayRules."""
+
+    def test_draft_sort_mode_change_wins_over_published(self):
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0, nodeSortMode="alpha-desc")])
+        d = _layout(layers=[_layer("l1", "A", 0, nodeSortMode="custom")])
+        result = merge_layout_3way(f, p, d)
+        assert result["layers"][0]["nodeSortMode"] == "custom"
+
+    def test_untouched_draft_takes_published_sort_mode(self):
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0, nodeSortMode="alpha-desc")])
+        d = _layout(layers=[_layer("l1", "A", 0)])
+        result = merge_layout_3way(f, p, d)
+        assert result["layers"][0]["nodeSortMode"] == "alpha-desc"
+
+    def test_draft_order_key_change_wins_over_published(self):
+        f = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1", orderKey="a0")})
+        p = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1", orderKey="a2")})
+        d = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1", orderKey="a1")})
+        result = merge_layout_3way(f, p, d)
+        assert result["assignments"]["urn:x"]["orderKey"] == "a1"
+
+    def test_untouched_draft_takes_published_new_order_key(self):
+        f = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1")})
+        p = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1", orderKey="a3")})
+        d = _layout(layers=[_layer("l1", "A", 0)],
+                    assignments={"urn:x": _assign("l1")})
+        result = merge_layout_3way(f, p, d)
+        assert result["assignments"]["urn:x"]["orderKey"] == "a3"
+
+    def test_orphan_prune_drops_keyed_assignment_to_deleted_layer(self):
+        # Draft deletes layer l2; a published-side keyed assignment onto it is
+        # pruned by the referential-integrity pass, orderKey notwithstanding.
+        f = _layout(layers=[_layer("l1", "A", 0), _layer("l2", "B", 1)])
+        p = _layout(layers=[_layer("l1", "A", 0), _layer("l2", "B", 1)],
+                    assignments={"urn:x": _assign("l2", orderKey="a0")})
+        d = _layout(layers=[_layer("l1", "A", 0)])
+        result = merge_layout_3way(f, p, d)
+        assert "urn:x" not in result["assignments"]
+
+
+class TestMergeDefaultSort3Way:
+    def test_draft_changed_wins_over_published(self):
+        f = {"layers": [], "assignments": {}}
+        p = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-desc"}
+        d = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-asc"}
+        assert merge_default_sort_3way(f, p, d) == "alpha-asc"
+
+    def test_draft_untouched_takes_published_since_fork_change(self):
+        f = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-asc"}
+        p = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-desc"}
+        d = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-asc"}
+        assert merge_default_sort_3way(f, p, d) == "alpha-desc"
+
+    def test_draft_cleared_removes_it(self):
+        f = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-desc"}
+        p = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-desc"}
+        d = {"layers": [], "assignments": {}}
+        assert merge_default_sort_3way(f, p, d) is None
+
+    def test_all_absent_is_none(self):
+        f = {"layers": [], "assignments": {}}
+        assert merge_default_sort_3way(f, f, f) is None
+
+    def test_malformed_value_treated_as_absent(self):
+        f = {"layers": [], "assignments": {}, "defaultNodeSortMode": 42}
+        assert merge_default_sort_3way(f, f, f) is None
+
+    def test_full_config_side_reads_nested_value_not_wiped(self):
+        bare = {"layers": [], "assignments": {}, "defaultNodeSortMode": "alpha-desc"}
+        f = {"layers": [], "assignments": {}}
+        p = {"layers": [], "assignments": {}}
+        d = {"layout": {"referenceLayout": bare}, "content": {}}
+        assert merge_default_sort_3way(f, p, d) == "alpha-desc"

@@ -6,12 +6,23 @@
  * descendants/nesting resolve live via ontology containment elsewhere.
  *
  * Mirrors backend/app/services/layout_config.py — keep the two in sync.
+ *
+ * Node-ordering fields pass through untouched: assignment entries are copied
+ * verbatim (so `orderKey` survives) and layer objects keep unknown keys (so
+ * `nodeSortMode` survives); the scalar `defaultNodeSortMode` side-field is
+ * caller-managed on the raw layout, like `displayRules`.
  */
 import type { LayerAssignmentEntry, LogicalNodeConfig, ViewContentConfig, ViewLayerConfig } from '@/types/schema'
 
 export interface NormalizedReferenceLayout {
     layers: ViewLayerConfig[]
     assignments: Record<string, LayerAssignmentEntry>
+    /**
+     * View-wide default node sort for layers without their own `nodeSortMode`
+     * ('alpha-asc' when absent). Carried through normalization so the canvas's
+     * persist path (which writes the normalized shape wholesale) never wipes it.
+     */
+    defaultNodeSortMode?: 'alpha-asc' | 'alpha-desc'
 }
 
 const GLOB_CHARS = /[*?]/
@@ -62,7 +73,7 @@ export function normalizeReferenceLayout(raw: unknown): NormalizedReferenceLayou
     if (!raw || typeof raw !== 'object') {
         return { layers: [], assignments: {} }
     }
-    const source = raw as { layers?: unknown; assignments?: unknown }
+    const source = raw as { layers?: unknown; assignments?: unknown; defaultNodeSortMode?: unknown }
     const assignments: Record<string, LayerAssignmentEntry> = {}
 
     if (source.assignments && typeof source.assignments === 'object') {
@@ -108,7 +119,11 @@ export function normalizeReferenceLayout(raw: unknown): NormalizedReferenceLayou
         return rest as ViewLayerConfig
     })
 
-    return { layers, assignments }
+    const defaultNodeSortMode =
+        source.defaultNodeSortMode === 'alpha-asc' || source.defaultNodeSortMode === 'alpha-desc'
+            ? source.defaultNodeSortMode
+            : undefined
+    return defaultNodeSortMode ? { layers, assignments, defaultNodeSortMode } : { layers, assignments }
 }
 
 /**

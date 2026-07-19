@@ -576,6 +576,9 @@ export interface TopLevelNodesQuery {
     cursor?: string | null
     /** When true (default), each returned node has `childCount` populated. */
     includeChildCount?: boolean
+    /** Server-side sort direction on displayName (default 'asc'). Cursors are
+     *  direction-bound — never replay a cursor with the other direction. */
+    sortDirection?: 'asc' | 'desc'
 }
 
 export interface TopLevelNodesResult {
@@ -668,6 +671,7 @@ export interface GraphDataProvider {
             limit?: number
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
+            sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
         }
     ): Promise<GraphNode[]>
 
@@ -686,6 +690,7 @@ export interface GraphDataProvider {
             includeLineageEdges?: boolean
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
+            sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
         }
     ): Promise<{
         children: GraphNode[]

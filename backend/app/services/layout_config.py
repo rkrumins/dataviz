@@ -7,6 +7,11 @@ descendants/nesting resolve live via ontology containment elsewhere.
 
 Mirrors frontend/src/utils/referenceLayout.ts — keep the two in sync.
 
+Node-ordering fields pass through untouched: assignment entries are copied
+verbatim (so ``orderKey`` survives) and layer dicts keep unknown keys (so
+``nodeSortMode`` survives); the scalar ``defaultNodeSortMode`` side-field is
+caller-managed on the raw layout, like ``displayRules``.
+
 Calling convention: both ``parse_reference_layout`` and
 ``derive_entity_scope`` take the FULL view config dict, i.e. whatever
 ``json.loads(ViewORM.config)`` returns (``{"content": {...}, "layout":

@@ -50,8 +50,10 @@ const CHILD_LOAD_CONCURRENCY = (() => {
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
 interface LoadChildrenOptions {
-    // Reserved for future use. The useAllSchemaTypes option was removed —
-    // the Entity Browser now uses the dedicated useEntityBrowser hook.
+    /** Server-side sort direction for the child page (default 'asc').
+     *  All pages of one parent must load under ONE direction — the canvas
+     *  drops partially-loaded children when a layer's direction flips. */
+    sortDirection?: 'asc' | 'desc'
 }
 
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
@@ -775,7 +777,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
-    const loadChildren = useCallback(async (parentId: string, _options?: LoadChildrenOptions) => {
+    const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
         const { nodes, edges, addGraph } = useCanvasStore.getState()
 
         // ── Handle root loading (empty parentId) ────────────────────
@@ -873,6 +875,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     limit: CHILDREN_PAGE_SIZE,
                     offset: currentChildrenCount,
                     includeLineageEdges: true,
+                    sortDirection: options?.sortDirection,
                 })
 
                 // User collapsed mid-load — drop the result silently

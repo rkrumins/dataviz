@@ -146,34 +146,82 @@ def _sanitize_label(s: str) -> str:
 #
 # A keyset is only correct on a UNIQUE sort key, so the cursor carries the urn
 # (which is unique) as a tiebreaker and the queries order by (displayName, urn).
+#
+# Direction: the cursor also records the sort direction it was minted under
+# ("d", absent = "asc" for cursors minted before direction support). A page
+# request whose direction disagrees with its cursor's is a client bug —
+# continuing would silently skip or repeat rows — so providers reject the
+# mismatch (ValueError → 400 at the endpoint).
 _CURSOR_PREFIX = "k1:"
 
 
-def _encode_keyset_cursor(display_name: Optional[str], urn: str) -> str:
-    payload = json.dumps({"n": display_name or "", "u": urn}, separators=(",", ":"))
-    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+def _validate_sort_direction(sort_direction: str) -> str:
+    direction = (sort_direction or "asc").lower()
+    if direction not in ("asc", "desc"):
+        raise ValueError(f"invalid sort_direction {sort_direction!r} (expected 'asc' or 'desc')")
+    return direction
+
+
+def _encode_keyset_cursor(display_name: Optional[str], urn: str, sort_direction: str = "asc") -> str:
+    payload: Dict[str, Any] = {"n": display_name or "", "u": urn}
+    if sort_direction == "desc":
+        payload["d"] = "desc"
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
     return _CURSOR_PREFIX + encoded
 
 
-def _decode_keyset_cursor(cursor: str) -> Tuple[str, Optional[str]]:
+def _decode_keyset_cursor(cursor: str, sort_direction: str = "asc") -> Tuple[str, Optional[str]]:
     """(displayName, urn). A legacy displayName-only cursor yields urn=None, so a
     client that is mid-pagination across a deploy keeps working (with the old,
-    lossy semantics) instead of erroring."""
+    lossy semantics) instead of erroring.
+
+    Raises ValueError when the cursor was minted under a different sort
+    direction than the one now requested (absent "d" = asc)."""
     if not cursor.startswith(_CURSOR_PREFIX):
+        if sort_direction == "desc":
+            raise ValueError("cursor direction mismatch: legacy asc cursor used with sort_direction=desc")
         return cursor, None
     raw = cursor[len(_CURSOR_PREFIX):]
     try:
         padded = raw + "=" * (-len(raw) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
-        return str(data.get("n", "")), data.get("u") or None
     except Exception:  # pragma: no cover - corrupt cursor, fall back to prefix scan
+        if sort_direction == "desc":
+            raise ValueError("cursor direction mismatch: unreadable cursor used with sort_direction=desc")
         return cursor, None
+    cursor_direction = data.get("d") or "asc"
+    if cursor_direction != sort_direction:
+        raise ValueError(
+            f"cursor direction mismatch: cursor was minted for {cursor_direction!r}, "
+            f"request asked for {sort_direction!r}"
+        )
+    return str(data.get("n", "")), data.get("u") or None
 
 
 def _keyset_sort_key(node: Any) -> Tuple[bool, str, str]:
-    """Sort rows the same way the keyset does: (displayName, urn), nulls last."""
+    """Sort rows the same way the ASC keyset does: (displayName, urn), nulls last."""
     name = getattr(node, "display_name", None)
     return (name is None, name or "", getattr(node, "urn", "") or "")
+
+
+def _keyset_sort_key_desc(node: Any) -> Tuple[bool, Tuple[int, ...], Tuple[int, ...]]:
+    """DESC twin of `_keyset_sort_key` for use with a plain ascending Python
+    sort: nulls FIRST is wrong under DESC — Cypher's `ORDER BY x DESC` places
+    nulls last in FalkorDB, matching ASC — so nulls stay last here too, and the
+    (name, urn) comparison is inverted via per-character complement (a tuple of
+    negated code points preserves lexicographic order under negation)."""
+    name = getattr(node, "display_name", None)
+    urn = getattr(node, "urn", "") or ""
+    invert = lambda s: tuple(-ord(c) for c in s)  # noqa: E731
+    return (name is None, invert(name or ""), invert(urn))
+
+
+def _keyset_sort(nodes: List[Any], sort_direction: str) -> List[Any]:
+    """Defensive re-sort matching the Cypher keyset order for the direction."""
+    key = _keyset_sort_key_desc if sort_direction == "desc" else _keyset_sort_key
+    return sorted(nodes, key=key)
 
 
 # Exception class names that indicate a Redis Cluster routing change (the
@@ -1930,6 +1978,10 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
 
         labels = indexed_labels(entity_type_ids)
+        # Remember the ontology vocabulary the indices were built for, so
+        # label-union readers (get_nodes_by_layer) can anchor on the same
+        # label set the label-scoped indexes actually cover.
+        self._indexed_entity_type_ids = list(entity_type_ids or [])
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
 
@@ -3057,8 +3109,10 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> List[GraphNode]:
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
         # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
@@ -3077,17 +3131,18 @@ class FalkorDBProvider(GraphDataProvider):
         # COMPOSITE on (displayName, urn) — displayName is not unique, and a
         # non-unique keyset drops rows at page boundaries (_encode_keyset_cursor).
         cursor_where = ""
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor:
-            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor, sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    "AND (c.displayName > $cursorName "
-                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                    f"AND (c.displayName {cmp} $cursorName "
+                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
-                cursor_where = "AND c.displayName > $cursorName "  # legacy cursor
+                cursor_where = f"AND c.displayName {cmp} $cursorName "  # legacy cursor
         else:
             # Fallback to offset when no cursor (first page or legacy callers)
             params["skip"] = offset
@@ -3096,7 +3151,8 @@ class FalkorDBProvider(GraphDataProvider):
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
+            dir_kw = " DESC" if sort_direction == "desc" else ""
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -3150,6 +3206,7 @@ class FalkorDBProvider(GraphDataProvider):
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         """Optimized single-roundtrip: children + containment edges + cross-child lineage edges.
 
@@ -3157,6 +3214,7 @@ class FalkorDBProvider(GraphDataProvider):
         When `cursor` is provided, it takes precedence over `offset`.
         """
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
@@ -3181,18 +3239,19 @@ class FalkorDBProvider(GraphDataProvider):
         # keyset silently drops every row sharing the boundary row's name — see
         # _encode_keyset_cursor.
         cursor_where = ""
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor:
-            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor, sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    "AND (c.displayName > $cursorName "
-                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                    f"AND (c.displayName {cmp} $cursorName "
+                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
                 # Legacy cursor minted before the tiebreaker existed.
-                cursor_where = "AND c.displayName > $cursorName "
+                cursor_where = f"AND c.displayName {cmp} $cursorName "
         else:
             params["skip"] = offset
 
@@ -3200,7 +3259,8 @@ class FalkorDBProvider(GraphDataProvider):
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
+            dir_kw = " DESC" if sort_direction == "desc" else ""
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -3302,16 +3362,18 @@ class FalkorDBProvider(GraphDataProvider):
         total = offset + len(children) + (1 if has_more else 0)
         # Defensive re-sort before deriving the keyset cursor: FalkorDB may
         # discard ORDER BY around an aggregating RETURN (count(gc) here), and
-        # the cursor MUST be the page's max sort key or keyset pagination
+        # the cursor MUST be the page's boundary sort key or keyset pagination
         # skips rows. LIMIT selection is unaffected (known engine behaviour).
-        # Sorts on (displayName, urn) — the same composite key the cursor uses.
+        # Sorts on (displayName, urn) — the same composite key the cursor uses,
+        # in the requested direction.
         if sort_property == "displayName" and children:
-            order = sorted(range(len(children)), key=lambda i: _keyset_sort_key(children[i]))
+            sort_key = _keyset_sort_key_desc if sort_direction == "desc" else _keyset_sort_key
+            order = sorted(range(len(children)), key=lambda i: sort_key(children[i]))
             children = [children[i] for i in order]
             containment_edges = [containment_edges[i] for i in order]
             child_urns = [children[i].urn for i in range(len(children))]
         next_cursor = (
-            _encode_keyset_cursor(children[-1].display_name, children[-1].urn)
+            _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
             if children and has_more else None
         )
 
@@ -3358,6 +3420,7 @@ class FalkorDBProvider(GraphDataProvider):
         include_child_count: bool = True,
         query_timeout: Optional[float] = None,
         known_total_count: Optional[int] = None,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         """Return structurally top-level nodes (no incoming containment edge).
 
@@ -3375,6 +3438,7 @@ class FalkorDBProvider(GraphDataProvider):
         serving from a materialized cache that already knows the total).
         """
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
 
         from ..config.resilience import (
             FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS,
@@ -3444,17 +3508,18 @@ class FalkorDBProvider(GraphDataProvider):
         # run of same-named nodes straddling a page boundary is silently dropped
         # (_encode_keyset_cursor).
         page_filters = list(filter_fragments)
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor is not None:
-            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor))
+            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor), sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 params["cursorUrn"] = cursor_urn
                 page_filters.append(
-                    "(n.displayName > $cursorName "
-                    "OR (n.displayName = $cursorName AND n.urn > $cursorUrn))"
+                    f"(n.displayName {cmp} $cursorName "
+                    f"OR (n.displayName = $cursorName AND n.urn {cmp} $cursorUrn))"
                 )
             else:
-                page_filters.append("n.displayName > $cursorName")  # legacy cursor
+                page_filters.append(f"n.displayName {cmp} $cursorName")  # legacy cursor
 
         def _build_match(filters: List[str]) -> str:
             where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
@@ -3467,24 +3532,25 @@ class FalkorDBProvider(GraphDataProvider):
             return f"MATCH (n){where_clause}"
 
         # ── Page query ────────────────────────────────────────────────────
+        dir_kw = "DESC" if sort_direction == "desc" else "ASC"
         if include_child_count and containment_rel_types:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
+                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
                 # Re-project through a non-aggregating WITH before ORDER BY:
                 # FalkorDB discards an ORDER BY that sits directly on an
                 # aggregating RETURN (and also a trailing RETURN ... ORDER BY),
                 # so the pre-aggregation window order is lost. Materializing the
                 # count into a WITH first, then ordering that WITH, restores the
-                # displayName-ASC output the keyset cursor depends on.
-                + " WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC"
+                # displayName-ordered output the keyset cursor depends on.
+                + f" WITH n, count(child) as childCount ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
                 + " RETURN n, childCount"
             )
         else:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
+                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
                 + " RETURN n, 0 as childCount"
             )
 
@@ -3527,16 +3593,17 @@ class FalkorDBProvider(GraphDataProvider):
                     orphan_count += 1
                 nodes.append(node)
 
-        # Defense-in-depth: guarantee displayName-ASC output even if the engine
-        # reorders across the aggregating RETURN, so next_cursor is always the
-        # page maximum and keyset pagination never overlaps/skips. Uses the same
-        # key the cursor compares on. Classification/childCount are already
-        # attached above and are order-independent.
-        nodes.sort(key=_keyset_sort_key)
+        # Defense-in-depth: guarantee displayName-ordered output even if the
+        # engine reorders across the aggregating RETURN, so next_cursor is
+        # always the page boundary and keyset pagination never overlaps/skips.
+        # Uses the same key (and direction) the cursor compares on.
+        # Classification/childCount are already attached above and are
+        # order-independent.
+        nodes = _keyset_sort(nodes, sort_direction)
 
         has_more = len(nodes) >= int(limit)
         next_cursor = (
-            _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn)
+            _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn, sort_direction)
             if (has_more and nodes) else None
         )
 
@@ -8342,13 +8409,67 @@ class FalkorDBProvider(GraphDataProvider):
                 nodes.append(n)
         return nodes
 
-    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+    async def get_nodes_by_layer(
+        self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
+        """Nodes with `layerAssignment = layer_id`, ordered by (displayName, urn)
+        in `sort_direction`, with keyset-cursor pagination (offset fallback).
+
+        Label-anchored UNION over the indexed label set (same pattern as
+        `get_top_level_or_orphan_nodes`) so the label-scoped `layerAssignment`
+        index serves the filter — a bare `MATCH (n)` cannot use label-scoped
+        indexes and full-scans. Falls back to the bare match when no ontology
+        vocabulary has been applied (pre-ontology graphs); a case-drifted
+        physical label outside the vocabulary is, by construction, not in the
+        union (mirrors the top-level path's coverage tradeoff).
+        """
         await self._ensure_connected()
-        result = await self._ro_query(
-            "MATCH (n) WHERE n.layerAssignment = $lid RETURN n SKIP $skip LIMIT $limit",
-            params={"lid": layer_id, "skip": offset, "limit": limit},
-        )
-        return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
+        sort_direction = _validate_sort_direction(sort_direction)
+        from backend.app.providers.index_policy import indexed_labels
+
+        params: Dict[str, Any] = {"lid": layer_id, "limit": int(limit)}
+        cmp = "<" if sort_direction == "desc" else ">"
+        dir_kw = "DESC" if sort_direction == "desc" else "ASC"
+
+        filters = ["n.layerAssignment = $lid"]
+        skip_clause = ""
+        if cursor:
+            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor), sort_direction)
+            params["cursorName"] = cursor_name
+            if cursor_urn:
+                params["cursorUrn"] = cursor_urn
+                filters.append(
+                    f"(n.displayName {cmp} $cursorName "
+                    f"OR (n.displayName = $cursorName AND n.urn {cmp} $cursorUrn))"
+                )
+            else:
+                filters.append(f"n.displayName {cmp} $cursorName")  # legacy cursor
+        else:
+            params["skip"] = int(offset)
+            skip_clause = " SKIP $skip"
+
+        where = " WHERE " + " AND ".join(filters)
+        order = f" ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
+
+        vocabulary = getattr(self, "_indexed_entity_type_ids", None)
+        if vocabulary:
+            branches = " UNION ".join(
+                f"MATCH (n:{_sanitize_label(label)}){where} RETURN n"
+                for label in indexed_labels(vocabulary)
+            )
+            cypher = "CALL { " + branches + " }" + f" WITH n{order}{skip_clause} LIMIT $limit RETURN n"
+        else:
+            cypher = f"MATCH (n){where} WITH n{order}{skip_clause} LIMIT $limit RETURN n"
+
+        result = await self._ro_query(cypher, params=params, op="nodes.byLayer")
+        nodes: List[GraphNode] = []
+        for row in (result.result_set or []):
+            n = self._extract_node_from_result(row[0] if isinstance(row, (list, tuple)) else row)
+            if n:
+                nodes.append(n)
+        # Defensive re-sort (same rationale as the other keyset readers).
+        return _keyset_sort(nodes, sort_direction)
 
     # TTL for the observed-casing maps below. Long enough to amortize the
     # vocabulary probe across a bulk load's many calls; short enough that

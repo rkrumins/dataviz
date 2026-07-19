@@ -23,9 +23,10 @@ import {
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
-import type { ViewLayerConfig } from '@/types/schema'
+import type { LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
+import { LayerSortMenu } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
@@ -82,6 +83,17 @@ interface LayerColumnProps {
   onRenameLayer?: (layerId: string, name: string) => void
   onDeleteLayer?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
+  /** Effective node sort mode for this column (override → layer → view default). */
+  sortMode?: LayerNodeSortMode
+  /** True when the column deviates from the view default (sort menu indicator dot). */
+  sortIsOverride?: boolean
+  /** The view-wide default named in the sort menu's "View default" item. */
+  viewDefaultSortMode?: 'alpha-asc' | 'alpha-desc'
+  /** Draft mode — enables the persisted sort actions (Custom order / Apply to all layers). */
+  canPersistSort?: boolean
+  /** Presence mounts the header sort menu. `mode === null` clears the layer override. */
+  onSetSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+  onApplySortToView?: (layerId: string) => void
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -156,6 +168,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   onRenameLayer,
   onDeleteLayer,
   onReorderLayer,
+  sortMode = 'alpha-asc',
+  sortIsOverride = false,
+  viewDefaultSortMode = 'alpha-asc',
+  canPersistSort = false,
+  onSetSortMode,
+  onApplySortToView,
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
@@ -1126,6 +1144,18 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <span className="text-[9px] text-ink-muted/60">/</span>
                     <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
                   </div>
+                )}
+                {onSetSortMode && (
+                  <LayerSortMenu
+                    layerName={layer.name}
+                    layerColor={layer.color}
+                    mode={sortMode}
+                    isOverride={sortIsOverride}
+                    viewDefault={viewDefaultSortMode}
+                    canPersist={canPersistSort}
+                    onSelectMode={(mode) => onSetSortMode(layer.id, mode)}
+                    onApplyToView={() => onApplySortToView?.(layer.id)}
+                  />
                 )}
                 {onAddToLayer && (
                   <button

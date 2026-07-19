@@ -40,6 +40,7 @@ from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
     merge_display_rules_3way,
+    merge_default_sort_3way,
 )
 
 logger = logging.getLogger(__name__)
@@ -795,10 +796,13 @@ async def promote_overlay(
 
     merged_layout = merge_layout_3way(fork_base, published, draft)
     # merge_layout_3way returns only {layers, assignments}; re-attach the merged
-    # displayRules so promote never wipes them off the published base.
+    # side-fields so promote never wipes them off the published base.
     merged_display_rules = merge_display_rules_3way(fork_base, published, draft)
     if merged_display_rules is not None:
         merged_layout["displayRules"] = merged_display_rules
+    merged_default_sort = merge_default_sort_3way(fork_base, published, draft)
+    if merged_default_sort is not None:
+        merged_layout["defaultNodeSortMode"] = merged_default_sort
     merged_scope = merge_scope_3way(
         overlay.fork_base_entity_scope,
         derive_entity_scope(config),
