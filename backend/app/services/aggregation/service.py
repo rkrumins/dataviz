@@ -2354,6 +2354,7 @@ async def assemble_fleet_freshness(
         ds_list=ds_list,
         total=total,
         signals=signals,
+        running=running,
     )
     return FreshnessFleetResponse(rows=rows, total=total, summary=summary)
 
@@ -2367,6 +2368,7 @@ async def _assemble_fleet_summary(
     ds_list: list,
     total: int,
     signals: dict,
+    running: dict,
 ) -> Optional[FreshnessSummary]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
@@ -2374,10 +2376,18 @@ async def _assemble_fleet_summary(
     exceeds ``_SUMMARY_MAX_SOURCES`` (bounded work; zero provider/FalkorDB
     access, same structural guarantee as the rest of fleet assembly).
 
-    Reuses the page's already-fetched rows + the single Redis pipeline
-    already read for it when the page already IS the full filtered set (no
-    ``stale_only`` narrowing and the page covers every matching row) —
-    never a second SQL pass or pipeline round-trip in that common case.
+    Reuses the page's already-fetched rows + the single Redis pipeline +
+    running-job map already read for it when the page already IS the full
+    filtered set (no ``stale_only`` narrowing and the page covers every
+    matching row) — never a second SQL pass or pipeline round-trip in that
+    common case.
+
+    ``pending`` (the "rebuild in flight" bucket) is derived from the SAME
+    signal ``FreshnessRow.running_job_id`` uses — a live ``AggregationJobORM``
+    row in ``pending``/``running`` status — rather than
+    ``aggregation_status == "pending"``: the mirror column's pending/running
+    writes are dead code (nothing ever calls ``job_pending``/``job_started``),
+    so that literal check would always read zero.
     """
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services import graph_cache as _gc
@@ -2386,6 +2396,7 @@ async def _assemble_fleet_summary(
     if page_is_full_set:
         full_rows = [(ds.id, ds.workspace_id, ds.aggregation_status) for ds in ds_list]
         full_signals = signals
+        full_running = running
     else:
         # staleOnly narrows the paged/`total` query, or pagination doesn't
         # cover the full set — the summary basis differs, so a dedicated
@@ -2413,6 +2424,13 @@ async def _assemble_fleet_summary(
         if len(full_rows) > _SUMMARY_MAX_SOURCES:
             return None
 
+        full_ids = [ds_id for ds_id, _ws, _status in full_rows]
+        page_ids = [ds.id for ds in ds_list]
+        if set(full_ids) == set(page_ids):
+            full_running = running
+        else:
+            full_running = await _running_job_map(session, full_ids)
+
         full_pairs = [(str(ws), str(ds_id)) for ds_id, ws, _status in full_rows]
         page_pairs = [(str(ds.workspace_id), str(ds.id)) for ds in ds_list]
         if set(full_pairs) == set(page_pairs):
@@ -2420,25 +2438,29 @@ async def _assemble_fleet_summary(
         else:
             full_signals = await _gc.read_freshness_signals(full_pairs)
 
-    return _summarize_freshness(full_rows, full_signals)
+    return _summarize_freshness(full_rows, full_signals, full_running)
 
 
 def _summarize_freshness(
-    full_rows: list, signals: dict,
+    full_rows: list, signals: dict, running: dict,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status)`` rows + their
-    Redis signals into the fleet summary counts. ``needs_attention`` is a
-    per-row OR (marker present or failed), not a sum of the two buckets —
-    a row that is both failed and marked stale counts once."""
+    Redis signals + running-job map into the fleet summary counts.
+    ``needs_attention`` is a per-row OR (marker present or failed), not a
+    sum of the two buckets — a row that is both failed and marked stale
+    counts once. ``pending`` counts rows with a live job (see
+    ``_assemble_fleet_summary`` docstring), independent of
+    ``aggregation_status`` — a row can be both ``ready`` (from its last
+    completed run) and ``pending`` (a new rebuild already in flight)."""
     ready = pending = failed = not_built = 0
     recomputing = needs_attention = cache_stamped = 0
     for ds_id, ws_id, status in full_rows:
         if status == "ready":
             ready += 1
-        elif status == "pending":
-            pending += 1
         elif status == "failed":
             failed += 1
+        if ds_id in running:
+            pending += 1
         if status in (None, "none", "skipped"):
             not_built += 1
         _gen, cache_as_of, stale_reason = signals.get(

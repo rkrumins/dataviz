@@ -244,7 +244,10 @@ def test_fleet_stale_only_consults_marker_set(monkeypatch):
 def test_fleet_summary_counts_mixed_fixture(monkeypatch):
     # One of every bucket, plus a marker on a non-failed row AND on the
     # failed row (proving needs_attention doesn't double-count), plus
-    # genat stamps on two rows.
+    # genat stamps on two rows. ds-pending carries the dead
+    # aggregation_status=="pending" value (nothing ever writes it in
+    # production) — it must NOT count toward `pending`; ds-ready carries a
+    # real running job instead, proving `pending` tracks that live signal.
     ds_ready = _ds(id="ds-ready", status="ready")
     ds_pending = _ds(id="ds-pending", status="pending")
     ds_failed = _ds(id="ds-failed", status="failed")
@@ -257,7 +260,9 @@ def test_fleet_summary_counts_mixed_fixture(monkeypatch):
         ("ws-1", "ds-ready"): (1, "2026-07-19T00:00:00+00:00", "source_changed"),
         ("ws-1", "ds-failed"): (2, "2026-07-19T00:05:00+00:00", "drift"),
     }
-    _patch_fleet_collaborators(monkeypatch, signals=signals)
+    _patch_fleet_collaborators(
+        monkeypatch, signals=signals, running={"ds-ready": "job-1"},
+    )
     session = _FakeSession([
         _FakeResult(scalar=len(all_ds)),
         _FakeResult(rows=[(ds, f"Prov {ds.id}") for ds in all_ds]),
@@ -270,12 +275,29 @@ def test_fleet_summary_counts_mixed_fixture(monkeypatch):
     assert s is not None
     assert s.total == 6
     assert s.ready == 1
-    assert s.pending == 1
+    assert s.pending == 1  # ds-ready's live job, NOT ds-pending's dead status
     assert s.failed == 1
     assert s.not_built == 3  # none, skipped, no-state-row
     assert s.recomputing == 2  # ds-ready + ds-failed both have markers
     assert s.needs_attention == 2  # ds-ready(marker) + ds-failed(marker&failed, counted once)
     assert s.cache_stamped == 2  # ds-ready + ds-failed have genat
+
+
+def test_fleet_summary_pending_ignores_dead_status_value(monkeypatch):
+    # Regression: workspace_data_sources.aggregation_status is only ever
+    # written "ready"/"failed"/"none" in production (job.completed/
+    # job.failed listener paths) — "pending"/"running" mirror writes are
+    # dead code (job_pending/job_started are never called). `pending` must
+    # instead track a live AggregationJobORM row (running_job_id's signal).
+    ds_dead_pending = _ds(id="ds-dead-pending", status="pending")  # no live job
+    ds_live_job = _ds(id="ds-live-job", status="ready")  # a real rebuild in flight
+    _patch_fleet_collaborators(monkeypatch, running={"ds-live-job": "job-42"})
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(ds_dead_pending, "Prov A"), (ds_live_job, "Prov B")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    assert resp.summary.pending == 1  # only the row with a real running job
 
 
 def test_fleet_summary_ignores_stale_only_facet(monkeypatch):
@@ -320,13 +342,17 @@ def test_fleet_summary_ignores_stale_only_facet(monkeypatch):
 def test_fleet_summary_full_set_on_page_2_of_small_page_size(monkeypatch):
     # total=3, pageSize=1, page=2 — the fetched page is a single row, but
     # summary must reflect all 3 filtered sources, not just that row.
+    # ds-y also proves the widened running-job lookup covers the full set,
+    # not just the page, when the page/full-set ids differ.
     ds_x = _ds(id="ds-x", status="ready")
-    ds_y = _ds(id="ds-y", status="pending")
+    ds_y = _ds(id="ds-y", status="pending")  # dead status value; live job below is what counts
     ds_z = _ds(id="ds-z", status="failed")
     signals = {
         ("ws-1", "ds-y"): (3, "2026-07-19T00:00:00+00:00", "source_changed"),
     }
-    _patch_fleet_collaborators(monkeypatch, signals=signals)
+    _patch_fleet_collaborators(
+        monkeypatch, signals=signals, running={"ds-y": "job-y"},
+    )
     session = _FakeSession([
         _FakeResult(scalar=3),
         _FakeResult(rows=[(ds_y, "Prov Y")]),  # page 2 of pageSize=1
@@ -344,7 +370,7 @@ def test_fleet_summary_full_set_on_page_2_of_small_page_size(monkeypatch):
     assert s is not None
     assert s.total == 3
     assert s.ready == 1
-    assert s.pending == 1
+    assert s.pending == 1  # ds-y's live job (widened past the single-row page)
     assert s.failed == 1
     assert s.recomputing == 1
     assert s.needs_attention == 2  # ds-y(marker) + ds-z(failed)
