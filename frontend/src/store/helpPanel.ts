@@ -9,16 +9,25 @@
  */
 import { create } from 'zustand'
 
+/** Which view the drawer should land on when it opens. Reset to 'home' on close. */
+export type HelpIntent = 'home' | 'getting-started'
+
 interface HelpPanelState {
     open: boolean
+    /** Read once by the panel when it opens to pick its initial view. */
+    intent: HelpIntent
     openHelp: () => void
+    /** Open straight to the Getting Started hub (sidebar launcher). */
+    openGettingStarted: () => void
     closeHelp: () => void
     toggleHelp: () => void
 }
 
 export const useHelpPanelStore = create<HelpPanelState>()((set) => ({
     open: false,
-    openHelp: () => set({ open: true }),
-    closeHelp: () => set({ open: false }),
-    toggleHelp: () => set((s) => ({ open: !s.open })),
+    intent: 'home',
+    openHelp: () => set({ open: true, intent: 'home' }),
+    openGettingStarted: () => set({ open: true, intent: 'getting-started' }),
+    closeHelp: () => set({ open: false, intent: 'home' }),
+    toggleHelp: () => set((s) => ({ open: !s.open, intent: 'home' })),
 }))

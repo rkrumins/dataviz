@@ -17,6 +17,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { listViews } from '@/services/viewApiService'
 import { useTourStore } from '@/features/tour/tourStore'
 import { usePreferencesStore } from '@/store/preferences'
+import { useFeature } from '@/store/features'
 
 /** The product tour that the ``take-tour`` step starts / tracks. */
 export const GETTING_STARTED_TOUR = 'getting-started'
@@ -86,6 +87,11 @@ export function useOnboardingProgress(): OnboardingProgressResult {
   // completed or a manual step is recorded, without a counts refetch.
   const tourCompleted = useTourStore((s) => s.completed.includes(GETTING_STARTED_TOUR))
   const completedManualSteps = usePreferencesStore((s) => s.onboardingCompletedSteps)
+  // The product tour is a flagged, experimental feature. Only offer it as a
+  // step when it's actually enabled — otherwise the "Start tour" CTA is a dead
+  // button (the tour overlay isn't mounted) and the checklist can never reach
+  // 100%. When off, onboarding is the five setup steps.
+  const toursEnabled = useFeature('toursEnabled')
 
   const counts: OnboardingCounts = data ?? {
     providerCount: 0,
@@ -136,13 +142,15 @@ export function useOnboardingProgress(): OnboardingProgressResult {
       href: '/workspaces',
       guideSlug: 'creating-views',
     },
-    {
-      id: 'take-tour',
-      label: 'Take the product tour',
-      description: 'A guided walkthrough of the key surfaces, in a couple of minutes.',
-      done: tourCompleted,
-    },
-  ], [counts, completedManualSteps, tourCompleted])
+    ...(toursEnabled
+      ? [{
+          id: 'take-tour',
+          label: 'Take the product tour',
+          description: 'A guided walkthrough of the key surfaces, in a couple of minutes.',
+          done: tourCompleted,
+        } satisfies OnboardingStep]
+      : []),
+  ], [counts, completedManualSteps, tourCompleted, toursEnabled])
 
   const completedCount = steps.filter((s) => s.done).length
   const total = steps.length

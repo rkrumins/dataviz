@@ -46,8 +46,6 @@ import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
 import { DashboardSemanticLayers } from './DashboardSemanticLayers'
 import { DashboardOnboarding } from './DashboardOnboarding'
-import { GettingStarted } from '@/components/onboarding/GettingStarted'
-import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
 import { motion } from 'framer-motion'
 import { LayoutTemplate } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
@@ -105,13 +103,6 @@ export function Dashboard() {
     // A brand-new instance = no workspaces. (The old `dashboardTier` heuristic
     // keyed off the fake recentViews count, so it decided layout from noise.)
     const isOnboarding = (workspaces?.length ?? 0) === 0 && !onboardingDismissedAt
-
-    // Once they're past the zero-workspace first-run screen but haven't finished
-    // setup (no ontology / view / tour yet), keep the Getting Started hub on the
-    // main dashboard — the single "where am I" that persists past first run.
-    // Respects the same dismiss lever as the first-run screen.
-    const { allDone: onboardingAllDone } = useOnboardingProgress()
-    const showGettingStarted = !isOnboarding && !onboardingDismissedAt && !onboardingAllDone
 
     const handleSelectHit = useCallback((hit: SearchHit) => {
         if (searchQuery.trim()) recordRecentSearch(searchQuery)
@@ -241,19 +232,6 @@ export function Dashboard() {
                         }
                     />
                 </motion.div>
-
-                {/* Getting Started hub — persists past the first-run screen until
-                    setup is complete or the user dismisses onboarding. */}
-                {showGettingStarted && (
-                    <motion.div
-                        initial={{ opacity: 0, y: MOTION.sectionY }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: MOTION.sectionStagger * 0.5, ...MOTION.sectionEntry }}
-                        className="mb-6"
-                    >
-                        <GettingStarted />
-                    </motion.div>
-                )}
 
                 {/* 2. Your work — ONE section, not three.
                        Unfinished drafts, pinned views and recently visited all

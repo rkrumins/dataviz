@@ -76,6 +76,7 @@ const AREA_ICON = {
 
 export function HelpPanel() {
   const open = useHelpPanelStore((s) => s.open)
+  const intent = useHelpPanelStore((s) => s.intent)
   const closeHelp = useHelpPanelStore((s) => s.closeHelp)
 
   // Internal views keep the user in-app.
@@ -86,13 +87,14 @@ export function HelpPanel() {
     closeHelp()
   }
 
-  // Fresh state each time the drawer opens.
+  // Fresh state each time the drawer opens — landing on whichever view the
+  // opener asked for (the sidebar launcher opens straight to Getting Started).
   useEffect(() => {
     if (open) {
-      setView('home')
+      setView(intent === 'getting-started' ? 'getting-started' : 'home')
       setArticleSlug(null)
     }
-  }, [open])
+  }, [open, intent])
 
   // Close on Escape (in addition to the ✕ and backdrop click).
   useEffect(() => {
