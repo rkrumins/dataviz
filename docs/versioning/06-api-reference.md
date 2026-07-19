@@ -332,10 +332,12 @@ blank models (422 `ontology_required` / 503 `ontology_unavailable`). See
 
 ## Related chapters
 
+- **The big-picture architecture** → [Overview & Architecture](/docs/versioning-overview)
 - **Behavior of every write** → [03 · Branching, Commits & Merge](03-branching-commits-merge.md)
 - **What the projection/watermark/rebuild routes do** → [04 · Projection & Cache](04-projection-and-cache.md)
 - **The 422 ontology contract** → [05 · Ontology Governance](05-ontology-governance.md)
 - **How the frontend calls all of this** → [07 · Frontend Integration](07-frontend-integration.md)
 - **Import/export endpoints in depth** → [08 · Import / Export](08-import-export.md)
-- **Run/test harness & smoke script** → [`../VERSIONING_E2E.md`](../VERSIONING_E2E.md)
+- **The RBAC role taxonomy behind the `_READ` / `_MANAGE` gates** → [RBAC](/docs/rbac)
+- **Run/test harness & smoke script** → [End-to-End Testing Guide](/docs/versioning-e2e)
 - **Glossary & suite index** → [README](README.md)

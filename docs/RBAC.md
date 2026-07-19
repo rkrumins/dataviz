@@ -1,9 +1,20 @@
 # RBAC
 
+> **At a glance.** The authorization reference for {brand} — for operators granting
+> access and engineers writing permission checks. It covers the **eight built-in roles**,
+> the namespaced **permission catalogue**, the central **resolver** that folds role
+> bindings into per-request claims, the typed **403 contract**, and the surrounding
+> machinery: custom roles, invites, time-bound bindings, session revocation, and the
+> audit log.
+
 The authorization model: eight built-in roles, a namespaced permission
 catalogue, and a central resolver that folds a user's role bindings into
 per-request permission claims. A failed check returns a typed 403 body.
 Custom roles extend the built-in set within the same rules.
+
+> **Caution:** `super_admin` carries `system:admin`, which short-circuits **every**
+> permission check platform-wide. Bind it sparingly (platform owner / SRE break-glass)
+> and prefer `org_admin` for cross-workspace operators who shouldn't own users or SSO.
 
 ## TL;DR
 
@@ -65,6 +76,25 @@ filter.
 resolver's auto-implication rule — see *Auto-implication* below.
 
 ## Resolver behaviour
+
+A permission check resolves through a fixed short-circuit ladder — the two global
+shortcuts win before any per-workspace bucket is consulted:
+
+```mermaid
+flowchart TD
+    Q["has_permission(claims, perm, workspace_id?)"] --> A{"system:admin ∈<br/>global_perms?"}
+    A -->|"yes"| ALLOW["✅ allow (unconditional)"]
+    A -->|"no"| B{"perm is workspace-scoped<br/>AND system:org-admin ∈ global_perms?"}
+    B -->|"yes"| ALLOW
+    B -->|"no"| C{"perm in the matching<br/>bucket?<br/>(global_perms or ws_perms[ws])"}
+    C -->|"yes"| ALLOW
+    C -->|"no"| DENY["⛔ typed 403<br/>missing_permission"]
+    style ALLOW fill:#14351f,stroke:#22c55e,color:#e2e8f0
+    style DENY fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+```
+
+The buckets themselves are built by the resolver from a user's bindings, applying the
+category × scope filter and `workspace:admin` auto-implication described below.
 
 ### 1. Category × scope filter
 
@@ -252,6 +282,12 @@ outage (an incident must not lock every user out); `requires(...)`
 keeps a fail-closed probe for sensitive permissions like `system:admin`
 / `workspace:admin`.
 
+> **Important:** Revocation is deliberately asymmetric under a Redis outage — it
+> **fails open** for ordinary checks (a Redis incident must not lock every user out)
+> but **fails closed** for the sensitive-permission probe. A revoked JWT is otherwise
+> caught on the very next request because `get_current_user` consults the revoked-session
+> set on **every** authenticated call, not only `requires(...)` routes.
+
 ### Time-bound bindings
 
 `RoleBindingORM.expires_at` auto-expires a binding — contractor, temp,
@@ -372,9 +408,9 @@ Compliance recipe: "Who promoted Alice last week?" → filter
 
 ## Related docs
 
-* [SSO_INTEGRATION.md](./SSO_INTEGRATION.md) — IdP → role-binding
+* [SSO Integration Guide](/docs/sso-integration) — IdP → role-binding
   reconciliation pulls roles from this taxonomy.
-* [SSO.md](./SSO.md) — operator-facing SSO posture; cross-references
+* [SSO operator reference](/docs/sso) — operator-facing SSO posture; cross-references
   the role names here.
 
 ## History

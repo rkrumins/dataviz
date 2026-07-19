@@ -278,6 +278,8 @@ sequenceDiagram
 
 ## Related chapters
 
+- **[API Reference](/docs/versioning-api-reference)** — the REST contract for the routers, auth/RBAC, and request/response shapes described here.
+- **[End-to-End Testing Guide](/docs/versioning-e2e)** — bring up the stack and drive the whole flow over HTTP.
 - [02 · Data Model](02-data-model.md) — the `graphver` schema and its invariants.
 - [03 · Branching, Commits & Merge](03-branching-commits-merge.md) — the engine.
 - [04 · Projection & Cache](04-projection-and-cache.md) — FalkorDB as a rebuildable read model.

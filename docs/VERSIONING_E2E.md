@@ -1,8 +1,15 @@
 # Versioned Graph — End-to-End Testing Guide
 
-> 📚 **Part of the [Versioned Graph documentation suite](versioning/README.md).** This guide is the
-> hands-on run/test companion; see the suite for the full architecture, engine, projection, API,
-> frontend, and design reference.
+> 📚 **Part of the Versioned Graph documentation suite.** This guide is the hands-on
+> run/test companion; for the concepts see the
+> [Overview & Architecture](/docs/versioning-overview) and the
+> [API Reference](/docs/versioning-api-reference). Permission strings map to the
+> [RBAC taxonomy](/docs/rbac).
+
+> **At a glance.** Bring up the Postgres stack, drive the whole *git-for-graphs* flow over
+> HTTP (one smoke script or by hand with curl), and verify it: create graph → draft →
+> stage → checkpoint → publish → history/diff → fork → PR → merge, plus revert/restore,
+> "enable version control" bootstrap, and the automated test suites.
 
 The versioned-graph store (`graphver`) and its API: *git for graphs* — per-user
 **drafts**, **checkpoints**, **squash-publish** to `main`, copy-on-write
@@ -79,6 +86,23 @@ It logs in, then runs the whole MVP over HTTP and prints a green checklist:
 create graph → open draft → stage → checkpoint → read state
             → publish to main → history + diff
             → fork (copy-on-write) → diverge → open PR → preview → merge → verify
+```
+
+The lifecycle those steps exercise — from an isolated draft through review to a shared
+`main`, and the two ways back out:
+
+```mermaid
+flowchart LR
+    D["Draft<br/>(working_changes)"] -->|checkpoint| C["Commit<br/>(version rows)"]
+    C -->|merge-preview| R{"review /<br/>PR"}
+    R -->|publish / merge| M["main @ head"]
+    M -->|revert one commit<br/>(may 409)| M
+    M -->|restore to a point<br/>(never conflicts)| M
+    M -.->|project| F[("FalkorDB<br/>hot reads")]
+    D -.->|fork (copy-on-write)| D2["Fork → PR → base"]
+    D2 -->|merge| M
+    style M fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+    style F fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 `--workspace` is optional: it discovers the first workspace from
@@ -172,6 +196,34 @@ graph cannot be paged into one HTTP call, and doing so made the web tier's memor
 
 Phases: `counting → nodes → edges → validate → heads → merkle → backfill → finalize`.
 
+```mermaid
+stateDiagram-v2
+    [*] --> counting: POST /bootstrap (202)
+    counting --> nodes
+    nodes --> edges
+    edges --> validate: bounded ID-range windows
+    validate --> heads
+    heads --> merkle
+    merkle --> backfill: stamp projector anchors
+    backfill --> finalize
+    finalize --> [*]: head flips → live & writable
+    validate --> failed: integrity mismatch
+    nodes --> failed: budget exhausted
+    failed --> nodes: retry?mode=resume
+    failed --> counting: retry?mode=restart
+    failed --> [*]: abandon (source reads as before)
+    note right of finalize
+        irreversible — everything the
+        live graph needs must be true first
+    end note
+```
+
+> **Warning:** `finalize` is the only irreversible phase — it flips the head, making the
+> graph live and writable, and fast-forwards the projection watermark. It runs **last**,
+> after `backfill` has stamped the projector's delete/update anchors. A failed job
+> **blocks writes** to that graph until you resume or abandon it — editing around it would
+> let the projector drop and reseed the graph from a fraction of the data.
+
 **`finalize` is last, and it is the only irreversible step** — it flips the head, which makes
 the graph live and writable. Everything the live graph depends on must already be true when
 it runs, including `backfill`, which stamps the projector's delete/update anchors
@@ -238,6 +290,11 @@ Operationally: the k8s worker takes these via `envFrom: worker-config` (edit the
 restart the pod — no image rebuild). Note that ConfigMap is shared with the aggregation worker.
 
 ### The `versioningEnabled` admin flag
+
+> **Note:** This is the master switch for the whole versioning surface. Turning it off is
+> **non-destructive** — reads stay open, existing versioned graphs and blank models remain
+> viewable, and background projection keeps running; only *mutating* routes and the Edit
+> entry points are gated. Nothing is deleted.
 
 `Admin → Features → Lineage → Version control` (a `feature_flags` boolean, default ON).
 When off: every **mutating** versioning route returns 403
@@ -324,4 +381,11 @@ through `frontend/src/services/versioningApiService.ts`:
 
 API-driven testing (smoke script / curl) remains the fastest harness for the
 write path itself.
-```
+
+---
+
+## Related
+
+- [Overview & Architecture](/docs/versioning-overview) — mental models, read/write routing, and the headline design decisions.
+- [API Reference](/docs/versioning-api-reference) — the full REST contract behind the flows tested here.
+- [RBAC](/docs/rbac) — the role taxonomy the `…:read` / `…:manage` gates resolve against.

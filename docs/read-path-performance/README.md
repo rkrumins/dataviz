@@ -43,6 +43,17 @@ Under load the two combined into a **saturation cascade**: FalkorDB runs on
 queued queries blew the 5s provider read budget and returned **503 at exactly 5.03s**
 (`ProviderUnavailable`), which then tripped the shared frontend circuit breaker.
 
+```mermaid
+flowchart LR
+    G["one canvas gesture"] --> S["request storm<br/>(7+ /aggregated + between + compute)"]
+    S --> Q["queued on 6 browser conns<br/>× full RTT each"]
+    Q --> W["FalkorDB THREAD_COUNT=4<br/>workers all busy on 10–26s reads"]
+    W --> T["queue wait blows 5s budget<br/>→ 503 @ 5.03s (ProviderUnavailable)"]
+    T --> B["frontend circuit breaker trips<br/>→ whole canvas blacks out"]
+    style T fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+    style B fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+```
+
 Decisively, the 10–26s reads happened on a **healthy** graph (`_AggMeta`
 boundary / `stampVersion=2`, 595k cells, materialized that day) — proving the cost was
 structural in the read path, not a stale-data artifact.
@@ -409,6 +420,11 @@ status machine (which must never render a failed load as an empty canvas).
 ---
 
 ## Appendix: FalkorDB gotchas encoded here
+
+> **Caution:** These are load-bearing constraints of the FalkorDB build, not
+> observations — every hot read path and its regression tests depend on them. Violate one
+> (an unlabeled anchor, a wrapped `ORDER BY`, an unnamespaced cache key) and you
+> reintroduce a full scan, a pagination skip, or a cross-tenant leak.
 
 - **No label-less URN index** on this build; labels are **case-sensitive**. Every hot
   anchor must be label-qualified (WS2) — an unlabeled `urn IN $list` is a full scan.

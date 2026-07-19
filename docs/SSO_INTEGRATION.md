@@ -2,10 +2,11 @@
 
 > **Team-facing developer + operator guide.** Read this end-to-end on
 > day one; keep it open as you build on top of, debug, or audit the
-> auth surface. **Pairs with** [`SSO.md`](SSO.md) (operator/feature
-> reference). When the same topic appears in both, this doc focuses
-> on *how to integrate* and *how to debug*; `SSO.md` focuses on *what
-> exists* and *how to operate*.
+> auth surface. **Pairs with** the [SSO operator reference](/docs/sso).
+> When the same topic appears in both, this doc focuses
+> on *how to integrate* and *how to debug*; the operator reference focuses on *what
+> exists* and *how to operate*. Role names throughout come from the
+> [RBAC taxonomy](/docs/rbac).
 
 > Covers the current auth surface: local password auth plus OIDC + SAML2,
 > DB-backed IdP providers, multi-identity per user, configurable claim

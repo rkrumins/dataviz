@@ -1,5 +1,13 @@
 # User & Sign-up Service
 
+> **At a glance.** The design reference for {brand}'s User & Sign-up Service — schema,
+> APIs, UX, and the principles behind them: the "logical split" that lets the user domain
+> be lifted into its own repo/DB, the transactional-outbox event model, the admin approval
+> flow, and defense-in-depth security. The **What's implemented** table below tracks what
+> shipped versus what's still pending. For the authorization model see [RBAC](/docs/rbac);
+> for the SSO layer built on top, [SSO](/docs/sso) and the
+> [SSO Integration Guide](/docs/sso-integration).
+
 This is the reference for the User & Sign-up Service: its schema, APIs, UX, and the design principles behind them. The service treats user management as one system — **auditability and safe evolution** (database), **clarity and trust** (UI/UX), **predictable behavior and operability** (engineering), **growth without rewrites** (scalability), and **defense in depth** (security) — and enforces a **logical split** so the user domain can be lifted into its own repository and database without breaking the main application.
 
 ---
@@ -16,8 +24,8 @@ This is the reference for the User & Sign-up Service: its schema, APIs, UX, and 
 | **Admin approval flow** | **Done** | Pending → Approve/Reject with audit trail in `user_approvals` |
 | **Frontend auth pages** (Login, SignUp, Reset) | **Done** | Glass-panel design, zxcvbn strength meter |
 | **Transactional outbox** (write side) | **Done** | Events written in same transaction as user operations |
-| **Outbox consumer** (read/publish side) | **Done** | The outbox relay drains `outbox_events` and lands them in `auth_audit_log`, deduped by `source_event_id`. See [SSO_INTEGRATION.md](SSO_INTEGRATION.md) §6.4. |
-| **SSO (OIDC + SAML2)** | **Done** | DB-backed IdP providers, multi-identity per user, JIT provisioning, group→role/group mapping, Argon2 local identity. See [SSO.md](SSO.md) and [SSO_INTEGRATION.md](SSO_INTEGRATION.md). |
+| **Outbox consumer** (read/publish side) | **Done** | The outbox relay drains `outbox_events` and lands them in `auth_audit_log`, deduped by `source_event_id`. See [SSO Integration Guide](/docs/sso-integration) §6.4. |
+| **SSO (OIDC + SAML2)** | **Done** | DB-backed IdP providers, multi-identity per user, JIT provisioning, group→role/group mapping, Argon2 local identity. See [SSO](/docs/sso) and the [SSO Integration Guide](/docs/sso-integration). |
 | **Force password change on first login** | **Pending** | `must_change_password` flag not implemented |
 | **Rate limiting** | **Partial** | Feature flag rate limits exist; per-IP signup/login limits not yet at API gateway level |
 
@@ -231,6 +239,12 @@ Routers in `api/` depend on `services/` and `schemas/`; services use `repositori
 ---
 
 ## 8. Security Summary (Defense in Depth)
+
+> **Important:** Two rules are non-negotiable before exposing self-signup publicly:
+> credential-masking middleware must strip `password` / `password_hash` from **all** JSON
+> logs, and the public signup response must not leak whether an email already exists
+> (return a generic success and notify existing users out-of-band). A 409 "email already
+> registered" is acceptable only for internal-only deployments.
 
 - **Credentials:** Passwords only in request body over HTTPS; never in URL, query, or logs. Server hashes (Argon2id) and compares with constant-time verification.
 - **Credential masking:** Middleware strips `password` and `password_hash` from all JSON logs.

@@ -1,5 +1,12 @@
 # SSO — operator reference
 
+> **At a glance.** The operator reference for {brand}'s single sign-on: **what exists**
+> and **how to run it**. Covers the OIDC + SAML2 transport, DB-backed per-row IdP
+> providers, multi-identity users, claim mapping, group→role/group mapping, 24h SSO
+> re-auth, and the platform posture switches — plus step-by-step operator playbooks
+> (§2) and verification procedures (§3). For *how to integrate, extend, and debug*, read
+> the [SSO Integration Guide](/docs/sso-integration).
+
 Single source of truth for the SSO/IdP integration. Read this end-to-end
 before working on the auth surface; share the relevant sub-sections with
 operators standing up a new IdP.
@@ -24,6 +31,38 @@ signup provenance; platform posture switches; and admin lookup + search.
 ---
 
 ## 1. What's implemented
+
+**The login flow at a glance** — both SSO kinds converge on one `complete_sso_login`
+path (JIT-provision, link, or reject by policy), then reconcile group→role/group
+mappings before minting the session cookies:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant FE as Login page
+    participant A as /auth/{slug}/…
+    participant IdP as OIDC / SAML IdP
+    participant Svc as complete_sso_login
+    U->>FE: pick a provider button
+    FE->>A: GET /auth/{slug}/login
+    A->>IdP: redirect (OIDC PKCE+nonce · or SAML AuthnRequest)
+    IdP-->>A: callback (code) / POST /acs (SAMLResponse)
+    A->>A: verify (JWKS / x509 + replay) → claim-map
+    A->>Svc: identity + linking_policy
+    alt subject known
+        Svc->>Svc: touch last login
+    else email free
+        Svc->>Svc: JIT provision (signup_source='sso_jit')
+    else email collides
+        Svc->>Svc: linking_policy decides link vs reject
+    end
+    Svc->>Svc: reconcile_sso_targets (role bindings + group members)
+    Svc-->>U: 302 + Set-Cookie nx_access / nx_refresh / nx_csrf
+```
+
+Full per-flow sequence diagrams (15 of them, including the collision-blocked and 24h
+re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 
 ### 1.1 Authentication transport
 
@@ -378,10 +417,10 @@ ahead of every `helm install/upgrade`.
 Admin → SSO → Group mappings → **Create mapping**.
 
 * **Role-binding target** — "Everyone in the IdP group
-  `DataViz-Admins` gets `admin` globally":
+  `DataViz-Admins` gets `super_admin` globally":
   * `idpGroup`: `DataViz-Admins`
   * `targetType`: `role_binding`
-  * `roleName`: `admin`
+  * `roleName`: `super_admin`
   * `scopeType`: `global`
 * **Group-membership target** — "Everyone in the IdP group
   `engineering` joins the internal `Engineers` group":
@@ -392,7 +431,20 @@ Admin → SSO → Group mappings → **Create mapping**.
 Mapping takes effect on the next SSO login OR the next `/refresh`
 (within ~5 min) for sessions already in flight.
 
+> **Warning:** An IdP-group mapping that grants a **global admin** role (`super_admin`
+> or `org_admin`) hands platform-wide power to whoever your IdP puts in that group.
+> Validation refuses `roleName: system:admin` outright (a forbidden auto-role — that is
+> a *permission*, not a bindable role), and `role_is_bindable_in_scope` must pass, but a
+> valid `super_admin` binding is exactly as powerful as it sounds. Prefer mapping to
+> `group_membership` and managing privileged membership internally. Role names come from
+> the [RBAC taxonomy](/docs/rbac).
+
 ### 2.4 Disable local login (SSO-only mode)
+
+> **Caution:** This is a lockout-class change. The API refuses it (HTTP 409) if any
+> active admin lacks an SSO identity, and refuses `sso_enabled=false` +
+> `allow_local_login=false` together (no way left to log in) — but you still want an
+> SSO login verified end-to-end **before** you flip it.
 
 Pre-flight: every admin must have at least one linked SSO identity.
 Check via `Admin → SSO → Find user` and confirm each admin has a

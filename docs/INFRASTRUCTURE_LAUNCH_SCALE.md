@@ -4,6 +4,13 @@
 **Target Environment:** GCP — Cloud SQL for PostgreSQL 16 (regional HA) · Memorystore for Redis (cache + coordination) · GKE regional (FalkorDB in **Redis Cluster mode**, self-managed)
 **Workload:** Interactive, read-dominant graph exploration for 1,000+ users, over ~300 physical graphs and ~3,000 versioned views whose **version history lives in Cloud SQL**.
 
+> **At a glance.** The production sizing spec for {brand} at *launch scale* — for the
+> engineers and SREs provisioning it. Derives, from four stated planning assumptions
+> (§1.2), the capacity model, GKE layout, Cloud SQL tuning for the append-only versioned
+> store, the connection-budget arithmetic that horizontal scaling makes fragile, the
+> cache/coordination Redis split, the FalkorDB cluster, DR, and a phased rollout. Numbers
+> here are for this scale only — do not mix them with the 250M companion.
+
 This spec is a ground-up re-derivation for the *operating* scale, not the theoretical maximum. Its larger-corpus companion is [INFRASTRUCTURE_SCALING_250M.md](./INFRASTRUCTURE_SCALING_250M.md); the two share topology and tuning philosophy but nothing else — do not mix their numbers. It also composes with:
 
 - [architecture-when-scaling.md](./architecture-when-scaling.md) — the stateless-web / worker / control-plane role split and the cache-vs-coordination Redis rules.
@@ -200,6 +207,12 @@ One HA instance carries both schemas for launch (A4). The `graphver` split (§5.
 - The read replica is **asynchronous** — the `READONLY` pool tolerates seconds of lag (it serves diffs/exports/audits, never authoritative reads).
 
 ### 5.4 Connection management under horizontal scale (the section that must always balance)
+
+> **Warning:** This is the trap horizontal scaling springs. Pools are **per-process**, so
+> the connection count grows with replica count: at HPA max (12 web pods × 4 workers ×
+> ~85 conns) that's **4,080 direct connections** — more than any single instance allows.
+> Scale connections by **adding pods behind a transaction-mode pooler**, never by growing
+> pools, and never by raising `max_connections` to paper over exhaustion.
 
 Connections are the resource most likely to break when you autoscale, because the pools are **per-process** and the multiplier is **pods × `GUNICORN_WORKERS` × Σ(role pool_size)**. HPA moves the first term, so the connection count grows with replica count even though each pool looks small: at 12 web pods × 4 workers × the default ~85 conns/process = **4,080 direct connections** — over any instance on its own.
 
