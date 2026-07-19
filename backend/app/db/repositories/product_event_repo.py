@@ -57,6 +57,9 @@ async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> di
     per_page: dict[str, dict[str, int]] = {}
     miss_counter: Counter[str] = Counter()
     tour_completed = tour_skipped = 0
+    tour_completed_by: Counter[str] = Counter()
+    tour_skipped_by: Counter[str] = Counter()
+    tour_dropoff: dict[str, Counter[int]] = {}
 
     for r in rows:
         p = _decode(r)
@@ -76,8 +79,32 @@ async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> di
                 miss_counter[q] += 1
         elif r.event_type == "tour.completed":
             tour_completed += 1
+            tour_completed_by[str(p.get("tourId") or "unknown")] += 1
         elif r.event_type == "tour.skipped":
             tour_skipped += 1
+            tid = str(p.get("tourId") or "unknown")
+            tour_skipped_by[tid] += 1
+            step = p.get("atStep")
+            if isinstance(step, int) and not isinstance(step, bool):
+                tour_dropoff.setdefault(tid, Counter())[step] += 1
+
+    # Per-tour funnel: completion rate and where skippers bailed. Built from the
+    # tourId/atStep we already record on tour.completed / tour.skipped.
+    tour_funnel = []
+    for tid in set(tour_completed_by) | set(tour_skipped_by):
+        comp = tour_completed_by[tid]
+        skip = tour_skipped_by[tid]
+        starts = comp + skip
+        drops = tour_dropoff.get(tid, Counter())
+        tour_funnel.append({
+            "tourId": tid,
+            "completed": comp,
+            "skipped": skip,
+            "starts": starts,
+            "completionRate": round(comp / starts, 3) if starts else None,
+            "dropoff": [{"step": s, "count": c} for s, c in sorted(drops.items())],
+        })
+    tour_funnel.sort(key=lambda f: (-f["starts"], f["tourId"]))
 
     total_votes = helpful_yes + helpful_no
     pages = [
@@ -96,6 +123,6 @@ async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> di
         "contentGaps": [
             {"query": q, "count": n} for q, n in miss_counter.most_common(top)
         ],
-        "tours": {"completed": tour_completed, "skipped": tour_skipped},
+        "tours": {"completed": tour_completed, "skipped": tour_skipped, "funnel": tour_funnel},
         "totalEvents": len(rows),
     }

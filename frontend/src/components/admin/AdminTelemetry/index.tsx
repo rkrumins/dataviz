@@ -182,6 +182,52 @@ export function AdminTelemetry() {
                 </div>
             </section>
 
+            {/* Tour funnel — completion rate and where users bail. */}
+            <section className="mb-8">
+                <div className="flex items-center gap-2 mb-3">
+                    <Compass className="w-4 h-4 text-violet-500" />
+                    <h2 className="text-sm font-bold text-ink">Tour funnel — completion &amp; drop-off</h2>
+                </div>
+                <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
+                    {tours.funnel.length === 0 ? (
+                        <div className="px-5 py-10 text-center">
+                            <p className="text-sm text-ink-muted">No tour activity in this window yet.</p>
+                        </div>
+                    ) : (
+                        <ul>
+                            {tours.funnel.map((t) => {
+                                const rate = t.completionRate == null ? null : Math.round(t.completionRate * 100)
+                                const topDrop = t.dropoff.length
+                                    ? t.dropoff.reduce((a, b) => (b.count > a.count ? b : a))
+                                    : null
+                                return (
+                                    <li key={t.tourId} className="px-5 py-3.5 border-b last:border-b-0 border-glass-border">
+                                        <div className="flex items-center gap-4">
+                                            <span className="flex-1 min-w-0 text-sm font-semibold text-ink truncate">{t.tourId}</span>
+                                            <span className="text-xs text-ink-muted tabular-nums">{compactNum(t.starts)} starts</span>
+                                            <span className="w-14 text-right text-sm font-bold tabular-nums text-violet-600 dark:text-violet-400">
+                                                {rate === null ? '—' : `${rate}%`}
+                                            </span>
+                                        </div>
+                                        <div className="mt-2 h-1.5 rounded-full bg-violet-500/10 overflow-hidden" aria-hidden="true">
+                                            <div className="h-full rounded-full bg-violet-500/60" style={{ width: `${rate ?? 0}%` }} />
+                                        </div>
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-ink-muted">
+                                            <span>{compactNum(t.completed)} completed · {compactNum(t.skipped)} skipped</span>
+                                            {topDrop && (
+                                                <span className="text-amber-600 dark:text-amber-400">
+                                                    Most drop-off at step {topDrop.step + 1} ({compactNum(topDrop.count)})
+                                                </span>
+                                            )}
+                                        </div>
+                                    </li>
+                                )
+                            })}
+                        </ul>
+                    )}
+                </div>
+            </section>
+
             {/* Helpful by page. */}
             <section>
                 <div className="flex items-center gap-2 mb-3">

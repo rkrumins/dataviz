@@ -39,10 +39,24 @@ export interface ContentGap {
 }
 
 
+/** One tour's funnel: how many finished vs. bailed, and where they bailed. */
+export interface TourFunnelRow {
+    tourId: string
+    completed: number
+    skipped: number
+    /** completed + skipped — the number of times the tour was started. */
+    starts: number
+    /** completed / starts, or null when never started. */
+    completionRate: number | null
+    /** Skip counts by the step index users bailed at, ascending. */
+    dropoff: { step: number; count: number }[]
+}
+
 /** Product-tour engagement. */
 export interface ToursSummary {
     completed: number
     skipped: number
+    funnel: TourFunnelRow[]
 }
 
 
