@@ -1099,7 +1099,17 @@ function ViewWizardBody({
             const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
             // Canonical-clean: strips any stray legacy entityAssignments and merges
             // them into the flattened map so nothing is silently lost.
-            const normalizedLayout = normalizeReferenceLayout({ layers: layersWithScope, assignments: formData.assignments })
+            // Carry the scalar defaultNodeSortMode side-field from the view being
+            // edited — the wizard rebuilds the layout from form state, and a bare
+            // { layers, assignments } write would wipe the view-wide sort default.
+            const priorDefaultSort = mode === 'edit'
+                ? normalizeReferenceLayout(editingView?.layout?.referenceLayout).defaultNodeSortMode
+                : undefined
+            const normalizedLayout = normalizeReferenceLayout({
+                layers: layersWithScope,
+                assignments: formData.assignments,
+                ...(priorDefaultSort ? { defaultNodeSortMode: priorDefaultSort } : {}),
+            })
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
@@ -1189,7 +1199,7 @@ function ViewWizardBody({
                 const entityScope = deriveEntityScope(undefined, normalizedLayout)
                 try {
                     const layoutResult = await updateViewLayout(createdViewId, {
-                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                        referenceLayout: normalizedLayout,
                         entityScope,
                     })
                     const savedView = viewToViewConfig(layoutResult)
@@ -1241,7 +1251,7 @@ function ViewWizardBody({
                     ) ?? undefined
                     try {
                         const layoutResult = await updateViewLayout(viewId, {
-                            referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                            referenceLayout: normalizedLayout,
                             entityScope,
                         }, branchId)
                         const savedView = viewToViewConfig(layoutResult)

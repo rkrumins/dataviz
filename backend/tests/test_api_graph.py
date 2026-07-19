@@ -118,7 +118,7 @@ class _StubProvider(GraphDataProvider):
     async def get_nodes_by_tag(self, tag, limit=100, offset=0) -> List[GraphNode]:
         return []
 
-    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0) -> List[GraphNode]:
+    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0, **kw) -> List[GraphNode]:
         return []
 
     async def save_custom_graph(self, nodes, edges) -> bool:

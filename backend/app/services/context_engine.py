@@ -616,9 +616,9 @@ class ContextEngine:
             return []
         return []  # No ontology at all — graceful empty
 
-    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName", cursor: Optional[str] = None) -> List[GraphNode]:
+    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName", cursor: Optional[str] = None, sort_direction: str = "asc") -> List[GraphNode]:
         edge_types = await self._ensure_containment_edge_types(edge_types)
-        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor)
+        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor, sort_direction=sort_direction)
 
     async def get_children_with_edges(
         self, urn: str, edge_types: Optional[List[str]] = None,
@@ -628,6 +628,7 @@ class ContextEngine:
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         edge_types = await self._ensure_containment_edge_types(edge_types)
         if not lineage_edge_types:
@@ -639,6 +640,7 @@ class ContextEngine:
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
+            sort_direction=sort_direction,
         )
 
     async def get_top_level_or_orphan_nodes(
@@ -651,6 +653,7 @@ class ContextEngine:
         include_child_count: bool = True,
         query_timeout: Optional[float] = None,
         known_total_count: Optional[int] = None,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         """Return instances with no incoming containment edge, scoped to the
         active workspace/data-source ontology.
@@ -689,6 +692,12 @@ class ContextEngine:
             extra["query_timeout"] = query_timeout
         if known_total_count is not None:
             extra["known_total_count"] = known_total_count
+        # Only forwarded when non-default so providers predating direction
+        # support keep working for asc; a desc request against such a provider
+        # falls into the TypeError retry below, which re-raises (desc cannot be
+        # silently served as asc).
+        if sort_direction != "asc":
+            extra["sort_direction"] = sort_direction
 
         try:
             return await self.provider.get_top_level_or_orphan_nodes(
@@ -702,6 +711,10 @@ class ContextEngine:
             )
         except TypeError:
             if not extra:
+                raise
+            if "sort_direction" in extra:
+                # A provider without direction support cannot silently serve a
+                # desc request as asc — surface the incompatibility instead.
                 raise
             return await self.provider.get_top_level_or_orphan_nodes(
                 root_entity_types=root_types,
@@ -1499,8 +1512,14 @@ class ContextEngine:
     async def get_nodes_by_tag(self, tag: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_nodes_by_tag(tag, limit=limit, offset=offset)
 
-    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
-        return await self.provider.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
+    async def get_nodes_by_layer(
+        self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
+        return await self.provider.get_nodes_by_layer(
+            layer_id, limit=limit, offset=offset,
+            sort_direction=sort_direction, cursor=cursor,
+        )
 
     async def get_graph_schema(
         self,

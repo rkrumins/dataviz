@@ -224,11 +224,13 @@ class DraftOverlayProvider:
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         base = await self._base.get_children_with_edges(
             parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, offset=offset, limit=limit,
-            include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor)
+            include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor,
+            sort_direction=sort_direction)
         d = await self._delta_()
         if d.empty:
             return base
@@ -266,21 +268,24 @@ class DraftOverlayProvider:
         self, parent_urn: str, entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, sort_property: Optional[str] = "displayName",
-        cursor: Optional[str] = None,
+        cursor: Optional[str] = None, sort_direction: str = "asc",
     ) -> List[GraphNode]:
         res = await self.get_children_with_edges(
             parent_urn, edge_types=edge_types, include_lineage_edges=False,
-            offset=offset, limit=limit, sort_property=sort_property, cursor=cursor)
+            offset=offset, limit=limit, sort_property=sort_property, cursor=cursor,
+            sort_direction=sort_direction)
         return res.children
 
     async def get_top_level_or_orphan_nodes(
         self, *, root_entity_types: Optional[List[str]] = None,
         entity_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         base = await self._base.get_top_level_or_orphan_nodes(
             root_entity_types=root_entity_types, entity_types=entity_types,
-            search_query=search_query, limit=limit, cursor=cursor, include_child_count=include_child_count)
+            search_query=search_query, limit=limit, cursor=cursor, include_child_count=include_child_count,
+            sort_direction=sort_direction)
         d = await self._delta_()
         if d.empty:
             return base

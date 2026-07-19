@@ -22,6 +22,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.app.providers.falkordb_provider import CursorMismatchError
 from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
@@ -996,6 +997,10 @@ async def get_top_level_nodes(
         description="Keyset cursor (displayName of the last node on the previous page).",
     ),
     includeChildCount: bool = Query(True, description="Populate child_count on each node."),
+    sort_direction: str = Query(
+        "asc", alias="sortDirection", pattern="^(asc|desc)$",
+        description="Sort direction on displayName. Cursors are direction-bound.",
+    ),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across the materialized-serve miss → FalkorDB read;
     # isolate from the WEB pool so a slow provider can't starve auth/nav.
@@ -1035,6 +1040,7 @@ async def get_top_level_nodes(
             and not scope.branch_id            # main-branch physical reads only
             and scope.data_source_id
             and includeChildCount
+            and sort_direction == "asc"        # materialized payload is asc-ordered
         ):
             # Filtered requests are served too when the materialized payload
             # holds the COMPLETE top-level set (in-process filter beats an
@@ -1064,6 +1070,7 @@ async def get_top_level_nodes(
             cursor=cursor,
             include_child_count=includeChildCount,
             known_total_count=known_total,
+            sort_direction=sort_direction,
         )
         if known_total is None and scope is not None and result.total_count is not None:
             await get_graph_cache().set_top_level_count(
@@ -1074,6 +1081,9 @@ async def get_top_level_nodes(
     if scope is None:
         try:
             return await compute()
+        except CursorMismatchError as exc:
+            # Cursor/direction mismatch from the provider (client bug).
+            raise HTTPException(status_code=400, detail=str(exc))
         except ProviderConfigurationError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1094,11 +1104,15 @@ async def get_top_level_nodes(
                 "limit": limit,
                 "cursor": cursor,
                 "includeChildCount": includeChildCount,
+                "sortDirection": sort_direction,
             },
             compute=_bounded_compute(engine, compute),
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
+    except CursorMismatchError as exc:
+        # Cursor/direction mismatch from the provider (client bug).
+        raise HTTPException(status_code=400, detail=str(exc))
     except ProviderConfigurationError as exc:
         # Logical error — not a cache-fallback case; surface as 400.
         raise HTTPException(
@@ -1145,10 +1159,18 @@ async def get_node_children(
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
+    sort_direction: str = Query(
+        "asc", alias="sortDirection", pattern="^(asc|desc)$",
+        description="Sort direction on sortProperty. Cursors are direction-bound.",
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Lazy load children nodes."""
-    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor)
+    try:
+        return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor, sort_direction=sort_direction)
+    except CursorMismatchError as exc:
+        # Cursor/direction mismatch or malformed direction from the provider.
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/nodes/{urn}/children-with-edges", response_model=ChildrenWithEdgesResult, response_model_by_alias=True)
@@ -1163,6 +1185,10 @@ async def get_children_with_edges(
     offset: int = Query(0, ge=0),
     cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
     include_lineage_edges: bool = Query(True, alias="includeLineageEdges"),
+    sort_direction: str = Query(
+        "asc", alias="sortDirection", pattern="^(asc|desc)$",
+        description="Sort direction on sortProperty. Cursors are direction-bound.",
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get children with containment and lineage edges in a single round-trip."""
@@ -1175,30 +1201,36 @@ async def get_children_with_edges(
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
+            sort_direction=sort_direction,
         )
 
     scope = _cache_scope(engine)
-    if scope is None:
-        return await compute()
+    try:
+        if scope is None:
+            return await compute()
 
-    return await get_graph_cache().get_or_compute(
-        scope=scope,
-        endpoint=ENDPOINT_CHILDREN,
-        params={
-            "urn": urn,
-            "edgeTypes": sorted(edge_types) if edge_types else None,
-            "lineageEdgeTypes": sorted(lineage_edge_types) if lineage_edge_types else None,
-            "searchQuery": search_query,
-            "sortProperty": sort_property,
-            "limit": limit,
-            "offset": offset,
-            "cursor": cursor,
-            "includeLineageEdges": include_lineage_edges,
-        },
-        compute=_bounded_compute(engine, compute),
-        model_cls=ChildrenWithEdgesResult,
-        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-    )
+        return await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_CHILDREN,
+            params={
+                "urn": urn,
+                "edgeTypes": sorted(edge_types) if edge_types else None,
+                "lineageEdgeTypes": sorted(lineage_edge_types) if lineage_edge_types else None,
+                "searchQuery": search_query,
+                "sortProperty": sort_property,
+                "limit": limit,
+                "offset": offset,
+                "cursor": cursor,
+                "includeLineageEdges": include_lineage_edges,
+                "sortDirection": sort_direction,
+            },
+            compute=_bounded_compute(engine, compute),
+            model_cls=ChildrenWithEdgesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        )
+    except CursorMismatchError as exc:
+        # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/search", response_model=List[GraphNode], response_model_by_alias=True)
@@ -1564,9 +1596,24 @@ async def get_nodes_by_layer_endpoint(
     layer_id: str,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
+    sort_direction: str = Query(
+        "asc", alias="sortDirection", pattern="^(asc|desc)$",
+        description="Sort direction on displayName. Cursors are direction-bound.",
+    ),
+    cursor: Optional[str] = Query(
+        None,
+        description="Keyset cursor from a previous page. Takes precedence over offset.",
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
+    try:
+        return await engine.get_nodes_by_layer(
+            layer_id, limit=limit, offset=offset,
+            sort_direction=sort_direction, cursor=cursor,
+        )
+    except CursorMismatchError as exc:
+        # Cursor/direction mismatch from the provider (client bug).
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 class InternalEdgeQuery(BaseModel):

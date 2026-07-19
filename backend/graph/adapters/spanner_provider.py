@@ -807,6 +807,7 @@ class SpannerProvider(GraphDataProvider):
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> List[GraphNode]:
         await self._ensure_connected()
         self._require_gql()
@@ -826,6 +827,8 @@ class SpannerProvider(GraphDataProvider):
             "cursor": _ParamTypes.STRING,
         }
         safe_limit = _safe_int(limit, default=100, max_value=1_000)
+        desc = (sort_direction or "asc").lower() == "desc"
+        cmp, dir_kw = ("<", " DESC") if desc else (">", "")
         gql = (
             f"GRAPH {self._graph_name}\n"
             "MATCH (p:Entity {urn: @parent})-[c]->(child:Entity)\n"
@@ -834,10 +837,10 @@ class SpannerProvider(GraphDataProvider):
             "  AND (@search IS NULL OR REGEXP_CONTAINS("
             "       LAX_STRING(child.properties.displayName), @search))\n"
             "  AND (@cursor IS NULL OR "
-            "       LAX_STRING(child.properties.displayName) > @cursor)\n"
+            f"       LAX_STRING(child.properties.displayName) {cmp} @cursor)\n"
             "RETURN child.urn AS urn, child.label AS label,\n"
             "       TO_JSON(child.properties) AS properties\n"
-            "ORDER BY LAX_STRING(child.properties.displayName)\n"
+            f"ORDER BY LAX_STRING(child.properties.displayName){dir_kw}\n"
             f"LIMIT {safe_limit}"
         )
         rows = await self._execute_query(
@@ -879,12 +882,15 @@ class SpannerProvider(GraphDataProvider):
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         await self._ensure_connected()
         self._require_gql()
         ctypes = self._containment_types()
         types_filter = entity_types or root_entity_types or None
         safe_limit = _safe_int(limit, default=100, max_value=1_000)
+        desc = (sort_direction or "asc").lower() == "desc"
+        cmp, dir_kw = ("<", " DESC") if desc else (">", "")
         gql = (
             f"GRAPH {self._graph_name}\n"
             "MATCH (n:Entity)\n"
@@ -896,10 +902,10 @@ class SpannerProvider(GraphDataProvider):
             "  AND (@search IS NULL OR REGEXP_CONTAINS("
             "       LAX_STRING(n.properties.displayName), @search))\n"
             "  AND (@cursor IS NULL OR "
-            "       LAX_STRING(n.properties.displayName) > @cursor)\n"
+            f"       LAX_STRING(n.properties.displayName) {cmp} @cursor)\n"
             "RETURN n.urn AS urn, n.label AS label,\n"
             "       TO_JSON(n.properties) AS properties\n"
-            "ORDER BY LAX_STRING(n.properties.displayName)\n"
+            f"ORDER BY LAX_STRING(n.properties.displayName){dir_kw}\n"
             f"LIMIT {safe_limit}"
         )
         rows = await self._execute_query(
@@ -1620,13 +1626,17 @@ class SpannerProvider(GraphDataProvider):
 
     async def get_nodes_by_layer(
         self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         await self._ensure_connected()
+        dir_kw = " DESC" if (sort_direction or "asc").lower() == "desc" else ""
         sql = (
             "SELECT urn, label, TO_JSON(properties) AS properties "
             "FROM GraphNode "
             "WHERE layer_assignment = @layer "
-            f"ORDER BY urn LIMIT {_safe_int(limit, 100, 1000)} OFFSET {_safe_int(offset, 0, 1_000_000)}"
+            "ORDER BY LAX_STRING(properties.displayName)"
+            f"{dir_kw}, urn{dir_kw} "
+            f"LIMIT {_safe_int(limit, 100, 1000)} OFFSET {_safe_int(offset, 0, 1_000_000)}"
         )
         rows = await self._execute_query(
             sql,

@@ -245,6 +245,10 @@ export interface ViewLayoutConfig {
     // canvas's debounced layout save and hydrated into referenceModelStore on
     // view open. Not part of the normalized layer/assignment shape.
     displayRules?: DisplayRuleConfig[];
+    // View-wide default node sort for layers without an explicit
+    // nodeSortMode. Absent = 'alpha-asc'. 'custom' is inherently per-layer
+    // (it needs per-assignment orderKeys) so it can never be the default.
+    defaultNodeSortMode?: LayerNodeSortAlgo;
   };
 
   // LOD (Level of Detail) configuration
@@ -268,7 +272,28 @@ export interface LayerAssignmentEntry {
   inheritsChildren: boolean
   assignedBy?: 'user' | 'rule' | 'import'
   assignedAt?: string
+  /**
+   * Fractional (LexoRank-style) position key for layers in 'custom' sort
+   * mode — compared as a plain ASCII-ordinal string (see
+   * frontend/src/utils/orderKeys.ts). Absent = the node sorts after all
+   * keyed entries, alphabetically.
+   */
+  orderKey?: string
 }
+
+/**
+ * Node sort mode for a layer column: alphabetical ascending/descending,
+ * property-derived orders ('type-asc' groups by entity type; 'count-desc'
+ * puts the biggest containers first), or user-defined manual order
+ * ('custom', driven by LayerAssignmentEntry.orderKey). Property modes apply
+ * to ROOT nodes client-side (roots are fully client-held, like custom);
+ * children of expanded nodes always sort alphabetically server-side.
+ */
+export type LayerNodeSortMode = 'alpha-asc' | 'alpha-desc' | 'type-asc' | 'count-desc' | 'custom'
+
+/** Every algorithmic mode — i.e. anything but 'custom', which is inherently
+ *  per-layer (it needs per-assignment orderKeys) and can't be a view default. */
+export type LayerNodeSortAlgo = Exclude<LayerNodeSortMode, 'custom'>
 
 /**
  * Layer configuration for Reference Model view
@@ -286,6 +311,14 @@ export interface ViewLayerConfig {
    *  draft-mode resizes persist here and ship to every viewer. Viewers
    *  may still hold a personal (local) override on top. */
   width?: number;
+
+  /**
+   * Root-node ordering override for this layer's column. Absent = inherit
+   * `referenceLayout.defaultNodeSortMode` (which defaults to 'alpha-asc').
+   * 'custom' orders roots by their assignment `orderKey`; children of
+   * expanded nodes always sort alphabetically asc/desc (server-side).
+   */
+  nodeSortMode?: LayerNodeSortMode;
 
   // Logical Hierarchy (New)
   logicalNodes?: LogicalNodeConfig[];

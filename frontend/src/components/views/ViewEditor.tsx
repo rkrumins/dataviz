@@ -176,7 +176,10 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       ...prev,
       layout: {
         ...prev.layout!,
+        // Spread the prior referenceLayout: a bare `{ layers }` write would wipe
+        // `assignments` (and every custom-order orderKey) plus defaultNodeSortMode.
         referenceLayout: {
+          ...prev.layout?.referenceLayout,
           layers: [...layers, newLayer],
         },
       },
@@ -192,7 +195,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       ...prev,
       layout: {
         ...prev.layout!,
-        referenceLayout: { layers: updated },
+        referenceLayout: { ...prev.layout?.referenceLayout, layers: updated },
       },
     }))
   }
@@ -204,6 +207,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       layout: {
         ...prev.layout!,
         referenceLayout: {
+          ...prev.layout?.referenceLayout,
           layers: layers.filter((l) => l.id !== layerId),
         },
       },

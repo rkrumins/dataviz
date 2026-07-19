@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { LayerNodeSortAlgo } from '@/types/schema'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -144,6 +145,17 @@ interface PreferencesState {
   gettingStartedHidden: boolean
   setGettingStartedHidden: (hidden: boolean) => void
 
+  /**
+   * Per-VIEW, per-layer node-sort overrides for read-only viewers, keyed
+   * `viewId -> layerId -> mode`. Device-local by design: a viewer's Z→A must
+   * not write to the shared view, but it also shouldn't vanish on reload.
+   * Algorithmic modes only ('custom' needs persisted orderKeys). Pruned to
+   * the most recent ~20 views so the record can't grow unbounded.
+   */
+  viewSortOverrides: Record<string, Record<string, LayerNodeSortAlgo>>
+  setViewSortOverride: (viewId: string, layerId: string, mode: LayerNodeSortAlgo | null) => void
+  clearViewSortOverrides: (viewId: string) => void
+
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
@@ -258,6 +270,36 @@ export const usePreferencesStore = create<PreferencesState>()(
       // User avatar
       avatarId: null,
       setAvatarId: (avatarId) => set({ avatarId }),
+
+      // Per-view viewer sort overrides (device-local)
+      viewSortOverrides: {},
+      setViewSortOverride: (viewId, layerId, mode) => set((state) => {
+        const current = state.viewSortOverrides[viewId] ?? {}
+        let nextForView: Record<string, LayerNodeSortAlgo>
+        if (mode === null) {
+          if (!(layerId in current)) return state
+          const { [layerId]: _drop, ...rest } = current
+          nextForView = rest
+        } else {
+          if (current[layerId] === mode) return state
+          nextForView = { ...current, [layerId]: mode }
+        }
+        // Re-insert last so object insertion order doubles as recency; prune
+        // the oldest views beyond 20.
+        const { [viewId]: _self, ...others } = state.viewSortOverrides
+        const next: Record<string, Record<string, LayerNodeSortAlgo>> =
+          Object.keys(nextForView).length > 0 ? { ...others, [viewId]: nextForView } : others
+        const keys = Object.keys(next)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 20))) {
+          delete next[stale]
+        }
+        return { viewSortOverrides: next }
+      }),
+      clearViewSortOverrides: (viewId) => set((state) => {
+        if (!(viewId in state.viewSortOverrides)) return state
+        const { [viewId]: _drop, ...rest } = state.viewSortOverrides
+        return { viewSortOverrides: rest }
+      }),
 
       // Onboarding
       onboardingCompletedSteps: [],

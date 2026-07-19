@@ -147,7 +147,7 @@ class DataHubGraphQLProvider(GraphDataProvider):
     async def get_children(
         self, parent_urn: str, entity_types=None, edge_types=None,
         search_query=None, offset: int = 0, limit: int = 100,
-        sort_property=None, cursor=None,
+        sort_property=None, cursor=None, sort_direction: str = "asc",
     ) -> List[GraphNode]:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
@@ -189,7 +189,8 @@ class DataHubGraphQLProvider(GraphDataProvider):
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def get_nodes_by_layer(
-        self, layer_id: str, limit: int = 100, offset: int = 0
+        self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 

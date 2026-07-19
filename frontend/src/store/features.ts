@@ -37,6 +37,7 @@ import { fetchPublicFeatureValues } from '@/services/featuresService'
 export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
     editModeEnabled: true,
+    nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
     blankModelsEnabled: true,

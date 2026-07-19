@@ -787,6 +787,7 @@ class Neo4jProvider(GraphDataProvider):
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> List[GraphNode]:
         ip = self._id_prop()
         name_field = self._mapping.display_name_field
@@ -808,12 +809,18 @@ class Neo4jProvider(GraphDataProvider):
             )
             params["searchQuery"] = search_query
 
+        # Minimal-correct ordering (this adapter pages by SKIP/LIMIT, no keyset):
+        # order the window on the display-name field so offset pages are stable
+        # and direction-aware.
+        dir_kw = " DESC" if (sort_direction or "asc").lower() == "desc" else ""
+        order_by = f"ORDER BY c.`{name_field}`{dir_kw}, c.{ip}{dir_kw} " if sort_property else ""
+
         if len(target_edge_types) == 1:
             rel = _sanitize_label(target_edge_types[0])
             cypher = (
                 f"MATCH (p)-[r:`{rel}`]->(c) "
                 f"WHERE p.{ip} = $parent {search_where}"
-                f"WITH c SKIP $skip LIMIT $lim "
+                f"WITH c {order_by}SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
@@ -821,7 +828,7 @@ class Neo4jProvider(GraphDataProvider):
             cypher = (
                 f"MATCH (p)-[r]->(c) "
                 f"WHERE p.{ip} = $parent AND type(r) IN $relTypes {search_where}"
-                f"WITH c SKIP $skip LIMIT $lim "
+                f"WITH c {order_by}SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
@@ -2159,10 +2166,17 @@ class Neo4jProvider(GraphDataProvider):
                 nodes.append(n)
         return nodes
 
-    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+    async def get_nodes_by_layer(
+        self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
         layer_field = self._mapping.layer_field
+        name_field = self._mapping.display_name_field
+        ip = self._id_prop()
+        dir_kw = " DESC" if (sort_direction or "asc").lower() == "desc" else ""
         rows = await self._run_read(
-            f"MATCH (n) WHERE n.`{layer_field}` = $lid RETURN n SKIP $skip LIMIT $limit",
+            f"MATCH (n) WHERE n.`{layer_field}` = $lid "
+            f"RETURN n ORDER BY n.`{name_field}`{dir_kw}, n.{ip}{dir_kw} SKIP $skip LIMIT $limit",
             {"lid": layer_id, "skip": offset, "limit": limit},
         )
         nodes = []

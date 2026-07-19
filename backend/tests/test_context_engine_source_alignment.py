@@ -53,7 +53,7 @@ class _AliasRecordingProvider(GraphDataProvider):
     async def get_ancestors(self, urn, limit=100, offset=0): return []
     async def get_descendants(self, urn, depth=5, **kw): return []
     async def get_nodes_by_tag(self, tag, limit=100, offset=0): return []
-    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0): return []
+    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0, **kw): return []
     async def save_custom_graph(self, nodes, edges): return True
     async def create_node(self, node, containment_edge=None): return True
     async def create_edge(self, edge): return True

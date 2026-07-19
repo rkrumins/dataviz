@@ -41,6 +41,10 @@ export type StagedChangeType =
   // never turn it into a /graph/changes op. It persists to the VIEW via saveToBackend, and is
   // reverted by its own `discard`. `after` carries `{ layers, action }`.
   | 'layer_config'
+  // Custom-order drag reorder of a node within its layer column. Same view-layout contract as
+  // layer_config: zero graph ops, persists via persistReferenceLayout (orderKey on the assignment),
+  // undo/discard through its own hooks.
+  | 'reorder_nodes'
 
 /** A single user-staged change awaiting Save. */
 export interface StagedChange {
@@ -144,6 +148,7 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   assign_layer: 3,
   move_to_layer: 3,
   layer_config: 3,
+  reorder_nodes: 3,
   create_entity: 4,
   create_edge: 5,
 }
@@ -428,6 +433,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       delete_edge: 0,
       reverse_edge: 0,
       layer_config: 0,
+      reorder_nodes: 0,
     }
     get().changes.forEach((c) => {
       counts[c.type]++
