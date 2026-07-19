@@ -1,0 +1,245 @@
+/**
+ * FreshnessRow — one data source's row in the fleet table, plus the small
+ * status/badge primitives the drawer reuses.
+ *
+ * Copy is plain-language and white-label: the row actions read "Refresh
+ * caches" / "Rebuild lineage" / "Full refresh", never the internal scope
+ * names. Actions are disabled while a rebuild is already running for the
+ * source (``runningJobId``) or while this row's own mutation is in flight.
+ */
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import {
+    Activity, AlertTriangle, CheckCircle2, Clock, Database, Loader2,
+    Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
+import { TimeStamp } from '@/components/ui/TimeStamp'
+import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
+
+// ── Shared derivations ───────────────────────────────────────────────
+
+/** The marker's "since" is not durably recorded, so fall back to the last
+ *  accepted refresh event's timestamp — the moment the change was accepted. */
+export function deriveStaleSince(row: FreshnessRowData): string | null {
+    if (row.staleSince) return row.staleSince
+    if (row.lastEvent?.outcome === 'accepted') return row.lastEvent.ts
+    return null
+}
+
+/** Minutes/hours/days until a future instant, or null if it's already past. */
+export function timeUntil(iso?: string | null): string | null {
+    if (!iso) return null
+    const ms = new Date(iso).getTime() - Date.now()
+    if (Number.isNaN(ms) || ms <= 0) return null
+    const mins = Math.round(ms / 60000)
+    if (mins < 60) return `${mins}m`
+    const hours = Math.round(mins / 60)
+    if (hours < 24) return `${hours}h`
+    return `${Math.round(hours / 24)}d`
+}
+
+function humanizeReason(reason: string): string {
+    switch (reason) {
+        case 'unmaterialized': return 'Not materialized'
+        case 'legacy_cells': return 'Legacy layout'
+        case 'degraded': return 'Degraded'
+        default: return reason.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())
+    }
+}
+
+// ── Small primitives (reused by the drawer) ──────────────────────────
+
+const STATUS_STYLE: Record<string, { label: string; tone: string; Icon: typeof CheckCircle2; spin?: boolean }> = {
+    ready: { label: 'Ready', tone: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20', Icon: CheckCircle2 },
+    running: { label: 'Running', tone: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20', Icon: Loader2, spin: true },
+    pending: { label: 'Pending', tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20', Icon: Clock },
+    failed: { label: 'Failed', tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20', Icon: AlertTriangle },
+    skipped: { label: 'Skipped', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus },
+}
+
+export function AggStatusPill({ status }: { status?: string | null }) {
+    const s = (status && STATUS_STYLE[status]) || {
+        label: 'Not built', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus,
+    }
+    const { label, tone, Icon } = s
+    return (
+        <span className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide', tone)}>
+            <Icon className={cn('w-3 h-3', s.spin && 'animate-spin')} />
+            {label}
+        </span>
+    )
+}
+
+function Badge({ tone, Icon, spin, label, title }: {
+    tone: string; Icon: typeof Clock; spin?: boolean; label: string; title?: string
+}) {
+    return (
+        <span title={title} className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold', tone)}>
+            <Icon className={cn('w-3 h-3', spin && 'animate-spin')} />
+            {label}
+        </span>
+    )
+}
+
+/** The Freshness column: "Recomputing", "Drift detected", "Next rebuild in
+ *  Xm", plus a plain "stale" badge for structural reasons. */
+export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
+    const badges: React.ReactNode[] = []
+
+    if (row.staleReason === 'source_changed') {
+        const since = deriveStaleSince(row)
+        badges.push(
+            <Badge key="recomputing"
+                tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
+                Icon={Loader2} spin label="Recomputing"
+                title={`Source data changed${since ? ` · detected ${timeAgo(since)}` : ''} — a lineage rebuild is queued.`}
+            />,
+        )
+    } else if (row.staleReason) {
+        badges.push(
+            <Badge key="stale"
+                tone="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                Icon={AlertTriangle} label={humanizeReason(row.staleReason)}
+                title="This source's lineage is out of date and needs a rebuild."
+            />,
+        )
+    }
+
+    if (row.drifted === true) {
+        badges.push(
+            <Badge key="drift"
+                tone="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                Icon={AlertTriangle} label="Drift detected"
+                title="A probe found the live source differs from the last aggregation."
+            />,
+        )
+    }
+
+    const until = timeUntil(row.cooldownUntil)
+    if (until) {
+        badges.push(
+            <Badge key="cooldown"
+                tone="bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+                Icon={Clock} label={`Next rebuild in ${until}`}
+                title="A rebuild recently ran; the next one is held off until this cooldown passes."
+            />,
+        )
+    }
+
+    if (badges.length === 0) {
+        return <span className="text-[11px] text-ink-muted">Up to date</span>
+    }
+    return <div className="flex flex-wrap items-center gap-1">{badges}</div>
+}
+
+// ── Row ──────────────────────────────────────────────────────────────
+
+interface Props {
+    row: FreshnessRowData
+    workspaceName?: string
+    onOpenDrawer: (dsId: string) => void
+    onRefresh: (dsId: string, scope: RefreshScope) => void
+    busy?: boolean
+}
+
+const ACTIONS: { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string }[] = [
+    { scope: 'read-caches', label: 'Refresh caches', Icon: RefreshCw, iconClass: 'text-sky-500' },
+    { scope: 'rollups', label: 'Rebuild lineage', Icon: RotateCcw, iconClass: 'text-indigo-500' },
+    { scope: 'full', label: 'Full refresh', Icon: Sparkles, iconClass: 'text-emerald-500' },
+]
+
+export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
+    const running = !!row.runningJobId
+    const actionsDisabled = busy || running
+
+    return (
+        <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
+            {/* Source */}
+            <td className="px-3 py-2.5 align-top">
+                <button
+                    onClick={() => onOpenDrawer(row.dataSourceId)}
+                    className="text-left group outline-none"
+                >
+                    <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
+                        {row.name || row.dataSourceId}
+                    </span>
+                    <span className="block text-[11px] text-ink-muted">
+                        {row.providerName || 'Unknown provider'}
+                        {workspaceName ? ` · ${workspaceName}` : ''}
+                    </span>
+                </button>
+            </td>
+
+            {/* Aggregation */}
+            <td className="px-3 py-2.5 align-top">
+                <div className="flex flex-col gap-1">
+                    <AggStatusPill status={row.aggregationStatus} />
+                    {row.lastAggregatedAt
+                        ? <TimeStamp at={row.lastAggregatedAt} prefix="updated" icon={RefreshCw} />
+                        : <span className="text-[11px] text-ink-muted">—</span>}
+                </div>
+            </td>
+
+            {/* Cache */}
+            <td className="px-3 py-2.5 align-top">
+                {row.cacheAsOf
+                    ? <TimeStamp at={row.cacheAsOf} prefix="as of" icon={Database} />
+                    : <span className="text-[11px] text-ink-muted">—</span>}
+            </td>
+
+            {/* Freshness */}
+            <td className="px-3 py-2.5 align-top">
+                <FreshnessBadges row={row} />
+            </td>
+
+            {/* Last activity */}
+            <td className="px-3 py-2.5 align-top">
+                {row.lastEvent
+                    ? (
+                        <div className="flex flex-col gap-0.5">
+                            <span className="text-[11px] text-ink-secondary">
+                                {row.lastEvent.origin} · {row.lastEvent.outcome}
+                            </span>
+                            <TimeStamp at={row.lastEvent.ts} icon={Activity} colorByAge={false} />
+                        </div>
+                    )
+                    : <span className="text-[11px] text-ink-muted">—</span>}
+            </td>
+
+            {/* Actions */}
+            <td className="px-3 py-2.5 align-top text-right" onClick={(e) => e.stopPropagation()}>
+                <DropdownMenu.Root modal={false}>
+                    <DropdownMenu.Trigger asChild>
+                        <button
+                            aria-label={`Refresh actions for ${row.name || row.dataSourceId}`}
+                            disabled={actionsDisabled}
+                            title={running ? 'A rebuild is already running for this source' : undefined}
+                            className="p-1.5 rounded-lg text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
+                        >
+                            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreHorizontal className="w-4 h-4" />}
+                        </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                        <DropdownMenu.Content
+                            align="end"
+                            sideOffset={4}
+                            className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                        >
+                            {ACTIONS.map(({ scope, label, Icon, iconClass }) => (
+                                <DropdownMenu.Item
+                                    key={scope}
+                                    onSelect={() => onRefresh(row.dataSourceId, scope)}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                                >
+                                    <Icon className={cn('w-3.5 h-3.5', iconClass)} />
+                                    {label}
+                                </DropdownMenu.Item>
+                            ))}
+                        </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+            </td>
+        </tr>
+    )
+}
