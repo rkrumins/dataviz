@@ -209,8 +209,9 @@ describe('LineageLens on-demand fetch merge', () => {
       expect(screen.getByText('rollup')).toBeTruthy()
       // Headline counts split by grain — units never mix.
       expect(screen.getByText(/1 direct connection · 1 rolled-up/)).toBeTruthy()
-      // Parent header re-centers on the parent itself.
-      fireEvent.click(screen.getByText('label-parentDs'))
+      // The header row toggles collapse; navigation lives on the
+      // dedicated re-center button beside it.
+      fireEvent.click(screen.getByTitle('Re-center on label-parentDs'))
       expect(onRecenter).toHaveBeenCalledWith('parentDs')
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
@@ -311,8 +312,9 @@ describe('LineageLens on-demand fetch merge', () => {
       // Frontier rows grouped under their parent dataset.
       expect(screen.getByText('label-pd')).toBeTruthy()
       expect(screen.getByText('label-kid1')).toBeTruthy()
-      // Clicking the group header walks into the parent itself.
-      fireEvent.click(screen.getByText('label-pd'))
+      // The header row toggles collapse; walking into the parent lives
+      // on the dedicated arrow button beside it.
+      fireEvent.click(screen.getByTitle('Walk into label-pd'))
       expect(onRecenter).toHaveBeenCalledWith('pd')
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)

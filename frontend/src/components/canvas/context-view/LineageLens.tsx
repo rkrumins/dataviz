@@ -897,32 +897,36 @@ export function LineageLens({
                                 && (defaultCollapsed !== collapseToggles.has(collapseKey))
                               return (
                                 <div key={`pg-${g.key}`} className="mb-0.5">
-                                  {/* Chevron collapses; the name walks into
-                                      the parent itself — distinct targets. */}
-                                  <div className="flex items-center min-w-0 pl-1.5">
+                                  {/* The WHOLE row toggles collapse (big
+                                      target); walking into the parent lives
+                                      on the dedicated arrow button. */}
+                                  <div className="flex items-center gap-1 px-1.5 mb-0.5 min-w-0">
                                     <button
                                       type="button"
                                       onClick={() => toggleCollapse(collapseKey)}
                                       title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                                      className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded text-ink-muted/60 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                                      className={cn(
+                                        'flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-left transition-colors bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07]',
+                                        headerActive && 'bg-accent-lineage/[0.08]',
+                                      )}
                                     >
-                                      <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', collapsed && '-rotate-90')} />
+                                      <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
+                                      <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
+                                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
+                                      <span className={cn('min-w-0 truncate text-[11.5px] font-semibold', headerActive ? 'text-accent-lineage' : 'text-ink')}>
+                                        {pLabel}
+                                      </span>
+                                      <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[9.5px] font-semibold tabular-nums text-ink-muted">
+                                        {g.rows.length}
+                                      </span>
                                     </button>
                                     <button
                                       type="button"
                                       onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
                                       title={`Walk into ${pLabel}`}
-                                      className={cn(
-                                        'flex-1 min-w-0 flex items-center gap-1.5 pr-3 pl-0.5 pt-1.5 pb-0.5 text-left transition-colors',
-                                        headerActive ? 'text-accent-lineage' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
-                                      )}
+                                      className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
                                     >
-                                      <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
-                                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
-                                      <span className={cn('min-w-0 truncate text-[10px] font-bold tracking-wide', headerActive ? 'text-accent-lineage' : 'text-ink-muted/90')}>
-                                        {pLabel}
-                                      </span>
-                                      <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
+                                      <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
                                     </button>
                                   </div>
                                   {!collapsed && g.rows.map(it => renderWalkRow(it, false))}
@@ -1358,17 +1362,16 @@ function NeighborRow({
           {unloaded && <span className="italic">· not on canvas</span>}
         </p>
       </div>
-      {/* Flow direction cue: data always travels left → right.
-          On hover the actions REPLACE the chevron in normal flow (the
-          label truncates to make room) — an absolute overlay covered
-          the label and chevron. */}
+      {/* Flow direction cue: data always travels left → right. Hover
+          actions ALWAYS dock on the right (docking them left covered
+          the label/chevron); only the right-side chevron (incoming
+          rows) swaps out for them — the left chevron keeps its place. */}
       <LucideIcons.ChevronRight
-        className={cn('w-3.5 h-3.5 flex-shrink-0 group-hover:hidden', isIn ? 'order-last' : 'order-first')}
+        className={cn('w-3.5 h-3.5 flex-shrink-0', isIn ? 'order-last group-hover:hidden' : 'order-first')}
         style={{ color: `${edgeColor}99` }}
       />
       <span className={cn(
-        'hidden group-hover:flex flex-shrink-0 items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
-        isIn ? 'order-last' : 'order-first',
+        'hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
       )}>
         {onRevealOnCanvas && (
           <button
@@ -1558,28 +1561,31 @@ function NeighborColumn({
             return (
               <div key={`p-${g.key}`} className="mb-2.5">
                 {/* Parent-dataset header — the structural story ("which
-                    datasets feed me, via which fields"). The chevron
-                    collapses/expands the group; the name steps the walk
-                    into the parent itself. */}
-                <div className="flex items-center min-w-0">
+                    datasets feed me, via which fields"). The WHOLE row
+                    toggles collapse (a 20px chevron alone was unusable);
+                    navigation lives on the dedicated re-center button. */}
+                <div className="flex items-center gap-1 mb-1 min-w-0">
                   <button
                     type="button"
                     onClick={() => onToggleCollapse(collapseKey)}
                     title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                    className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded text-ink-muted/60 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                    className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
                   >
-                    <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', collapsed && '-rotate-90')} />
+                    <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
+                    <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
+                    <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{parentLabel}</span>
+                    <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted">
+                      {g.rows.length}
+                    </span>
                   </button>
                   <button
                     type="button"
                     onClick={() => onRecenter(g.key)}
                     title={`Re-center on ${parentLabel}`}
-                    className="flex-1 min-w-0 flex items-center gap-1.5 px-1 py-1 rounded-md text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
+                    className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
                   >
-                    <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/60" />
-                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
-                    <span className="min-w-0 truncate text-[10px] font-bold tracking-wide text-ink-muted/90">{parentLabel}</span>
-                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
+                    <LucideIcons.Crosshair className="w-3.5 h-3.5" />
                   </button>
                 </div>
                 {!collapsed && (
