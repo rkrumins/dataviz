@@ -475,6 +475,22 @@ def test_source_doc_cooldown_until_honors_override(monkeypatch):
     assert doc.cooldown_until is None
 
 
+def test_get_settings_reports_effective_env_defaults(monkeypatch):
+    # The editor seeds from persisted ?? envDefault, so get_settings must
+    # surface the REAL env defaults (here drift-auto OFF) — even with no row.
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    svc = _svc(_FakeRegistry(_FailProvider()))
+
+    class _NoRowSession:
+        async def get(self, orm, key):
+            return None
+    resp = _run(svc.get_settings(_NoRowSession()))
+    assert resp.cadence is None
+    assert resp.env_rebuild_min_interval_secs == 900
+    assert resp.env_drift_auto_rebuild is False
+
+
 def test_source_doc_exposes_resolved_and_source(monkeypatch):
     monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
     svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))

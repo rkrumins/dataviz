@@ -37,15 +37,23 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
     const [mins, setMins] = useState('')
     const [driftAuto, setDriftAuto] = useState(true)
 
-    // Seed the form from the persisted cadence once it loads.
+    // Seed from the persisted cadence, falling back to the EFFECTIVE env
+    // defaults (never a hardcoded assumption). This is load-bearing for the
+    // toggle: seeding it from the real current default means a save that only
+    // meant to change the interval round-trips the actual drift-auto state
+    // instead of silently flipping it on.
     const cadence = settingsQ.data?.cadence
+    const envDriftAuto = settingsQ.data?.envDriftAutoRebuild
+    const envMins = settingsQ.data?.envRebuildMinIntervalSecs != null
+        ? Math.round(settingsQ.data.envRebuildMinIntervalSecs / 60)
+        : null
     useEffect(() => {
         if (!settingsQ.data) return
         setMins(cadence?.rebuildMinIntervalSecs != null
             ? String(Math.round(cadence.rebuildMinIntervalSecs / 60))
             : '')
-        setDriftAuto(cadence?.driftAutoRebuild ?? true)
-    }, [settingsQ.data, cadence])
+        setDriftAuto(cadence?.driftAutoRebuild ?? envDriftAuto ?? true)
+    }, [settingsQ.data, cadence, envDriftAuto])
 
     const save = useMutation({
         mutationFn: (body: AggregationCadence) => aggregationService.putAggregationCadence(body),
@@ -109,14 +117,14 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
                                             type="number" min={0} max={MAX_MINUTES} step={1}
                                             value={mins}
                                             onChange={(e) => setMins(e.target.value)}
-                                            placeholder="Default (15)"
+                                            placeholder={envMins != null ? `Default (${envMins})` : 'Default'}
                                             aria-label="Minimum minutes between automatic rebuilds"
                                             className="w-32 h-9 px-2.5 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
                                         />
                                         <span className="text-sm text-ink-muted">minutes</span>
                                     </div>
                                     <p className="text-[11px] text-ink-muted mt-1">
-                                        Leave blank to use the system default (15 minutes). Set 0 to rebuild on every change.
+                                        Leave blank to use the system default{envMins != null ? ` (${envMins} minutes)` : ''}. Set 0 to rebuild on every change.
                                     </p>
                                 </div>
 

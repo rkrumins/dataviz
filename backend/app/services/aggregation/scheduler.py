@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 # Gates both the act-on-drift signal and the stale-marker reconciler
 # (Task 4). ``signal_source_changed`` is the single choke point for the
 # change gate and rebuild cooldown — this flag only controls whether the
-# scheduler CALLS it; off preserves the historic notify-only sweep
-# exactly. Default on; read once at import, mirroring the package's
-# env-const style.
-_DRIFT_AUTO_REBUILD = os.getenv(
-    "AGGREGATION_DRIFT_AUTO_REBUILD", "true"
-).strip().lower() in ("1", "true", "yes", "on")
+# scheduler CALLS it; off preserves the historic notify-only sweep exactly.
+# The ENV default is canonical in service.py (so ``get_settings`` reports the
+# same fallback the tick resolves against); a persisted global cadence
+# overrides it per tick. Kept as a module-level name here so tests can
+# monkeypatch ``scheduler._DRIFT_AUTO_REBUILD`` and the tick reads it live.
+from .service import AGGREGATION_DRIFT_AUTO_REBUILD as _DRIFT_AUTO_REBUILD
 
 
 class AggregationScheduler:

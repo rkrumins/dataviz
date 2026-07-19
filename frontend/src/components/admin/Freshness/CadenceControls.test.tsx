@@ -96,12 +96,24 @@ describe('drawer rebuild-cadence row', () => {
         expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
         expect(screen.queryByLabelText('Rebuild cadence override (minutes)')).not.toBeInTheDocument()
     })
+
+    it('hides the editor for a never-built source (no state row → would 404)', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            lastAggregatedAt: null, aggregationStatus: 'none',
+        }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
+        expect(screen.queryByLabelText('Rebuild cadence override (minutes)')).not.toBeInTheDocument()
+        expect(screen.getByText(/once this source has been built/i)).toBeInTheDocument()
+    })
 })
 
 describe('admin cadence popover', () => {
     it('seeds from the persisted cadence and Save fires the cadence PUT', async () => {
         getAggregationSettings.mockResolvedValue({
             tuning: null, cadence: { rebuildMinIntervalSecs: 600, driftAutoRebuild: false },
+            envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
         })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: { rebuildMinIntervalSecs: 120, driftAutoRebuild: false } })
         wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
@@ -119,17 +131,24 @@ describe('admin cadence popover', () => {
         ))
     })
 
-    it('blank interval sends null (fall through to the env default)', async () => {
-        getAggregationSettings.mockResolvedValue({ tuning: null, cadence: null })
+    it('no persisted cadence: a plain Save round-trips the env defaults (no drift clobber)', async () => {
+        // Deploy env has drift-auto OFF and no persisted cadence. The toggle
+        // must seed from the env default (false), so an interval-only Save does
+        // NOT flip drift-auto on fleet-wide.
+        getAggregationSettings.mockResolvedValue({
+            tuning: null, cadence: null,
+            envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: false,
+        })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
         wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
 
-        // Nothing persisted → the input starts blank; Save without typing.
-        await screen.findByLabelText('Minimum minutes between automatic rebuilds')
+        const toggle = await screen.findByLabelText(/Automatically rebuild a source when drift is detected/i)
+        await waitFor(() => expect(toggle).not.toBeChecked())
+
         await userEvent.click(screen.getByRole('button', { name: 'Save' }))
 
         await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
-            { rebuildMinIntervalSecs: null, driftAutoRebuild: true },
+            { rebuildMinIntervalSecs: null, driftAutoRebuild: false },
         ))
     })
 })

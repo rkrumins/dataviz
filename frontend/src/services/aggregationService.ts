@@ -154,6 +154,10 @@ export interface AggregationCadence {
 export interface AggregationSettingsResponse {
   tuning: AggregationTuning | null;
   cadence?: AggregationCadence | null;
+  /** Effective ENV defaults (server-read) — the cadence editor seeds from
+   *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
+  envRebuildMinIntervalSecs?: number | null;
+  envDriftAutoRebuild?: boolean | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }

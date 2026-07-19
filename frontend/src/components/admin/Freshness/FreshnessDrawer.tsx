@@ -66,6 +66,12 @@ function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
     const [mins, setMins] = useState(overrideMins)
     const source = doc.rebuildIntervalSource ?? 'default'
 
+    // The override lives on the aggregation state row, which only exists once a
+    // source has been built — a never-aggregated source would 404 the PATCH.
+    // Detect that and show guidance instead of a control that can't succeed.
+    const neverBuilt = !doc.lastAggregatedAt
+        && (doc.aggregationStatus == null || doc.aggregationStatus === 'none')
+
     const save = (value: number | null) => {
         setSettings.mutate({ dsId: doc.dataSourceId, rebuildMinIntervalSecs: value }, {
             onSuccess: () => showToast('success', value == null
@@ -98,7 +104,12 @@ function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
                 Minimum time between automatic rebuilds of this source. Currently{' '}
                 <span className="font-semibold text-ink">{fmtInterval(doc.resolvedRebuildIntervalSecs)}</span>.
             </p>
-            {canManage && (
+            {canManage && neverBuilt && (
+                <p className="text-[11px] text-ink-muted pt-1">
+                    You can set a custom cadence once this source has been built for the first time.
+                </p>
+            )}
+            {canManage && !neverBuilt && (
                 <div className="flex items-center gap-2 pt-1">
                     <input
                         type="number" min={0} max={1440} step={1}

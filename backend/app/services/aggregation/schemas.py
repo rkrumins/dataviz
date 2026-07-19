@@ -614,6 +614,15 @@ class AggregationSettingsRequest(BaseModel):
 class AggregationSettingsResponse(BaseModel):
     tuning: Optional[AggregationTuning] = None
     cadence: Optional[AggregationCadence] = None
+    # Effective ENV defaults (read server-side), so the cadence editor can
+    # seed its controls from ``persisted ?? envDefault`` — a no-op save then
+    # round-trips the real current default instead of pinning a wrong value.
+    env_rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="envRebuildMinIntervalSecs",
+    )
+    env_drift_auto_rebuild: Optional[bool] = Field(
+        None, alias="envDriftAutoRebuild",
+    )
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
 

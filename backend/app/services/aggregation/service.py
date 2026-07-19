@@ -58,6 +58,15 @@ AGGREGATION_REBUILD_MIN_INTERVAL_SECS = int(
     __import__("os").getenv("AGGREGATION_REBUILD_MIN_INTERVAL_SECS", "900")
 )
 
+# Env default for drift auto-rebuild — the fallback when the persisted global
+# cadence leaves ``drift_auto_rebuild`` unset. Canonical here (next to the
+# rebuild-interval default) so ``get_settings`` reports EXACTLY the value the
+# scheduler falls back to (scheduler imports this as ``_DRIFT_AUTO_REBUILD``).
+AGGREGATION_DRIFT_AUTO_REBUILD = (
+    __import__("os").getenv("AGGREGATION_DRIFT_AUTO_REBUILD", "true")
+    .strip().lower() in ("1", "true", "yes", "on")
+)
+
 
 # ── F9: configurable rebuild cadence ─────────────────────────────────────
 # The env-only cooldown/drift knobs are now overridable by a persisted
@@ -862,9 +871,15 @@ class AggregationService:
     async def get_settings(self, session: AsyncSession) -> AggregationSettingsResponse:
         from .models import AggregationSettingsORM
 
+        # Always report the effective ENV defaults so the editor seeds from
+        # ``persisted ?? envDefault`` (present whether or not a row exists).
+        env_kwargs = dict(
+            env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
+            env_drift_auto_rebuild=AGGREGATION_DRIFT_AUTO_REBUILD,
+        )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
-            return AggregationSettingsResponse(tuning=None)
+            return AggregationSettingsResponse(tuning=None, **env_kwargs)
         try:
             tuning = (
                 AggregationTuning(**json.loads(row.tuning_json))
@@ -884,6 +899,7 @@ class AggregationService:
             cadence=cadence,
             updated_at=row.updated_at,
             updated_by=row.updated_by,
+            **env_kwargs,
         )
 
     async def put_settings(
