@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass, Boxes, Workflow } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -234,6 +234,123 @@ TOURS.push(
       {
         title: "You've got the canvas",
         body: 'Search to find, Trace to follow, Display to tune. Open **Help** to replay this any time.',
+      },
+    ],
+  },
+  {
+    id: 'ingestion',
+    title: 'Connect your data',
+    description: 'Point the platform at a graph database, verify the connection, and register the assets you want to work with.',
+    icon: Import,
+    estimate: '2 min',
+    steps: [
+      {
+        title: 'Bring data in',
+        body: 'Ingestion is where raw graphs become **data sources** your team can use. Here’s the path — leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="ingestion-tabs"]',
+        route: '/ingestion',
+        placement: 'bottom',
+        title: 'Three stages, three tabs',
+        body: 'Work left to right: connect **Providers**, register **Data Sources**, then watch **Job History** as the platform ingests them.',
+      },
+      {
+        target: '[data-tour="ingestion-connect"]',
+        route: '/ingestion?tab=providers',
+        placement: 'bottom',
+        title: '1 · Connect & test a provider',
+        body: 'Register a graph database (FalkorDB, Neo4j, DataHub) and **Test** the connection before going further.',
+      },
+      {
+        target: '[data-tour="ingestion-assets"]',
+        route: '/ingestion?tab=assets',
+        placement: 'right',
+        title: '2 · Discover & register assets',
+        body: 'Pick a provider to see the graphs it exposes, then **register** the ones you want as data sources.',
+      },
+      {
+        title: "That's ingestion",
+        body: 'Connected, registered, and ingesting. Next, bind these sources to a **workspace**. Open **Help** to replay any tour.',
+      },
+    ],
+  },
+  {
+    id: 'semantic-layers',
+    title: 'Add meaning with semantic layers',
+    description: 'Model entity types and colours, then assign a semantic layer to each data source to make the raw graph readable.',
+    icon: Layers,
+    estimate: '2 min',
+    steps: [
+      {
+        title: 'From raw graph to readable',
+        body: 'A **semantic layer** (ontology) gives raw nodes and edges business meaning — types, colours, and hierarchy. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="schema-sidebar"]',
+        route: '/schema',
+        placement: 'right',
+        title: 'Every layer, one place',
+        body: 'Your semantic layers live here. **Select one** to inspect it, or start a new draft from scratch.',
+      },
+      {
+        title: 'Model your types',
+        body: "Inside a layer, the **Schema** tab is where you define **entity & relationship types** and give each a **colour** and description — the vocabulary of your graph.",
+      },
+      {
+        target: '[data-tour="schema-dashboard"]',
+        route: '/schema',
+        placement: 'bottom',
+        title: 'Assign it to data sources',
+        body: 'The **Deployment Dashboard** binds each data source to a semantic layer — that’s what turns raw graphs into a governed, readable model.',
+      },
+      {
+        title: "That's semantic layers",
+        body: 'Model once, assign anywhere. Publish a layer and every view on those sources picks it up. Open **Help** to replay any tour.',
+      },
+    ],
+  },
+  {
+    id: 'reviews',
+    title: 'Review & merge changes',
+    description: 'How drafts become reviewed, approved, and merged — a lap around the Review Center.',
+    icon: GitPullRequestArrow,
+    estimate: '2 min',
+    // Reviews live at the workspace-scoped route /workspaces/:wsId/reviews, which has
+    // no static path a route-step could navigate to. Offered from the reviews surface
+    // itself and from Help while you're anywhere under /workspaces/.
+    contextual: true,
+    contextPathPrefix: '/workspaces/',
+    steps: [
+      {
+        title: 'Changes, reviewed',
+        body: 'Edits are **drafted**, opened as a merge request, **reviewed**, then **merged** — like a pull request for your graph. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="reviews-stats"]',
+        placement: 'bottom',
+        title: 'The state of play',
+        body: 'See at a glance what’s **open**, **ready to merge**, **needs attention**, or **raised by you** — click a card to filter to it.',
+      },
+      {
+        target: '[data-tour="reviews-list"]',
+        placement: 'top',
+        title: 'Every request',
+        body: 'Each row is a proposed change. **Open one** to read its diff, leave feedback, approve, and merge.',
+      },
+      {
+        target: '[data-tour="reviews-filters"]',
+        placement: 'bottom',
+        title: 'Find the right one',
+        body: 'Narrow by **scope**, **author**, or **source**, or search by title and branch.',
+      },
+      {
+        title: 'Approve & merge',
+        body: 'Opening a request shows the full **diff** with approve and merge controls — nothing lands until it’s reviewed.',
+      },
+      {
+        title: "That's reviews",
+        body: 'Draft, review, merge — changes ship safely and with a trail. Open **Help** to replay this any time.',
       },
     ],
   },

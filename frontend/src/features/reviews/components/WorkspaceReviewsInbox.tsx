@@ -211,7 +211,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
       ))}
 
       {/* Summary stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div data-tour="reviews-stats" className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <StatCard icon={GitPullRequestArrow} label="Open requests" count={stats.open} tone="indigo" active={scope === 'open'} onClick={() => setScope('open')} />
         <StatCard icon={GitMerge} label="Ready to merge" count={stats.ready} tone="emerald" onClick={() => { setScope('all'); }} />
         <StatCard icon={AlertTriangle} label="Needs attention" count={stats.attention} tone="amber" onClick={() => { setScope('all'); }} />
@@ -219,7 +219,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
       </div>
 
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2.5 mb-5">
+      <div data-tour="reviews-filters" className="flex flex-wrap items-center gap-2.5 mb-5">
         {/* Scope segmented */}
         <div className="inline-flex items-center rounded-xl border border-glass-border bg-canvas-elevated/50 p-0.5">
           {SCOPES.map((s) => (
@@ -255,7 +255,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
       </div>
 
       {/* List */}
-      <div className="space-y-2">
+      <div data-tour="reviews-list" className="space-y-2">
         {shown.map(({ pr, sourceLabel }) => (
           <PrListRow key={pr.prId} wsId={wsId} pr={pr} sourceLabel={sourceLabel} onOpen={() => setOpenPrId(pr.prId)} />
         ))}

@@ -1214,7 +1214,7 @@ export function RegistryAssets() {
         <div className="flex gap-6 h-full min-h-0 animate-in fade-in duration-300">
 
             {/* ─── Left: Provider Sidebar ─────────────────────────────────────── */}
-            <div className="w-64 shrink-0 flex flex-col gap-2">
+            <div data-tour="ingestion-assets" className="w-64 shrink-0 flex flex-col gap-2">
                 <div className="mb-1">
                     <p className="text-xs font-bold text-ink-muted uppercase tracking-wider">Providers</p>
                 </div>

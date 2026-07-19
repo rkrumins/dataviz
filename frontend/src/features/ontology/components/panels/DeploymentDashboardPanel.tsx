@@ -37,6 +37,7 @@ const GROUP_PAGE_SIZE = 10
 const MATRIX_MAX_CELLS = 400
 import { WORKSPACE_PALETTES } from '@/components/dashboard/dashboard-constants'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 // ---------------------------------------------------------------------------
 // Stagger CSS (matches ExplorerPage / WorkspacesPage pattern)
@@ -327,7 +328,7 @@ export function DeploymentDashboardPanel({
       <style>{STAGGER_STYLE}</style>
 
       {/* ── Hero section ─────────────────────────────────────────── */}
-      <div className="mb-8">
+      <div data-tour="schema-dashboard" className="mb-8">
         <div className="flex items-start justify-between gap-6">
           <div className="flex-1">
             <h1 className="text-3xl font-bold tracking-tight text-ink">Semantic Layers</h1>
@@ -337,24 +338,23 @@ export function DeploymentDashboardPanel({
             </p>
           </div>
 
-          {(onCreateDraft || onSuggestFromGraph) && (
-            <div className="flex items-center gap-2 flex-shrink-0 pt-1">
-              {canSuggest && onSuggestFromGraph && (
-                <button onClick={onSuggestFromGraph}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border border-glass-border text-ink-secondary hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-500/[0.04] transition-all">
-                  <Sparkles className="w-4 h-4" />
-                  Suggest from Graph
-                </button>
-              )}
-              {onCreateDraft && (
-                <button onClick={onCreateDraft}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/20 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
-                  <Plus className="w-4 h-4" />
-                  New Semantic Layer
-                </button>
-              )}
-            </div>
-          )}
+          <div className="flex items-center gap-2 flex-shrink-0 pt-1">
+            <TourLaunchButton tourId="semantic-layers" />
+            {canSuggest && onSuggestFromGraph && (
+              <button onClick={onSuggestFromGraph}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border border-glass-border text-ink-secondary hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-500/[0.04] transition-all">
+                <Sparkles className="w-4 h-4" />
+                Suggest from Graph
+              </button>
+            )}
+            {onCreateDraft && (
+              <button onClick={onCreateDraft}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/20 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                <Plus className="w-4 h-4" />
+                New Semantic Layer
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Getting started guide — original rich layout with collapse toggle */}
