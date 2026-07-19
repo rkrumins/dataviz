@@ -4,6 +4,16 @@
 
 > **See also:** [Platform Services overview](/docs/services-overview) for the current service/process-role topology (WEB, WORKER, CONTROLPLANE, DEV).
 
+This is the system-design reference: how the frontend, backend, semantic layer, and graph providers fit together, and how a request flows through them.
+
+**Who it's for:** developers and architects who need the end-to-end picture before diving into a subsystem.
+
+**What you'll find here:**
+- The three-layer system topology and the four-entity core model
+- Service architecture and the request lifecycle
+- Authentication, security controls, and scalability caveats
+- Deployment (Docker Compose + Kubernetes) and the technology stack
+
 ---
 
 ## System Overview
@@ -173,7 +183,9 @@ erDiagram
 | **Workspace** | Operational context (team project, environment) | Contains data sources, views, context models |
 | **DataSource** | Binding of Provider + Graph + Ontology within a Workspace | Unique per (workspace, provider, graph_name) |
 
-> See [DECISIONS.md ADR-001](DECISIONS.md#adr-001) for the rationale behind this design.
+> **Important:** A `WorkspaceDataSource` is the only unit of data access, and it is unique per `(workspace_id, provider_id, graph_name)`. This invariant is what keeps tenants isolated — no view or query can reach a graph that isn't bound into its workspace.
+
+> See [ADR-001](/docs/decisions#adr-001) for the rationale behind this design.
 
 ---
 
@@ -348,6 +360,8 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 | **CORS** | Configurable origins | `CORS_ALLOWED_ORIGINS` env var |
 
 ### Production Security Notes
+
+> **Warning:** The three items below are non-negotiable before a production deployment. Shipping with the dev defaults (plaintext credentials, localStorage tokens, the bootstrap admin password) leaves the platform exploitable. See [Technical Debt § Security](/docs/technical-debt#1-security-concerns) for the full risk analysis.
 
 - **JWT Storage**: Currently stored in `localStorage` (XSS risk). Planned migration to HttpOnly cookies with CSRF protection.
 - **Credential Encryption**: Optional in development (`CREDENTIAL_ENCRYPTION_KEY` not set falls back to plaintext). **REQUIRED in production** — generate a key via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
@@ -793,3 +807,15 @@ kubectl -n synodic logs -l app=viz-service -f
 ```
 
 > **Note:** FalkorDB and PostgreSQL are shown inline in the Docker Compose setup. For Kubernetes, use managed services (e.g., AWS ElastiCache, Cloud SQL, RDS) or deploy them via Helm charts (`bitnami/postgresql`, `falkordb/falkordb`) with persistent volume claims.
+
+---
+
+## Related
+
+- [Overview](/docs/overview) — vision, capabilities, and roadmap
+- [Data Architecture](/docs/data-architecture) — schemas, entity relationships, caching, Redis topology
+- [Decisions](/docs/decisions) — ADRs behind the entity model, services, and Redis design
+- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are materialized
+- [Technical Debt](/docs/technical-debt) — security, scaling, and testing risks
+- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred horizontal-scale plan

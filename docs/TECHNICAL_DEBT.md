@@ -4,6 +4,13 @@
 
 This document provides a critical analysis of the {brand} platform, identifying technical debt, security concerns, scalability issues, and prioritized recommendations.
 
+**What you'll find here:**
+- A risk matrix and category-by-category debt inventory (security, data, architecture, testing, frontend, infrastructure)
+- Honest **resolved vs. open** status on every item — shipped fixes are marked, real debt is kept
+- A phased remediation plan with priorities and effort estimates
+
+> **Important:** Items are labelled by severity and status. **RESOLVED** entries are retained for history, not open work — check the status line before acting. Live risk is summarized in [§8 Summary](#8-summary).
+
 ---
 
 ## Risk Matrix
@@ -417,9 +424,19 @@ gantt
 | **Infrastructure** | - | 1 (outbox consumer) | 3 (no monitoring, no rate limits, per-worker cache isolation) | 3 (no API docs, no pagination cap, poller shutdown) |
 | **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~, ~~CORS wildcard~~, ~~no Alembic~~, ~~inline migration growth~~ |
 
-**Highest priority blockers for production deployment:**
-1. Force credential encryption (prevent plaintext leaks)
-2. Move JWT to HttpOnly cookies (prevent XSS token theft)
-3. Require PostgreSQL in production (prevent SQLite corruption)
-4. Strong default admin password (prevent trivial compromise)
-5. CI/CD pipeline (prevent unvalidated deployments)
+> **Warning: highest-priority blockers for production deployment.**
+> 1. Force credential encryption (prevent plaintext leaks)
+> 2. Move JWT to HttpOnly cookies (prevent XSS token theft)
+> 3. Require PostgreSQL in production (prevent SQLite corruption)
+> 4. Strong default admin password (prevent trivial compromise)
+> 5. CI/CD pipeline (prevent unvalidated deployments)
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — the security controls and deployment model these risks apply to
+- [Data Architecture](/docs/data-architecture) — credential encryption, migrations, and outbox details
+- [Decisions](/docs/decisions) — ADRs that resolved several items here (Alembic, Redis roles, graph-service retirement)
+- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred multi-tier design behind the cache-isolation and scaling gaps
+- [Overview](/docs/overview) — platform vision, maturity assessment, and roadmap

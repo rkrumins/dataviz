@@ -1,5 +1,17 @@
 # {brand}: Project Overview, Vision & Roadmap
 
+The starting point for understanding {brand} — what it is, the problem it solves, what has shipped, and where it's headed.
+
+**Who it's for:** anyone new to the platform — admins, data engineers, business stakeholders, and developers looking for orientation before the deeper design docs.
+
+**What you'll find here:**
+- Key terms and a role-based reading guide
+- The problem, the vision, and core design principles
+- Shipped capabilities and honest maturity assessment
+- Competitive positioning and forward-looking roadmap
+
+> **Tip:** Skim the [Key Terms](#key-terms) table first — the four-entity vocabulary (Provider, CatalogItem, Ontology, Workspace) recurs across every other doc.
+
 ---
 
 ## What is {brand}?
@@ -585,3 +597,14 @@ CORS_ALLOWED_ORIGINS=https://your-domain.com                          # Required
 ADMIN_EMAIL=admin@your-org.com                                        # Recommended
 ADMIN_PASSWORD=<strong-random-password>                                # Recommended
 ```
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — system design, service topology, deployment
+- [Data Architecture](/docs/data-architecture) — data models, entity relationships, caching, Redis topology
+- [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
+- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
+- [Technical Debt](/docs/technical-debt) — known risks and the remediation plan
+- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred horizontal-scale plan

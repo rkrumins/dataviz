@@ -1,5 +1,17 @@
 # Data Architecture
 
+The definitive reference for how {brand} stores and moves data across its two storage layers and its Redis topology.
+
+**Who it's for:** backend developers, DBAs, and operators who need the concrete schema, cache, and Redis-role details.
+
+**What you'll find here:**
+- The full management-DB entity-relationship model
+- End-to-end query flow and the graph data model
+- Credential encryption, caching, and Redis role decoupling
+- Stats polling, the transactional outbox, migrations, and data-integrity constraints
+
+---
+
 ## Overview
 
 {brand}'s data architecture spans two distinct layers:
@@ -473,6 +485,8 @@ graph LR
 - `password: Optional[str]`
 - `token: Optional[str]`
 
+> **Warning:** If `CREDENTIAL_ENCRYPTION_KEY` is unset, credentials are stored as **plaintext** — a development convenience that becomes a real risk in any shared or production environment. Generate a key with `Fernet.generate_key()` and set it before storing any real provider credentials. See [ADR-008](/docs/decisions#adr-008-fernet-for-credential-encryption).
+
 **Security rules:**
 - Credentials are **never returned in API responses** (stripped from ProviderResponse, ConnectionResponse)
 - Decrypted only when instantiating a provider connection
@@ -524,6 +538,8 @@ graph TB
 ---
 
 ## Redis Topology & Decoupling
+
+> **Important:** FalkorDB hosts the graph **only**. Every operational Redis structure (streams, cache, locks, rate-limit, revocation) lives on a dedicated Redis — never on FalkorDB. This is enforced by construction, not convention ([ADR-020](/docs/decisions#adr-020-dedicated-redis-decoupled-from-falkordb-by-construction)): a FalkorDB restart or OOM can never wipe the cache or contend with graph queries.
 
 There are **two distinct Redis roles**, and they must never be confused:
 
@@ -884,3 +900,14 @@ All tables use text UUIDs with semantic prefixes:
 | `feature_registry_meta` | Single row by convention |
 | `management_db_config` | `id = 1` always |
 | `announcement_config` | `id = 1` always |
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — system topology and the request lifecycle
+- [Decisions](/docs/decisions) — ADRs behind the entity model, Redis roles, and outbox
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are computed and written
+- [Services Overview](/docs/services-overview) — process-role topology over these data layers
+- [Technical Debt](/docs/technical-debt) — SQLite, migrations, and outbox-consumer risks
+- [Overview](/docs/overview) — platform vision and key terms

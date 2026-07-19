@@ -12,6 +12,15 @@
 > pressure to start building distributed-systems machinery for a
 > deployment shape that doesn't exist.
 
+**Who it's for:** platform engineers evaluating *whether* and *how* to move
+off single-process — read the [trigger conditions](#when-this-becomes-real)
+first; if none apply, this is reference-only.
+
+**What you'll find here:** the trigger conditions, the three-tier design,
+the mandatory Redis split, the stateless-web mandate, connection and
+migration handling, operator-visible breaking changes, and a verification
+checklist for when the work is funded.
+
 ## When this becomes real
 
 Trigger conditions — any one of these flips this from "design notes" to
@@ -45,6 +54,44 @@ Three deployment tiers, all from the same image, gated by env var:
 
 Same code, different `SYNODIC_ROLE ∈ {web, worker, controlplane}` env var
 gates which subsystems start in `lifespan()`.
+
+```mermaid
+graph TB
+    LB["Ingress / Load Balancer"]
+
+    subgraph Web["synodic-web (N replicas, stateless)"]
+        W["HTTP API · auth · reads<br/>lightweight writes"]
+    end
+    subgraph Worker["synodic-worker (K replicas)"]
+        WK["Aggregation execution<br/>heavy provider I/O"]
+    end
+    subgraph CP["synodic-controlplane (1 replica, Recreate)"]
+        C["Scheduler · outbox relay<br/>crash recovery · Alembic"]
+    end
+
+    subgraph Infra["Shared Infrastructure"]
+        PG[(Postgres v16+)]
+        CacheR[(Cache Redis<br/>allkeys-lru)]
+        CoordR[(Coordination Redis<br/>noeviction + AOF)]
+    end
+
+    LB --> Web
+    Web -->|"enqueue jobs"| CoordR
+    CoordR -->|"XREADGROUP"| Worker
+    CP -->|"schedule + recover"| CoordR
+    Web --> CacheR
+    Worker --> CacheR
+    Web --> PG
+    Worker --> PG
+    CP --> PG
+
+    style Web fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style Worker fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
+    style CP fill:#312e81,stroke:#6366f1,color:#e2e8f0
+    style Infra fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+```
+
+> **Caution:** This topology is the **end-state design, not what runs today**. Building it before a [trigger condition](#when-this-becomes-real) is met means operating distributed-systems machinery for a deployment shape that doesn't exist. Until then, the single-process `dev` role is correct.
 
 ## Mandatory infrastructure (when it's time)
 
@@ -194,3 +241,13 @@ When this work happens:
 - **Broker swap path.** Phase 4's outbox dispatcher Protocol stays useful — RedisStreamHandler is the obvious first implementation, RabbitMQ/Kafka are mechanical swaps. Picking the broker is a deployment-team decision, not a platform-architecture one.
 - **Per-tenant rate limiting.** The `slowapi` Redis backend gives global limits. Per-tenant limits require a different key derivation. Defer until it's a real ask.
 - **Read replicas.** SQLAlchemy's `bind` mechanism supports per-table or per-query routing to a read replica. Useful when control-plane reporting queries start contending with web-tier writes. Not needed at first.
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — the current single-process system design this plan would evolve
+- [Data Architecture](/docs/data-architecture) — the Redis Topology & Decoupling runbook for the deploy-only cache split
+- [Decisions](/docs/decisions) — ADR-017/019/020, the decoupling work already landed toward this design
+- [Services Overview](/docs/services-overview) — the `SYNODIC_ROLE` topology (WEB, WORKER, CONTROLPLANE, DEV)
+- [Technical Debt](/docs/technical-debt) — the per-worker cache-isolation and data-tier HA gaps this plan addresses
