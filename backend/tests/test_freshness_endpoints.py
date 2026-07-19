@@ -496,6 +496,51 @@ def test_cp_refresh_twin_passes_actor_through():
     assert svc.refresh_kwargs["origin"] == "api"
 
 
+# ── Provider batch-refresh route: always proxies, forces actor/origin ──
+
+
+def test_provider_batch_route_forwards_actor_and_forces_origin(monkeypatch):
+    # No direct branch for this route (the runner is CP-only) — it always
+    # proxies, but the same trust rule applies: the client body never
+    # decides actor/origin.
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-42")
+    out = _run(fresh_mod.refresh_provider_batch(
+        "prov-1", _FakeRequest(b'{"scope":"rollups","origin":"connector"}'),
+        user=user,
+    ))
+    assert out == "proxied"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/aggregation/providers/prov-1/refresh-batch"
+    body = json.loads(captured["body"])
+    assert body["actor"] == "user-42"
+    assert body["origin"] == "api"  # client's "connector" overridden
+    assert body["scope"] == "rollups"
+
+
+def test_provider_batch_route_defaults_empty_body(monkeypatch):
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-7")
+    _run(fresh_mod.refresh_provider_batch("prov-1", _FakeRequest(b""), user=user))
+    body = json.loads(captured["body"])
+    assert body["actor"] == "user-7"
+    assert body["origin"] == "api"
+
+
 # ── RBAC: route dependencies carry the right gate ───────────────────────
 
 
@@ -523,6 +568,16 @@ def test_reads_require_ingestion_gate():
 def test_refresh_requires_manage_gate():
     fns = _dep_calls(_route("/data-sources/{ds_id}/refresh", "POST").dependant)
     assert _REQUIRE_DS_MANAGE in fns
+
+
+def test_provider_batch_requires_provider_manage_gate():
+    fns = _dep_calls(_route("/providers/{provider_id}/refresh", "POST").dependant)
+    assert fresh_mod._REQUIRE_PROVIDER_MANAGE in fns
+
+
+def test_refresh_batch_status_requires_ingestion_gate():
+    fns = _dep_calls(_route("/refresh-batches/{batch_id}", "GET").dependant)
+    assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns)
 
 
 if __name__ == "__main__":

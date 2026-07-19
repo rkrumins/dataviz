@@ -601,3 +601,55 @@ class WorkersResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# ── Guarded provider refresh batch (F5) ──────────────────────────────
+
+
+class BatchRefreshRequest(BaseModel):
+    """Body for the provider batch-refresh verb. ``scope``/``force`` are
+    forwarded to ``refresh_source`` for every live data source under the
+    provider; ``max_concurrent`` bounds the fan-out (the runner additionally
+    caps it at 4 regardless of what's requested)."""
+    scope: Literal["auto", "read-caches", "rollups", "full"] = "auto"
+    force: bool = Field(False)
+    max_concurrent: int = Field(2, ge=1)
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchRefreshRequestInternal(BatchRefreshRequest):
+    """Body for the Control Plane's batch-refresh twin — adds the two
+    internal-channel fields (mirrors ``RefreshRequestInternal``): ``origin``
+    is caller-asserted, ``actor`` is the batch initiator's user id forwarded
+    by the viz proxy (defaults to ``internal`` for direct callers)."""
+    origin: Literal["script", "connector", "api"] = "api"
+    actor: str = Field("internal", max_length=128)
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchItemResult(BaseModel):
+    """One data source's outcome within a refresh batch."""
+    data_source_id: str = Field(alias="dataSourceId")
+    outcome: Literal["done", "error"]
+    job_id: Optional[str] = Field(None, alias="jobId")
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchStatus(BaseModel):
+    """Progress/result of one guarded provider refresh batch, assembled
+    from the ``refreshbatch:{batch_id}`` Redis hash."""
+    batch_id: str = Field(alias="batchId")
+    provider_id: str = Field(alias="providerId")
+    total: int = 0
+    done: int = 0
+    results: List[BatchItemResult] = Field(default_factory=list)
+    state: Literal["running", "done"] = "running"
+
+    class Config:
+        populate_by_name = True

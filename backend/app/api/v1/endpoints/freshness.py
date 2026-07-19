@@ -37,6 +37,7 @@ from backend.app.api.v1.endpoints.aggregation import (
 from backend.app.auth.dependencies import (
     get_current_user,
     get_permission_claims,
+    requires,
 )
 from backend.app.db.engine import (
     get_db_session,
@@ -44,6 +45,7 @@ from backend.app.db.engine import (
     get_readonly_db_session,
 )
 from backend.app.services.aggregation.schemas import (
+    BatchStatus,
     FreshnessDoc,
     FreshnessFleetResponse,
     RefreshRequest,
@@ -90,6 +92,17 @@ async def _require_ingestion_read(
             "message": "Missing Ingestion access",
         },
     )
+
+
+# ── Provider batch-refresh gate: platform-admin only ─────────────────
+#
+# A provider's data sources can span workspaces the caller has no access
+# to, so this can't be the per-ds ``workspace:datasource:manage`` gate
+# (there's no single ``ds_id`` to resolve a workspace from). Mirrors
+# ``providers.py``'s ``_REQUIRES_SYSTEM_ADMIN``: provider-scoped mutations
+# stay platform-admin-only (``workspace:provider`` deliberately has no
+# ``:manage`` leaf — see ``permission_service.py``).
+_REQUIRE_PROVIDER_MANAGE = requires("system:admin")
 
 
 # ── GET /freshness — fleet view ─────────────────────────────────────
@@ -195,3 +208,46 @@ async def refresh_data_source(
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+# ── POST /providers/{provider_id}/refresh — guarded batch refresh ───
+
+@router.post(
+    "/providers/{provider_id}/refresh",
+    response_model=BatchStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Guarded batch refresh across a provider's live data sources",
+)
+async def refresh_provider_batch(
+    provider_id: str,
+    request: Request,
+    # Also the manage gate — returns the authenticated user so we can
+    # attribute the batch (and every item's audit event) to them.
+    user: User = Depends(_REQUIRE_PROVIDER_MANAGE),
+):
+    """The runner is a Control Plane background job (its own
+    ``asyncio.create_task`` + session factory) — there is no in-process
+    equivalent, so unlike the per-ds refresh route this always proxies,
+    regardless of ``_PROXY_ENABLED``."""
+    raw = await request.body()
+    forwarded = _json.loads(raw) if raw else {}
+    # Same trust rule as the per-ds refresh route: the client body never
+    # decides actor/origin, even in the internal channel to the CP.
+    forwarded["actor"] = user.id
+    forwarded["origin"] = "api"
+    return await _proxy(
+        "POST", f"/aggregation/providers/{provider_id}/refresh-batch", request,
+        body=_json.dumps(forwarded).encode(),
+    )
+
+
+# ── GET /refresh-batches/{batch_id} — batch progress ─────────────────
+
+@router.get(
+    "/refresh-batches/{batch_id}",
+    response_model=BatchStatus,
+    summary="Guarded provider refresh batch progress",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_refresh_batch(batch_id: str, request: Request):
+    return await _proxy("GET", f"/aggregation/refresh-batches/{batch_id}", request)

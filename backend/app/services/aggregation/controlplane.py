@@ -31,6 +31,7 @@ Environment variables:
     LOG_LEVEL                  Logging level (default: INFO)
 """
 import asyncio
+import json as _json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -39,6 +40,7 @@ from typing import List, Optional
 from fastapi import (
     Body, Depends, FastAPI, HTTPException, Query, Request, Response, status,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .internal_auth import log_auth_mode, require_internal_token
@@ -251,6 +253,8 @@ from .schemas import (  # noqa: E402
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
+    BatchRefreshRequestInternal,
+    BatchStatus,
     FreshnessDoc,
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
@@ -676,6 +680,155 @@ async def source_freshness(
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Data source {ds_id!r} not found")
     return doc
+
+
+# ── Guarded provider refresh batch (F5) ──────────────────────────────
+#
+# Bounded fan-out of ``refresh_source`` over a provider's live data sources.
+# The runner is a fire-and-forget ``asyncio.create_task`` background job:
+# the route acquires the single-flight lock and returns immediately with a
+# ``batch_id``; ``GET .../refresh-batches/{batch_id}`` polls progress from
+# the Redis hash the runner writes to. Batch linkage lives entirely in that
+# hash — items are refreshed with the REQUESTED scope, never a synthetic
+# "batch-item" scope forced through ``refresh_source``.
+
+_REFRESH_BATCH_TTL_SECS = 86400
+_REFRESH_BATCH_LOCK_TTL_SECS = 3600
+_REFRESH_BATCH_MAX_CONCURRENT = 4
+
+
+async def _run_provider_batch(
+    batch_id: str,
+    provider_id: str,
+    ds_ids: List[str],
+    body: BatchRefreshRequestInternal,
+    *,
+    svc,
+    session_factory,
+    redis,
+) -> None:
+    """Background fan-out over ``ds_ids``. Semaphore-bounded concurrency;
+    each item gets a FRESH session and its outcome is written to the batch
+    hash as it finishes. An item's own exception is recorded as ``error``
+    and never aborts the batch. The single-flight lock is released in
+    ``finally`` so it cannot leak — even if something here crashes outright
+    (not just an individual item failing)."""
+    hash_key = f"refreshbatch:{batch_id}"
+    lock_key = f"refreshbatch:lock:{provider_id}"
+    try:
+        await redis.hset(hash_key, mapping={
+            "provider_id": provider_id, "state": "running",
+            "total": len(ds_ids), "done": 0,
+        })
+        await redis.expire(hash_key, _REFRESH_BATCH_TTL_SECS)
+
+        concurrency = min(max(body.max_concurrent, 1), _REFRESH_BATCH_MAX_CONCURRENT)
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _run_one(ds_id: str) -> None:
+            async with sem:
+                async with session_factory() as session:
+                    try:
+                        resp = await svc.refresh_source(
+                            ds_id, session,
+                            scope=body.scope, force=body.force,
+                            actor=body.actor, origin=body.origin,
+                        )
+                        item = {"dataSourceId": ds_id, "outcome": "done", "jobId": resp.job_id}
+                    except Exception as exc:
+                        logger.warning(
+                            "refresh batch %s: item %s failed: %s", batch_id, ds_id, exc,
+                        )
+                        item = {"dataSourceId": ds_id, "outcome": "error", "jobId": None}
+            await redis.hset(hash_key, f"ds:{ds_id}", _json.dumps(item))
+            await redis.hincrby(hash_key, "done", 1)
+
+        await asyncio.gather(*(_run_one(d) for d in ds_ids))
+        await redis.hset(hash_key, "state", "done")
+    finally:
+        await redis.delete(lock_key)
+
+
+# ── POST /aggregation/providers/{provider_id}/refresh-batch ─────────
+
+@app.post(
+    "/aggregation/providers/{provider_id}/refresh-batch",
+    response_model=BatchStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Guarded batch refresh across a provider's live data sources",
+)
+async def start_refresh_batch(
+    provider_id: str,
+    request: Request,
+    body: BatchRefreshRequestInternal = Body(default=BatchRefreshRequestInternal()),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories.provider_repo import get_provider_orm
+    from .redis_client import get_redis
+
+    provider = await get_provider_orm(session, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Provider {provider_id!r} not found")
+
+    rows = await session.execute(
+        select(WorkspaceDataSourceORM.id)
+        .where(WorkspaceDataSourceORM.provider_id == provider_id)
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        .order_by(WorkspaceDataSourceORM.id)
+    )
+    ds_ids = [r[0] for r in rows.all()]
+
+    redis = get_redis()
+    lock_key = f"refreshbatch:lock:{provider_id}"
+    got = await redis.set(lock_key, "1", nx=True, ex=_REFRESH_BATCH_LOCK_TTL_SECS)
+    if not got:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A refresh batch is already running for provider {provider_id!r}",
+        )
+
+    from uuid import uuid4
+    batch_id = uuid4().hex
+    asyncio.create_task(
+        _run_provider_batch(
+            batch_id, provider_id, ds_ids, body,
+            svc=svc, session_factory=request.app.state.session_factory, redis=redis,
+        )
+    )
+    return BatchStatus(
+        batch_id=batch_id, provider_id=provider_id,
+        total=len(ds_ids), done=0, results=[], state="running",
+    )
+
+
+# ── GET /aggregation/refresh-batches/{batch_id} ──────────────────────
+
+@app.get(
+    "/aggregation/refresh-batches/{batch_id}",
+    response_model=BatchStatus,
+    summary="Guarded provider refresh batch progress",
+)
+async def get_refresh_batch(batch_id: str):
+    from .redis_client import get_redis
+
+    redis = get_redis()
+    raw = await redis.hgetall(f"refreshbatch:{batch_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail=f"Refresh batch {batch_id!r} not found")
+
+    results = [
+        _json.loads(v) for k, v in raw.items() if k.startswith("ds:")
+    ]
+    return BatchStatus(
+        batch_id=batch_id,
+        provider_id=raw.get("provider_id", ""),
+        total=int(raw.get("total", 0)),
+        done=int(raw.get("done", 0)),
+        results=results,
+        state=raw.get("state", "running"),
+    )
 
 
 # ── CLI entry point ─────────────────────────────────────────────────

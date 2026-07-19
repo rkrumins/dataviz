@@ -65,6 +65,16 @@ Key decisions:
 - **A source shows the stale banner "forever"**: check the aggregation job pipeline (a failing rebuild keeps the marker on purpose; the reconciler retries each window). The marker also has a 7-day TTL backstop.
 - **Immediate resolution**: `--force` signal or the manual re-aggregation endpoint (both bypass the cooldown).
 
+## OPS API
+
+Operator-facing surface, mounted under `/api/v1/admin` (Ingestion-surface read gate unless noted):
+
+- `GET /admin/freshness` — paged fleet freshness overview (`workspaceId` / `providerId` / `staleOnly` filters).
+- `GET /admin/data-sources/{id}/freshness` — per-source detail; `?probe=true` adds one live provider stats call.
+- `POST /admin/data-sources/{id}/refresh` — unified refresh verb (`scope`: `auto` | `read-caches` | `rollups` | `full`; `force`; `wait`). Gated by `workspace:datasource:manage`.
+- `POST /admin/providers/{providerId}/refresh` — guarded batch refresh: fans `POST .../refresh` out across every live (non-deleted) data source under the provider, bounded to `maxConcurrent` (capped at 4). Returns `202` with a `batchId` immediately; one item failing is recorded, not fatal, to the rest. A single-flight lock (`refreshbatch:lock:{providerId}`, 1h TTL) rejects an overlapping batch for the same provider with `409`. Platform-admin only (`system:admin`) — a provider's sources can span workspaces the caller may not otherwise manage.
+- `GET /admin/refresh-batches/{batchId}` — poll batch progress/outcomes (`state`: `running` | `done`; `results`: per-source `outcome` + `jobId`). Batch state lives in Redis for 24h.
+
 ## How to validate
 
 **Unit suites** (run per-file in the viz container):

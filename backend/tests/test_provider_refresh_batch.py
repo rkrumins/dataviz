@@ -1,0 +1,418 @@
+"""Unit tests for the guarded provider refresh batch (Task F5).
+
+Direct-handler-call style (like ``test_freshness_endpoints.py``): the CP
+runner and routes are exercised directly with fakes — no TestClient, no
+real Redis/Postgres.
+
+What is under test:
+
+  * the runner (``_run_provider_batch``) — enumerates outcomes for every
+    ds it's given, bounds concurrency at ``min(max_concurrent, 4)``, never
+    lets one item's exception abort the batch (recorded as ``error``), and
+    ALWAYS releases the single-flight lock in ``finally`` — on a clean
+    finish, on an item failure, on an unexpected crash outside any single
+    item, and on external cancellation.
+  * the CP routes — unknown provider 404s before any side effect; a held
+    lock 409s and never schedules a task; a successful call acquires the
+    lock, returns the initial ``running`` status, and schedules exactly
+    one background task with the enumerated ds ids; the batch-status route
+    assembles a ``BatchStatus`` from the hash (or 404s when absent).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import types
+
+import pytest
+from fastapi import HTTPException
+
+from backend.app.db.repositories import provider_repo as provider_repo_mod
+from backend.app.services.aggregation import controlplane as cp
+from backend.app.services.aggregation import redis_client as redis_client_mod
+from backend.app.services.aggregation.schemas import (
+    BatchRefreshRequestInternal,
+    BatchStatus,
+)
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+# ── Fakes ─────────────────────────────────────────────────────────────
+
+
+class _FakeRedis:
+    """In-memory stand-in for the aggregation Redis client — just enough
+    of the SET NX / hash API the runner and routes use."""
+
+    def __init__(self):
+        self.strings: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+
+    async def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.strings:
+            return None
+        self.strings[key] = value
+        return True
+
+    async def hset(self, name, key=None, value=None, mapping=None):
+        h = self.hashes.setdefault(name, {})
+        if mapping:
+            for k, v in mapping.items():
+                h[k] = str(v)
+        if key is not None:
+            h[key] = str(value)
+        return 1
+
+    async def expire(self, name, seconds):
+        return True
+
+    async def hincrby(self, name, key, amount=1):
+        h = self.hashes.setdefault(name, {})
+        h[key] = str(int(h.get(key, 0)) + amount)
+        return int(h[key])
+
+    async def hgetall(self, name):
+        return dict(self.hashes.get(name, {}))
+
+    async def delete(self, *keys):
+        count = 0
+        for k in keys:
+            if k in self.strings:
+                del self.strings[k]
+                count += 1
+            if k in self.hashes:
+                del self.hashes[k]
+                count += 1
+        return count
+
+
+class _CrashingExpireRedis(_FakeRedis):
+    """Crashes AFTER the lock is held but BEFORE any per-item work — proves
+    the lock-release `finally` covers a runner crash, not just item errors."""
+
+    async def expire(self, name, seconds):
+        raise RuntimeError("redis unavailable")
+
+
+class _FakeSessionCM:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _session_factory():
+    return _FakeSessionCM()
+
+
+def _resp(job_id="job-1"):
+    return types.SimpleNamespace(job_id=job_id)
+
+
+class _AllSucceedSvc:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        self.calls.append(ds_id)
+        return _resp(job_id=f"job-{ds_id}")
+
+
+class _MixedOutcomeSvc:
+    def __init__(self, fail_ids: set[str]):
+        self._fail_ids = fail_ids
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        if ds_id in self._fail_ids:
+            raise RuntimeError(f"boom: {ds_id}")
+        return _resp(job_id=f"job-{ds_id}")
+
+
+class _ConcurrencyCountingSvc:
+    """Sleeps briefly on every call so overlapping calls are observable,
+    tracking the peak number in flight at once."""
+
+    def __init__(self, sleep=0.02):
+        self._sleep = sleep
+        self.current = 0
+        self.peak = 0
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        self.current += 1
+        self.peak = max(self.peak, self.current)
+        await asyncio.sleep(self._sleep)
+        self.current -= 1
+        return _resp(job_id=f"job-{ds_id}")
+
+
+class _SlowSvc:
+    """Never returns on its own — used to cancel a batch mid-flight."""
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        await asyncio.sleep(10)
+        return _resp()
+
+
+def _req(scope="auto", force=False, max_concurrent=2, actor="user-1", origin="api"):
+    return BatchRefreshRequestInternal(
+        scope=scope, force=force, max_concurrent=max_concurrent,
+        actor=actor, origin=origin,
+    )
+
+
+# ── Runner: enumeration + outcomes ───────────────────────────────────
+
+
+def test_batch_records_outcome_for_every_ds_and_completes():
+    svc = _AllSucceedSvc()
+    redis = _FakeRedis()
+    ds_ids = [f"ds-{i}" for i in range(5)]
+    _run(cp._run_provider_batch(
+        "batch-1", "prov-1", ds_ids, _req(),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    hash_ = redis.hashes["refreshbatch:batch-1"]
+    assert hash_["state"] == "done"
+    assert hash_["total"] == "5"
+    assert hash_["done"] == "5"
+    for ds_id in ds_ids:
+        item = json.loads(hash_[f"ds:{ds_id}"])
+        assert item["outcome"] == "done"
+        assert item["jobId"] == f"job-{ds_id}"
+    assert sorted(svc.calls) == sorted(ds_ids)
+
+
+def test_batch_item_failure_recorded_as_error_batch_still_completes():
+    svc = _MixedOutcomeSvc(fail_ids={"ds-b"})
+    redis = _FakeRedis()
+    _run(cp._run_provider_batch(
+        "batch-2", "prov-1", ["ds-a", "ds-b", "ds-c"], _req(),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    hash_ = redis.hashes["refreshbatch:batch-2"]
+    assert hash_["state"] == "done"
+    assert hash_["done"] == "3"
+    assert json.loads(hash_["ds:ds-a"])["outcome"] == "done"
+    failed = json.loads(hash_["ds:ds-b"])
+    assert failed["outcome"] == "error"
+    assert failed["jobId"] is None
+    assert json.loads(hash_["ds:ds-c"])["outcome"] == "done"
+
+
+# ── Concurrency bound ─────────────────────────────────────────────────
+
+
+def test_concurrency_bounded_by_requested_max():
+    svc = _ConcurrencyCountingSvc()
+    redis = _FakeRedis()
+    ds_ids = [f"ds-{i}" for i in range(8)]
+    _run(cp._run_provider_batch(
+        "batch-3", "prov-1", ds_ids, _req(max_concurrent=3),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    assert svc.peak <= 3
+    assert svc.peak > 1  # proves items actually overlapped, not serial
+
+
+def test_concurrency_capped_at_four_even_if_more_requested():
+    svc = _ConcurrencyCountingSvc()
+    redis = _FakeRedis()
+    ds_ids = [f"ds-{i}" for i in range(10)]
+    _run(cp._run_provider_batch(
+        "batch-4", "prov-1", ds_ids, _req(max_concurrent=10),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    assert svc.peak <= 4
+
+
+# ── Single-flight lock release ────────────────────────────────────────
+
+
+def test_lock_released_on_clean_completion():
+    redis = _FakeRedis()
+    redis.strings["refreshbatch:lock:prov-1"] = "1"  # simulate route having set it
+    _run(cp._run_provider_batch(
+        "batch-5", "prov-1", ["ds-a"], _req(),
+        svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
+    ))
+    assert "refreshbatch:lock:prov-1" not in redis.strings
+
+
+def test_lock_released_when_an_item_fails():
+    redis = _FakeRedis()
+    redis.strings["refreshbatch:lock:prov-1"] = "1"
+    _run(cp._run_provider_batch(
+        "batch-6", "prov-1", ["ds-a", "ds-b"], _req(),
+        svc=_MixedOutcomeSvc(fail_ids={"ds-a"}),
+        session_factory=_session_factory, redis=redis,
+    ))
+    assert "refreshbatch:lock:prov-1" not in redis.strings
+
+
+def test_lock_released_on_runner_crash_outside_any_single_item():
+    redis = _CrashingExpireRedis()
+    redis.strings["refreshbatch:lock:prov-1"] = "1"
+    with pytest.raises(RuntimeError):
+        _run(cp._run_provider_batch(
+            "batch-7", "prov-1", ["ds-a"], _req(),
+            svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
+        ))
+    assert "refreshbatch:lock:prov-1" not in redis.strings
+
+
+def test_lock_released_on_external_cancellation():
+    redis = _FakeRedis()
+    redis.strings["refreshbatch:lock:prov-1"] = "1"
+
+    async def _scenario():
+        task = asyncio.create_task(cp._run_provider_batch(
+            "batch-8", "prov-1", ["ds-a"], _req(),
+            svc=_SlowSvc(), session_factory=_session_factory, redis=redis,
+        ))
+        await asyncio.sleep(0.01)  # let it start and acquire the "lock"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(_scenario())
+    assert "refreshbatch:lock:prov-1" not in redis.strings
+
+
+# ── Route: POST /aggregation/providers/{provider_id}/refresh-batch ──
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, query):
+        return _FakeResult(self._rows)
+
+
+def _fake_request(session_factory=_session_factory):
+    return types.SimpleNamespace(
+        app=types.SimpleNamespace(
+            state=types.SimpleNamespace(session_factory=session_factory),
+        ),
+    )
+
+
+def _patch_create_task(monkeypatch):
+    """Intercepts asyncio.create_task so route tests never actually run the
+    background job; closes the coroutine to avoid a "never awaited"
+    warning. Returns the list of captured coroutines."""
+    captured = []
+
+    def _fake(coro, **kwargs):
+        captured.append(coro)
+        coro.close()
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr(cp.asyncio, "create_task", _fake)
+    return captured
+
+
+def test_route_404_unknown_provider(monkeypatch):
+    async def _get_provider_orm(session, provider_id):
+        return None
+    monkeypatch.setattr(provider_repo_mod, "get_provider_orm", _get_provider_orm)
+    captured = _patch_create_task(monkeypatch)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(cp.start_refresh_batch(
+            "prov-x", _fake_request(), body=_req(),
+            svc=_AllSucceedSvc(), session=_FakeSession([]),
+        ))
+    assert ei.value.status_code == 404
+    assert captured == []  # no task scheduled
+
+
+def test_route_409_when_lock_already_held(monkeypatch):
+    async def _get_provider_orm(session, provider_id):
+        return types.SimpleNamespace(id=provider_id)
+    monkeypatch.setattr(provider_repo_mod, "get_provider_orm", _get_provider_orm)
+    captured = _patch_create_task(monkeypatch)
+
+    redis = _FakeRedis()
+    redis.strings["refreshbatch:lock:prov-1"] = "1"  # already running
+    monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(cp.start_refresh_batch(
+            "prov-1", _fake_request(), body=_req(),
+            svc=_AllSucceedSvc(), session=_FakeSession([("ds-a",)]),
+        ))
+    assert ei.value.status_code == 409
+    assert captured == []  # no task scheduled over an existing run
+
+
+def test_route_success_enumerates_acquires_lock_and_schedules_task(monkeypatch):
+    async def _get_provider_orm(session, provider_id):
+        return types.SimpleNamespace(id=provider_id)
+    monkeypatch.setattr(provider_repo_mod, "get_provider_orm", _get_provider_orm)
+    captured = _patch_create_task(monkeypatch)
+
+    redis = _FakeRedis()
+    monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
+
+    svc = _AllSucceedSvc()
+    resp = _run(cp.start_refresh_batch(
+        "prov-1", _fake_request(), body=_req(),
+        svc=svc, session=_FakeSession([("ds-a",), ("ds-b",)]),
+    ))
+
+    assert isinstance(resp, BatchStatus)
+    assert resp.provider_id == "prov-1"
+    assert resp.total == 2
+    assert resp.done == 0
+    assert resp.state == "running"
+    assert resp.results == []
+    assert redis.strings["refreshbatch:lock:prov-1"] == "1"
+    assert len(captured) == 1  # exactly one background job scheduled
+
+
+# ── Route: GET /aggregation/refresh-batches/{batch_id} ───────────────
+
+
+def test_get_refresh_batch_assembles_status_from_hash(monkeypatch):
+    redis = _FakeRedis()
+    redis.hashes["refreshbatch:batch-9"] = {
+        "provider_id": "prov-1", "state": "done", "total": "2", "done": "2",
+        "ds:ds-a": json.dumps({"dataSourceId": "ds-a", "outcome": "done", "jobId": "job-a"}),
+        "ds:ds-b": json.dumps({"dataSourceId": "ds-b", "outcome": "error", "jobId": None}),
+    }
+    monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
+
+    status_ = _run(cp.get_refresh_batch("batch-9"))
+    assert status_.provider_id == "prov-1"
+    assert status_.state == "done"
+    assert status_.total == 2
+    assert status_.done == 2
+    outcomes = {r.data_source_id: r.outcome for r in status_.results}
+    assert outcomes == {"ds-a": "done", "ds-b": "error"}
+
+
+def test_get_refresh_batch_404_when_unknown(monkeypatch):
+    redis = _FakeRedis()
+    monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(cp.get_refresh_batch("nope"))
+    assert ei.value.status_code == 404
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-v"]))
