@@ -46,8 +46,6 @@ flowchart LR
     IT --> RO
     RO -->|injected| P
 
-    style RO fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style P fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 > **Important:** The resolved ontology is cached for **5 minutes per engine instance** (`_ONTOLOGY_CACHE_TTL`). A just-changed ontology can take up to one TTL to be reflected by an already-warm engine — the engine is created per request/job precisely because it holds this per-instance cache.

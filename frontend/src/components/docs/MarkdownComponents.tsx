@@ -1,9 +1,10 @@
-import { Children, isValidElement } from 'react'
+import { Children, isValidElement, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
-import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, type LucideIcon } from 'lucide-react'
+import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
+import { ZoomableImage } from './reading/ZoomableImage'
 
 // Map the actual filenames from docs/ to route slugs. Adding a new doc to
 // docsConfig.ts? Add its filename here too, or its relative .md links from
@@ -91,6 +92,62 @@ function rewriteDocLink(href: string): string {
   return href
 }
 
+/** The hash affordance on a heading — clicking copies a deep link to it. */
+function CopyAnchor({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    const url = `${window.location.origin}${window.location.pathname}#${id}`
+    void navigator.clipboard?.writeText(url).then(() => {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    })
+    window.history.replaceState(null, '', `#${id}`)
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label="Copy link to this section"
+      title="Copy link to this section"
+      className="heading-anchor"
+    >
+      {copied ? (
+        <Check className="w-4 h-4 inline text-emerald-500" />
+      ) : (
+        <Hash className="w-4 h-4 inline" />
+      )}
+    </button>
+  )
+}
+
+/** Copy-to-clipboard control overlaid on a fenced code block. */
+function CodeCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      aria-label="Copy code"
+      onClick={() =>
+        void navigator.clipboard?.writeText(text).then(() => {
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        })
+      }
+      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted opacity-0 backdrop-blur-sm transition-opacity hover:text-ink focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
+    >
+      {copied ? (
+        <>
+          <Check className="w-3.5 h-3.5 text-emerald-500" /> Copied
+        </>
+      ) : (
+        <>
+          <Copy className="w-3.5 h-3.5" /> Copy
+        </>
+      )}
+    </button>
+  )
+}
+
 function HeadingWithAnchor({
   level,
   id,
@@ -103,11 +160,7 @@ function HeadingWithAnchor({
   const content = (
     <>
       {children}
-      {id && (
-        <a href={`#${id}`} className="heading-anchor" aria-hidden>
-          <Hash className="w-4 h-4 inline" />
-        </a>
-      )}
+      {id && <CopyAnchor id={id} />}
     </>
   )
 
@@ -145,12 +198,18 @@ export const markdownComponents: Components = {
   h6: ({ children, id }) => <HeadingWithAnchor level={6} id={id}>{children}</HeadingWithAnchor>,
 
   // Intercept <pre> to detect mermaid blocks (avoids nesting <div> inside <pre>)
+  // and to overlay a copy-to-clipboard control on ordinary code blocks.
   pre: ({ children, ...props }) => {
     const info = extractCodeFromPre(children)
     if (info?.lang === 'mermaid') {
       return <MermaidBlock code={info.text} />
     }
-    return <pre {...props}>{children}</pre>
+    return (
+      <div className="group relative">
+        {info?.text ? <CodeCopyButton text={info.text} /> : null}
+        <pre {...props}>{children}</pre>
+      </div>
+    )
   },
 
   // Tables: scrollable wrapper
@@ -205,8 +264,8 @@ export const markdownComponents: Components = {
     )
   },
 
-  // Images
-  img: ({ src, alt, ...props }) => (
-    <img src={src} alt={alt ?? ''} loading="lazy" {...props} />
+  // Images: framed, with click-to-zoom
+  img: ({ src, alt }) => (
+    <ZoomableImage src={typeof src === 'string' ? src : undefined} alt={alt} />
   ),
 }

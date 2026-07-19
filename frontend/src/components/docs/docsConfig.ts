@@ -550,3 +550,22 @@ export function getEntriesForSection(sectionId: string): DocEntry[] {
 export function getSectionById(sectionId: string): DocSection | undefined {
   return docSections.find((s) => s.id === sectionId)
 }
+
+/** Flat reading order (all sections except the FAQ), used by the prev/next pager. */
+export const orderedSlugs: string[] = docSections
+  .filter((s) => s.id !== 'faq')
+  .flatMap((s) => getEntriesForSection(s.id).map((e) => e.slug))
+
+export function getPagerNeighbors(slug: string): {
+  prev: DocEntry | undefined
+  next: DocEntry | undefined
+} {
+  const idx = orderedSlugs.indexOf(slug)
+  return {
+    prev: idx > 0 ? getEntryBySlug(orderedSlugs[idx - 1]) : undefined,
+    next:
+      idx >= 0 && idx < orderedSlugs.length - 1
+        ? getEntryBySlug(orderedSlugs[idx + 1])
+        : undefined,
+  }
+}

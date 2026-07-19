@@ -91,8 +91,6 @@ flowchart LR
     Streams --> Purge
     Worker -.->|exhausted| DLQ
 
-    style Streams fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style PG fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 **Admission control** guards provider I/O: a per-provider **Redis-backed GCRA

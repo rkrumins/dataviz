@@ -29,7 +29,6 @@ graph LR
     Ontology --> DS
     Workspace --> DS
 
-    style DS fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Entity | Responsibility | Reuse Pattern |
@@ -113,7 +112,6 @@ graph TB
     IsC -->|"Hierarchy queries"| CE
     IsL -->|"Lineage queries"| CE
 
-    style Ontology fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Reasoning:**
@@ -275,8 +273,6 @@ graph LR
     Ontology -->|"icon, color, shape"| Schema
     Schema -->|"lookup by entityType"| Node
 
-    style Ontology fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Node fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Reasoning:**
@@ -379,7 +375,6 @@ graph LR
     Provider --> Catalog
     Catalog --> DS
 
-    style Catalog fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Field | Purpose |

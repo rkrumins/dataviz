@@ -124,8 +124,6 @@ flowchart TD
     P -.->|strict, RE-GATE vs current main| GP["legacy + rich + edge integrity<br/>service.py:770-803"]
     FPR -.->|strict| GF["_pr_ontology_check<br/>vs TARGET ontology<br/>service.py:1202"]
 
-    style GC fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style GP fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 | Gate (call-site) | What it checks | Timing / authority | Notes |

@@ -50,8 +50,6 @@ flowchart LR
     Q --> W["FalkorDB THREAD_COUNT=4<br/>workers all busy on 10–26s reads"]
     W --> T["queue wait blows 5s budget<br/>→ 503 @ 5.03s (ProviderUnavailable)"]
     T --> B["frontend circuit breaker trips<br/>→ whole canvas blacks out"]
-    style T fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style B fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 Decisively, the 10–26s reads happened on a **healthy** graph (`_AggMeta`

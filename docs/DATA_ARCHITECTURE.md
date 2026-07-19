@@ -359,10 +359,6 @@ graph TB
 
     Stats -.->|Cached| CE
 
-    style External fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style Backend fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style MgmtDB fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Frontend fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 ### Detailed Query Flow
@@ -409,8 +405,6 @@ graph LR
 
     Node --- Edge
 
-    style Node fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Edge fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Edge Classification
@@ -440,8 +434,6 @@ graph TB
 
     Fine -.->|"Granularity<br/>Aggregation"| Coarse
 
-    style Fine fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Coarse fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **AggregatedEdgeInfo:**
@@ -475,9 +467,6 @@ graph LR
     Fernet -->|"JSON dict"| Registry
     Registry --> Provider
 
-    style Store fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Encrypt fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style Use fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Credential fields** (per `ConnectionCredentials` Pydantic model):
@@ -521,10 +510,6 @@ graph TB
     OntologyCache -.->|"Expire after 5 min"| OntologyCache
     StatsCache -.->|"Refresh on poll"| StatsCache
 
-    style ProviderCache fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style OntologyCache fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style StatsCache fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style FECache fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Cache | Location | Key | TTL | Invalidation |
@@ -726,9 +711,6 @@ graph TB
     Poll -->|"upsert_data_source_stats()"| StatsTable
     Poll -->|"update last_polled_at<br/>last_status"| PollCfg
 
-    style Poller fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style MgmtDB fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Providers fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Polling lifecycle:**

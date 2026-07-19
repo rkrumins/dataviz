@@ -146,7 +146,6 @@ graph LR
         P5["Dual-Audience<br/>Business + Technical"]
     end
 
-    style Principles fill:#1e293b,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Principle | What It Means | Why It Matters |
@@ -171,12 +170,6 @@ graph LR
     D --> E["Explore Lineage<br/>(trace, filter, aggregate)"]
     E --> F["Save Views<br/>(share with team)"]
 
-    style A fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style B fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style C fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style D fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style E fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style F fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
 ```
 
 1. **Connect** a graph database (FalkorDB, Neo4j, or DataHub) via the admin panel
@@ -231,9 +224,6 @@ graph TB
     Column -.->|"Zoom out"| Table
     Table -.->|"Zoom out"| Domain
 
-    style Column fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Table fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Domain fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 Trace lineage at any level of the ontology hierarchy. The server aggregates fine-grained edges (column-to-column) into coarser edges (table-to-table, domain-to-domain) on the fly, driven by the ontology's hierarchy levels.
@@ -250,7 +240,6 @@ graph LR
         Clone --> Draft
     end
 
-    style Lifecycle fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
 ```
 
 - **Three-layer resolution:** System defaults + workspace-assigned ontology + introspected gap-fill
@@ -284,8 +273,6 @@ graph LR
 
     Studio --> Smart
 
-    style Studio fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Smart fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 Organize complex graphs into meaningful layers. The Layer Studio provides a three-panel WYSIWYG editor with drag-drop, undo/redo, and AI-powered organization suggestions.
@@ -413,11 +400,6 @@ graph TB
     Ontology --> MgmtDB
     VizSvc --> MgmtDB
 
-    style Users fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
-    style Frontend fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Backend fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Semantic fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Data fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 For detailed architecture documentation, see:
@@ -546,9 +528,6 @@ graph TB
         PM["Product Manager<br/>Understand data dependencies<br/>for feature planning"]
     end
 
-    style Primary fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Secondary fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Future fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ---

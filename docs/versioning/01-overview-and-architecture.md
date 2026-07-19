@@ -67,8 +67,6 @@ graph LR
     C --> V --> H
     SoT -->|projector: idempotent MERGE/DELETE<br/>watermark advances after apply| Cache
     Cache -.->|drop & rebuild anytime<br/>from Postgres| SoT
-    style SoT fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Cache fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 The cache can be evicted, corrupted, or lost and **rebuilt in full from Postgres** — so the projector
@@ -123,8 +121,6 @@ graph TB
     FK --> FDB
     SVC -->|project| FDB
     SVC -. on_rollups_stale .-> AGG --> FDB
-    style PG fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style FDB fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 - **Providers / ontology / views / aggregation** are the surrounding stack — see
@@ -206,9 +202,6 @@ graph LR
     swk --> pg & fdb
     swk <-. stream .-> redis
     agw --> fdb
-    style pg fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style fdb fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style redis fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 ## 8. Request lifecycle (two representative flows)

@@ -33,10 +33,6 @@ graph LR
     E --> C --> R --> A
     A -.->|"crash / cancel → resume<br/>v3:{run_start}:{phase}:{pos}"| E
 
-    style Extract fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Compute fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Reconcile fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Apply fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 > **Note:** The pipeline is **resumable and non-destructive by design**. RECONCILE guards deletes with `latestUpdate < run_start`, and there is **no epoch sweep** — a failed or resumed run can never wipe good edges.

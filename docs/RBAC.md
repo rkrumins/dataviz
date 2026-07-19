@@ -89,8 +89,6 @@ flowchart TD
     B -->|"no"| C{"perm in the matching<br/>bucket?<br/>(global_perms or ws_perms[ws])"}
     C -->|"yes"| ALLOW
     C -->|"no"| DENY["⛔ typed 403<br/>missing_permission"]
-    style ALLOW fill:#14351f,stroke:#22c55e,color:#e2e8f0
-    style DENY fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 The buckets themselves are built by the resolver from a user's bindings, applying the

@@ -155,10 +155,6 @@ graph LR
         Allowed["POST /nodes/{urn}/allowed-children"]
     end
 
-    style Queries fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Hierarchy fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Mutations fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style Advanced fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Key Graph Endpoints:**
@@ -275,9 +271,6 @@ graph TB
     RP --> Operations
     RO --> Operations
 
-    style Factory fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Resolution fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Operations fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 **Key behaviors:**
@@ -310,7 +303,6 @@ graph TB
     Instantiate --> Store
     Store --> Return
 
-    style Cache fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Cache structure:**
@@ -336,10 +328,6 @@ graph LR
     AO --> RO
     IT --> RO
 
-    style SD fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style AO fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style IT fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style RO fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Entity Type Definition (per type ID):**
@@ -378,7 +366,6 @@ Abstract base class defining the contract for all graph backends:
 
 ```mermaid
 classDiagram
-    class GraphDataProvider {
         <<abstract>>
         +get_node(urn) GraphNode
         +get_nodes(query) List~GraphNode~
@@ -400,24 +387,20 @@ classDiagram
         +delete_edge(edge_id) bool
     }
 
-    class FalkorDBProvider {
         -pool: BlockingConnectionPool
         -graph_name: str
         +materialize_aggregated_edges_batch(...)
         +ensure_indices(entity_types)
     }
 
-    class Neo4jProvider {
         -driver: AsyncDriver
         -database: str
     }
 
-    class DataHubGraphQLProvider {
         -client: httpx.AsyncClient
         -base_url: str
     }
 
-    class MockGraphProvider {
         -nodes: Dict
         -edges: List
     }
@@ -550,7 +533,6 @@ graph TB
     Log[Request Logger<br/>Structured JSON] --> Route
     Route[FastAPI Router<br/>+ Auth Dependency]
 
-    style Req fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Security headers applied to every response:**
@@ -583,9 +565,6 @@ graph TB
     Start --> InitDB --> SeedOnt --> SeedFeat --> BootAdmin --> ResolvePrimary --> Ready
     Shutdown --> Evict
 
-    style Start fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Ready fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Shutdown fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 ### Environment Variables

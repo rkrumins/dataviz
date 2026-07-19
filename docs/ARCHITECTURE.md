@@ -60,9 +60,6 @@ graph TB
     PR -->|Cached Instances| DH
     Repos --> MgmtDB
 
-    style Frontend fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style VizService fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
-    style Storage fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ---
@@ -245,10 +242,6 @@ graph LR
     PR2 --> SP
     PR2 --> MP
 
-    style Routes fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Services fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Data fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Providers fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### In-Process Provider Connectivity
@@ -341,9 +334,6 @@ graph TB
     Scopes --> GlobalR
     Scopes --> WSR
 
-    style AuthFlow fill:#1e293b,stroke:#ef4444,color:#e2e8f0
-    style Security fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
-    style Roles fill:#1e293b,stroke:#10b981,color:#e2e8f0
 ```
 
 Authorization separates **global-tier roles** (organization-wide) from **workspace-scoped roles** (per-workspace), enforced through a permission-scope system checked on every request rather than a fixed set of coarse roles. See [RBAC.md](RBAC.md) for the current role and permission catalogue.
@@ -400,8 +390,6 @@ graph TB
     Gunicorn1 --> PG
     Gunicorn1 --> FDB2
 
-    style Dev fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Prod fill:#1e293b,stroke:#10b981,color:#e2e8f0
 ```
 
 ### Quick Start

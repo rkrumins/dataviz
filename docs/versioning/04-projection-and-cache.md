@@ -139,9 +139,6 @@ flowchart TD
     M --> N{"full seed OR rollups stale<br/>OR heal reseeded?"}
     N -- yes --> O["on_rollups_stale(graph_id)"]
     N --> P["on_projected(data_source_id) → nudge stats"]
-    style G fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style H fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style L fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 Key guards:

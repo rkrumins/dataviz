@@ -54,9 +54,6 @@ graph LR
 
     F --> EP --> OS --> P --> R --> A --> D --> PUB
 
-    style Import fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Review fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style OS fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 > **Invariant.** Imported changes are **committed on the draft, not staged** — the worker calls

@@ -54,9 +54,6 @@ flowchart LR
 
     Q --> V --> S --> St --> D --> R
 
-    style S fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style St fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style D fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 > **Important:** View scoping is enforced **server-side, before any Cypher is generated**. Whatever a client passes in `scope.rootUrns`, out-of-view URNs are dropped — cross-view leakage would be a correctness/RBAC violation, so a search without a resolvable `scope.viewId` fails by design.

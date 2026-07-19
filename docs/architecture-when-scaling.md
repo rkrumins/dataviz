@@ -85,10 +85,6 @@ graph TB
     Worker --> PG
     CP --> PG
 
-    style Web fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Worker fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style CP fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Infra fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 > **Caution:** This topology is the **end-state design, not what runs today**. Building it before a [trigger condition](#when-this-becomes-real) is met means operating distributed-systems machinery for a deployment shape that doesn't exist. Until then, the single-process `dev` role is correct.

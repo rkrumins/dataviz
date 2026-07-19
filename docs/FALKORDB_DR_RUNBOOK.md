@@ -64,8 +64,6 @@ flowchart TD
     F4 --> F5["5 · revert manifest to --appendonly yes"]
     F5 --> DONE(["Serving"])
     RESEED --> DONE
-    style RESEED fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style F5 fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 FalkorDB loads `dump.rdb` at boot **only when AOF is off** — with `appendonly yes` it

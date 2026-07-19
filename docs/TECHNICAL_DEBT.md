@@ -175,8 +175,6 @@ graph LR
     Bridge["_migrate_connection_to_workspace()"]
     Legacy -.-> Bridge -.-> New
 
-    style Legacy fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style New fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 **Risks:**

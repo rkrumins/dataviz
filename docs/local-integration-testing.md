@@ -34,9 +34,6 @@ graph LR
 
     Create --> Import --> Draft --> Edit --> Read --> Publish --> Main
 
-    style Draft fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Publish fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Main fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ---

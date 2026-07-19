@@ -69,8 +69,6 @@ flowchart TD
     T4 -->|yes| A
     T4 -->|no| T5 --> A
 
-    style A fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style U fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 > **Important:** Scope is **exactly the rendered set, never the whole graph** — the engine reads only the entities the caller is placing (`request.urns`, ancestors included). In **curated scope** only tiers 1–2 apply; anything else is left unassigned by design.

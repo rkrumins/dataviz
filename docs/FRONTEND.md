@@ -86,10 +86,6 @@ graph TB
     Canvas --> Panels
     Layout --> Modals
 
-    style App fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Pages fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Canvas fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style CanvasParts fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Key Design Patterns
@@ -124,9 +120,6 @@ graph LR
     Reset -->|Success| Login
     Login -->|"JWT issued"| Dashboard
 
-    style Login fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Dashboard fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Pending fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Workspace & Data Source Navigation
@@ -144,7 +137,6 @@ graph TB
     DSSelect --> SchemaReload
     SchemaReload --> CanvasUpdate
 
-    style Sidebar fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
 ```
 
 > **Note:** Views and ontology cache are keyed by the composite scope `${workspaceId}/${dataSourceId}`. Switching workspace or data source invalidates that cache and forces a schema reload — so a stale ontology never leaks across scopes.
@@ -180,8 +172,6 @@ graph TB
 
     Trace --> Controls
 
-    style Explorer fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Controls fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Canvas interactions:**
@@ -207,7 +197,6 @@ graph LR
     Create --> Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Save
     Save --> Browse
 
-    style Create fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **View scoping:** Views are scoped to `{workspaceId}/{dataSourceId}`. Bookmarks and recent views provide cross-workspace access.
@@ -239,8 +228,6 @@ graph TB
     SchemaUI -->|"scope key"| SchemaData
     Auth -->|"JWT"| WS
 
-    style Persisted fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Runtime fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 | Store | Key State | Persistence | Update Pattern |
@@ -289,9 +276,6 @@ graph LR
     RGP -.->|backend unreachable| Mock
     Svc --> AF --> BE
 
-    style RQ fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style AF fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style Mock fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### API Client
@@ -390,9 +374,6 @@ graph LR
         JBMono["JetBrains Mono<br/>Code/monospace"]
     end
 
-    style Theme fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Colors fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Typography fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ### Styling Approach
@@ -469,9 +450,6 @@ graph TB
     Registry --> RegistryTabs
     Users --> UserMgmt
 
-    style Admin fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style RegistryTabs fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style UserMgmt fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ### Admin Routes
@@ -567,8 +545,6 @@ graph LR
 
     Studio --> Features
 
-    style Studio fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Features fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Key Components

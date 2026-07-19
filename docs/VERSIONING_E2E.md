@@ -101,8 +101,6 @@ flowchart LR
     M -.->|project| F[("FalkorDB<br/>hot reads")]
     D -.->|fork (copy-on-write)| D2["Fork → PR → base"]
     D2 -->|merge| M
-    style M fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style F fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 `--workspace` is optional: it discovers the first workspace from
