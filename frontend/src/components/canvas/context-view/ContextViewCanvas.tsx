@@ -2626,6 +2626,8 @@ export function ContextViewCanvas({
   const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
   const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
   const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
+  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
+  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
   const lensClose = useCallback(() => setLensStack([]), [])
   useEffect(() => {
     focusLensRef.current = () => {
@@ -3348,6 +3350,7 @@ export function ContextViewCanvas({
           externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
+          onJumpTo={lensJumpTo}
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}

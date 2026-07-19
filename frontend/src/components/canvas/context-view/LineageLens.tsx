@@ -38,6 +38,8 @@ export interface LineageLensProps {
   lensStack: string[]
   onRecenter: (nodeId: string) => void
   onBack: () => void
+  /** Jump the walk back to stack index i (truncates the trail there). */
+  onJumpTo?: (index: number) => void
   onClose: () => void
   /** Reveal the node on the canvas (expand ancestors + scroll) without closing the lens. */
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
@@ -60,6 +62,7 @@ export function LineageLens({
   lensStack,
   onRecenter,
   onBack,
+  onJumpTo,
   onClose,
   onRevealOnCanvas,
   onOpenDetails,
@@ -190,6 +193,43 @@ export function LineageLens({
               </button>
             </div>
           </div>
+
+          {/* ── Walk trail — the lens stack as a visible, clickable path.
+              Re-centering is a WALK; this makes the walked route a
+              first-class object: every hop is a chip, clicking an
+              earlier hop jumps the walk back to that point (the spatial
+              generalization of Back). Increment 1 of the Miller-column
+              walk — the current frontier renders below as today's
+              single-focal body. ── */}
+          {lensStack.length > 1 && onJumpTo && (
+            <div className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
+              <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
+                Walk
+              </span>
+              {lensStack.map((id, i) => {
+                const isCurrent = i === lensStack.length - 1
+                const label = labelOf(id, nodeMap.get(id))
+                return (
+                  <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
+                    {i > 0 && <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />}
+                    <button
+                      type="button"
+                      disabled={isCurrent}
+                      onClick={() => onJumpTo(i)}
+                      title={isCurrent ? label : `Jump back to ${label}`}
+                      className={
+                        isCurrent
+                          ? 'max-w-[180px] truncate px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
+                          : 'max-w-[160px] truncate px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
+                      }
+                    >
+                      {label}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
 
           {/* Body: upstream | focal | downstream — data flows left → right */}
           <div className="flex-1 grid grid-cols-[1fr_auto_1fr] min-h-0">
