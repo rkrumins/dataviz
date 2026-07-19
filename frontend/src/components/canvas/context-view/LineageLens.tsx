@@ -641,6 +641,42 @@ export function LineageLens({
                   ;(coarser ? rowsCoarser : rowsFiner).push({ rec, n, coarser })
                 }
                 const rows = [...rowsFiner, ...rowsCoarser].slice(0, 200)
+                // Grain chips (frontier column) + lens-global hidden-type
+                // filter, and the same parent-dataset grouping the classic
+                // columns use — the frontier reads "which datasets, via
+                // which fields", not a wall of bare names.
+                const typeCounts = new Map<string, number>()
+                for (const { rec } of byNeighbor.values()) {
+                  const t = (rec.neighborNode?.data?.type as string) ?? 'not loaded'
+                  typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
+                }
+                const hopChips: Array<[string, number]> = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
+                let hopHiddenCount = 0
+                const shownRows: typeof rows = []
+                for (const it of rows) {
+                  const t = (it.rec.neighborNode?.data?.type as string) ?? 'not loaded'
+                  if (hiddenTypes.has(t)) { hopHiddenCount++; continue }
+                  shownRows.push(it)
+                }
+                const walkGroupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: typeof rows }>()
+                const rollupRows: typeof rows = []
+                for (const it of shownRows) {
+                  if (it.coarser) { rollupRows.push(it); continue }
+                  const p = resolveParent(it.rec.neighborId)
+                  const useParent = !!p && p !== hopId
+                  const mk = useParent ? `p:${p}` : `t:${(it.rec.neighborNode?.data?.type as string) ?? 'not loaded'}`
+                  let g = walkGroupMap.get(mk)
+                  if (!g) {
+                    g = {
+                      kind: useParent ? 'parent' : 'type',
+                      key: useParent ? (p as string) : ((it.rec.neighborNode?.data?.type as string) ?? 'not loaded'),
+                      rows: [],
+                    }
+                    walkGroupMap.set(mk, g)
+                  }
+                  g.rows.push(it)
+                }
+                const hopGroups = [...walkGroupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
                 const hopLabel = labelOf(hopId, nodeMap.get(hopId))
                 const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
                 const hopFetch = fetchStatus?.get(hopId)
@@ -671,14 +707,19 @@ export function LineageLens({
                       </span>
                     </div>
                     <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
-                      {rows.map(({ rec, n, coarser }) => {
+                      {/* IIFE so the row renderer can be shared by the
+                          parent groups, type groups, and rollup tier
+                          without hoisting its many closures into props. */}
+                      {(() => {
+                      const renderWalkRow = ({ rec, n, coarser }: { rec: NeighborRecord; n: number; coarser: boolean }, showParentHint: boolean) => {
                         const rid = rec.neighborId
                         const active = rid === walkedInto
                         const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
                         // Parent breadcrumb — a bare field name isn't
-                        // identifying; say which dataset it belongs to
-                        // (omitted when the parent IS this hop).
-                        const rowParent = resolveParent(rid)
+                        // identifying; say which dataset it belongs to.
+                        // Omitted inside parent groups (the header says it)
+                        // and when the parent IS this hop.
+                        const rowParent = showParentHint ? resolveParent(rid) : null
                         const rowParentLabel = rowParent && rowParent !== hopId
                           ? labelOf(rowParent, nodeMap.get(rowParent))
                           : null
@@ -817,7 +858,73 @@ export function LineageLens({
                             )}
                           </div>
                         )
-                      })}
+                      }
+                      return (
+                        <>
+                          {isLast && hopChips.length > 1 && (
+                            <TypeChips chips={hopChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} className="px-3 pb-1.5 pt-0.5" />
+                          )}
+                          {hopGroups.map(g => {
+                            if (g.kind === 'parent') {
+                              const pLabel = labelOf(g.key, nodeMap.get(g.key))
+                              const pColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
+                              const headerActive = g.key === walkedInto
+                              return (
+                                <div key={`pg-${g.key}`} className="mb-0.5">
+                                  {/* Parent-dataset header — clickable: walking
+                                      into the parent itself is a valid hop. */}
+                                  <button
+                                    type="button"
+                                    onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
+                                    title={`Walk into ${pLabel}`}
+                                    className={cn(
+                                      'w-full min-w-0 flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 text-left transition-colors',
+                                      headerActive ? 'text-accent-lineage' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
+                                    )}
+                                  >
+                                    <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
+                                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
+                                    <span className={cn('min-w-0 truncate text-[10px] font-bold tracking-wide', headerActive ? 'text-accent-lineage' : 'text-ink-muted/90')}>
+                                      {pLabel}
+                                    </span>
+                                    <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
+                                  </button>
+                                  {g.rows.map(it => renderWalkRow(it, false))}
+                                </div>
+                              )
+                            }
+                            return (
+                              <div key={`tg-${g.key}`} className="mb-0.5">
+                                <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5">
+                                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: g.key === 'not loaded' ? '#94a3b8' : generateColorFromType(g.key) }} />
+                                  <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">{g.key}</span>
+                                  <span className="text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
+                                </div>
+                                {g.rows.map(it => renderWalkRow(it, true))}
+                              </div>
+                            )
+                          })}
+                          {rollupRows.length > 0 && (
+                            <div className="mt-1 pt-1 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
+                              <div
+                                className="flex items-center gap-1.5 px-3 py-1"
+                                title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
+                              >
+                                <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
+                                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
+                                <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollupRows.length}</span>
+                              </div>
+                              {rollupRows.map(it => renderWalkRow(it, true))}
+                            </div>
+                          )}
+                          {hopHiddenCount > 0 && (
+                            <p className="px-3 py-1 text-[10px] text-ink-muted/60">
+                              {hopHiddenCount} hidden by the type chips
+                            </p>
+                          )}
+                        </>
+                      )
+                      })()}
                       {/* Contained entities — the containment descent that
                           keeps a walk alive when a container carries its
                           relationships at child level. Stepping into a
@@ -1102,6 +1209,53 @@ function labelOf(id: string, node: LineageNode | undefined): string {
     ?? id
 }
 
+/** Entity-type filter chips — shared by the classic columns and the
+ *  walk frontier. An OFF chip goes ghost (dashed border, dimmed, EyeOff)
+ *  but keeps its count: filtering is an explicit, visible, reversible
+ *  choice — never a strikethrough that reads as broken, never silent
+ *  loss. */
+function TypeChips({
+  chips,
+  hiddenTypes,
+  onToggle,
+  className,
+}: {
+  chips: Array<[string, number]>
+  hiddenTypes: ReadonlySet<string>
+  onToggle: (type: string) => void
+  className?: string
+}) {
+  return (
+    <div className={cn('flex flex-wrap items-center gap-1', className)}>
+      {chips.map(([t, n]) => {
+        const off = hiddenTypes.has(t)
+        const chipColor = t === 'not loaded' ? '#94a3b8' : generateColorFromType(t)
+        return (
+          <button
+            key={t}
+            type="button"
+            onClick={() => onToggle(t)}
+            title={off
+              ? `${t} hidden — click to show these ${n} connection${n === 1 ? '' : 's'} again`
+              : `Click to hide ${t} connections (${n})`}
+            className={cn(
+              'flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wide transition-all',
+              off
+                ? 'border-dashed border-ink-muted/30 text-ink-muted/45 hover:text-ink-muted hover:border-ink-muted/50'
+                : 'border-black/10 dark:border-white/10 text-ink-muted hover:text-ink bg-black/[0.03] dark:bg-white/[0.04]',
+            )}
+          >
+            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor, opacity: off ? 0.3 : 1 }} />
+            <span className="max-w-[90px] truncate">{t}</span>
+            <span className="tabular-nums">{n}</span>
+            {off && <LucideIcons.EyeOff className="w-2.5 h-2.5 flex-shrink-0" />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 /** One neighbor row — shared by parent groups, type groups, and the
  *  rollup tier so the interaction contract stays identical everywhere. */
 function NeighborRow({
@@ -1307,30 +1461,7 @@ function NeighborColumn({
           toggle. An off chip stays visible with its count (explicit
           user choice, not silent loss). */}
       {typeChips.length > 1 && (
-        <div className="flex flex-wrap items-center gap-1 px-3 pb-1.5 flex-shrink-0">
-          {typeChips.map(([t, n]) => {
-            const off = hiddenTypes.has(t)
-            const chipColor = t === 'not loaded' ? '#94a3b8' : generateColorFromType(t)
-            return (
-              <button
-                key={t}
-                type="button"
-                onClick={() => onToggleType(t)}
-                title={off ? `Show ${t} connections again` : `Hide ${t} connections in both columns`}
-                className={cn(
-                  'flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-black/10 dark:border-white/10 text-[9px] font-semibold uppercase tracking-wide transition-colors',
-                  off
-                    ? 'text-ink-muted/40 line-through decoration-ink-muted/40'
-                    : 'text-ink-muted hover:text-ink bg-black/[0.03] dark:bg-white/[0.04]',
-                )}
-              >
-                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor, opacity: off ? 0.35 : 1 }} />
-                <span className="max-w-[90px] truncate">{t}</span>
-                <span className="tabular-nums">{n}</span>
-              </button>
-            )
-          })}
-        </div>
+        <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={onToggleType} className="px-3 pb-1.5 flex-shrink-0" />
       )}
       <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
         {allFilteredOff && (

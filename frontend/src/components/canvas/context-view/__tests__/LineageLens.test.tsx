@@ -248,6 +248,44 @@ describe('LineageLens on-demand fetch merge', () => {
     }
   })
 
+  it('walk frontier groups partners under their parent; header walks into the parent', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('a'), node('b')],
+        edges: [edge('e1', 'a', 'b')],
+        visibleEdges: [],
+      } as never)
+      const onRecenter = vi.fn()
+      renderLens(['a', 'b'], { onRecenter }, {
+        onWalkTo: vi.fn(),
+        onJumpTo: vi.fn(),
+        supplementalEdges: [
+          edge('f1', 'b', 'kid1'),
+          edge('f2', 'b', 'kid2'),
+          { id: 'c1', source: 'pd', target: 'kid1', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+          { id: 'c2', source: 'pd', target: 'kid2', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+        ],
+        supplementalNodes: new Map([
+          ['kid1', node('kid1')],
+          ['kid2', node('kid2')],
+          ['pd', node('pd')],
+        ]),
+      })
+      // Frontier rows grouped under their parent dataset.
+      expect(screen.getByText('label-pd')).toBeTruthy()
+      expect(screen.getByText('label-kid1')).toBeTruthy()
+      // Clicking the group header walks into the parent itself.
+      fireEvent.click(screen.getByText('label-pd'))
+      expect(onRecenter).toHaveBeenCalledWith('pd')
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
