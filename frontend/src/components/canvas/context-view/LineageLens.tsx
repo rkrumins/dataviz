@@ -21,11 +21,11 @@
  * Lens-local ESC handling runs in the capture phase so canvas keyboard
  * shortcuts don't fire underneath.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useContainmentEdgeTypes } from '@/store/schema'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
@@ -170,6 +170,33 @@ export function LineageLens({
     [lensStack, edges, nodeMap, containmentEdgeTypes],
   )
 
+  // ── Containment drill — refine an aggregated row to its constituent
+  // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
+  // up (`data.sourceEdges`). Honest by construction: constituents that
+  // aren't loaded are reported as "+M more", never invented.
+  const rawEdgeById = useMemo(() => {
+    const m = new Map<string, LineageEdge>()
+    for (const e of rawEdges) m.set(e.id, e)
+    return m
+  }, [rawEdges])
+  const [drilledRows, setDrilledRows] = useState<Set<string>>(() => new Set())
+  const toggleDrill = (key: string) => setDrilledRows(prev => {
+    const next = new Set(prev)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next
+  })
+
+  // Auto-advance: when a hop is pushed, glide the column strip to the
+  // frontier so the newest column is always in view.
+  const walkStripRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = walkStripRef.current
+    if (!el) return
+    const raf = requestAnimationFrame(() => el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' }))
+    return () => cancelAnimationFrame(raf)
+  }, [lensStack.length])
+
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
       ? deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes)
@@ -225,7 +252,9 @@ export function LineageLens({
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
               <p className="text-[10.5px] text-ink-muted leading-tight">
-                {incomingRecords.length + outgoingRecords.length} direct connection{incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}
+                {lensStack.length > 1
+                  ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
+                  : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}`}
               </p>
             </div>
             {lensStack.length > 1 && (
@@ -379,7 +408,7 @@ export function LineageLens({
               in an earlier column BRANCHES the walk from that hop.
               Complexity stays constant: path + frontier, never a tree. ── */}
           {lensStack.length > 1 && onWalkTo ? (
-            <div className="flex-1 flex min-h-0 overflow-x-auto custom-scrollbar divide-x divide-black/[0.06] dark:divide-white/[0.06]">
+            <div ref={walkStripRef} className="flex-1 flex min-h-0 overflow-x-auto custom-scrollbar divide-x divide-black/[0.06] dark:divide-white/[0.06]">
               {lensStack.map((hopId, i) => {
                 const recsAll = walkDirection === 'outgoing'
                   ? hopRecords[i].outgoingRecords
@@ -399,8 +428,11 @@ export function LineageLens({
                 const hopLabel = labelOf(hopId, nodeMap.get(hopId))
                 const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
                 return (
-                  <div
+                  <motion.div
                     key={`walk-col-${hopId}-${i}`}
+                    initial={{ opacity: 0, x: 24 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.18, ease: 'easeOut' }}
                     className={isLast
                       ? 'flex-1 min-w-[300px] flex flex-col min-h-0 bg-accent-lineage/[0.03]'
                       : 'w-[230px] flex-shrink-0 flex flex-col min-h-0'}
@@ -417,25 +449,83 @@ export function LineageLens({
                         const rid = rec.neighborId
                         const active = rid === walkedInto
                         const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
+                        const aggData = rec.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
+                        const drillKey = `${i}:${rid}`
+                        const canDrill = !!aggData?.isAggregated
+                          && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
+                        const drilled = canDrill && drilledRows.has(drillKey)
+                        const constituents = drilled
+                          ? (aggData?.sourceEdges ?? []).map(eid => rawEdgeById.get(eid)).filter((e): e is LineageEdge => !!e).slice(0, 50)
+                          : []
+                        const missing = drilled
+                          ? Math.max(0, (aggData?.sourceEdgeCount ?? 0) - constituents.length)
+                          : 0
                         return (
-                          <button
-                            key={rid}
-                            type="button"
-                            onClick={() => (isLast ? onRecenter(rid) : onWalkTo(i, rid))}
-                            title={isLast
-                              ? `Walk into ${labelOf(rid, rec.neighborNode)}`
-                              : `Branch the walk here — continue from ${labelOf(rid, rec.neighborNode)}`}
-                            className={
-                              active
-                                ? 'w-full flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
-                                : 'w-full flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
-                            }
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
-                            <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
-                            {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
-                            <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
-                          </button>
+                          <div key={rid}>
+                            <div className="flex items-stretch">
+                              <button
+                                type="button"
+                                onClick={() => (isLast ? onRecenter(rid) : onWalkTo(i, rid))}
+                                title={isLast
+                                  ? `Walk into ${labelOf(rid, rec.neighborNode)}`
+                                  : `Branch the walk here — continue from ${labelOf(rid, rec.neighborNode)}`}
+                                className={
+                                  active
+                                    ? 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
+                                    : 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
+                                }
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
+                                <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
+                                {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
+                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
+                              </button>
+                              {canDrill && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleDrill(drillKey)}
+                                  title={drilled
+                                    ? 'Collapse back to the rolled-up connection'
+                                    : `Refine — see the ${(aggData?.sourceEdgeCount ?? 0).toLocaleString()} underlying connection${(aggData?.sourceEdgeCount ?? 0) === 1 ? '' : 's'} this rolls up`}
+                                  className="flex-shrink-0 px-1.5 flex items-center text-ink-muted/50 hover:text-ink transition-colors"
+                                >
+                                  <LucideIcons.ChevronDown className={`w-3 h-3 transition-transform ${drilled ? '' : '-rotate-90'}`} />
+                                </button>
+                              )}
+                            </div>
+                            {/* Refined constituents — the aggregate's real
+                                endpoints, resolved from loaded raw edges.
+                                Unloaded remainder reported, never invented. */}
+                            {drilled && (
+                              <div className="ml-4 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
+                                {constituents.map(e => {
+                                  const otherId = walkDirection === 'outgoing' ? e.target : e.source
+                                  const nearId = walkDirection === 'outgoing' ? e.source : e.target
+                                  const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
+                                  return (
+                                    <div
+                                      key={e.id}
+                                      className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
+                                      title={`${labelOf(nearId, nodeMap.get(nearId))} → ${labelOf(otherId, nodeMap.get(otherId))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
+                                    >
+                                      <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
+                                      <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
+                                    </div>
+                                  )
+                                })}
+                                {constituents.length === 0 && (
+                                  <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
+                                    Constituent connections aren&apos;t loaded — drill this edge on the canvas to fetch them.
+                                  </p>
+                                )}
+                                {missing > 0 && constituents.length > 0 && (
+                                  <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
+                                    +{missing.toLocaleString()} more not loaded
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         )
                       })}
                       {byNeighbor.size === 0 && (
@@ -445,7 +535,7 @@ export function LineageLens({
                         </p>
                       )}
                     </div>
-                  </div>
+                  </motion.div>
                 )
               })}
             </div>
