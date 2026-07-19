@@ -10,6 +10,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import { interpolateBrand } from '@/lib/brandText'
 import { cn } from '@/lib/utils'
+import { recordEvent } from '@/services/telemetryService'
 import {
   useDocsSearchIndex,
   type DocsSearchResult,
@@ -70,6 +71,22 @@ export function DocsSearchModal({ open, onClose }: DocsSearchModalProps) {
   useEffect(() => {
     if (open) requestAnimationFrame(() => inputRef.current?.focus())
   }, [open])
+
+  // Record a "content gap" when a settled query finds nothing — debounced so we
+  // capture the query the user actually meant, not every keystroke, and only
+  // once per distinct miss.
+  const reportedMissRef = useRef<string | null>(null)
+  useEffect(() => {
+    const q = query.trim()
+    if (!ready || !q || results.length > 0) return
+    const t = window.setTimeout(() => {
+      if (reportedMissRef.current !== q.toLowerCase()) {
+        reportedMissRef.current = q.toLowerCase()
+        recordEvent('docs.search_miss', { query: q, source: 'docs-modal' })
+      }
+    }, 1100)
+    return () => window.clearTimeout(t)
+  }, [ready, query, results.length])
 
   // Reset the query when the modal closes.
   useEffect(() => {

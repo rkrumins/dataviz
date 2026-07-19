@@ -70,6 +70,7 @@ _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "infrastructure": ("/admin/system/status",),
     "branding":      ("/admin/branding",),
     "features":      ("/admin/features",),
+    "telemetry":     ("/admin/telemetry",),
     "announcements": ("/admin/announcements",),
     "users":         ("/admin/users",),
     "groups":        ("/admin/groups",),

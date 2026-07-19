@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { getTour } from './tours'
+import { recordEvent } from '@/services/telemetryService'
 
 const COMPLETED_KEY = 'nx-tours-completed'
 
@@ -66,14 +67,21 @@ export const useTourStore = create<TourState>()((set, get) => ({
     set({ stepIndex: Math.max(0, Math.min(index, tour.steps.length - 1)) })
   },
 
-  stop: () => set({ activeTourId: null, stepIndex: 0 }),
+  stop: () => {
+    const { activeTourId, stepIndex } = get()
+    if (activeTourId) recordEvent('tour.skipped', { tourId: activeTourId, atStep: stepIndex })
+    set({ activeTourId: null, stepIndex: 0 })
+  },
 
   finish: () => {
     const { activeTourId, completed } = get()
-    if (activeTourId && !completed.includes(activeTourId)) {
-      const next = [...completed, activeTourId]
-      saveCompleted(next)
-      set({ completed: next })
+    if (activeTourId) {
+      recordEvent('tour.completed', { tourId: activeTourId })
+      if (!completed.includes(activeTourId)) {
+        const next = [...completed, activeTourId]
+        saveCompleted(next)
+        set({ completed: next })
+      }
     }
     set({ activeTourId: null, stepIndex: 0 })
   },

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Pencil, ThumbsUp, ThumbsDown, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { GITHUB_REPO } from './docMeta.generated'
+import { recordEvent } from '@/services/telemetryService'
 
 type Vote = 'yes' | 'no'
 
@@ -23,6 +24,7 @@ function recordFeedback(pageKey: string, vote: Vote, note?: string) {
   } catch {
     /* no-op */
   }
+  recordEvent('docs.feedback', { pageKey, vote, note })
 }
 
 function priorVote(pageKey: string): Vote | null {
