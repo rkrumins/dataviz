@@ -228,11 +228,143 @@ def test_fleet_stale_only_consults_marker_set(monkeypatch):
     session = _FakeSession([
         _FakeResult(scalar=1),
         _FakeResult(rows=[(ds_a, "Prov A")]),
+        # summary basis: the workspace/provider-filtered set BEFORE staleOnly
+        # — here it happens to be the same single source.
+        _FakeResult(rows=[(ds_a.id, ds_a.workspace_id, ds_a.aggregation_status)]),
     ])
     resp = _run(assemble_fleet_freshness(session, stale_only=True))
     assert seen.get("called") is True
     assert resp.total == 1
     assert resp.rows[0].data_source_id == "ds-a"
+
+
+# ── Fleet summary (Task F7) ──────────────────────────────────────────────
+
+
+def test_fleet_summary_counts_mixed_fixture(monkeypatch):
+    # One of every bucket, plus a marker on a non-failed row AND on the
+    # failed row (proving needs_attention doesn't double-count), plus
+    # genat stamps on two rows.
+    ds_ready = _ds(id="ds-ready", status="ready")
+    ds_pending = _ds(id="ds-pending", status="pending")
+    ds_failed = _ds(id="ds-failed", status="failed")
+    ds_none = _ds(id="ds-none", status="none")
+    ds_skipped = _ds(id="ds-skipped", status="skipped")
+    ds_norow = _ds(id="ds-norow", status=None)
+    all_ds = [ds_ready, ds_pending, ds_failed, ds_none, ds_skipped, ds_norow]
+
+    signals = {
+        ("ws-1", "ds-ready"): (1, "2026-07-19T00:00:00+00:00", "source_changed"),
+        ("ws-1", "ds-failed"): (2, "2026-07-19T00:05:00+00:00", "drift"),
+    }
+    _patch_fleet_collaborators(monkeypatch, signals=signals)
+    session = _FakeSession([
+        _FakeResult(scalar=len(all_ds)),
+        _FakeResult(rows=[(ds, f"Prov {ds.id}") for ds in all_ds]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+
+    # The page IS the full set (total==len(page)) — no 3rd query needed.
+    assert len(session.executed) == 2
+    s = resp.summary
+    assert s is not None
+    assert s.total == 6
+    assert s.ready == 1
+    assert s.pending == 1
+    assert s.failed == 1
+    assert s.not_built == 3  # none, skipped, no-state-row
+    assert s.recomputing == 2  # ds-ready + ds-failed both have markers
+    assert s.needs_attention == 2  # ds-ready(marker) + ds-failed(marker&failed, counted once)
+    assert s.cache_stamped == 2  # ds-ready + ds-failed have genat
+
+
+def test_fleet_summary_ignores_stale_only_facet(monkeypatch):
+    # 3 sources workspace-wide; only ds-b is stale. The staleOnly-filtered
+    # rows/total must stay narrow, but summary reflects all 3.
+    ds_a = _ds(id="ds-a", status="ready")
+    ds_b = _ds(id="ds-b", status="ready")
+    ds_c = _ds(id="ds-c", status="failed")
+    signals = {
+        ("ws-1", "ds-b"): (1, None, "source_changed"),
+        ("ws-1", "ds-a"): (None, "2026-07-19T00:00:00+00:00", None),
+    }
+    _patch_fleet_collaborators(
+        monkeypatch, signals=signals, stale=[("ws-1", "ds-b")],
+    )
+    session = _FakeSession([
+        _FakeResult(scalar=1),  # stale-filtered total
+        _FakeResult(rows=[(ds_b, "Prov B")]),  # stale-filtered page
+        # summary basis query: full workspace/provider-filtered set.
+        _FakeResult(rows=[
+            (ds.id, ds.workspace_id, ds.aggregation_status)
+            for ds in (ds_a, ds_b, ds_c)
+        ]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, stale_only=True))
+
+    # Rows/total stay staleOnly-filtered (unaffected by this change).
+    assert resp.total == 1
+    assert [r.data_source_id for r in resp.rows] == ["ds-b"]
+
+    s = resp.summary
+    assert s is not None
+    assert s.total == 3
+    assert s.ready == 2
+    assert s.failed == 1
+    assert s.not_built == 0
+    assert s.recomputing == 1  # ds-b marker
+    assert s.needs_attention == 2  # ds-b(marker) + ds-c(failed)
+    assert s.cache_stamped == 1  # ds-a genat
+
+
+def test_fleet_summary_full_set_on_page_2_of_small_page_size(monkeypatch):
+    # total=3, pageSize=1, page=2 — the fetched page is a single row, but
+    # summary must reflect all 3 filtered sources, not just that row.
+    ds_x = _ds(id="ds-x", status="ready")
+    ds_y = _ds(id="ds-y", status="pending")
+    ds_z = _ds(id="ds-z", status="failed")
+    signals = {
+        ("ws-1", "ds-y"): (3, "2026-07-19T00:00:00+00:00", "source_changed"),
+    }
+    _patch_fleet_collaborators(monkeypatch, signals=signals)
+    session = _FakeSession([
+        _FakeResult(scalar=3),
+        _FakeResult(rows=[(ds_y, "Prov Y")]),  # page 2 of pageSize=1
+        _FakeResult(rows=[
+            (ds.id, ds.workspace_id, ds.aggregation_status)
+            for ds in (ds_x, ds_y, ds_z)
+        ]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=2, page_size=1))
+
+    assert resp.total == 3
+    assert [r.data_source_id for r in resp.rows] == ["ds-y"]
+
+    s = resp.summary
+    assert s is not None
+    assert s.total == 3
+    assert s.ready == 1
+    assert s.pending == 1
+    assert s.failed == 1
+    assert s.recomputing == 1
+    assert s.needs_attention == 2  # ds-y(marker) + ds-z(failed)
+    assert s.cache_stamped == 1
+
+
+def test_fleet_summary_none_above_1000_sources(monkeypatch):
+    _patch_fleet_collaborators(monkeypatch)
+    ds_a = _ds(id="ds-a")
+    session = _FakeSession([
+        _FakeResult(scalar=1500),  # filtered set exceeds the 1000 cutoff
+        _FakeResult(rows=[(ds_a, "Prov A")]),  # page still returned normally
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+
+    assert resp.total == 1500
+    assert len(resp.rows) == 1  # rows still returned
+    assert resp.summary is None
+    # Bounded work: no 3rd query needed once total already proves >1000.
+    assert len(session.executed) == 2
 
 
 def test_fleet_takes_no_provider_registry():

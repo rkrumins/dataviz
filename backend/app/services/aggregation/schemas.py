@@ -535,10 +535,30 @@ class FreshnessDoc(FreshnessRow):
         populate_by_name = True
 
 
+class FreshnessSummary(BaseModel):
+    """Fleet-wide stat-tile counts for the Freshness cockpit, computed over
+    the workspace/provider-filtered set *before* the ``staleOnly`` facet and
+    pagination are applied — the tiles describe the whole filtered fleet,
+    not the visible page. ``None`` (on the response) when that filtered set
+    exceeds 1000 sources, so the assembly never does unbounded work."""
+    total: int
+    ready: int = Field(0)  # aggregation_status == "ready"
+    pending: int = Field(0)  # aggregation_status == "pending" (rebuild in flight)
+    failed: int = Field(0)  # aggregation_status == "failed"
+    not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
+    recomputing: int = Field(0)  # stale marker present
+    needs_attention: int = Field(0, alias="needsAttention")  # marker present OR failed
+    cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+
+    class Config:
+        populate_by_name = True
+
+
 class FreshnessFleetResponse(BaseModel):
     """Paged fleet freshness response — ``total`` is the filtered count."""
     rows: List[FreshnessRow] = Field(default_factory=list)
     total: int = 0
+    summary: Optional[FreshnessSummary] = None
 
     class Config:
         populate_by_name = True

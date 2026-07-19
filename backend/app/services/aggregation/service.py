@@ -31,6 +31,7 @@ from .schemas import (
     FreshnessDoc,
     FreshnessFleetResponse,
     FreshnessRow,
+    FreshnessSummary,
     PaginatedJobsResponse,
     RefreshEventSummary,
     RefreshResponse,
@@ -2252,6 +2253,12 @@ async def _running_job_map(
     return out
 
 
+# Fleet summary is skipped (returned as None) once the workspace/provider-
+# filtered set exceeds this many sources — bounds the widened Redis pipeline
+# read to a fixed cost regardless of fleet size. See ``_assemble_fleet_summary``.
+_SUMMARY_MAX_SOURCES = 1000
+
+
 async def assemble_fleet_freshness(
     session: AsyncSession,
     *,
@@ -2280,6 +2287,11 @@ async def assemble_fleet_freshness(
     if stale_only:
         stale_ids = {ds for _ws, ds in await _gc.list_stale_sources()}
         if not stale_ids:
+            # No source anywhere is marked stale, so summary can't be
+            # computed without a query — this short-circuit's whole point
+            # is to make ZERO SQL calls, so summary is omitted (None) here
+            # rather than widened for. Vanishingly rare in practice (it
+            # requires no source system-wide to have ever gone stale).
             return FreshnessFleetResponse(rows=[], total=0)
 
     base = (
@@ -2334,7 +2346,121 @@ async def assemble_fleet_freshness(
         ))
         for ds in ds_list
     ]
-    return FreshnessFleetResponse(rows=rows, total=total)
+    summary = await _assemble_fleet_summary(
+        session,
+        workspace_id=workspace_id,
+        provider_id=provider_id,
+        stale_only=stale_only,
+        ds_list=ds_list,
+        total=total,
+        signals=signals,
+    )
+    return FreshnessFleetResponse(rows=rows, total=total, summary=summary)
+
+
+async def _assemble_fleet_summary(
+    session: AsyncSession,
+    *,
+    workspace_id: Optional[str],
+    provider_id: Optional[str],
+    stale_only: bool,
+    ds_list: list,
+    total: int,
+    signals: dict,
+) -> Optional[FreshnessSummary]:
+    """Fleet stat-tile counts over the workspace/provider-filtered set,
+    BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
+    the whole filtered fleet, not the visible page. ``None`` once that set
+    exceeds ``_SUMMARY_MAX_SOURCES`` (bounded work; zero provider/FalkorDB
+    access, same structural guarantee as the rest of fleet assembly).
+
+    Reuses the page's already-fetched rows + the single Redis pipeline
+    already read for it when the page already IS the full filtered set (no
+    ``stale_only`` narrowing and the page covers every matching row) —
+    never a second SQL pass or pipeline round-trip in that common case.
+    """
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services import graph_cache as _gc
+
+    page_is_full_set = (not stale_only) and (len(ds_list) == total)
+    if page_is_full_set:
+        full_rows = [(ds.id, ds.workspace_id, ds.aggregation_status) for ds in ds_list]
+        full_signals = signals
+    else:
+        # staleOnly narrows the paged/`total` query, or pagination doesn't
+        # cover the full set — the summary basis differs, so a dedicated
+        # (bounded) query is unavoidable here. When we already have an
+        # exact unfiltered-by-stale count (non-staleOnly requests), skip
+        # even that query once it alone proves the set is over the cutoff.
+        if not stale_only and total > _SUMMARY_MAX_SOURCES:
+            return None
+
+        query = (
+            select(
+                WorkspaceDataSourceORM.id,
+                WorkspaceDataSourceORM.workspace_id,
+                WorkspaceDataSourceORM.aggregation_status,
+            )
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        )
+        if workspace_id:
+            query = query.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+        if provider_id:
+            query = query.where(WorkspaceDataSourceORM.provider_id == provider_id)
+        query = query.limit(_SUMMARY_MAX_SOURCES + 1)
+
+        full_rows = (await session.execute(query)).all()
+        if len(full_rows) > _SUMMARY_MAX_SOURCES:
+            return None
+
+        full_pairs = [(str(ws), str(ds_id)) for ds_id, ws, _status in full_rows]
+        page_pairs = [(str(ds.workspace_id), str(ds.id)) for ds in ds_list]
+        if set(full_pairs) == set(page_pairs):
+            full_signals = signals
+        else:
+            full_signals = await _gc.read_freshness_signals(full_pairs)
+
+    return _summarize_freshness(full_rows, full_signals)
+
+
+def _summarize_freshness(
+    full_rows: list, signals: dict,
+) -> FreshnessSummary:
+    """Reduce ``(ds_id, workspace_id, aggregation_status)`` rows + their
+    Redis signals into the fleet summary counts. ``needs_attention`` is a
+    per-row OR (marker present or failed), not a sum of the two buckets —
+    a row that is both failed and marked stale counts once."""
+    ready = pending = failed = not_built = 0
+    recomputing = needs_attention = cache_stamped = 0
+    for ds_id, ws_id, status in full_rows:
+        if status == "ready":
+            ready += 1
+        elif status == "pending":
+            pending += 1
+        elif status == "failed":
+            failed += 1
+        if status in (None, "none", "skipped"):
+            not_built += 1
+        _gen, cache_as_of, stale_reason = signals.get(
+            (str(ws_id), str(ds_id)), (None, None, None),
+        )
+        marker = bool(stale_reason)
+        if marker:
+            recomputing += 1
+        if marker or status == "failed":
+            needs_attention += 1
+        if cache_as_of:
+            cache_stamped += 1
+    return FreshnessSummary(
+        total=len(full_rows),
+        ready=ready,
+        pending=pending,
+        failed=failed,
+        not_built=not_built,
+        recomputing=recomputing,
+        needs_attention=needs_attention,
+        cache_stamped=cache_stamped,
+    )
 
 
 # ── Custom Exception Classes ────────────────────────────────────────
