@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes, newest first. Dates are release dates.
+Release history for {brand}. Notable changes, newest first. Dates are release dates.
 
 Sections follow [Keep a Changelog](https://keepachangelog.com): **Added**, **Changed**,
 **Deprecated**, **Removed**, **Fixed**, **Security**. Anything that requires action on upgrade

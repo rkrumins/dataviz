@@ -1,8 +1,13 @@
-# Context Visualization Platform Developer Guide
+# Developer Guide
 
-## What is the Context Visualization Platform?
+**What this is:** the contributor's map of the platform — its architecture, process roles, and the subsystems (aggregation, versioning, insights) you'll touch when adding features. **Who it's for:** engineers working on the backend or frontend source, whether running it all-in-one or as separate processes.
 
-The Context Visualization Platform is a graph lineage visualization platform. It connects to graph databases (FalkorDB, Neo4j, DataHub), lets teams model data lineage through ontologies, and provides interactive visualization of how data flows through systems. The "aggregation" engine materializes summary edges so that million-node graphs can be navigated at any zoom level without running expensive live traversals.
+> [!TIP]
+> Just want it running? Jump to [Local Development Setup](#local-development-setup). Read on here for the why behind the architecture.
+
+## What is the platform?
+
+The platform is a graph lineage visualization system. It connects to graph databases (FalkorDB, Neo4j, DataHub), lets teams model data lineage through ontologies, and provides interactive visualization of how data flows through systems. The "aggregation" engine materializes summary edges so that million-node graphs can be navigated at any zoom level without running expensive live traversals.
 
 ---
 
@@ -10,71 +15,36 @@ The Context Visualization Platform is a graph lineage visualization platform. It
 
 ### The Big Picture
 
-```
-                    +------------------+
-                    |     Browser      |
-                    |  React 19 + Vite |
-                    +--------+---------+
-                             |
-                    HTTP (port 5173 dev / 3080 prod)
-                             |
-               +-------------v--------------+
-               |        viz-service          |    Port 8000
-               |     (FastAPI + Uvicorn)     |
-               |                             |
-               |  Auth, Workspaces, Graph    |
-               |  Queries, Ontology, Views   |
-               |                             |
-               |  Aggregation endpoints are  |
-               |  proxied to Control Plane   |---+
-               +--+---------------------+---+   |
-                  |                     |         |
-                  | SQL                 | Cypher   |  HTTP proxy
-                  |                     |         |
-         +--------v-------+    +-------v----+    |
-         |   PostgreSQL    |    |  FalkorDB  |    |
-         |   Port 5432     |    |  Port 6379 |    |
-         |                 |    |            |    |
-         | public schema:  |    | Graph data:|    |
-         |  users          |    |  nodes     |    |
-         |  workspaces     |    |  edges     |    |
-         |  providers      |    |  lineage   |    |
-         |  ontologies     |    |  AGGREGATED|    |
-         |  views          |    +-------^----+    |
-         |                 |            |         |
-         | aggregation     |            |         |
-         |  schema:        |      Cypher MERGE    |
-         |  aggregation_   |       (batched)      |
-         |   jobs          |            |         |
-         |  data_source_   |    +-------+----+    |
-         |   state         |    | Aggregation|    |
-         +--------^--------+    |  Worker(s) |    |
-                  |             |  (headless)|    |
-                  | SQL         |  Port 8090 |    |
-                  |             +------^-----+    |
-                  |                    |           |
-                  |              XREADGROUP        |
-                  |                    |           |
-                  |             +------+-----+    |
-                  |             |   Redis 7   |    |
-                  |             |  Port 6380  |    |
-                  |             |             |    |
-                  |             | Streams:    |    |
-                  |             |  job dispatch|   |
-                  |             | Pub/Sub:    |    |
-                  |             |  status     |    |
-                  |             |  events     |    |
-                  |             +------^------+    |
-                  |                    |           |
-                  |               XADD |           |
-                  |                    |           |
-               +--+--------------------+---+      |
-               |  Aggregation Control Plane | <----+
-               |       Port 8091            |
-               |                            |
-               |  Job lifecycle, scheduling |
-               |  Crash recovery, drift     |
-               +----------------------------+
+```mermaid
+flowchart TB
+    Browser["Browser<br/>React 19 + Vite<br/>:5173 dev / :3080 prod"]
+
+    Browser -->|HTTP| Viz
+
+    subgraph Web["Web tier"]
+        Viz["viz-service :8000<br/>FastAPI + Uvicorn<br/>Auth, Workspaces, Graph<br/>Queries, Ontology, Views"]
+    end
+
+    subgraph Aggregation["Aggregation (separate processes)"]
+        CP["Control Plane :8091<br/>Job lifecycle, scheduling<br/>Crash recovery, drift"]
+        Worker["Worker(s) :8090<br/>headless batch materializer"]
+        Redis["Redis 7 :6380<br/>Streams: job dispatch<br/>Pub/Sub: status events"]
+    end
+
+    PG[("PostgreSQL :5432<br/>public schema + aggregation schema")]
+    Falkor[("FalkorDB :6379<br/>nodes, edges, lineage,<br/>AGGREGATED edges")]
+
+    Viz -->|SQL| PG
+    Viz -->|Cypher| Falkor
+    Viz -.->|HTTP proxy<br/>aggregation endpoints| CP
+
+    CP -->|XADD| Redis
+    Redis -->|XREADGROUP| Worker
+    Worker -->|Cypher MERGE batched| Falkor
+    Worker -->|checkpoints SQL| PG
+    Worker -.->|job status pub/sub| Redis
+    Redis -.->|status events| Viz
+    CP -->|SQL| PG
 ```
 
 ### Why This Architecture?
@@ -93,6 +63,19 @@ A single codebase boots into different roles, selected by the `SYNODIC_ROLE` env
 - **`WORKER`** — aggregation execution and heavy provider I/O.
 - **`CONTROLPLANE`** — scheduler, outbox relay, and crash recovery. Singleton.
 - **`DEV`** — all-in-one for local development (the default). Runs every subsystem in one process.
+
+```mermaid
+flowchart LR
+    Codebase["Single codebase<br/>SYNODIC_ROLE"] --> WEB
+    Codebase --> WORKER
+    Codebase --> CONTROLPLANE
+    Codebase --> DEV
+
+    WEB["WEB<br/>HTTP API, auth, reads<br/>stateless, scale out"]
+    WORKER["WORKER<br/>aggregation + heavy provider I/O"]
+    CONTROLPLANE["CONTROLPLANE<br/>scheduler, crash recovery<br/>singleton"]
+    DEV["DEV (default)<br/>all subsystems in one process<br/>local development"]
+```
 
 The **versioning projection worker** is a separate process (`python -m backend.app.services.versioning`), not a `SYNODIC_ROLE` value — in `DEV` it can instead run in-process via `GRAPHVER_PROJECTION_INPROCESS=1`.
 
@@ -446,35 +429,34 @@ A graph with 5 million edges is too large to traverse live for every UI request.
 
 ### The Pipeline
 
-```
-1. User clicks "Run Aggregation" in the UI
-        |
-2. viz-service proxies POST to Control Plane
-        |
-3. Control Plane:
-   - Validates data source exists
-   - Resolves ontology (which edge types are containment vs lineage)
-   - Creates job record in aggregation.aggregation_jobs
-   - XADD job_id to Redis Stream "aggregation.jobs"
-        |
-4. Worker:
-   - XREADGROUP claims the job from the stream
-   - Reads frozen edge types from the job record
-   - Batch loop (cursor-based, NOT skip/offset):
-     a. Fetch 1000 lineage edges (WHERE cursor > last_cursor)
-     b. Compute ancestor chains for all URNs (cached in Redis)
-     c. Expand to ancestor pairs (source_chain x target_chain)
-     d. MERGE AGGREGATED edges into FalkorDB (idempotent)
-     e. Checkpoint progress to Postgres (every ~2s)
-   - On completion: publish job.completed event
-        |
-5. viz-service event listener:
-   - Receives event via Redis pub/sub
-   - Updates workspace_data_sources.aggregation_status = "ready"
-        |
-6. Frontend polls readiness endpoint every 5 seconds
-   - Shows progress bar during execution
-   - Enables "Create View" button when ready
+```mermaid
+sequenceDiagram
+    participant UI as Frontend
+    participant Viz as viz-service
+    participant CP as Control Plane
+    participant Redis
+    participant Worker
+    participant Falkor as FalkorDB
+    participant PG as Postgres
+
+    UI->>Viz: Click "Run Aggregation"
+    Viz->>CP: proxy POST /aggregation
+    CP->>CP: validate data source,<br/>resolve ontology edge types
+    CP->>PG: create job record
+    CP->>Redis: XADD job_id (aggregation.jobs)
+    Redis->>Worker: XREADGROUP claims job
+    Worker->>PG: read frozen edge types
+    loop Cursor-based batches (not skip/offset)
+        Worker->>Falkor: fetch 1000 lineage edges (cursor > last)
+        Worker->>Worker: compute + expand ancestor pairs
+        Worker->>Falkor: MERGE AGGREGATED edges (idempotent)
+        Worker->>PG: checkpoint progress (~2s)
+    end
+    Worker->>Redis: publish job.completed
+    Redis->>Viz: status event (pub/sub)
+    Viz->>PG: set aggregation_status = "ready"
+    UI->>Viz: poll readiness (every 5s)
+    Viz-->>UI: ready → enable "Create View"
 ```
 
 ### Crash Recovery

@@ -1,6 +1,16 @@
-# Context Visualization Platform
+# Data Lineage & Context Platform
 
-Context Visualization Platform (CVP) — a graph metadata + lineage platform. Backend in Python (FastAPI), frontend in React, graph store in FalkorDB.
+> A graph metadata and lineage platform: connect a graph database, model data lineage with ontologies, and explore how data flows through your systems on an interactive canvas — at any scale.
+
+**What this is:** the platform's monorepo — a Python (FastAPI) backend, a React frontend, and a FalkorDB graph store, plus the aggregation and versioning services that make million-node graphs navigable. **Who it's for:** contributors editing the source, operators self-hosting it, and anyone who wants a zero-config demo.
+
+Pick the path that matches what you're doing:
+
+| I want to… | Path | Command |
+|------------|------|---------|
+| Edit source with hot-reload | [Contributor](#1-contributor--edit-source-locally) | `./dev.sh` |
+| Run it on a VM | [Self-host](#2-self-host--run-on-a-vm) | `./deploy.sh up` |
+| Take a quick look | [Quickstart](#3-quickstart--zero-config-demo) | `docker compose -f docker-compose.quickstart.yml up` |
 
 ## Three paths to get running
 
@@ -40,6 +50,9 @@ Access:
 - API docs: http://localhost:8000/docs
 - Login: `admin@nexuslineage.local` / `admin123`
 
+> [!NOTE]
+> The quickstart ships pre-seeded SQLite and FalkorDB baked into the images — no `.env`, no seeding. It is for evaluation only; the Contributor and Self-host paths use PostgreSQL.
+
 ## Diagnostics
 
 Both runners ship with `doctor`, `status`, and `repair` subcommands — they check environment, ports, role/db state, and orphan containers. If something feels off:
@@ -49,11 +62,19 @@ Both runners ship with `doctor`, `status`, and `repair` subcommands — they che
 ./deploy.sh doctor    # self-host
 ```
 
-## Documentation
+## Documentation map
 
-- [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) — contributor guide
-- [docs/SETUP.md](docs/SETUP.md) — environment setup reference
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — self-host operator guide
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system overview
-- [docs/BACKEND.md](docs/BACKEND.md) — backend internals
-- [docs/FRONTEND.md](docs/FRONTEND.md) — frontend internals
+Start here, then follow the trail for whatever you're doing.
+
+| Document | What it covers |
+|----------|----------------|
+| [QUICKSTART.md](QUICKSTART.md) | Get running locally with sample data |
+| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | Contributor guide — architecture, roles, aggregation internals |
+| [SPEC.md](SPEC.md) | Technical specification — data models, rule engine, API contract |
+| [PLAN.md](PLAN.md) | What's built today and what's next |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [docs/SETUP.md](docs/SETUP.md) | Environment setup reference |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Self-host operator guide |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview |
+| [docs/BACKEND.md](docs/BACKEND.md) | Backend internals |
+| [docs/FRONTEND.md](docs/FRONTEND.md) | Frontend internals |

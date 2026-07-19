@@ -1,9 +1,10 @@
-# Context Visualization Platform — Current State & What's Next
+# Current State & What's Next
 
-The Context Visualization Platform is a data-lineage platform: it connects to graph
+**What this is:** a current-state snapshot of the platform — what's built today and the short list of work still ahead. **Who it's for:** contributors and stakeholders who want the honest picture without wading through the full docs.
+
+The platform is a data-lineage system: it connects to graph
 databases, overlays user-defined business ontologies onto physical technical metadata,
-and renders interactive lineage on a canvas. This document describes what is built today
-and the short list of work still ahead. For deeper detail on any area, see the docs under
+and renders interactive lineage on a canvas. For deeper detail on any area, see the docs under
 [`docs/`](docs/) and the [CHANGELOG](CHANGELOG.md).
 
 ---
