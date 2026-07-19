@@ -1,0 +1,101 @@
+"""Read/write helpers for ``product_events`` — the append-only telemetry store.
+
+Writes are one-liners; reads aggregate in Python after a windowed fetch (the
+same portable approach ``audit.py`` uses for payload predicates), which keeps
+the SQL trivial and works identically on SQLite and Postgres. Volumes are small
+(one row per deliberate product signal), so a windowed scan is fine.
+"""
+from __future__ import annotations
+
+import json
+from collections import Counter
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db.models import ProductEventORM
+
+
+async def record(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    actor_id: str | None,
+    payload: dict[str, Any] | None,
+) -> None:
+    """Append one telemetry row. The caller owns the transaction/commit."""
+    session.add(
+        ProductEventORM(
+            event_type=event_type,
+            actor_id=actor_id,
+            payload=json.dumps(payload) if payload else None,
+        )
+    )
+    await session.flush()
+
+
+def _decode(row: ProductEventORM) -> dict[str, Any]:
+    if not row.payload:
+        return {}
+    try:
+        val = json.loads(row.payload)
+        return val if isinstance(val, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> dict[str, Any]:
+    """Aggregate the telemetry window into the shape the Admin panel renders."""
+    rows = (
+        await session.execute(
+            select(ProductEventORM).where(ProductEventORM.created_at >= since_iso)
+        )
+    ).scalars().all()
+
+    helpful_yes = helpful_no = 0
+    per_page: dict[str, dict[str, int]] = {}
+    miss_counter: Counter[str] = Counter()
+    tour_completed = tour_skipped = 0
+
+    for r in rows:
+        p = _decode(r)
+        if r.event_type == "docs.feedback":
+            vote = p.get("vote")
+            page = str(p.get("pageKey") or "unknown")
+            bucket = per_page.setdefault(page, {"yes": 0, "no": 0})
+            if vote == "yes":
+                helpful_yes += 1
+                bucket["yes"] += 1
+            elif vote == "no":
+                helpful_no += 1
+                bucket["no"] += 1
+        elif r.event_type == "docs.search_miss":
+            q = str(p.get("query") or "").strip().lower()
+            if q:
+                miss_counter[q] += 1
+        elif r.event_type == "tour.completed":
+            tour_completed += 1
+        elif r.event_type == "tour.skipped":
+            tour_skipped += 1
+
+    total_votes = helpful_yes + helpful_no
+    pages = [
+        {"page": page, "yes": c["yes"], "no": c["no"]}
+        for page, c in sorted(per_page.items(), key=lambda kv: -(kv[1]["yes"] + kv[1]["no"]))
+    ]
+
+    return {
+        "helpful": {
+            "yes": helpful_yes,
+            "no": helpful_no,
+            "total": total_votes,
+            "score": round(helpful_yes / total_votes, 3) if total_votes else None,
+            "byPage": pages,
+        },
+        "contentGaps": [
+            {"query": q, "count": n} for q, n in miss_counter.most_common(top)
+        ],
+        "tours": {"completed": tour_completed, "skipped": tour_skipped},
+        "totalEvents": len(rows),
+    }
