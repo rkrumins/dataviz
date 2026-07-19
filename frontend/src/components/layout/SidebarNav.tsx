@@ -154,6 +154,7 @@ function NavButton({ item, collapsed, active, onClick }: NavButtonProps) {
     <>
     <button
       ref={buttonRef}
+      data-tour={`nav-${item.id}`}
       onClick={onClick}
       {...reveal}
       className={cn(

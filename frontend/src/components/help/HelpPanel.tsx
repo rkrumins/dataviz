@@ -30,10 +30,12 @@ import {
   FileText,
   BookOpen,
   Sparkles,
+  Check,
+  Rocket,
 } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useTourStore } from '@/features/tour/tourStore'
-import { getTour, FIRST_RUN_TOUR } from '@/features/tour/tours'
+import { TOURS } from '@/features/tour/tours'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -51,6 +53,7 @@ import {
   type GuideEntry,
 } from '@/components/guide/guideConfig'
 import { guideMarkdownComponents } from '@/components/guide/guideMarkdown'
+import { GettingStarted } from '@/components/onboarding/GettingStarted'
 
 // Curated quick-start links — a handful of high-value guide articles.
 const QUICK_START_SLUGS = [
@@ -75,8 +78,8 @@ export function HelpPanel() {
   const open = useHelpPanelStore((s) => s.open)
   const closeHelp = useHelpPanelStore((s) => s.closeHelp)
 
-  // Two internal views keep the user in-app.
-  const [view, setView] = useState<'home' | 'article'>('home')
+  // Internal views keep the user in-app.
+  const [view, setView] = useState<'home' | 'article' | 'getting-started'>('home')
   const [articleSlug, setArticleSlug] = useState<string | null>(null)
 
   const close = () => {
@@ -138,8 +141,14 @@ export function HelpPanel() {
                 onBack={() => setView('home')}
                 onClose={close}
               />
+            ) : view === 'getting-started' ? (
+              <GettingStartedView onBack={() => setView('home')} onClose={close} />
             ) : (
-              <HomeView onSelectGuide={openArticle} onClose={close} />
+              <HomeView
+                onSelectGuide={openArticle}
+                onOpenGettingStarted={() => setView('getting-started')}
+                onClose={close}
+              />
             )}
           </motion.aside>
         )}
@@ -154,9 +163,11 @@ export function HelpPanel() {
 
 function HomeView({
   onSelectGuide,
+  onOpenGettingStarted,
   onClose,
 }: {
   onSelectGuide: (slug: string) => void
+  onOpenGettingStarted: () => void
   onClose: () => void
 }) {
   const brand = useBrand()
@@ -165,7 +176,7 @@ function HomeView({
   const inputRef = useRef<HTMLInputElement>(null)
   const toursEnabled = useFeature('toursEnabled')
   const startTour = useTourStore((s) => s.start)
-  const tour = getTour(FIRST_RUN_TOUR)
+  const completedTours = useTourStore((s) => s.completed)
 
   // Focus the search input when the home view mounts (i.e. on open / back).
   useEffect(() => {
@@ -288,23 +299,54 @@ function HomeView({
         ) : (
           // Quick-start links
           <div className="pt-1">
-            {toursEnabled && tour && (
-              <button
-                onClick={() => {
-                  startTour(FIRST_RUN_TOUR)
-                  onClose()
-                }}
-                className="mb-4 flex w-full items-center gap-3 rounded-xl border border-accent-lineage/25 bg-gradient-to-r from-accent-lineage/[0.08] to-violet-500/[0.05] p-3 text-left transition-colors hover:border-accent-lineage/40"
-              >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/20">
-                  <Sparkles className="h-4.5 w-4.5" />
+            <button
+              onClick={onOpenGettingStarted}
+              className="group mb-4 flex w-full items-center gap-3 rounded-lg border border-accent-lineage/30 bg-accent-lineage/[0.05] px-3 py-3 text-left transition-colors hover:border-accent-lineage/50 hover:bg-accent-lineage/[0.08]"
+            >
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-lineage/12 text-accent-lineage">
+                <Rocket className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-ink">Getting started</p>
+                <p className="truncate text-xs text-ink-muted">
+                  Track your setup progress, step by step
+                </p>
+              </div>
+              <ArrowUpRight className="h-4 w-4 shrink-0 text-ink-muted group-hover:text-accent-lineage" />
+            </button>
+            {toursEnabled && (
+              <div className="mb-4">
+                <div className="flex items-center gap-1.5 px-1 pb-2 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
+                  <Sparkles className="h-3 w-3" /> Take a tour
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-ink">Take the product tour</p>
-                  <p className="text-xs text-ink-muted">A quick guided lap · {tour.estimate}</p>
-                </div>
-                <ArrowUpRight className="h-4 w-4 shrink-0 text-accent-lineage" />
-              </button>
+                <ul className="space-y-1">
+                  {TOURS.map((t) => {
+                    const done = completedTours.includes(t.id)
+                    return (
+                      <li key={t.id}>
+                        <button
+                          onClick={() => {
+                            startTour(t.id)
+                            onClose()
+                          }}
+                          className="group flex w-full items-center gap-3 rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2.5 text-left transition-colors hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.04]"
+                        >
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-lineage/10 text-accent-lineage">
+                            <t.icon className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                              {t.title}
+                              {done && <Check className="h-3.5 w-3.5 text-emerald-500" />}
+                            </p>
+                            <p className="truncate text-xs text-ink-muted">{t.estimate} · {t.description}</p>
+                          </div>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
             )}
             <div className="px-1 pb-2 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
               Quick start
@@ -424,6 +466,44 @@ function ArticleView({
             </ReactMarkdown>
           </article>
         )}
+      </div>
+    </>
+  )
+}
+
+// ── Getting-started view ────────────────────────────────────────────
+
+function GettingStartedView({
+  onBack,
+  onClose,
+}: {
+  onBack: () => void
+  onClose: () => void
+}) {
+  return (
+    <>
+      {/* Header */}
+      <div className="flex items-center justify-between gap-2 px-5 pt-5 pb-4 border-b border-glass-border/60">
+        <button
+          onClick={onBack}
+          aria-label="Back to help home"
+          className="flex items-center gap-1.5 px-2 py-1.5 -ml-2 rounded-lg text-sm font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" />
+          Back
+        </button>
+        <button
+          onClick={onClose}
+          aria-label="Close help"
+          className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors duration-150"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Body — the hub closes the drawer when a step CTA navigates. */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-5">
+        <GettingStarted onNavigate={onClose} />
       </div>
     </>
   )
