@@ -56,7 +56,8 @@ export interface TourFunnelRow {
 export interface ToursSummary {
     completed: number
     skipped: number
-    funnel: TourFunnelRow[]
+    /** Optional — absent from summaries produced before the funnel was added. */
+    funnel?: TourFunnelRow[]
 }
 
 

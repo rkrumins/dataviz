@@ -62,6 +62,9 @@ export function AdminTelemetry() {
     }
 
     const { helpful, contentGaps, tours, totalEvents } = data
+    // `funnel` is a newer field — tolerate a backend that predates it so the
+    // panel renders (empty funnel) instead of crashing.
+    const funnel = tours.funnel ?? []
     const scorePct = helpful.total > 0 ? Math.round(helpful.score * 100) : null
 
     const kpis = [
@@ -189,13 +192,13 @@ export function AdminTelemetry() {
                     <h2 className="text-sm font-bold text-ink">Tour funnel — completion &amp; drop-off</h2>
                 </div>
                 <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
-                    {tours.funnel.length === 0 ? (
+                    {funnel.length === 0 ? (
                         <div className="px-5 py-10 text-center">
                             <p className="text-sm text-ink-muted">No tour activity in this window yet.</p>
                         </div>
                     ) : (
                         <ul>
-                            {tours.funnel.map((t) => {
+                            {funnel.map((t) => {
                                 const rate = t.completionRate == null ? null : Math.round(t.completionRate * 100)
                                 const topDrop = t.dropoff.length
                                     ? t.dropoff.reduce((a, b) => (b.count > a.count ? b : a))
