@@ -51,6 +51,22 @@ _KINDS_WITHOUT_RESTORE = (
 def upgrade() -> None:
     bind = op.get_bind()
     commits = f'"{gv_config.graphver_schema()}"."commits"'
+    # Pre-validate over live data so a mismatch fails with the ACTUAL
+    # offending values (and row counts) instead of an opaque partition
+    # CheckViolation. Any hit means some writer produced a kind this
+    # file doesn't know — widen the lists (WIDEN-ONLY doctrine, see
+    # models.py ck_commits_kind); never delete the rows.
+    stray = bind.execute(sa.text(
+        f"SELECT kind, count(*) FROM {commits} "
+        f"WHERE kind NOT IN ({_KINDS_WITH_RESTORE}) GROUP BY kind"
+    )).fetchall()
+    if stray:
+        raise RuntimeError(
+            "restore_kind migration: commits.kind contains value(s) outside the "
+            f"target constraint list: {[(r[0], r[1]) for r in stray]!r}. "
+            "Widen _KINDS_WITH_RESTORE/_KINDS_WITHOUT_RESTORE in this file to "
+            "include them (WIDEN-ONLY) — do not delete rows."
+        )
     bind.execute(sa.text(f"ALTER TABLE {commits} DROP CONSTRAINT IF EXISTS ck_commits_kind"))
     bind.execute(sa.text(
         f"ALTER TABLE {commits} ADD CONSTRAINT ck_commits_kind "
