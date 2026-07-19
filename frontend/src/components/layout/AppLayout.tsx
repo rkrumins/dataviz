@@ -14,6 +14,8 @@ import { TopBar } from './TopBar'
 import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
+import { HelpPanel } from '@/components/help/HelpPanel'
+import { useHelpPanelStore } from '@/store/helpPanel'
 import { ViewWizard } from '@/components/views/ViewWizard'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useAuthStore } from '@/store/auth'
@@ -90,6 +92,28 @@ export function AppLayout() {
     document.documentElement.classList.toggle('reduce-motion', reducedMotion)
   }, [reducedMotion])
 
+  // Global "?" shortcut toggles the Help drawer — ignored while typing in a
+  // field so it never steals a literal question mark.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== '?') return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        el?.isContentEditable
+      ) {
+        return
+      }
+      e.preventDefault()
+      useHelpPanelStore.getState().toggleHelp()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   // While the cookie is being validated against the server, render a
   // neutral loader. This prevents a flash of /login on cold reload when
   // the user is in fact authenticated.
@@ -139,6 +163,7 @@ export function AppLayout() {
           initialDataSourceId={initialScope.dataSourceId}
         />
 
+        <HelpPanel />
         <ToastContainer />
         <AccessDeniedModal />
       </div>

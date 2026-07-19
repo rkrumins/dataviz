@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -18,6 +18,7 @@ import {
   type SystemRole,
 } from '@/store/auth'
 import { useSchemaStore } from '@/store/schema'
+import { useHelpPanelStore } from '@/store/helpPanel'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
@@ -180,6 +181,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 3: System / Account */}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
+
+          <button
+            className="btn btn-ghost p-2 rounded-lg"
+            onClick={() => useHelpPanelStore.getState().openHelp()}
+            title="Help (?)"
+            aria-label="Help"
+          >
+            <HelpCircle className="w-5 h-5 text-ink-secondary" />
+          </button>
 
           {showAdminCog && (
             <button
