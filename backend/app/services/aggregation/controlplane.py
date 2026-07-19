@@ -727,19 +727,26 @@ async def _run_provider_batch(
 
         async def _run_one(ds_id: str) -> None:
             async with sem:
-                async with session_factory() as session:
-                    try:
+                # The try wraps the WHOLE session block, not just
+                # refresh_source — the commit happens at the `async with`
+                # __aexit__ (session_factory's _session_scope commits on
+                # exit), so a commit failure (deadlock, dropped connection
+                # under concurrent load) must be caught here too, or it
+                # escapes _run_one, propagates through asyncio.gather, and
+                # strands the batch at state "running" forever.
+                try:
+                    async with session_factory() as session:
                         resp = await svc.refresh_source(
                             ds_id, session,
                             scope=body.scope, force=body.force,
                             actor=body.actor, origin=body.origin,
                         )
-                        item = {"dataSourceId": ds_id, "outcome": "done", "jobId": resp.job_id}
-                    except Exception as exc:
-                        logger.warning(
-                            "refresh batch %s: item %s failed: %s", batch_id, ds_id, exc,
-                        )
-                        item = {"dataSourceId": ds_id, "outcome": "error", "jobId": None}
+                    item = {"dataSourceId": ds_id, "outcome": "done", "jobId": resp.job_id}
+                except Exception as exc:
+                    logger.warning(
+                        "refresh batch %s: item %s failed: %s", batch_id, ds_id, exc,
+                    )
+                    item = {"dataSourceId": ds_id, "outcome": "error", "jobId": None}
             await redis.hset(hash_key, f"ds:{ds_id}", _json.dumps(item))
             await redis.hincrby(hash_key, "done", 1)
 

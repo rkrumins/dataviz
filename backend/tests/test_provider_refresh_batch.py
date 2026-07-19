@@ -109,6 +109,36 @@ def _session_factory():
     return _FakeSessionCM()
 
 
+class _CommitFailCM:
+    """Mimics ``_session_scope``: only commits (and can only fail to commit)
+    on a CLEAN exit — an already-raising body rolls back instead."""
+
+    def __init__(self, fail: bool):
+        self._fail = fail
+
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._fail and exc_type is None:
+            raise RuntimeError("commit failed")
+        return False
+
+
+class _FailNthCommitSessionFactory:
+    """A fresh session per call, matching the real per-item session_factory
+    contract; the Nth call's session raises on commit (__aexit__), the rest
+    behave normally."""
+
+    def __init__(self, fail_at_call: int):
+        self._fail_at_call = fail_at_call
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return _CommitFailCM(fail=(self.calls == self._fail_at_call))
+
+
 def _resp(job_id="job-1"):
     return types.SimpleNamespace(job_id=job_id)
 
@@ -201,6 +231,28 @@ def test_batch_item_failure_recorded_as_error_batch_still_completes():
     assert failed["outcome"] == "error"
     assert failed["jobId"] is None
     assert json.loads(hash_["ds:ds-c"])["outcome"] == "done"
+
+
+def test_session_commit_failure_recorded_as_error_batch_still_completes():
+    # refresh_source itself is designed to never raise, but the session's
+    # commit — which happens at the `async with` __aexit__, AFTER
+    # refresh_source returns cleanly — can still fail (deadlock, dropped
+    # connection). That must be caught too, not just the refresh_source
+    # call, or the batch never reaches "done".
+    redis = _FakeRedis()
+    ds_ids = ["ds-a", "ds-b", "ds-c"]
+    session_factory = _FailNthCommitSessionFactory(fail_at_call=2)
+    _run(cp._run_provider_batch(
+        "batch-commit-fail", "prov-1", ds_ids, _req(),
+        svc=_AllSucceedSvc(), session_factory=session_factory, redis=redis,
+    ))
+    hash_ = redis.hashes["refreshbatch:batch-commit-fail"]
+    assert hash_["state"] == "done"
+    assert hash_["done"] == "3"
+    outcomes = [json.loads(hash_[f"ds:{d}"])["outcome"] for d in ds_ids]
+    assert outcomes.count("error") == 1  # exactly the one whose commit failed
+    assert outcomes.count("done") == 2   # siblings recorded normally
+    assert session_factory.calls == 3    # one fresh session per item
 
 
 # ── Concurrency bound ─────────────────────────────────────────────────
