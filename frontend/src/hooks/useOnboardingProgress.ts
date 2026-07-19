@@ -15,11 +15,9 @@ import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
 import { listViews } from '@/services/viewApiService'
-import { useTourStore } from '@/features/tour/tourStore'
 import { usePreferencesStore } from '@/store/preferences'
-import { useFeature } from '@/store/features'
 
-/** The product tour that the ``take-tour`` step starts / tracks. */
+/** The product tour the hub offers (as a persistent action, not a checklist step). */
 export const GETTING_STARTED_TOUR = 'getting-started'
 
 export interface OnboardingStep {
@@ -83,15 +81,8 @@ export function useOnboardingProgress(): OnboardingProgressResult {
     staleTime: 30_000,
   })
 
-  // Reactive store reads — the checklist updates the moment the tour is
-  // completed or a manual step is recorded, without a counts refetch.
-  const tourCompleted = useTourStore((s) => s.completed.includes(GETTING_STARTED_TOUR))
+  // Reactive store read — a manually-recorded step ticks off without a refetch.
   const completedManualSteps = usePreferencesStore((s) => s.onboardingCompletedSteps)
-  // The product tour is a flagged, experimental feature. Only offer it as a
-  // step when it's actually enabled — otherwise the "Start tour" CTA is a dead
-  // button (the tour overlay isn't mounted) and the checklist can never reach
-  // 100%. When off, onboarding is the five setup steps.
-  const toursEnabled = useFeature('toursEnabled')
 
   const counts: OnboardingCounts = data ?? {
     providerCount: 0,
@@ -142,15 +133,7 @@ export function useOnboardingProgress(): OnboardingProgressResult {
       href: '/workspaces',
       guideSlug: 'creating-views',
     },
-    ...(toursEnabled
-      ? [{
-          id: 'take-tour',
-          label: 'Take the product tour',
-          description: 'A guided walkthrough of the key surfaces, in a couple of minutes.',
-          done: tourCompleted,
-        } satisfies OnboardingStep]
-      : []),
-  ], [counts, completedManualSteps, tourCompleted, toursEnabled])
+  ], [counts, completedManualSteps])
 
   const completedCount = steps.filter((s) => s.done).length
   const total = steps.length

@@ -3,9 +3,11 @@
  *
  * One checklist that shows a new user exactly where they are across the
  * first-run journey (connect a provider → discover assets → workspace →
- * ontology → view → tour), replacing the fragmented first-run surfaces.
- * State comes entirely from ``useOnboardingProgress`` (real app data), so a
- * step ticks itself off the moment the user completes it elsewhere.
+ * ontology → view), replacing the fragmented first-run surfaces. State comes
+ * from ``useOnboardingProgress`` (real app data), so a step ticks itself off
+ * the moment the user completes it elsewhere. The product tour sits below the
+ * checklist as a persistent action (when enabled) so it can be replayed any
+ * time — it is not a one-off step that vanishes once taken.
  */
 import { motion } from 'framer-motion'
 import { Link as RouterLink } from 'react-router-dom'
@@ -14,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { interpolateBrand } from '@/lib/brandText'
 import { recordEvent } from '@/services/telemetryService'
+import { useFeature } from '@/store/features'
 import { useTourStore } from '@/features/tour/tourStore'
 import { DocsLink } from '@/components/help/DocsLink'
 import { ProgressBar } from '@/components/ui/ProgressBar'
@@ -31,6 +34,8 @@ interface GettingStartedProps {
 export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
   const brand = useBrand()
   const { steps, completedCount, total, allDone, isLoading } = useOnboardingProgress()
+  const toursEnabled = useFeature('toursEnabled')
+  const tourDone = useTourStore((s) => s.completed.includes(GETTING_STARTED_TOUR))
 
   // The first not-yet-done step is the user's "next" — emphasised below.
   const nextStepId = steps.find((s) => !s.done)?.id ?? null
@@ -38,9 +43,11 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
 
   const handleStepAction = (step: OnboardingStep) => {
     recordEvent('onboarding.step', { step: step.id })
-    if (step.id === 'take-tour') {
-      useTourStore.getState().start(GETTING_STARTED_TOUR)
-    }
+    onNavigate?.()
+  }
+
+  const handleStartTour = () => {
+    useTourStore.getState().start(GETTING_STARTED_TOUR)
     onNavigate?.()
   }
 
@@ -109,6 +116,32 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
           ))}
         </ol>
       )}
+
+      {/* Product tour — a persistent action (not a one-off step), so it can be
+          replayed any time. Only shown when the experimental flag is on. */}
+      {toursEnabled && (
+        <div className="mt-4 flex items-center gap-3 rounded-xl border border-glass-border bg-canvas-elevated/40 p-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-lineage/10 text-accent-lineage">
+            <PlayCircle className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-ink">Product tour</p>
+            <p className="mt-0.5 text-xs text-ink-muted">
+              {tourDone
+                ? 'Replay the guided walkthrough any time.'
+                : 'A two-minute guided walkthrough of the workspace.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleStartTour}
+            className="btn-secondary btn-sm shrink-0"
+          >
+            <PlayCircle className="h-4 w-4" />
+            {tourDone ? 'Replay' : 'Start'}
+          </button>
+        </div>
+      )}
     </motion.section>
   )
 }
@@ -122,8 +155,6 @@ interface StepRowProps {
 }
 
 function StepRow({ step, index, isNext, isLoading, onAction }: StepRowProps) {
-  const isTour = step.id === 'take-tour'
-
   return (
     <li
       className={cn(
@@ -171,34 +202,19 @@ function StepRow({ step, index, isNext, isLoading, onAction }: StepRowProps) {
       {/* CTA — only actionable while the step is outstanding. */}
       {!step.done && (
         <div className="shrink-0 self-center">
-          {isTour ? (
-            <button
-              type="button"
-              onClick={onAction}
-              disabled={isLoading}
-              className={cn(
-                isNext ? 'btn-primary' : 'btn-secondary',
-                'btn-sm',
-              )}
-            >
-              <PlayCircle className="h-4 w-4" />
-              Start tour
-            </button>
-          ) : (
-            <RouterLink
-              to={step.href ?? '#'}
-              onClick={onAction}
-              aria-label={`${step.label} — open`}
-              className={cn(
-                isNext ? 'btn-primary' : 'btn-secondary',
-                'btn-sm',
-                isLoading && 'pointer-events-none opacity-50',
-              )}
-            >
-              Open
-              <ArrowRight className="h-4 w-4" />
-            </RouterLink>
-          )}
+          <RouterLink
+            to={step.href ?? '#'}
+            onClick={onAction}
+            aria-label={`${step.label} — open`}
+            className={cn(
+              isNext ? 'btn-primary' : 'btn-secondary',
+              'btn-sm',
+              isLoading && 'pointer-events-none opacity-50',
+            )}
+          >
+            Open
+            <ArrowRight className="h-4 w-4" />
+          </RouterLink>
         </div>
       )}
     </li>
