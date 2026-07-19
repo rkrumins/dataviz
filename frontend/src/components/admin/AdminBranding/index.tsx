@@ -276,14 +276,14 @@ export function AdminBranding() {
                             help="The full product name. Shown on the sign-in screen and the browser tab."
                             value={form.appName}
                             onChange={(v) => update('appName', v)}
-                            placeholder="Nexus Lineage"
+                            placeholder="Context Visualization Platform"
                         />
                         <Field
                             label="Short name"
                             help="A compact variant for tight spaces like the top bar and command palette."
                             value={form.shortName}
                             onChange={(v) => update('shortName', v)}
-                            placeholder="NexusLineage"
+                            placeholder="CVP"
                         />
                         <Field
                             label="Description"
@@ -404,7 +404,7 @@ export function AdminBranding() {
                             help="Footer text on the sign-in screen and elsewhere."
                             value={form.copyrightText}
                             onChange={(v) => update('copyrightText', v)}
-                            placeholder="© 2026 Nexus Lineage"
+                            placeholder="© 2026 Context Visualization Platform"
                         />
                         <Field
                             label="Support email"
