@@ -95,11 +95,21 @@ export function LineageLens({
         e.preventDefault()
         e.stopPropagation()
         onClose()
+        return
+      }
+      // Keyboard walking: ← steps the walk back one hop (never while
+      // typing in the filter input).
+      if (e.key === 'ArrowLeft' && lensStack.length > 1) {
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+        e.preventDefault()
+        e.stopPropagation()
+        onBack()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, onClose])
+  }, [nodeId, onClose, lensStack.length, onBack])
 
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>()
@@ -108,6 +118,39 @@ export function LineageLens({
   }, [nodes])
 
   const edges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+
+  // Hop metadata — direction + edge type for each trail transition,
+  // derived from loaded edges. Lets the trail read as a sentence
+  // ("acct_num FEEDS System A") instead of a bare list. Trail length is
+  // small; recomputed only when the walk or edge set changes. null =
+  // connecting edge not loaded (fall back to a neutral separator).
+  const hopMeta = useMemo(() => {
+    const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
+    for (let i = 1; i < lensStack.length; i++) {
+      const prev = lensStack[i - 1]
+      const curr = lensStack[i]
+      let found: { downstream: boolean; edgeType: string } | null = null
+      for (const e of edges) {
+        if (e.source === prev && e.target === curr) {
+          found = { downstream: true, edgeType: (e.data?.edgeType as string) || '' }
+          break
+        }
+        if (e.source === curr && e.target === prev) {
+          found = { downstream: false, edgeType: (e.data?.edgeType as string) || '' }
+          break
+        }
+      }
+      meta.push(found)
+    }
+    return meta
+  }, [lensStack, edges])
+
+  // Deep walks middle-truncate so the endpoints (the part people care
+  // about) stay visible; the gap chip expands the full trail.
+  const [showFullTrail, setShowFullTrail] = useState(false)
+  const TRAIL_CAP = 6
+  const collapseTrail = lensStack.length > TRAIL_CAP && !showFullTrail
+
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
       ? deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes)
@@ -209,12 +252,48 @@ export function LineageLens({
               <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
                 Walk
               </span>
-              {lensStack.map((id, i) => {
+              {(collapseTrail
+                ? [0, -1, ...Array.from({ length: 4 }, (_, k) => lensStack.length - 4 + k)]
+                : lensStack.map((_, i) => i)
+              ).map((i, pos) => {
+                if (i === -1) {
+                  const hidden = lensStack.slice(1, lensStack.length - 4)
+                  return (
+                    <div key="trail-gap" className="flex items-center gap-1 flex-shrink-0">
+                      <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                      <button
+                        type="button"
+                        onClick={() => setShowFullTrail(true)}
+                        title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(id => labelOf(id, nodeMap.get(id))).join(' → ')}`}
+                        className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
+                      >
+                        … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
+                      </button>
+                    </div>
+                  )
+                }
+                const id = lensStack[i]
                 const isCurrent = i === lensStack.length - 1
                 const label = labelOf(id, nodeMap.get(id))
+                const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
+                const meta = i > 0 ? hopMeta[i - 1] : null
+                const afterGap = collapseTrail && pos === 2
                 return (
                   <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
-                    {i > 0 && <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />}
+                    {i > 0 && (
+                      meta && !afterGap ? (
+                        <span
+                          className="flex items-center"
+                          title={`${meta.edgeType || 'connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
+                        >
+                          {meta.downstream
+                            ? <LucideIcons.MoveRight className="w-3.5 h-3.5 text-accent-lineage/70" />
+                            : <LucideIcons.MoveLeft className="w-3.5 h-3.5 text-amber-500/80" />}
+                        </span>
+                      ) : (
+                        <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                      )
+                    )}
                     <button
                       type="button"
                       disabled={isCurrent}
@@ -222,11 +301,12 @@ export function LineageLens({
                       title={isCurrent ? label : `Jump back to ${label}`}
                       className={
                         isCurrent
-                          ? 'max-w-[180px] truncate px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
-                          : 'max-w-[160px] truncate px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
+                          ? 'flex items-center gap-1.5 max-w-[180px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
+                          : 'flex items-center gap-1.5 max-w-[160px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
                       }
                     >
-                      {label}
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
+                      <span className="truncate">{label}</span>
                     </button>
                   </div>
                 )
