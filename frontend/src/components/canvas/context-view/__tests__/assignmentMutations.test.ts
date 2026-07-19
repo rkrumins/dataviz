@@ -8,6 +8,7 @@ import {
   isTempUrn,
   setAssignmentOrderKey,
   lastOrderKeyInLayer,
+  keyForInsertion,
 } from '../assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
@@ -261,5 +262,47 @@ describe('assignmentMutations — orderKey (custom node ordering)', () => {
     expect(unassignEntities(assignEntities(withDefault, ['urn:a'], 'l1'), ['urn:a']).defaultNodeSortMode).toBe('alpha-desc')
     const staged = assignEntities(withDefault, ['urn:staged:t:x'], 'l1')
     expect(pruneTempAssignments(staged).defaultNodeSortMode).toBe('alpha-desc')
+  })
+})
+
+describe('assignmentMutations — keyForInsertion (drag-reorder neighbor walk)', () => {
+  const entry = (layerId: string, orderKey?: string): LayerAssignmentEntry => ({
+    layerId,
+    inheritsChildren: true,
+    ...(orderKey ? { orderKey } : {}),
+  })
+  const layoutWith = (assignments: Record<string, LayerAssignmentEntry>): NormalizedReferenceLayout => ({
+    layers: [{ id: 'l1', name: 'L1', order: 0, entityTypes: [], nodeSortMode: 'custom' }],
+    assignments,
+  })
+
+  it('mints strictly between two keyed neighbors', () => {
+    const l = layoutWith({ a: entry('l1', 'a1'), b: entry('l1', 'a2') })
+    const key = keyForInsertion(l, 'l1', ['a', 'b'], 1)
+    expect(key && key > 'a1' && key < 'a2').toBe(true)
+  })
+
+  it('walks OUTWARD past unkeyed neighbors instead of minting the smallest key', () => {
+    // Visual order: keyed(a1) · unkeyed · [drop here] · unkeyed · keyed(a2)
+    const l = layoutWith({ a: entry('l1', 'a1'), d: entry('l1', 'a2') })
+    const key = keyForInsertion(l, 'l1', ['a', 'b', 'c', 'd'], 2)
+    expect(key && key > 'a1' && key < 'a2').toBe(true)
+  })
+
+  it('appends after the layer max when BOTH sides are unkeyed (trailing region drop)', () => {
+    const l = layoutWith({ a: entry('l1', 'a3') })
+    const key = keyForInsertion(l, 'l1', ['b', 'c'], 1) // between two unkeyed roots
+    expect(key && key > 'a3').toBe(true)
+  })
+
+  it('prepends before the first keyed root at insertIdx 0', () => {
+    const l = layoutWith({ a: entry('l1', 'a1') })
+    const key = keyForInsertion(l, 'l1', ['a'], 0)
+    expect(key && key < 'a1').toBe(true)
+  })
+
+  it('returns null (refuses) on malformed neighbor keys', () => {
+    const l = layoutWith({ a: entry('l1', '!!bad'), b: entry('l1', 'a2') })
+    expect(keyForInsertion(l, 'l1', ['a', 'b'], 1)).toBe(null)
   })
 })

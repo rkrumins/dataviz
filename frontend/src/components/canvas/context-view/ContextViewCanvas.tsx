@@ -61,7 +61,7 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
-import { CanvasContextMenu } from '../CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
@@ -905,7 +905,7 @@ export function ContextViewCanvas({
       return
     }
 
-    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
     const prevLayerId = before.assignments[entityId]?.layerId
     const prevLayer = before.layers.find(l => l.id === prevLayerId)
@@ -913,15 +913,22 @@ export function ContextViewCanvas({
 
     // Descendants with their own explicit entries are cleared so they inherit the parent's new layer.
     const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
-    // A drop into a custom-sorted layer lands at the BOTTOM of the manual
-    // arrangement (append key after the layer's largest).
+    // A drop into a custom-sorted layer lands at the true BOTTOM of the manual
+    // arrangement: first seed any UNKEYED explicit roots of the target layer
+    // from its current visual order (else they'd render below the appended
+    // entry in the alpha tail), then mint a key after the layer's largest.
+    let base = before
     let orderKey: string | undefined
     if (before.layers.find(l => l.id === layerId)?.nodeSortMode === 'custom') {
+      const targetRoots = (nodesByLayerRef.current.get(layerId) ?? [])
+        .map(n => n.id)
+        .filter(id => !id.startsWith('logical:'))
+      base = layerOps.setLayerNodeSortMode(before, layerId, 'custom', targetRoots)
       try {
-        orderKey = generateKeyBetween(assignmentOps.lastOrderKeyInLayer(before, layerId), null)
+        orderKey = generateKeyBetween(assignmentOps.lastOrderKeyInLayer(base, layerId), null)
       } catch { /* malformed keys — fall back to the unkeyed alpha tail */ }
     }
-    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants, orderKey })
+    const after = assignmentOps.assignEntities(base, [entityId], layerId, { clearDescendants, orderKey })
     persistReferenceLayout(after)
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
@@ -944,7 +951,7 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout, nodes])
+  }, [currentLayout, persistReferenceLayout])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -1747,6 +1754,18 @@ export function ContextViewCanvas({
     const after = layerOps.setLayerNodeSortMode(before, layerId, mode, seedOrder)
     if (after === before) return
     persistReferenceLayout(after)
+    // First-use guidance: entering custom mode changes an invisible property
+    // (rows become drag-reorderable) — say so, once per user.
+    if (mode === 'custom') {
+      const prefs = usePreferencesStore.getState()
+      if (!prefs.onboardingCompletedSteps.includes('custom-order-toast')) {
+        prefs.completeOnboardingStep('custom-order-toast')
+        useToastStore.getState().addToast({
+          type: 'info',
+          message: `Custom order — drag cards to arrange “${layer.name}”`,
+        })
+      }
+    }
     const label = mode === null
       ? `View default (${sortModeLabel(before.defaultNodeSortMode ?? 'alpha-asc')})`
       : mode === 'custom' ? 'Custom order' : sortModeLabel(mode)
@@ -1801,42 +1820,103 @@ export function ContextViewCanvas({
     const targetIdx = order.indexOf(targetId)
     if (targetIdx < 0) return
     const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
-    const prevId = insertIdx > 0 ? order[insertIdx - 1] : null
-    const nextId = insertIdx < order.length ? order[insertIdx] : null
-    const prevKey = prevId ? layout.assignments[prevId]?.orderKey ?? null : null
-    const nextKey = nextId ? layout.assignments[nextId]?.orderKey ?? null : null
-    let newKey: string
-    try {
-      newKey = generateKeyBetween(prevKey, nextKey)
-    } catch {
-      return // malformed neighbor keys — refuse rather than corrupt the arrangement
-    }
+    // keyForInsertion walks outward past unkeyed rule-assigned neighbors and
+    // returns null on malformed keys (refuse rather than corrupt the order).
+    const newKey = assignmentOps.keyForInsertion(layout, layerId, order, insertIdx)
+    if (newKey === null) return
     const after = assignmentOps.setAssignmentOrderKey(layout, draggedId, newKey)
     if (after === layout && layout === before) return
     persistReferenceLayout(after)
 
-    const node = nodes.find(n => n.id === draggedId || (n.data?.urn as string) === draggedId)
+    const node = nodesRef.current.find(n => n.id === draggedId || (n.data?.urn as string) === draggedId)
     const name = (node?.data?.label as string) ?? draggedId
+    // Undo baseline: a REPEAT drag of the same node must still restore the
+    // truly-original arrangement (incl. un-doing the first drag's lazy
+    // seeding), so reuse the pre-change layout captured by the FIRST staged
+    // reorder of this node rather than this drag's already-seeded `before`.
+    const existing = useStagedChangesStore.getState().changes.find(
+      (c) => c.type === 'reorder_nodes' && c.targetId === draggedId,
+    )
+    const baseline = ((existing?.before as { layout?: NormalizedReferenceLayout } | undefined)?.layout) ?? before
     useStagedChangesStore.getState().stageOrReplace(
       (c) => c.type === 'reorder_nodes' && c.targetId === draggedId,
       {
         type: 'reorder_nodes',
         targetId: draggedId,
         targetUrn: (node?.data?.urn as string) ?? draggedId,
-        before: { orderKey: before.assignments[draggedId]?.orderKey ?? null },
+        before: { orderKey: baseline.assignments[draggedId]?.orderKey ?? null, layout: baseline },
         after: { orderKey: newKey, layerId },
         summary: `Reordered '${name}' in ${layer.name}`,
-        discard: () => persistReferenceLayout(before),
+        discard: () => persistReferenceLayout(baseline),
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout, nodes])
+  }, [currentLayout, persistReferenceLayout])
+
+  // Context-menu "Move up / Move down" for roots of a custom-sorted draft
+  // layer — the keyboard-and-mouse alternative to the drag bands (a11y: native
+  // HTML5 DnD is mouse-only). Neighbors come from the same visual root order
+  // the drag path uses.
+  const reorderMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!isDraft || trace.isTracing || !target || target.type !== 'node') return []
+    const nodeId = target.id
+    const layerId = nodeLayerMap.get(nodeId)
+    if (!layerId) return []
+    if (sortedLayers.find(l => l.id === layerId)?.nodeSortMode !== 'custom') return []
+    const roots = (nodesByLayer.get(layerId) ?? []).filter(n => !n.isLogical).map(n => n.id)
+    const idx = roots.indexOf(nodeId)
+    if (idx < 0) return [] // children aren't manually orderable — roots only
+    return [
+      {
+        id: 'reorder-up',
+        label: 'Move up',
+        icon: 'ArrowUp',
+        shortcut: '⌥↑',
+        disabled: idx === 0,
+        onClick: () => {
+          handleReorderNode(nodeId, roots[idx - 1], 'before')
+          interactions.closeContextMenu()
+        },
+      },
+      {
+        id: 'reorder-down',
+        label: 'Move down',
+        icon: 'ArrowDown',
+        shortcut: '⌥↓',
+        disabled: idx === roots.length - 1,
+        onClick: () => {
+          handleReorderNode(nodeId, roots[idx + 1], 'after')
+          interactions.closeContextMenu()
+        },
+      },
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, isDraft, trace.isTracing, nodeLayerMap, sortedLayers, nodesByLayer, handleReorderNode])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
     // The builder store's open() runs the ensureDraftOpen guard itself.
     useHierarchyBuilderStore.getState().open({ parentUrn: parentId })
   }, [])
+
+  // Stable per-layer create/build/context-menu handlers — LayerColumn is
+  // React.memo'd, so these must keep ONE identity (an inline arrow at the
+  // render site re-renders every column on every canvas render).
+  const openBuilderForLayer = useCallback((layerId: string) => {
+    useHierarchyBuilderStore.getState().open({ layerId })
+  }, [])
+  const openBuildForLayer = useCallback((layerId: string) => {
+    useHierarchyBuilderStore.getState().openBuild({ layerId })
+  }, [])
+  const handleLayerContextMenuOpen = useCallback((e: React.MouseEvent, layerId: string) => {
+    interactions.openContextMenu(e, {
+      type: 'canvas',
+      position: { x: e.clientX, y: e.clientY },
+      layerId,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
@@ -3646,18 +3726,10 @@ export function ContextViewCanvas({
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={canEditGraph ? handleAddChildEntity : undefined}
-                onAddToLayer={canEditGraph ? (layerId) => {
-                  useHierarchyBuilderStore.getState().open({ layerId })
-                } : undefined}
-                onBuildToLayer={canEditGraph ? (layerId) => {
-                  useHierarchyBuilderStore.getState().openBuild({ layerId })
-                } : undefined}
+                onAddToLayer={canEditGraph ? openBuilderForLayer : undefined}
+                onBuildToLayer={canEditGraph ? openBuildForLayer : undefined}
                 onBeginConnect={canEditGraph ? edgeConnect.beginDrag : undefined}
-                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
-                  type: 'canvas',
-                  position: { x: e.clientX, y: e.clientY },
-                  layerId,
-                })}
+                onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
@@ -3672,7 +3744,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
+                onAssignToLayer={handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 onRenameLayer={isDraft ? renameLayer : undefined}
                 onDeleteLayer={isDraft ? deleteLayer : undefined}
@@ -3685,7 +3757,9 @@ export function ContextViewCanvas({
                 canPersistSort={isDraft}
                 onSetSortMode={handleSetLayerSortMode}
                 onApplySortToView={handleApplySortToView}
-                reorderEnabled={isDraft && layer.nodeSortMode === 'custom'}
+                // No reorder during trace: the user sees the FILTERED root
+                // list but neighbor keys are computed from the full one.
+                reorderEnabled={isDraft && layer.nodeSortMode === 'custom' && !trace.isTracing}
                 onReorderDrop={handleReorderNode}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
@@ -3837,6 +3911,7 @@ export function ContextViewCanvas({
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
+        customActions={reorderMenuActions}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}

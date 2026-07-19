@@ -10,6 +10,7 @@
  */
 import type { AssignmentConflict, LayerAssignmentEntry } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import { generateKeyBetween } from '@/utils/orderKeys'
 
 export interface AssignEntitiesOptions {
   logicalNodeId?: string
@@ -90,6 +91,43 @@ export function lastOrderKeyInLayer(
     if (last === null || entry.orderKey > last) last = entry.orderKey
   }
   return last
+}
+
+/**
+ * Mint a fractional key for inserting at `insertIdx` within `order` (the
+ * column's visual root ids, dragged node already removed). Immediate neighbors
+ * may be UNKEYED rule-assigned roots (open scope) — `generateKeyBetween(null,
+ * null)` would return the smallest key and teleport the node to the top — so
+ * walk OUTWARD to the nearest keyed neighbor on each side; both sides unkeyed
+ * ⇒ append after the layer's largest key (the drop landed inside the trailing
+ * unkeyed region, which renders after every keyed root). Returns null when the
+ * neighbor keys are malformed (caller refuses the drop rather than corrupting
+ * the arrangement).
+ */
+export function keyForInsertion(
+  layout: NormalizedReferenceLayout,
+  layerId: string,
+  order: readonly string[],
+  insertIdx: number,
+): string | null {
+  let prevKey: string | null = null
+  for (let i = insertIdx - 1; i >= 0; i--) {
+    const key = layout.assignments[order[i]]?.orderKey
+    if (key) { prevKey = key; break }
+  }
+  let nextKey: string | null = null
+  for (let i = insertIdx; i < order.length; i++) {
+    const key = layout.assignments[order[i]]?.orderKey
+    if (key) { nextKey = key; break }
+  }
+  if (prevKey === null && nextKey === null) {
+    prevKey = lastOrderKeyInLayer(layout, layerId)
+  }
+  try {
+    return generateKeyBetween(prevKey, nextKey)
+  } catch {
+    return null
+  }
 }
 
 /** Drop the explicit entries for `urns`; entities then fall out (curated) or resolve by rule (open). */

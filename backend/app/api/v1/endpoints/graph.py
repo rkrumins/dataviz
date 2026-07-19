@@ -22,6 +22,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.app.providers.falkordb_provider import CursorMismatchError
 from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
@@ -1080,7 +1081,7 @@ async def get_top_level_nodes(
     if scope is None:
         try:
             return await compute()
-        except ValueError as exc:
+        except CursorMismatchError as exc:
             # Cursor/direction mismatch from the provider (client bug).
             raise HTTPException(status_code=400, detail=str(exc))
         except ProviderConfigurationError as exc:
@@ -1109,7 +1110,7 @@ async def get_top_level_nodes(
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
-    except ValueError as exc:
+    except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug).
         raise HTTPException(status_code=400, detail=str(exc))
     except ProviderConfigurationError as exc:
@@ -1167,7 +1168,7 @@ async def get_node_children(
     """Lazy load children nodes."""
     try:
         return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor, sort_direction=sort_direction)
-    except ValueError as exc:
+    except CursorMismatchError as exc:
         # Cursor/direction mismatch or malformed direction from the provider.
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1227,7 +1228,7 @@ async def get_children_with_edges(
             model_cls=ChildrenWithEdgesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
-    except ValueError as exc:
+    except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1610,7 +1611,7 @@ async def get_nodes_by_layer_endpoint(
             layer_id, limit=limit, offset=offset,
             sort_direction=sort_direction, cursor=cursor,
         )
-    except ValueError as exc:
+    except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug).
         raise HTTPException(status_code=400, detail=str(exc))
 

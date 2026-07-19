@@ -423,6 +423,10 @@ export function useLayerAssignment({
     // Build entityId -> logicalNodeId map from all layer entityAssignments,
     // then for each layer with logicalNodes, create wrapper HierarchyNodes
     // and move assigned entities under them.
+    // KNOWN LIMITATION (deliberate): in a 'custom'-sorted layer, orderKeys
+    // order the UNGROUPED roots only — logical wrappers stay first in config
+    // order and entities inside a wrapper sort alphabetically (childCmp).
+    // Manual ordering inside logical groups is out of scope for now.
     const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {

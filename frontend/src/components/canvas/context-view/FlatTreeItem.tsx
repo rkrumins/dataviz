@@ -253,6 +253,24 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
   const reorderBandsActive = reorderEnabled && depth === 0 && !isLogical && !!onReorderDrop
 
+  // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
+  // Escape-cancelled drag (dragend fires on the source) could strand the
+  // indicator line. While any drop state is live, a window-level one-shot
+  // listener guarantees it clears on every way a drag can end.
+  useEffect(() => {
+    if (!dropIndicator && !dropHover) return
+    const clear = () => {
+      setDropIndicator(null)
+      setDropHover(false)
+    }
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+    }
+  }, [dropIndicator, dropHover])
+
   return (
     <div
       ref={itemRef}
@@ -297,7 +315,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
-        "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
+        "flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative z-[2]",
+        // Reorderable rows advertise the drag with a grab cursor (+ the
+        // hover-revealed grip below); everything else keeps the pointer.
+        reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
         paddingClass,
         // Subtle backdrop-blur on the card body — visually invisible
         // (matches the glassy translucent design) but blurs anything
@@ -373,6 +394,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
+      {/* Reorder affordance — hover-revealed grip on the left edge tells the
+          user this row is draggable in custom-order mode (same hover-reveal
+          language as the connection handle on the right edge). */}
+      {reorderBandsActive && (
+        <div className="pointer-events-none absolute left-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/item:opacity-60 transition-opacity duration-150">
+          <LucideIcons.GripVertical className="w-3 h-3 text-ink-muted" />
+        </div>
+      )}
+
       {/* Custom-order drop indicator — a glowing accent line at the row edge
           the drop will land on (before/after), with a dot cap so the insertion
           point reads instantly even between visually-dense rows. */}

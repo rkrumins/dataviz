@@ -77,7 +77,7 @@ interface LayerColumnProps {
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
   onScroll?: () => void
-  onAssignToLayer?: (entityId: string) => void
+  onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
    *  Edit mode, so View mode stays read-only. Reorder moves the column; its nodes/edges follow. */
   onRenameLayer?: (layerId: string, name: string) => void
@@ -206,6 +206,14 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const shouldShowGhosts = isHydratingInitial && layerHasConfiguredSources
 
+  // Custom-order guidance state: hint dismissal is a one-time preferences flag;
+  // the end-zone hover drives the "Move to end" affordance.
+  const customOrderHintDismissed = usePreferencesStore(
+    s => s.onboardingCompletedSteps.includes('custom-order-hint'),
+  )
+  const completeOnboardingStep = usePreferencesStore(s => s.completeOnboardingStep)
+  const [endZoneHover, setEndZoneHover] = useState(false)
+
   // Per-layer custom width (resize handle on the right edge). Persisted
   // across sessions; null = default 320–480 flex range. When set, the
   // column pins to the exact width (min == max) so dragging feels 1:1.
@@ -239,6 +247,35 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
+  // dragover events are irregular and stop entirely while the pointer holds
+  // still, so scrolling directly from them stutters. Instead dragover samples
+  // the pointer (see the container's onDragOver) and this loop scrolls every
+  // frame with distance-proportional speed, stopping itself once no fresh
+  // sample has arrived for ~200ms (drag ended or left the column).
+  const dragPointerRef = useRef<{ y: number; t: number } | null>(null)
+  const dragScrollRafRef = useRef<number | null>(null)
+  const dragScrollStep = useCallback(() => {
+    const el = scrollContainerRef.current
+    const sample = dragPointerRef.current
+    if (!el || !sample || performance.now() - sample.t > 200) {
+      dragScrollRafRef.current = null
+      dragPointerRef.current = null
+      return
+    }
+    const rect = el.getBoundingClientRect()
+    const zone = 48
+    if (sample.y < rect.top + zone) {
+      el.scrollTop -= Math.ceil((rect.top + zone - sample.y) / 4)
+    } else if (sample.y > rect.bottom - zone) {
+      el.scrollTop += Math.ceil((sample.y - (rect.bottom - zone)) / 4)
+    }
+    dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
+  }, [])
+  useEffect(() => () => {
+    if (dragScrollRafRef.current != null) cancelAnimationFrame(dragScrollRafRef.current)
+  }, [])
 
   const toggleSearchNode = useCallback((nodeId: string) => {
     setActiveSearchNodes(prev => {
@@ -698,6 +735,27 @@ export const LayerColumn = React.memo(function LayerColumn({
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const count = navigableItems.length
     if (count === 0) return
+    // ⌥↑ / ⌥↓ — keyboard reorder for roots of a custom-sorted draft layer (the
+    // accessible sibling of the drag bands). Focus follows the moved node via
+    // pendingFocusNodeIdRef once the re-sorted tree lands.
+    if (e.altKey && reorderEnabled && onReorderDrop && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const item = navigableItems[focusIndex]
+      if (item && item.depth === 0 && !item.node.isLogical) {
+        e.preventDefault()
+        const rootIds = nodes.filter(n => !n.isLogical).map(n => n.id)
+        const idx = rootIds.indexOf(item.node.id)
+        if (idx >= 0) {
+          if (e.key === 'ArrowUp' && idx > 0) {
+            pendingFocusNodeIdRef.current = item.node.id
+            onReorderDrop(item.node.id, rootIds[idx - 1], 'before')
+          } else if (e.key === 'ArrowDown' && idx < rootIds.length - 1) {
+            pendingFocusNodeIdRef.current = item.node.id
+            onReorderDrop(item.node.id, rootIds[idx + 1], 'after')
+          }
+        }
+        return
+      }
+    }
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
@@ -733,7 +791,20 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderDrop, nodes])
+
+  // After a keyboard reorder, re-point focus at the moved node's new row
+  // (its index shifts by the displaced neighbor's visible subtree size).
+  const pendingFocusNodeIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const id = pendingFocusNodeIdRef.current
+    if (!id) return
+    const idx = navigableItems.findIndex(it => it.node.id === id)
+    if (idx >= 0) {
+      setFocusIndex(idx)
+      pendingFocusNodeIdRef.current = null
+    }
+  }, [navigableItems])
 
   // Entity rows currently in the tree (expanded children included).
   // Auxiliary rows — search boxes, skeletons, load-more, failed
@@ -989,7 +1060,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
-          if (entityId && onAssignToLayer) onAssignToLayer(entityId)
+          if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
       >
         {/* Drop hint overlay */}
@@ -1069,10 +1140,19 @@ export const LayerColumn = React.memo(function LayerColumn({
                 {layer.name}
               </span>
               <div
-                className="px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
+                className="relative px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
+                title={sortIsOverride ? `Sorted: ${sortMode === 'custom' ? 'custom order' : sortMode === 'alpha-desc' ? 'Z → A' : 'A → Z'}` : undefined}
               >
                 {totalCount}
+                {/* Sort-override indicator survives collapse, so a curated
+                    arrangement doesn't silently vanish from view. */}
+                {sortIsOverride && (
+                  <span
+                    className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ring-2 ring-canvas"
+                    style={{ backgroundColor: layer.color }}
+                  />
+                )}
               </div>
               <button
                 onClick={(e) => {
@@ -1149,6 +1229,18 @@ export const LayerColumn = React.memo(function LayerColumn({
                     </span>
                     <span className="text-[9px] text-ink-muted/60">/</span>
                     <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
+                  </div>
+                )}
+                {/* Curated-order signal — always visible (never hover-gated) so
+                    read-only consumers know the arrangement is deliberate. */}
+                {sortMode === 'custom' && (
+                  <div
+                    className="flex items-center gap-1 px-2 py-1 rounded-full"
+                    style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
+                    title="This layer uses a curated custom order"
+                  >
+                    <LucideIcons.ListOrdered className="w-3 h-3" />
+                    <span className="text-[10px] font-semibold">Custom</span>
                   </div>
                 )}
                 {onSetSortMode && (
@@ -1520,18 +1612,16 @@ export const LayerColumn = React.memo(function LayerColumn({
             onKeyDown={handleKeyDown}
             onDragOver={(e) => {
               // Auto-scroll while an entity drag hovers near the column's
-              // vertical edges, so long virtualized lists can be reordered /
-              // reparented beyond the visible window. Deliberately does NOT
-              // preventDefault — drop acceptance stays with the row targets.
+              // vertical edges. dragover only refreshes the pointer sample;
+              // the rAF loop below applies smooth, distance-proportional
+              // scrolling and self-terminates ~200ms after events stop
+              // (drop, cancel, or the pointer leaving the column).
+              // Deliberately does NOT preventDefault — drop acceptance stays
+              // with the row targets.
               if (!e.dataTransfer.types.includes('text/x-entity-id')) return
-              const el = scrollContainerRef.current
-              if (!el) return
-              const rect = el.getBoundingClientRect()
-              const zone = 48
-              if (e.clientY < rect.top + zone) {
-                el.scrollTop -= 14
-              } else if (e.clientY > rect.bottom - zone) {
-                el.scrollTop += 14
+              dragPointerRef.current = { y: e.clientY, t: performance.now() }
+              if (dragScrollRafRef.current == null) {
+                dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
             }}
             onContextMenu={(e) => {
@@ -1550,6 +1640,28 @@ export const LayerColumn = React.memo(function LayerColumn({
           {/* Subtle top fade for scroll indication — slimmer now that the
               floating chip handles the indicator role. */}
           <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
+
+          {/* First-use guidance for custom order — a dismissible caption in the
+              ghost-stack style, shown only while the layer is reorderable and
+              until the user dismisses it (preferences-flagged, once ever). */}
+          {reorderEnabled && !customOrderHintDismissed && flatTree.length > 0 && (
+            <div
+              className="flex items-center gap-2 px-3 py-2 mx-1 mt-2 mb-1 rounded-lg backdrop-blur-sm border"
+              style={{ backgroundColor: `${layer.color}10`, borderColor: `${layer.color}25` }}
+            >
+              <LucideIcons.ListOrdered className="w-3.5 h-3.5 flex-shrink-0" style={{ color: layer.color }} />
+              <span className="text-[11px] font-medium tracking-wide flex-1" style={{ color: layer.color }}>
+                Drag cards to arrange · ⌥↑↓ to nudge
+              </span>
+              <button
+                onClick={(e) => { e.stopPropagation(); completeOnboardingStep('custom-order-hint') }}
+                className="p-0.5 rounded text-ink-muted hover:text-ink transition-colors flex-shrink-0"
+                title="Got it"
+              >
+                <LucideIcons.X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
 
           {flatTree.length === 0 ? (
             <AnimatePresence mode="wait" initial={false}>
@@ -1808,6 +1920,41 @@ export const LayerColumn = React.memo(function LayerColumn({
                   </div>
                 )
               })}
+            </div>
+          )}
+
+          {/* Drop-to-end zone — reaching the last row's bottom 30% band is a
+              precision trap; any drop on the space below the list appends to
+              the end of the custom arrangement instead of being dead. */}
+          {reorderEnabled && flatTree.length > 0 && (
+            <div
+              className={cn(
+                "mx-1 my-1 h-12 rounded-xl border border-dashed flex items-center justify-center transition-colors duration-150",
+                endZoneHover ? "border-accent-lineage/60 bg-accent-lineage/5" : "border-transparent",
+              )}
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (!endZoneHover) setEndZoneHover(true)
+              }}
+              onDragLeave={() => setEndZoneHover(false)}
+              onDrop={(e) => {
+                const draggedId = e.dataTransfer.getData('text/x-entity-id')
+                setEndZoneHover(false)
+                if (!draggedId || !onReorderDrop) return
+                e.preventDefault()
+                e.stopPropagation()
+                const lastRoot = [...nodes].reverse().find(n => !n.isLogical)
+                if (lastRoot && lastRoot.id !== draggedId) onReorderDrop(draggedId, lastRoot.id, 'after')
+              }}
+            >
+              {endZoneHover && (
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-accent-lineage">
+                  <LucideIcons.CornerDownRight className="w-3 h-3" />
+                  Move to end
+                </span>
+              )}
             </div>
           )}
 

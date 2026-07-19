@@ -155,10 +155,16 @@ def _sanitize_label(s: str) -> str:
 _CURSOR_PREFIX = "k1:"
 
 
+class CursorMismatchError(ValueError):
+    """A pagination cursor (or sort_direction) that cannot serve the request —
+    minted under the other direction, unreadable, or malformed. Endpoints map
+    this (and only this) to HTTP 400; any other ValueError stays a 500."""
+
+
 def _validate_sort_direction(sort_direction: str) -> str:
     direction = (sort_direction or "asc").lower()
     if direction not in ("asc", "desc"):
-        raise ValueError(f"invalid sort_direction {sort_direction!r} (expected 'asc' or 'desc')")
+        raise CursorMismatchError(f"invalid sort_direction {sort_direction!r} (expected 'asc' or 'desc')")
     return direction
 
 
@@ -177,11 +183,11 @@ def _decode_keyset_cursor(cursor: str, sort_direction: str = "asc") -> Tuple[str
     client that is mid-pagination across a deploy keeps working (with the old,
     lossy semantics) instead of erroring.
 
-    Raises ValueError when the cursor was minted under a different sort
-    direction than the one now requested (absent "d" = asc)."""
+    Raises CursorMismatchError when the cursor was minted under a different
+    sort direction than the one now requested (absent "d" = asc)."""
     if not cursor.startswith(_CURSOR_PREFIX):
         if sort_direction == "desc":
-            raise ValueError("cursor direction mismatch: legacy asc cursor used with sort_direction=desc")
+            raise CursorMismatchError("cursor direction mismatch: legacy asc cursor used with sort_direction=desc")
         return cursor, None
     raw = cursor[len(_CURSOR_PREFIX):]
     try:
@@ -189,11 +195,11 @@ def _decode_keyset_cursor(cursor: str, sort_direction: str = "asc") -> Tuple[str
         data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
     except Exception:  # pragma: no cover - corrupt cursor, fall back to prefix scan
         if sort_direction == "desc":
-            raise ValueError("cursor direction mismatch: unreadable cursor used with sort_direction=desc")
+            raise CursorMismatchError("cursor direction mismatch: unreadable cursor used with sort_direction=desc")
         return cursor, None
     cursor_direction = data.get("d") or "asc"
     if cursor_direction != sort_direction:
-        raise ValueError(
+        raise CursorMismatchError(
             f"cursor direction mismatch: cursor was minted for {cursor_direction!r}, "
             f"request asked for {sort_direction!r}"
         )
@@ -206,22 +212,23 @@ def _keyset_sort_key(node: Any) -> Tuple[bool, str, str]:
     return (name is None, name or "", getattr(node, "urn", "") or "")
 
 
-def _keyset_sort_key_desc(node: Any) -> Tuple[bool, Tuple[int, ...], Tuple[int, ...]]:
-    """DESC twin of `_keyset_sort_key` for use with a plain ascending Python
-    sort: nulls FIRST is wrong under DESC — Cypher's `ORDER BY x DESC` places
-    nulls last in FalkorDB, matching ASC — so nulls stay last here too, and the
-    (name, urn) comparison is inverted via per-character complement (a tuple of
-    negated code points preserves lexicographic order under negation)."""
-    name = getattr(node, "display_name", None)
-    urn = getattr(node, "urn", "") or ""
-    invert = lambda s: tuple(-ord(c) for c in s)  # noqa: E731
-    return (name is None, invert(name or ""), invert(urn))
-
-
 def _keyset_sort(nodes: List[Any], sort_direction: str) -> List[Any]:
-    """Defensive re-sort matching the Cypher keyset order for the direction."""
-    key = _keyset_sort_key_desc if sort_direction == "desc" else _keyset_sort_key
-    return sorted(nodes, key=key)
+    """Defensive re-sort matching the Cypher keyset order for the direction.
+
+    DESC is a TRUE descending lexicographic sort of (displayName, urn) with
+    null names kept last (parity with the ASC path). Implemented as a
+    two-bucket `reverse=True` sort — NOT a per-character complement key: a
+    negated-code-point tuple fails to invert Python's tuple-length rule, so
+    prefix pairs mis-order ("Account" would sort before "Accounts" although
+    true DESC is the opposite), and a cursor minted from that wrong page tail
+    silently duplicates/skips rows at page boundaries."""
+    if sort_direction != "desc":
+        return sorted(nodes, key=_keyset_sort_key)
+    named = [n for n in nodes if getattr(n, "display_name", None) is not None]
+    unnamed = [n for n in nodes if getattr(n, "display_name", None) is None]
+    named.sort(key=lambda n: (n.display_name, getattr(n, "urn", "") or ""), reverse=True)
+    unnamed.sort(key=lambda n: getattr(n, "urn", "") or "", reverse=True)
+    return named + unnamed
 
 
 # Exception class names that indicate a Redis Cluster routing change (the
@@ -3367,8 +3374,12 @@ class FalkorDBProvider(GraphDataProvider):
         # Sorts on (displayName, urn) — the same composite key the cursor uses,
         # in the requested direction.
         if sort_property == "displayName" and children:
-            sort_key = _keyset_sort_key_desc if sort_direction == "desc" else _keyset_sort_key
-            order = sorted(range(len(children)), key=lambda i: sort_key(children[i]))
+            # Derive the index permutation from _keyset_sort (the single
+            # source of keyset order, incl. the DESC prefix semantics) so the
+            # paired containment_edges list stays aligned with its child.
+            ordered = _keyset_sort(list(children), sort_direction)
+            index_of = {id(node): i for i, node in enumerate(children)}
+            order = [index_of[id(node)] for node in ordered]
             children = [children[i] for i in order]
             containment_edges = [containment_edges[i] for i in order]
             child_urns = [children[i].urn for i in range(len(children))]
