@@ -169,10 +169,15 @@ async def refresh_data_source(
     session: AsyncSession = Depends(get_db_session),
 ):
     if _PROXY_ENABLED:
+        # Inject the authenticated user id so the Control Plane audits the
+        # refresh as the user, not "internal" — production runs proxy mode,
+        # so without this every UI refresh would lose its actor.
         raw = await request.body()
+        forwarded = _json.loads(raw) if raw else {}
+        forwarded["actor"] = user.id
         return await _proxy(
             "POST", f"/aggregation/data-sources/{ds_id}/refresh", request,
-            body=raw if raw else None,
+            body=_json.dumps(forwarded).encode(),
         )
     from backend.app.services.aggregation.service import NotFoundError
 

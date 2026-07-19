@@ -432,12 +432,19 @@ class RefreshRequest(BaseModel):
 
 class RefreshRequestInternal(RefreshRequest):
     """Body for the Control Plane's ``refresh`` twin. Extends the public
-    ``RefreshRequest`` with an ``origin`` the caller asserts for the audit
-    trail: the loader script sends ``script``, external connectors
-    ``connector``; the viz proxy leaves it ``api``. Restricted to the
-    non-system origins (``drift``/``reconcile`` are emitted internally, never
-    via this route)."""
+    ``RefreshRequest`` with the two fields only an internal caller asserts:
+
+      * ``origin`` — the audit origin: the loader script sends ``script``,
+        external connectors ``connector``; the viz proxy leaves it ``api``.
+        Restricted to the non-system origins (``drift``/``reconcile`` are
+        emitted internally, never via this route).
+      * ``actor`` — who triggered it. The viz proxy forwards the
+        authenticated user id it already resolves for direct mode, so a
+        UI-triggered refresh is attributed to the user in production
+        (proxy) deployments too, not to ``internal``.
+    """
     origin: Literal["script", "connector", "api"] = "api"
+    actor: str = Field("internal", max_length=128)
 
     class Config:
         populate_by_name = True

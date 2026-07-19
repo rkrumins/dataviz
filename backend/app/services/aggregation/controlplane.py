@@ -644,13 +644,14 @@ async def refresh_source(
 ):
     """Twin of the viz-service refresh route. ``origin`` is caller-asserted
     (script | connector | api); the web proxy leaves it ``api`` and the
-    loader script sends ``script``. Actor is ``internal`` here — the web
-    tier owns user attribution in direct mode."""
+    loader script sends ``script``. ``actor`` is forwarded by the proxy (the
+    authenticated user id) or defaults to ``internal`` for direct callers
+    like the script."""
     try:
         return await svc.refresh_source(
             ds_id, session,
             scope=body.scope, force=body.force, reason=body.reason,
-            actor="internal", origin=body.origin, wait=body.wait,
+            actor=body.actor, origin=body.origin, wait=body.wait,
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

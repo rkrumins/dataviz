@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import types
 
 import pytest
@@ -439,6 +440,40 @@ def test_refresh_route_maps_notfound_to_404(_direct_mode):
             user=user, svc=svc, session=object(),
         ))
     assert ei.value.status_code == 404
+
+
+def test_refresh_route_proxy_forwards_actor(monkeypatch):
+    # Proxy mode (production): the forwarded body must carry the
+    # authenticated user id so the CP audits the refresh as the user.
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", True)
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-42")
+    out = _run(fresh_mod.refresh_data_source(
+        "ds-1", _FakeRequest(b'{"scope":"rollups"}'),
+        user=user, svc=None, session=object(),
+    ))
+    assert out == "proxied"
+    body = json.loads(captured["body"])
+    assert body["actor"] == "user-42"
+    assert body["scope"] == "rollups"
+
+
+def test_cp_refresh_twin_passes_actor_through():
+    # The Control Plane twin forwards the proxied actor to refresh_source.
+    from backend.app.services.aggregation import controlplane as cp
+    from backend.app.services.aggregation.schemas import RefreshRequestInternal
+
+    svc = _FakeSvc(refresh=RefreshResponse(scope="rollups", gate="n/a", changed=True))
+    body = RefreshRequestInternal(scope="rollups", actor="user-99", origin="api")
+    _run(cp.refresh_source("ds-1", body=body, svc=svc, session=object()))
+    assert svc.refresh_kwargs["actor"] == "user-99"
+    assert svc.refresh_kwargs["origin"] == "api"
 
 
 # ── RBAC: route dependencies carry the right gate ───────────────────────
