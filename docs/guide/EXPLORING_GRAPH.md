@@ -80,6 +80,22 @@ As a graph grows, use these to keep it legible:
 
 ---
 
+## Focus with the Lineage Lens
+
+When a graph gets dense, switch on the **Lineage Lens** (also called the
+**Context View**) to spotlight just the lineage around a chosen node — its
+upstream and downstream context — while everything unrelated fades into the
+background. It's the fastest way to answer *"what actually touches this?"*
+without hiding the rest by hand. Full walkthrough:
+[The Lineage Lens](/guide/lineage-lens).
+
+For big graphs, the **Layer Strip** along the edge of the canvas lets you move
+through the picture one layer at a time — collapsing, expanding, and resizing
+the layer columns so a tangle reads like a set of tidy tiers. More in
+[Navigating Layers](/guide/navigating-layers).
+
+---
+
 ## Canvas controls
 
 The canvas itself has a control cluster (usually bottom-corner):
@@ -124,4 +140,6 @@ A real example, start to finish:
 
 - Turn your investigation into a shareable artefact → [Creating Views](/guide/creating-views)
 - Understand the colours and edge types → [Reading Lineage](/guide/reading-lineage)
+- Spotlight the context around one node → [The Lineage Lens](/guide/lineage-lens)
+- Move through a graph layer by layer → [Navigating Layers](/guide/navigating-layers)
 - Adopt good habits for naming and sharing → [Ways of Working](/guide/ways-of-working)

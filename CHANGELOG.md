@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Versioned Graph: rollback, admin flag, and enable-VC at 10M entities
+## [0.2.0] — 2026-07-19 — Versioned Graph: rollback, admin flag, and enable-VC at scale
 
 Version control for a data graph becomes usable on a *real* graph: you can turn it on for a
 data source you already have, undo a change you already published, and switch the whole feature

@@ -554,15 +554,21 @@ graph LR
 - **Smart Rule Builder**: Define rules for automatic entity-to-layer assignment based on type, tags, or properties
 - **Conflict Resolution**: When multiple rules assign the same entity to different layers, a dialog helps resolve conflicts
 
-### Context Lenses (Preview)
+### Context View & Lineage Lens
 
-The Context View system provides hierarchical, layered visualization of graph data:
+The **Context View** (a.k.a. the Lineage Lens experience) is **shipped**. It provides a hierarchical, layer-organized visualization of graph data with a curated, paginated column layout and an ego-graph overlay for immediate-neighbor inspection.
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | Main context view renderer |
-| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout |
-| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay |
+| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | Main Context View renderer; wires the Layer Strip, layer columns, overlays, and external-degree signals |
+| `LineageLens` | `components/canvas/context-view/LineageLens.tsx` | Ego-graph overlay: click a node to see its immediate upstream (left) / downstream (right) neighbors grouped by entity type with counts, regardless of canvas scale/scroll. Breadcrumb re-centering; escalates to full Trace |
+| `LayerStrip` | `components/canvas/context-view/LayerStrip.tsx` | Horizontal strip of layer headers across the top of the canvas — layer navigation, counts, and add-layer affordance |
+| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout with **resizable columns** — a right-edge resize handle sets a per-layer custom width, persisted to `nx-layer-widths` in localStorage. Renders one-page-ahead paginated items |
+| `AddLayerColumn` | `components/canvas/context-view/AddLayerColumn.tsx` | Inline "add a layer" column affordance |
+| `anchorRail` | `components/canvas/context-view/anchorRail.ts` | **Anchor Rail** — keeps the focal/anchor entity stable while columns paginate and resize |
+| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay drawn across layer columns |
+
+**Curated-view "lineage outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`) and subtracts each node's loaded (internal) degree, surfacing a chip when a node has links beyond the current view.
 
 ---
 
@@ -576,6 +582,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useDataSourceSchema` | Load ontology for active data source |
 | `useGraphSchema` | Low-level graph API schema introspection |
 | `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `computeViewScopedRoots()` |
+| `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`; powers the Context View's "lineage outside this view" chip by comparing external totals against internally loaded degree |
 | `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
 | `useLayerAssignment` | Handle entity-to-layer assignment logic |
 | `useHighlightState` | Track highlighted/traced/dimmed nodes |

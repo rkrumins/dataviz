@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Synodic backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
+The {brand} backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
 
 | Service | Port | Entry Point | Responsibility |
 |---------|------|-------------|----------------|
@@ -11,6 +11,8 @@ The Synodic backend is a single FastAPI application (the **Visualization Service
 | **Insights Service** | -- | `backend/insights_service/__main__.py` | Background collection of schema/stats and cache warming |
 
 > A standalone `graph-service` (`:8001`, `backend/graph/main.py`) once handled provider connectivity testing. It was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) -- it was built and deployed but never invoked. Its Neo4j/DataHub/Spanner adapters survive in `backend/graph/adapters/` and are now imported **in-process** by the Visualization Service.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the current service topology and process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV).
 
 ---
 
@@ -163,6 +165,29 @@ graph LR
 | `/{ws_id}/graph/commands/batch` | POST | Batch mutations (fail-fast by default) |
 | `/{ws_id}/graph/edges/aggregated` | POST | Aggregated edges between containers |
 | `/{ws_id}/graph/edges/aggregated/materialize` | POST | Batch-create AGGREGATED edges |
+| `/{ws_id}/graph/nodes/degree` | POST | Total lineage degree (in/out) per URN over the full graph — powers the curated-view "lineage outside this view" chip. Response-cached; a URN absent from the result is UNKNOWN (never zero). Body: `{ urns[], edge_types? }` |
+
+### Graph Versioning & Change Control
+
+Graph versioning (drafts, review & merge, publish, revert, restore) is **shipped** and gated by the `versioningEnabled` feature flag. Enabling version control on a data source is a resumable **async bootstrap job**: it copies the whole source graph into the versioned store as an auditable `import` commit, integrity-checks it against the source, and only then makes it live. Verified on a 7.7M-entity graph.
+
+**Enable-VC bootstrap job** (workspace-scoped, `?dataSourceId=` required):
+
+| Endpoint | Method | Status | Purpose |
+|----------|--------|--------|---------|
+| `/{ws_id}/graph/bootstrap` | POST | **202** (or 200 `alreadyEnabled`) | Start "enable version control" for a data source. Runs on the versioning worker in resumable windows; returns `{ jobId, graphId, status }`. Idempotent — an in-flight job returns itself |
+| `/{ws_id}/graph/bootstrap/status` | GET | 200 | Live progress (phase, counts, percent) and, on a terminal job, the integrity report. Not flag-gated so a job started before versioning was disabled stays observable |
+| `/{ws_id}/graph/bootstrap/retry` | POST | 202 | Resume a failed copy from its last committed window (`mode=resume`) or restart it (`mode=restart`) |
+| `/{ws_id}/graph/bootstrap/abandon` | POST | 200 | Discard everything the job imported; the data source reads exactly as before. Refused (409) once version control is live |
+
+**Draft & restore** (versioning router, prefix `/api/v1/{ws_id}/versioning`):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore` | POST | Restore the graph to a historical commit ("Restore to this point") as a new commit on `main`. Flag-gated |
+| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore-preview` | GET | Preview the diff a restore would apply, without mutating anything |
+
+> Draft lifecycle (open draft, stage/checkpoint, review/merge PR-style, publish, revert "Undo this change") lives on the versioning router; the draft *editing* surface is the normal `/graph` API plus a `?branchId=` query param. See the [draft lineage & merge engineering notes](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md) and [local-integration-testing.md](local-integration-testing.md).
 
 ### Views & Features
 
@@ -173,6 +198,7 @@ graph LR
 | `/api/v1/views/{id}/favourite` | POST | Toggle favourite |
 | `/api/v1/views/popular` | GET | Most-favourited views |
 | `/api/v1/admin/features` | GET, PATCH | Feature flag management (optimistic concurrency) |
+| `/api/v1/features/values` | GET | **Public**, read-only flag values (no auth, no schema/categories overhead) for client bootstrapping |
 
 ### Announcements
 
@@ -559,7 +585,7 @@ graph TB
 | `JWT_SECRET_KEY` | _(random)_ | Prod | HS256 signing key |
 | `JWT_EXPIRY_MINUTES` | `60` | No | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
-| `ADMIN_PASSWORD` | `changeme` | No | Bootstrap admin password |
+| `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3000,5173` | No | Comma-separated origins |
 | `FALKORDB_HOST` | `localhost` | No | FalkorDB/Redis hostname |
 | `FALKORDB_PORT` | `6379` | No | FalkorDB/Redis port |

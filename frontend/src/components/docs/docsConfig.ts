@@ -69,6 +69,7 @@ export const docSections: DocSection[] = [
   { id: 'architecture', label: 'Architecture', icon: LayoutGrid },
   { id: 'dev-workflow', label: 'Setup & Development', icon: Terminal },
   { id: 'reference', label: 'Backend, API & Frontend', icon: Server },
+  { id: 'services', label: 'Platform Services', icon: Boxes },
   { id: 'versioning', label: 'Versioning', icon: GitBranch },
   { id: 'security-identity', label: 'Security & Identity', icon: ShieldCheck },
   { id: 'operations', label: 'Deployment & Operations', icon: Cloud },
@@ -272,6 +273,43 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/API_FEATURES.md?raw'),
   },
 
+  // Platform Services
+  {
+    slug: 'services-overview',
+    section: 'services',
+    title: 'Platform Services Overview',
+    description: 'The service inventory and how the processes fit together',
+    importFn: () => import('@docs/services/OVERVIEW.md?raw'),
+  },
+  {
+    slug: 'services-insights',
+    section: 'services',
+    title: 'Insights Service',
+    description: 'Stats collection, discovery, admission control, and cache warming',
+    importFn: () => import('@docs/services/INSIGHTS.md?raw'),
+  },
+  {
+    slug: 'services-search',
+    section: 'services',
+    title: 'Search: Deep & Advanced',
+    description: 'Provider-agnostic deep search and the advanced-search pipeline',
+    importFn: () => import('@docs/services/SEARCH.md?raw'),
+  },
+  {
+    slug: 'services-context-engine',
+    section: 'services',
+    title: 'Context Engine',
+    description: 'Ontology resolution, context models, and context lenses',
+    importFn: () => import('@docs/services/CONTEXT_ENGINE.md?raw'),
+  },
+  {
+    slug: 'services-assignments',
+    section: 'services',
+    title: 'Assignment Engine',
+    description: 'Type/ontology assignment precedence and schema mapping',
+    importFn: () => import('@docs/services/ASSIGNMENTS.md?raw'),
+  },
+
   // Versioning
   {
     slug: 'versioning-overview',
@@ -293,13 +331,6 @@ export const docEntries: DocEntry[] = [
     title: 'Versioning: End-to-End Walkthrough',
     description: 'Hands-on test guide for the draft, branch, and merge flow',
     importFn: () => import('@docs/VERSIONING_E2E.md?raw'),
-  },
-  {
-    slug: 'versioning-drafts-merge',
-    section: 'versioning',
-    title: 'Versioning: Drafts, Lineage & Merge',
-    description: 'Engineering notes on a draft-lineage/merge data-loss bug and its repair',
-    importFn: () => import('@docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md?raw'),
   },
   {
     slug: 'versioning-deep-dives',
@@ -334,16 +365,9 @@ export const docEntries: DocEntry[] = [
   {
     slug: 'signup-service',
     section: 'security-identity',
-    title: 'User Service Plan',
-    description: 'Signup and user management roadmap',
+    title: 'User & Sign-up Service',
+    description: 'How sign-up, approval, and user management work today',
     importFn: () => import('@docs/SIGNUP_USER_SERVICE_PLAN.md?raw'),
-  },
-  {
-    slug: 'security-audit',
-    section: 'security-identity',
-    title: 'Security Audit: RBAC & SSO',
-    description: 'Findings and remediations from the 2026-06-05 audit',
-    importFn: () => import('@docs/audits/rbac-sso-audit-2026-06-05.md?raw'),
   },
 
   // Deployment & Operations

@@ -1,6 +1,6 @@
 # Architectural Decision Records (ADRs)
 
-This document captures the key architectural decisions made in Synodic, their reasoning, trade-offs, and status.
+This document captures the key architectural decisions made in {brand}, their reasoning, trade-offs, and status.
 
 ---
 
@@ -55,7 +55,7 @@ graph LR
 
 ## ADR-002: Dual FastAPI Services
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-018](#adr-018-retire-the-graph-service) — the standalone `graph-service` was retired and pre-registration connectivity testing now runs in-process in the Visualization Service. Retained here for historical context.
 **Date:** 2025 Q4
 **Context:** Users need to test database connectivity before registering a provider. This testing should not require database access or authentication.
 
@@ -112,7 +112,7 @@ graph TB
 
 **Reasoning:**
 - External systems (DataHub, Neo4j) use different edge type names
-- Ontology source mappings translate external types to Synodic types
+- Ontology source mappings translate external types to {brand} types
 - Classification is per-ontology, not global -- different workspaces can classify edges differently
 - Granularity aggregation uses hierarchy levels from ontology, not hardcoded entity types
 

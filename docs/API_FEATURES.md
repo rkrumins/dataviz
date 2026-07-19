@@ -213,17 +213,36 @@ Same shape as GET. 404 if key not found.
 
 ---
 
-## Notable Feature Flags
+## Feature Flags (authoritative set)
 
-The following feature flags are seeded at startup via `backend/app/db/seed_feature_registry.py`:
+The authoritative flag set lives in `backend/app/config/feature_wiring.py`; definitions are seeded at
+startup via `backend/app/db/seed_feature_registry.py`. **Every flag below is enforced server-side and
+wired** — each has a real backend gate (not a UI-only toggle). A `capability` flag **fails open** if it
+cannot be resolved; a `security` flag **fails closed**.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `editModeEnabled` | boolean | `true` | Enable inline node editing on the canvas |
-| `traceEnabled` | boolean | `true` | Enable lineage trace operations |
-| `signupEnabled` | boolean | `false` | Allow self-service user registration |
-| `announcementsEnabled` | boolean | `true` | Show global announcement banners. When disabled, banners are hidden even if active announcements exist. Toggle off to instantly hide all banners without deactivating individual announcements. |
-| `allowedViewModes` | string[] | `["graph", "hierarchy", "reference", "layered-lineage"]` | Available canvas view modes |
+**Lifecycle stages** (`stage`): `experimental` (half-built, must default OFF), `active` (fully wired,
+the steady state), `deprecated` (on its way out; gates being removed). All flags below are `active`.
+
+| Key | Type | Posture | Depends on | Server-side enforcement |
+|-----|------|---------|-----------|-------------------------|
+| `versioningEnabled` | boolean | capability | — | `versioning_gate.py` — every `/graph` write (drafts, commits, merges, reverts) and the enable-VC bootstrap job |
+| `traceEnabled` | boolean | capability | — | `POST /graph/trace` — upstream/downstream lineage traversal |
+| `editModeEnabled` | boolean | capability | — | Graph mutation routes — node/edge create, update, delete |
+| `allowedViewModes` | string[] | capability | — | `POST/PUT /views` — refuses a view whose type is not in the list |
+| `signupEnabled` | boolean | **security** (default OFF) | — | `POST /auth/register` — refuses strangers without an invite |
+| `announcementsEnabled` | boolean | capability | — | `GET /announcements` — serves an empty list when off |
+| `graphExportEnabled` | boolean | capability | — | Graph export routes |
+| `blankModelsEnabled` | boolean | capability | `versioningEnabled` | `POST /blank-graphs` — provision a lineage model with no data source |
+| `semanticLayerEditMode` | boolean | capability | — | Semantic-layer (ontology) edit routes |
+| `semanticLayerImportEnabled` | boolean | capability | `semanticLayerEditMode` | Ontology import routes |
+| `semanticLayerExportEnabled` | boolean | capability | — | `GET /admin/ontologies/{id}/export` — download the definition as JSON |
+| `semanticLayerAutoSuggest` | boolean | capability | — | `POST /admin/ontologies/suggest` — score layers against a graph |
+| `semanticLayerVersionHistory` | boolean | capability | — | Ontology version-history routes |
+| `semanticLayerNonAdminEditing` | boolean | **security** | `semanticLayerEditMode` | Allows non-admins to edit the semantic layer (fails closed) |
+
+> A `depends_on` flag is only effective when its parent is also on (e.g. `blankModelsEnabled` requires
+> `versioningEnabled`; `semanticLayerImportEnabled` and `semanticLayerNonAdminEditing` require
+> `semanticLayerEditMode`).
 
 > The `announcementsEnabled` flag gates the public `/api/v1/announcements` endpoint — when `false`, the endpoint returns an empty list regardless of active announcements in the database.
 

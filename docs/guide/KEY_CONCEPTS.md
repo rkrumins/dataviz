@@ -1,6 +1,6 @@
 # Key Concepts
 
-Synodic has a small vocabulary. Learn these ten words and the whole platform
+{brand} has a small vocabulary. Learn these ten words and the whole platform
 becomes predictable. Read top to bottom — each concept builds on the one before.
 
 > 💡 **The one-sentence model:** A **Provider** holds graphs, which become
@@ -24,12 +24,12 @@ flowchart LR
 
 ### Provider
 A **Provider** is a *connection to a graph database* where your lineage data
-actually lives — for example a FalkorDB, Neo4j, or DataHub instance. It stores
+actually lives — for example a FalkorDB, Neo4j, DataHub, or Spanner instance. It stores
 the host, credentials, and health status. You'll only deal with Providers if
 you're an administrator; everyone else benefits from them invisibly.
 
 ### Catalog Item
-When a Provider is connected, Synodic *discovers* the graphs inside it and
+When a Provider is connected, {brand} *discovers* the graphs inside it and
 registers each one as a **Catalog Item** — a named, governed dataset that can be
 shared into workspaces. Think of the catalog as the **shelf of available
 datasets** that admins curate.
@@ -65,7 +65,7 @@ database becomes a *readable* picture instead of anonymous dots.
 Learn more in [The Semantic Layer](/guide/semantic-layer).
 
 ### Granularity
-Real lineage exists at several **levels of detail**. Synodic lets you zoom
+Real lineage exists at several **levels of detail**. {brand} lets you zoom
 between them without losing your place:
 
 | Level | You see… | Best for |
@@ -90,7 +90,7 @@ stakeholders.
 ### Lineage
 **Lineage** is the network of connections itself — the lines between nodes that
 show how data flows. *Upstream* means "where this came from"; *downstream* means
-"what this feeds." Tracing lineage is the core activity in Synodic.
+"what this feeds." Tracing lineage is the core activity in {brand}.
 
 ### Canvas / Explorer
 The **canvas** is the interactive space where the graph is drawn. The
@@ -118,7 +118,7 @@ diagram. You set these up in the **Layer Studio** when creating a view.
 
 ## Who can do what (access in one paragraph)
 
-Synodic uses **role-based access control (RBAC)**. Every person has a **role** —
+{brand} uses **role-based access control (RBAC)**. Every person has a **role** —
 typically **Admin**, **User**, or **Viewer** — granted globally or per-workspace.
 Roles map to fine-grained **permissions**. On top of that, individual Views can
 be **explicitly shared** with specific people. If you ever wonder *"what am I

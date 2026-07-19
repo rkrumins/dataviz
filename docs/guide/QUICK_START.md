@@ -42,7 +42,7 @@ then enter the one you want to work in. Each screen shows you which workspace
 you're in — there's no separate global switcher to keep in sync. The workspace
 determines which data you'll see.
 
-When you enter a workspace, Synodic loads its **data source** and its
+When you enter a workspace, {brand} loads its **data source** and its
 **ontology** (the colours and meanings). The canvas will re-render around the new
 context.
 
@@ -69,7 +69,7 @@ to interpret what's on screen.
 
 ## Step 4 — Trace lineage
 
-This is the heart of Synodic. Pick any node that interests you and follow its
+This is the heart of {brand}. Pick any node that interests you and follow its
 connections:
 
 1. **Click a node** to select it. A details panel opens with its properties,

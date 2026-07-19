@@ -1,8 +1,8 @@
-# SSO — operator + reviewer reference
+# SSO — operator reference
 
-Single source of truth for the SSO/IdP integration shipped in Phases
-0–4. Read this end-to-end before reviewing the branch; share the
-relevant sub-sections with operators standing up a new IdP.
+Single source of truth for the SSO/IdP integration. Read this end-to-end
+before working on the auth surface; share the relevant sub-sections with
+operators standing up a new IdP.
 
 > **For developers integrating on top of SSO** — read alongside
 > [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md). That guide covers
@@ -14,13 +14,12 @@ relevant sub-sections with operators standing up a new IdP.
 > *how to operate it*; the integration guide focuses on *how to
 > read, extend, test, and debug it*.
 
-Branch under review: `claude/audit-rbac-enforcement-PikQK`
-Phases landed: **Phase 0** (RBAC hardening + fail-fast secrets) →
-**Phase 1** (OIDC) → **Phase 2** (SAML, custom dev IdP, 24h re-auth,
-group→role mapping v1) → **Phase 3** (multi-IdP, multi-identity,
-configurable claim mapping, group→Group mapping) → **Phase 4** (signup
-provenance, indexed claim attributes, platform posture switches,
-admin lookup + search).
+The SSO surface today: **OIDC** (Authlib, Authorization Code + PKCE + JWKS
+verify) and **SAML2** (python3-saml strict mode) alongside local password
+auth; DB-backed per-row IdP providers plus a custom dev IdP; multi-identity
+per user; configurable claim mapping with indexed attribute pass-through;
+group→role and group→internal-group mapping; 24h SSO re-authentication;
+signup provenance; platform posture switches; and admin lookup + search.
 
 ---
 
@@ -530,7 +529,7 @@ export JWT_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(4
    show `user.sso_jit_blocked`.
 8. Toggle everything back ON.
 
-### 3.4 PR review checklist (for reviewers)
+### 3.4 Review checklist
 
 1. Read `docs/SSO.md` (this file) end-to-end.
 2. Walk the migrations in chronological order:
@@ -582,7 +581,7 @@ we go beyond the typical pattern:
   any admin. Most platforms make the operator manually verify; we
   enforce it.
 
-Known follow-ups (deferred, not in scope for this PR):
+Known follow-ups (not yet implemented):
 
 * SCIM 2.0 user + group provisioning / deprovisioning. Currently
   group sync is reactive (per login); SCIM would be push-based.

@@ -27,12 +27,12 @@ wizard** appears automatically to walk you through the early steps.
 ## Step 1 — Connect a Provider
 
 A **Provider** is a connection to a graph database where lineage data lives
-(FalkorDB, Neo4j, or DataHub).
+(FalkorDB, Neo4j, DataHub, or Spanner).
 
 1. Go to **Admin → Overview** (or **Ingestion**) and click **Add Provider**.
 2. Choose the **provider type** and enter connection details (host, port,
    credentials).
-3. **Test connectivity** — Synodic verifies it can reach the database.
+3. **Test connectivity** — {brand} verifies it can reach the database.
 4. Save. Credentials are stored encrypted.
 
 > 💡 On first boot, the platform may **bootstrap a default Provider** from
@@ -42,16 +42,16 @@ A **Provider** is a connection to a graph database where lineage data lives
 
 ## Step 2 — Discover and catalog assets
 
-With a Provider connected, let Synodic find the graphs inside it:
+With a Provider connected, let {brand} find the graphs inside it:
 
-1. From the Provider, run **discovery** — Synodic introspects the available
+1. From the Provider, run **discovery** — {brand} introspects the available
    graphs and schemas.
 2. Register the ones you want as **Catalog Items** — named, governed datasets
    that can be shared into workspaces.
 3. Set **permissions** on each catalog item to control who can use it.
 
 The catalog is your **curated shelf of datasets**. Before deleting a catalog
-item, Synodic shows an **impact analysis** of what depends on it — always check
+item, {brand} shows an **impact analysis** of what depends on it — always check
 this first.
 
 ---

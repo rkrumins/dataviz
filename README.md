@@ -1,6 +1,6 @@
-# Synodic
+# Context Visualization Platform
 
-Graph metadata + lineage platform. Backend in Python (FastAPI), frontend in React, graph store in FalkorDB.
+Context Visualization Platform (CVP) — a graph metadata + lineage platform. Backend in Python (FastAPI), frontend in React, graph store in FalkorDB.
 
 ## Three paths to get running
 
@@ -13,7 +13,7 @@ cp .env.example .env.dev
 ./dev.sh              # starts infra + prints next steps
 ```
 
-Full guide: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Full guide: [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
 
 ### 2. Self-host — run on a VM
 
@@ -38,7 +38,7 @@ docker compose -f docker-compose.quickstart.yml up --build
 Access:
 - Frontend: http://localhost:3080
 - API docs: http://localhost:8000/docs
-- Login: `admin@synodic.local` / `admin123`
+- Login: `admin@nexuslineage.local` / `admin123`
 
 ## Diagnostics
 
@@ -51,7 +51,8 @@ Both runners ship with `doctor`, `status`, and `repair` subcommands — they che
 
 ## Documentation
 
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — contributor guide
+- [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) — contributor guide
+- [docs/SETUP.md](docs/SETUP.md) — environment setup reference
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — self-host operator guide
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system overview
 - [docs/BACKEND.md](docs/BACKEND.md) — backend internals

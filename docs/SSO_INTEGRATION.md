@@ -7,8 +7,9 @@
 > on *how to integrate* and *how to debug*; `SSO.md` focuses on *what
 > exists* and *how to operate*.
 
-> Branch: `claude/audit-rbac-enforcement-PikQK` · Shipped phases:
-> 0 → 4 · Last revised: 2026-06.
+> Covers the current auth surface: local password auth plus OIDC + SAML2,
+> DB-backed IdP providers, multi-identity per user, configurable claim
+> mapping, and the admin/self-service identity surfaces.
 
 ---
 
@@ -1356,7 +1357,7 @@ attacks at the bottom of the section.
 * **DDoS / rate limiting** — `slowapi` decorates `/login` and
   `/refresh` at 10/min and 30/min respectively. Anything broader
   is the reverse proxy / WAF's job.
-* **MFA** — not in this branch. See `SSO.md §4` for the deferred
+* **MFA** — not implemented. See `SSO.md §4` for the deferred
   pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
   endpoints cover the small-scale need.

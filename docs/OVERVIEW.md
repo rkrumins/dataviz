@@ -68,6 +68,16 @@ mindmap
       Audit Trail (OntologyAuditLog)
       Source Mappings
       Drift Detection
+    Graph Change Control
+      Drafts + review & merge (PR-style)
+      Publish, revert, restore
+      Version-control master switch
+      Resumable enable-VC bootstrap job
+    Lineage Lens / Context View
+      External-degree signal
+      Curated-view chip
+      Layer Strip
+      Anchor Rail + one-page-ahead pagination
     Data Catalog
       CatalogItems
       Workspace Bindings
@@ -289,6 +299,20 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 - **AssetOnboardingWizard** for streamlined setup -- 4-step guided flow (workspace allocation, aggregation, semantics, review)
 - **Reduces time-to-first-value** for new admins -- from manual multi-step configuration to guided flow
 
+### 8. Graph Versioning & Change Control (Shipped)
+
+- **Drafts + review & merge:** Edit on a draft branch (`?branchId=`), then review and merge PR-style before it hits `main`
+- **Publish, revert, restore:** Publish a draft, **revert** a change ("Undo this change"), or **restore** the graph to a historical commit ("Restore to this point", with a diff preview)
+- **Version-control master switch:** An admin flag (`versioningEnabled`) gates every `/graph` write
+- **Resumable enable-VC bootstrap:** Turning on version control for a data source runs an async, resumable job that copies the whole source graph into the versioned store as an integrity-checked `import` commit — verified on a 7.7M-entity graph
+
+### 9. Lineage Lens / Context View (Shipped)
+
+- **Context View:** Layer-organized, curated exploration with a **Layer Strip**, **resizable layer columns**, and one-page-ahead pagination
+- **Lineage Lens:** Ego-graph overlay — click a node to see immediate upstream/downstream neighbors grouped by type, regardless of canvas scale
+- **External-degree signal:** A "lineage outside this view" chip driven by total lineage degree per node (`POST /{ws_id}/graph/nodes/degree`)
+- **Anchor Rail:** Keeps the focal entity stable as columns paginate and resize
+
 ---
 
 ## Competitive Positioning
@@ -394,113 +418,70 @@ For detailed architecture documentation, see:
 
 ---
 
-## Roadmap
+## Current State & Roadmap
 
-### Current State: Late MVP
+### Current State: Shipped Platform
 
-The platform has a solid architectural foundation with the core capabilities built:
+The platform is past MVP. The four-entity core, the ontology system, the interactive canvas, and — most recently — **graph versioning with full change control** are all shipped and in use.
 
 ```mermaid
 timeline
-    title {brand} Development Phases
-    section Completed
-        Core Architecture : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
-                          : Pluggable provider system (FalkorDB, Neo4j, DataHub, Mock)
-                          : Workspace-centric API with legacy backward compatibility
+    title {brand} Delivered Capabilities
+    section Core (Shipped)
+        Architecture      : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
+                          : Pluggable providers (FalkorDB default, Neo4j, DataHub, Spanner Graph, Mock)
+                          : Workspace-centric API
         Lineage Engine    : Multi-directional trace (upstream/downstream/both)
                           : Granularity aggregation (column → table → domain)
                           : Containment hierarchy traversal
                           : Aggregated edge materialization
         Ontology System   : Versioned definitions with publish/clone lifecycle
                           : Three-layer resolution (system + assigned + introspected)
-                          : Rich entity/relationship type definitions with visual config
                           : Impact analysis and coverage checking
-        Frontend Core     : Interactive canvas with ELK layout (Web Worker)
-                          : Schema-driven GenericNode rendering
-                          : Persona toggle (business/technical)
-                          : Dashboard with search, KPIs, view gallery
-                          : View wizard (5-step creation)
         Auth & Users      : JWT authentication with Argon2id
-                          : Signup with admin approval workflow
-                          : Role-based access (admin/user/viewer)
-                          : Password reset flow
-        Admin System      : Provider management with connectivity testing
-                          : Workspace and data source management
-                          : Ontology management with versioning
-                          : Feature flag administration
+                          : Signup with admin approval (default OFF)
+                          : Role-based + workspace-scoped access
         Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
                           : Permission-controlled asset registration
                           : Impact analysis before deletion
-        Guided Onboarding : FirstRunHero for empty platforms
-                          : OnboardingProgress tracker
-                          : AssetOnboardingWizard (4-step flow)
-    section In Progress
-        Data Integrations : Additional provider adapters
-                          : Schema drift detection
-        UX Refinement     : Layer Studio (WYSIWYG editor)
-                          : Smart assignment and auto-organize
-                          : Context lenses
-    section Planned
-        Security Hardening : HttpOnly cookie auth (replace localStorage JWT)
-                           : Mandatory credential encryption
-                           : Production environment guards
-        Testing & CI/CD    : GitHub Actions pipeline
-                           : 70%+ test coverage
-                           : Automated quality gates
-        Legacy Cleanup     : Remove GraphConnectionORM
-                           : Delete dual code paths
-                           : Alembic migration system
+    section Exploration (Shipped)
+        Canvas            : Interactive canvas with ELK layout (Web Worker)
+                          : Schema-driven GenericNode rendering
+                          : Persona toggle (business/technical)
+        Lineage Lens      : Lineage Lens / Context View
+                          : External-degree signal + curated-view chip (POST /nodes/degree)
+                          : Layer Strip + resizable layer columns
+                          : Anchor Rail + one-page-ahead pagination
+    section Change Control (Shipped)
+        Versioning        : Drafts, review & merge (PR-style), publish
+                          : Revert ("Undo this change") + restore ("Restore to this point")
+                          : Version-control admin master switch
+                          : Resumable async enable-VC bootstrap job with integrity report
+                          : Verified on a 7.7M-entity graph
+    section Forward-Looking
+        Integrations      : Additional provider adapters (Apache Atlas, dbt, Airflow)
+                          : Real-time lineage ingestion (event streaming)
+        Enterprise        : SSO (SAML2 / OIDC)
+                          : Workspace-level access-control policies
+                          : GraphQL API layer
+        Scale-out         : Horizontal scale (WEB/WORKER/CONTROLPLANE tiers) when load justifies
 ```
 
-### Phase 1: Hardening (Next)
+### Forward-Looking Work
 
-**Goal:** Production-ready security, testing, and observability.
+The following items are **not yet shipped** and remain genuinely forward-looking:
 
-| Priority | Item | Impact |
-|----------|------|--------|
-| P0 | Mandatory credential encryption in production | Prevents plaintext credential leaks |
-| P0 | JWT migration to HttpOnly cookies | Eliminates XSS token theft |
-| P0 | Production environment guards (require PostgreSQL, strong admin password) | Prevents misconfigurations |
-| P1 | CI/CD pipeline (GitHub Actions) | Automated quality gates |
-| P1 | Auth + provider registry test coverage (70%+) | Catches regressions on critical paths |
-| P1 | Graph hydration fix (edges on initial load) | Unblocks deep-linking and page refresh |
-| P2 | Prometheus metrics + structured alerting | Production observability |
-| P2 | Error boundaries in frontend | Graceful error recovery |
+| Area | Item | Rationale |
+|------|------|-----------|
+| Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Broader ecosystem coverage |
+| Integrations | Real-time lineage ingestion (event streaming) | Live pipeline monitoring |
+| Enterprise | SSO (SAML2 / OIDC) — see [SSO.md](SSO.md) | Enterprise auth requirements |
+| Enterprise | Workspace-level access-control policies | Finer-grained tenant isolation |
+| Enterprise | GraphQL API layer | Alternative query interface |
+| Scale-out | Horizontal scale-out (WEB/WORKER/CONTROLPLANE roles) | Deferred until load justifies — see [architecture-when-scaling.md](architecture-when-scaling.md) |
+| Collaboration | Comments, annotations, change proposals | Team workflow |
 
-### Phase 2: Architecture Cleanup
-
-**Goal:** Remove legacy debt, establish migration framework.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P1 | Alembic migration framework | Reliable schema evolution |
-| P1 | Remove legacy `GraphConnectionORM` and dual code paths | Reduces complexity by ~30% |
-| P2 | Redis-backed ProviderRegistry cache | Multi-worker cache coherence |
-| P2 | Increase ontology cache TTL + event-based invalidation | Reduces DB load |
-
-### Phase 3: Enterprise Features
-
-**Goal:** Multi-tenant SaaS readiness.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P1 | User Service extraction (separate DB + message bus) | Independent scaling and deployment |
-| P1 | Workspace-level access control policies | Fine-grained tenant isolation |
-| P2 | Audit logging (user actions, workspace changes, credential access) | Compliance readiness |
-| P2 | SSO integration (SAML2, OIDC) | Enterprise auth requirements |
-| P3 | GraphQL API layer | Alternative query interface |
-
-### Phase 4: Platform Growth
-
-**Goal:** Ecosystem expansion and advanced capabilities.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P2 | Additional provider integrations (Apache Atlas, dbt, Airflow) | Broader ecosystem coverage |
-| P2 | Real-time lineage ingestion (event streaming) | Live pipeline monitoring |
-| P3 | Collaboration features (comments, annotations, change proposals) | Team workflow |
-| P3 | Data quality scoring integrated into lineage | Quality-aware governance |
-| P3 | API-first SDK for programmatic lineage management | Developer experience |
+> Process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) exist today; the single-process **DEV** all-in-one role is the standard deployment shape, with the multi-tier split available when scale demands it.
 
 ---
 
@@ -510,16 +491,15 @@ timeline
 
 - **Architecture is right:** The four-entity model (Provider + CatalogItem + Ontology + Workspace), provider abstraction, and ontology system are well-designed for the target use cases
 - **Ontology system is powerful:** Versioning, impact analysis, and three-layer resolution provide genuine schema governance
-- **Frontend is ambitious:** Canvas-first exploration with persona toggle and Layer Studio positions this ahead of static lineage tools
+- **Change control is shipped:** Graph versioning (drafts, review & merge, publish, revert, restore) plus the version-control master switch and a resumable enable-VC bootstrap job — verified on a 7.7M-entity graph
+- **Exploration is differentiated:** Canvas-first exploration with persona toggle, Lineage Lens / Context View, external-degree signals, the Layer Strip, and the Anchor Rail put this ahead of static lineage tools
 - **Multi-tenant from day one:** Workspace isolation is architectural, not bolted on
 
 ### Areas for Improvement
 
-- **Security defaults need hardening:** Optional encryption, weak admin password, and JWT in localStorage must be fixed before production
-- **Testing coverage is minimal:** ~10 backend tests, ~3 frontend tests; critical paths (auth, provider registry) lack coverage
-- **Observability is absent:** No metrics, no structured alerting, startup failures silenced
-- **Legacy migration incomplete:** Dual code paths (connection + workspace) add complexity and confusion
-- **Frontend hydration gap:** ~~Missing edges on initial load~~ — `useGraphHydration` hook implemented (verify full wiring across all canvas entry points)
+- **Security defaults still need production hardening:** Credential encryption is optional in dev, JWT is stored in localStorage, and the default admin password must be rotated before production
+- **Legacy migration ongoing:** Some dual code paths remain from the pre-workspace era
+- **Horizontal scale-out not yet built:** The platform runs single-process (DEV role); the WEB/WORKER/CONTROLPLANE split is designed but deferred until load justifies it
 
 ### Honest State
 
@@ -527,12 +507,11 @@ timeline
 |-----------|--------|-------|
 | Architecture | Strong | Four-entity model, provider abstraction, workspace isolation, catalog governance |
 | Ontology System | Strong | Versioning, impact analysis, drift detection |
-| Frontend UX | Promising | Canvas, persona, Layer Studio, guided onboarding |
+| Change Control | Strong | Graph versioning shipped (drafts, merge, publish, revert, restore); enable-VC bootstrap verified at 7.7M entities |
+| Frontend UX | Strong | Canvas, persona, Lineage Lens, Layer Strip, Anchor Rail, guided onboarding |
 | Backend API | Solid | 50+ endpoints, clear REST patterns |
-| Security | Needs Work | JWT in localStorage, optional encryption, weak defaults |
-| Testing | Weak | Minimal coverage, no CI/CD |
-| Observability | Missing | No metrics, no alerting |
-| Documentation | Improving | This documentation effort addresses major gaps |
+| Security | Needs Work | JWT in localStorage, optional encryption in dev, rotate default admin password |
+| Scale-out | Deferred | Single-process today; multi-tier design ready when needed |
 
 ---
 

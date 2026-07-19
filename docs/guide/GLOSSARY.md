@@ -1,6 +1,6 @@
 # Glossary & Acronyms
 
-Every term and acronym you'll meet in Synodic, in plain language. Skim it once;
+Every term and acronym you'll meet in {brand}, in plain language. Skim it once;
 return whenever a word trips you up.
 
 > 💡 New to the platform? Pair this with [Key Concepts](/guide/key-concepts),
@@ -12,7 +12,7 @@ return whenever a word trips you up.
 
 | Term | Meaning |
 | --- | --- |
-| **Provider** | A connection to a graph database (FalkorDB, Neo4j, DataHub) where lineage data lives. |
+| **Provider** | A connection to a graph database (FalkorDB, Neo4j, DataHub, Spanner) where lineage data lives. |
 | **Catalog Item** | A discovered graph/dataset registered for governed sharing into workspaces. |
 | **Workspace** | An isolated team or project context containing data sources, Views, and members. |
 | **Data Source** | A binding of a catalog item (graph) + ontology that you actually explore. |
@@ -65,20 +65,22 @@ return whenever a word trips you up.
 | **Impact Analysis** | A preview of what depends on something before you delete/change it. |
 | **Aggregation** | Background processing that powers higher-level granularity. |
 | **Discovery / Introspection** | Detecting the graphs and schema inside a provider. |
-| **Source Mapping** | Translating an external system's type labels into Synodic types. |
+| **Source Mapping** | Translating an external system's type labels into {brand} types. |
 | **Drift** | External types not yet mapped to your ontology. |
 
 ---
 
 ## Acronyms
 
-| Acronym | Stands for | In Synodic… |
+| Acronym | Stands for | In {brand}… |
 | --- | --- | --- |
 | **RBAC** | Role-Based Access Control | How permissions are granted via roles. |
 | **URN** | Uniform Resource Name | A unique identifier for a node/entity. |
 | **ADR** | Architecture Decision Record | A documented design decision (see engineer [docs](/docs)). |
 | **JWT** | JSON Web Token | The token issued at login for your session. |
-| **SSO** | Single Sign-On | Logging in via a central identity provider. |
+| **SSO** | Single Sign-On | Logging in via a central identity provider; admins can configure it. |
+| **OIDC** | OpenID Connect | One of the two supported SSO protocols. |
+| **SAML** | Security Assertion Markup Language | The other supported SSO protocol. |
 | **SCIM** | System for Cross-domain Identity Management | The protocol for syncing users/groups from an identity provider. |
 | **WIP** | Work In Progress | A suggested tag/prefix for unfinished Views. |
 | **UI / UX** | User Interface / Experience | How the platform looks and feels. |
@@ -92,6 +94,7 @@ return whenever a word trips you up.
 | **FalkorDB** | The default graph database (Redis-protocol). |
 | **Neo4j** | A supported enterprise graph database. |
 | **DataHub** | A supported metadata/catalog source. |
+| **Spanner** | A supported cloud graph database backend. |
 | **PostgreSQL / SQLite** | The platform's own management database (prod / local dev). |
 
 ---

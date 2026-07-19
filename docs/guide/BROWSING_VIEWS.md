@@ -37,6 +37,10 @@ Each **View card** shows:
 > filtering by tag is the quickest way to the right View. See
 > [Ways of Working](/guide/ways-of-working) for tagging conventions.
 
+Large galleries don't dump everything at once — the grid shows a first page and
+a **Load more** control brings in the next batch, so browsing stays fast even
+across hundreds of Views.
+
 ---
 
 ## Opening a View

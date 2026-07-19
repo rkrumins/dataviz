@@ -1,6 +1,6 @@
 # Users & Access
 
-*For Administrators.* Synodic's access model is layered but predictable. This
+*For Administrators.* {brand}'s access model is layered but predictable. This
 page explains how people get in, what roles mean, and how to grant exactly the
 right access — no more, no less.
 
@@ -32,6 +32,10 @@ Access is **approval-based**, so no one reaches your data by simply registering.
 You can also **suspend/reactivate** accounts and **reset passwords** from the
 same screen. Filter the list by status (**pending / active / suspended**) to find
 who needs attention.
+
+> 💡 **Prefer central identity?** Administrators can configure **single sign-on**
+> via **OIDC** or **SAML**, so people log in through your organisation's identity
+> provider instead of a local password. Approvals and roles still apply on top.
 
 ---
 

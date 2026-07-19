@@ -2,11 +2,13 @@
 
 ## Overview
 
-Synodic's data architecture spans two distinct layers:
+{brand}'s data architecture spans two distinct layers:
 1. **Management Database** (PostgreSQL — no SQLite fallback; any non-`postgresql+asyncpg://` URL is rejected at startup) -- stores platform metadata: users, workspaces, providers, ontologies, views, feature flags
-2. **Graph Databases** (FalkorDB, Neo4j, DataHub) -- stores the actual graph data: nodes, edges, lineage, containment hierarchies
+2. **Graph Databases** (FalkorDB default, Neo4j, DataHub, Spanner Graph) -- stores the actual graph data: nodes, edges, lineage, containment hierarchies
 
-The management layer is accessed through SQLAlchemy 2.0 async ORM. Graph data is accessed through the pluggable `GraphDataProvider` interface.
+The management layer is accessed through SQLAlchemy 2.0 async ORM. Graph data is accessed through the pluggable `GraphDataProvider` interface. Redis backs the cache and aggregation streams.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the service/process-role topology (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) that operates over these data layers.
 
 ---
 
@@ -36,7 +38,7 @@ erDiagram
     providers {
         text id PK "prov_*"
         text name
-        text provider_type "falkordb|neo4j|datahub|mock"
+        text provider_type "falkordb|neo4j|datahub|spanner|mock"
         text host
         int port
         text credentials "Fernet-encrypted JSON"

@@ -2,7 +2,7 @@
 
 > **Status:** **Future architecture, not active scope.** This document
 > captures the design we'd execute *when* operational load justifies
-> horizontal scale-out. Today Synodic runs as a single process with
+> horizontal scale-out. Today {brand} runs as a single process with
 > one Postgres v16 — that's the right shape for current scale.
 >
 > Original location: this lived as "Phase 6" of the schema-optimization

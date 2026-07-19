@@ -45,7 +45,7 @@ editing dozens of nodes on the canvas.
 | **Add & update** | Creates new items and updates the ones that match. Never deletes anything. | The safe default — you're adding or correcting data. |
 | **Replace (authoritative)** | Treats the file as the *complete* picture — anything in the graph but missing from the file gets deleted. | You're re-uploading a full, canonical export and want the graph to match it exactly. |
 
-> ⚠️ **Replace mode can delete data.** Synodic always shows you the exact
+> ⚠️ **Replace mode can delete data.** {brand} always shows you the exact
 > count before you confirm, but double-check your file is complete before
 > choosing it.
 
@@ -69,7 +69,7 @@ backup, not just a report.
 
 An export can always be brought back in through Import later, so it doubles
 as a safety net before a big change and as a way to work with your data
-outside Synodic.
+outside {brand}.
 
 ---
 

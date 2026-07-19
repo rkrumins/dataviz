@@ -14,7 +14,7 @@ Companion documents — this specification composes with, and does not replace:
 
 ## 1. Executive Summary
 
-This document specifies the infrastructure required to operate Synodic at **250 million graph elements** (nodes + edges combined, across all workspace graphs):
+This document specifies the infrastructure required to operate {brand} at **250 million graph elements** (nodes + edges combined, across all workspace graphs):
 
 - **System of record:** Cloud SQL for PostgreSQL 16 (Enterprise Plus), split into a **management instance** and a dedicated **graphver instance** (the versioned node/edge store — the split needs no code change; it is the `GRAPHVER_DB_URL` decoupling designed into `backend/app/services/versioning/config.py`).
 - **Graph read layer:** FalkorDB in **Redis Cluster mode**, deployed as **3 StatefulSets (one per shard), 3 pods each** — 9 pods spread across 3 GCP zones. FalkorDB remains a *disposable projection*: any graph can be dropped and rebuilt from Postgres, which is what makes an aggressive-but-recoverable memory posture safe.

@@ -12,7 +12,7 @@ ontology health.
 
 From **Workspaces**, start the wizard:
 
-1. **Basics** — give it a clear name (Synodic checks for duplicates as you
+1. **Basics** — give it a clear name ({brand} checks for duplicates as you
    type and suggests an alternative if it's taken) and an optional
    description.
 2. **Data** — optionally connect a catalog item now, or skip and add one
@@ -29,7 +29,7 @@ A workspace isn't usable until it has at least one **data source** — a
 catalog item (the graph) bound to an ontology (its meaning). The wizard:
 
 1. **Source** — pick which catalog item to attach.
-2. **Semantics** — choose the ontology. Synodic ranks the available options by
+2. **Semantics** — choose the ontology. {brand} ranks the available options by
    how much of the graph's actual types they cover, and marks the best match
    for you — so you're not guessing which semantic layer fits.
 3. **Review** — confirm and attach.
@@ -93,7 +93,7 @@ ontology declares?* Every type is classified as:
 The tab leads with a plain verdict — *fully aligned*, or *needs attention*
 with a count of what's drifted or unmapped — before you drill into any detail,
 and it works from data collected periodically, not a live query, so it's fast
-to check. Case drift is usually the easy win: Synodic can normalize it for
+to check. Case drift is usually the easy win: {brand} can normalize it for
 you rather than requiring a manual data fix.
 
 ---

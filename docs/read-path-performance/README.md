@@ -4,9 +4,9 @@ How the graph read paths — canvas open/expand, aggregated edges, `/edges/betwe
 top-level nodes, and trace — were re-engineered to hold sub-second server times and
 never-504 semantics on multi-million-element graphs, over real network round-trips.
 
-> **Status:** WS0–WS5 shipped on `feature/major-data-reload-refactor`. WS7 (saturation
-> control, cache TTLs, transport) shipped. WS6 landed its resilience half; the canvas
-> frontend adoption of the batched contract is deferred (see [Current status](#current-status--whats-deferred)).
+> **Status:** WS0–WS5 shipped. WS7 (saturation control, cache TTLs, transport)
+> shipped. WS6 landed its resilience half; the canvas frontend adoption of the
+> batched contract is deferred (see [Current status](#current-status--whats-deferred)).
 
 ---
 

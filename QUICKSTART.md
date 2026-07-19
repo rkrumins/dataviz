@@ -1,6 +1,12 @@
-# Synodic — Local Setup Guide
+# Context Visualization Platform — Local Setup Guide
 
-Get the full Synodic platform running locally with pre-loaded sample data. No external dependencies beyond Docker.
+Get the full Context Visualization Platform running locally with pre-loaded sample data. No external dependencies beyond Docker.
+
+There are three ways to run the platform. This guide covers the compose-based paths in detail:
+
+- **Contributor** (edit source with hot-reload) — `./dev.sh` (see [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)).
+- **Self-host** (containers on a VM) — `./deploy.sh up` (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+- **Quickstart** (zero-config demo) — `docker compose -f docker-compose.quickstart.yml up`, described as Option A below.
 
 ---
 
@@ -169,7 +175,7 @@ npm run dev    # Vite dev server on http://localhost:5173
 
 ### 6. Schema migrations (Alembic)
 
-Synodic uses Alembic to own all schema lifecycle, but the application itself never runs migrations — `init_db()` only *verifies* the schema is at the expected head and fails loudly (or serves in degraded mode) if it isn't. Migrations are applied by a dedicated `synodic-upgrade` step: a Helm pre-install/pre-upgrade hook Job in Kubernetes, a one-shot `upgrade` service in Docker Compose, or manually via `python -m backend.scripts.upgrade upgrade` for a local `uvicorn` boot. For manual control over individual migrations:
+The platform uses Alembic to own all schema lifecycle, but the application itself never runs migrations — `init_db()` only *verifies* the schema is at the expected head and fails loudly (or serves in degraded mode) if it isn't. Migrations are applied by a dedicated `synodic-upgrade` step: a Helm pre-install/pre-upgrade hook Job in Kubernetes, a one-shot `upgrade` service in Docker Compose, or manually via `python -m backend.scripts.upgrade upgrade` for a local `uvicorn` boot. For manual control over individual migrations:
 
 ```bash
 cd backend

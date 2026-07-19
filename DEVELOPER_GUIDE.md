@@ -1,8 +1,8 @@
-# Synodic Developer Guide
+# Context Visualization Platform Developer Guide
 
-## What is Synodic?
+## What is the Context Visualization Platform?
 
-Synodic is a graph lineage visualization platform. It connects to graph databases (FalkorDB, Neo4j, DataHub), lets teams model data lineage through ontologies, and provides interactive visualization of how data flows through systems. The "aggregation" engine materializes summary edges so that million-node graphs can be navigated at any zoom level without running expensive live traversals.
+The Context Visualization Platform is a graph lineage visualization platform. It connects to graph databases (FalkorDB, Neo4j, DataHub), lets teams model data lineage through ontologies, and provides interactive visualization of how data flows through systems. The "aggregation" engine materializes summary edges so that million-node graphs can be navigated at any zoom level without running expensive live traversals.
 
 ---
 
@@ -85,6 +85,17 @@ The system is split into independent processes because aggregation is the bottle
 2. **Control Plane** answers "what's the status of my job?" in milliseconds, not competing with MERGE operations for CPU
 3. **Workers** can be scaled independently (1 for dev, 10 for production) and crash without affecting any API
 
+### Process Roles
+
+A single codebase boots into different roles, selected by the `SYNODIC_ROLE` environment variable (`backend/app/runtime/role.py`). The role controls which subsystems the FastAPI lifespan starts:
+
+- **`WEB`** — HTTP API, auth, reads, and lightweight writes. Stateless; scale horizontally.
+- **`WORKER`** — aggregation execution and heavy provider I/O.
+- **`CONTROLPLANE`** — scheduler, outbox relay, and crash recovery. Singleton.
+- **`DEV`** — all-in-one for local development (the default). Runs every subsystem in one process.
+
+The **versioning projection worker** is a separate process (`python -m backend.app.services.versioning`), not a `SYNODIC_ROLE` value — in `DEV` it can instead run in-process via `GRAPHVER_PROJECTION_INPROCESS=1`.
+
 ---
 
 ## Components in Detail
@@ -163,6 +174,20 @@ The batch executor. Headless -- no HTTP API, only a health probe. Consumes jobs 
 Each worker replica joins the same consumer group, so Redis distributes jobs automatically. Per-graph concurrency is limited (`MAX_CONCURRENT_PER_GRAPH`) to prevent FalkorDB write lock contention.
 
 **Entry point:** `backend/app/services/aggregation/__main__.py`
+
+#### versioning projection worker
+
+The graph-versioning executor. Like the aggregation worker, it is a headless background process that owns the heavy provider I/O for the version-control feature: it runs the resumable **enable-version-control bootstrap** (copying an existing data source into a versioned graph), projects published revisions onto FalkorDB, and handles restore/purge/reconcile work. It polls Postgres (`graphver.jobs`) and consumes a Redis stream, mirroring the aggregation worker's dispatch model, and checkpoints so a killed worker resumes rather than restarts.
+
+Must be running for any enable-VC or projection job to make progress — without it, versioning jobs sit in `pending` forever.
+
+**Entry point:** `python -m backend.app.services.versioning` (dev shortcut: set `GRAPHVER_PROJECTION_INPROCESS=1` to run it inside the viz-service process).
+
+#### insights service
+
+Powers pre-registration discovery (per-asset stats and previews shown before a data source is fully onboarded). The web tier's insights endpoints are **cache-only** — they never call a provider inline. A cache miss enqueues a `discovery` job into the insights service (Redis stream) and returns `200` with `meta.status="computing"` so the frontend renders a placeholder plus an ETA chip; the background service computes the payload and writes it to the cache for the next read.
+
+**Entry point:** `backend/app/api/v1/endpoints/insights.py` (API surface); background jobs run on the insights worker.
 
 #### graph-service (Port 8001)
 
@@ -355,7 +380,7 @@ source .env.dev
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm |
 | `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |
-| `ADMIN_PASSWORD` | `changeme` | Bootstrap admin password |
+| `ADMIN_PASSWORD` | `admin123` | Bootstrap admin password |
 
 ### Process Roles
 

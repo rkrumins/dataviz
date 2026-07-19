@@ -1,12 +1,14 @@
-# Synodic Platform Architecture
+# {brand} Platform Architecture
 
-> **Synodic** is a workspace-centric graph visualization and data lineage platform. It enables teams to explore, trace, and manage data relationships across heterogeneous graph backends through a unified semantic layer.
+> **{brand}** is a workspace-centric graph visualization and data lineage platform. It enables teams to explore, trace, and manage data relationships across heterogeneous graph backends through a unified semantic layer.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the current service/process-role topology (WEB, WORKER, CONTROLPLANE, DEV).
 
 ---
 
 ## System Overview
 
-Synodic is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Mock).
+{brand} is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Spanner Graph, Mock).
 
 ```mermaid
 graph TB
@@ -73,7 +75,7 @@ erDiagram
     Provider {
         text id PK "prov_*"
         text name
-        text provider_type "falkordb | neo4j | datahub | mock"
+        text provider_type "falkordb | neo4j | datahub | spanner | mock"
         text host
         int port
         text credentials "Fernet-encrypted JSON"
@@ -209,6 +211,7 @@ graph LR
         FP[FalkorDBProvider]
         NP[Neo4jProvider]
         DP[DataHubProvider]
+        SP[SpannerGraphProvider]
         MP[MockProvider]
     end
 
@@ -227,6 +230,7 @@ graph LR
     PR2 --> FP
     PR2 --> NP
     PR2 --> DP
+    PR2 --> SP
     PR2 --> MP
 
     style Routes fill:#312e81,stroke:#6366f1,color:#e2e8f0
@@ -347,7 +351,7 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 
 - **JWT Storage**: Currently stored in `localStorage` (XSS risk). Planned migration to HttpOnly cookies with CSRF protection.
 - **Credential Encryption**: Optional in development (`CREDENTIAL_ENCRYPTION_KEY` not set falls back to plaintext). **REQUIRED in production** — generate a key via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-- **Default Admin Password**: Bootstrap uses `"changeme"` — must be changed immediately in production.
+- **Default Admin Password**: Bootstrap uses `admin@nexuslineage.local` / `admin123` (override via `ADMIN_EMAIL` / `ADMIN_PASSWORD`) — must be changed immediately in production.
 
 ### Scalability Considerations
 

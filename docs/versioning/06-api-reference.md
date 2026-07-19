@@ -314,10 +314,16 @@ blank models (422 `ontology_required` / 503 `ontology_unavailable`). See
 - `GET /nodes/{urn}/delete-impact?branchId=…` (`graph.py:1804`) previews the containment subtree + all
   incident edges a delete would remove, via the **same** helper the commit uses, so preview matches
   result.
-- `POST /bootstrap` (`graph.py:105`) — "Enable version control": idempotent create-or-seed of the
-  versioned base from the live provider, in one transaction.
-- `POST /resync` (`graph.py:128`) — authoritative re-sync (`strategy: merge | external_wins`) via the
-  service's 3-way merge. See [10](10-authoritative-sources-datahub-openmetadata.md).
+- **"Enable version control" is an async job**, not a request — a multi-million-entity graph can't be
+  paged into one HTTP call. `POST /bootstrap` (`graph.py:122`) returns **202** `{jobId, graphId, status}`
+  (200 `{alreadyEnabled}` if already versioned; `422 provider_unsupported` for any non-FalkorDB source).
+  Poll `GET /bootstrap/status` (`graph.py:158`); `POST /bootstrap/retry?mode=resume|restart`
+  (`graph.py:177`) and `POST /bootstrap/abandon` (`graph.py:200`) drive recovery. The worker scans the
+  source in bounded ID-range windows, is resumable and crash-safe, and finalizes only after an integrity
+  report proves the copy — full detail in [`../VERSIONING_E2E.md`](../VERSIONING_E2E.md) §3.
+- `POST /resync` (`graph.py:281`) — authoritative re-sync (`strategy: merge | external_wins`) via the
+  service's 3-way merge; refuses above `GRAPHVER_RESYNC_MAX_ENTITIES` (default 250,000) with
+  `422 graph_too_large_to_sync`. See [10](10-authoritative-sources-datahub-openmetadata.md).
 
 > **Limitation — v1 trace is gone.** `POST /api/v1/{ws}/graph/trace` returns **410** with an RFC 8594
 > `Sunset` header (`graph.py:288-301`); use `POST /api/v2/{ws}/graph/trace`.
