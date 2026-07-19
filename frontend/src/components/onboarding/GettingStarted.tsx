@@ -68,6 +68,8 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
   const toursEnabled = useFeature('toursEnabled')
   const tourDone = useTourStore((s) => s.completed.includes(GETTING_STARTED_TOUR))
   const completeStep = usePreferencesStore((s) => s.completeOnboardingStep)
+  const gsHidden = usePreferencesStore((s) => s.gettingStartedHidden)
+  const setGsHidden = usePreferencesStore((s) => s.setGettingStartedHidden)
 
   const pct = total > 0 ? (completedCount / total) * 100 : 0
   // The single "next" step across every track — the one thing to do right now.
@@ -174,6 +176,18 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
           </button>
         </div>
       )}
+
+      {/* Sidebar visibility — lets the user tuck the launcher away (or bring it
+          back), reachable here via Help even once it's hidden. */}
+      <div className="mt-4 flex justify-center border-t border-glass-border/60 pt-3">
+        <button
+          type="button"
+          onClick={() => setGsHidden(!gsHidden)}
+          className="text-xs font-medium text-ink-muted transition-colors hover:text-ink"
+        >
+          {gsHidden ? 'Show in sidebar' : 'Hide from sidebar'}
+        </button>
+      </div>
     </motion.section>
   )
 }

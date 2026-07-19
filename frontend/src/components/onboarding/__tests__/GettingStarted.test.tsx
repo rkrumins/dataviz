@@ -23,6 +23,7 @@ vi.mock('@/store/features', () => ({ useFeature: () => toursOn }))
 
 import { GettingStarted } from '../GettingStarted'
 import { useTourStore } from '@/features/tour/tourStore'
+import { usePreferencesStore } from '@/store/preferences'
 
 type TStep = { id: string; label: string; description: string; icon: typeof Compass; done: boolean; href: string }
 type TTrack = { id: string; title: string; subtitle: string; accent: string; icon: typeof Boxes; steps: TStep[]; completedCount: number; total: number; allDone: boolean }
@@ -49,6 +50,7 @@ const renderHub = () => render(<MemoryRouter><GettingStarted /></MemoryRouter>)
 describe('GettingStarted — tracks + tour access', () => {
   beforeEach(() => {
     useTourStore.setState({ activeTourId: null, stepIndex: 0, completed: [] })
+    usePreferencesStore.setState({ gettingStartedHidden: false })
     toursOn = true
     setTracks([
       track('setup', 'Set up the platform', Boxes, [step('connect-provider', true), step('discover-assets', false)]),
@@ -87,5 +89,12 @@ describe('GettingStarted — tracks + tour access', () => {
     toursOn = false
     renderHub()
     expect(screen.queryByText('Product tour')).not.toBeInTheDocument()
+  })
+
+  it('toggles the sidebar launcher visibility from the hub', async () => {
+    renderHub()
+    expect(usePreferencesStore.getState().gettingStartedHidden).toBe(false)
+    await userEvent.click(screen.getByRole('button', { name: /hide from sidebar/i }))
+    expect(usePreferencesStore.getState().gettingStartedHidden).toBe(true)
   })
 })

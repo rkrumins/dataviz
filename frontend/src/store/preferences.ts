@@ -140,6 +140,9 @@ interface PreferencesState {
   completeOnboardingStep: (step: string) => void
   dismissOnboarding: () => void
   resetOnboarding: () => void
+  /** Whether the user has hidden the Getting Started launcher from the sidebar. */
+  gettingStartedHidden: boolean
+  setGettingStartedHidden: (hidden: boolean) => void
 
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
@@ -263,6 +266,8 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (state.onboardingCompletedSteps.includes(step)) return state
         return { onboardingCompletedSteps: [...state.onboardingCompletedSteps, step] }
       }),
+      gettingStartedHidden: false,
+      setGettingStartedHidden: (gettingStartedHidden) => set({ gettingStartedHidden }),
       dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
       resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
 

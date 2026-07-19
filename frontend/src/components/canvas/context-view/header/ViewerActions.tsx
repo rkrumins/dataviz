@@ -131,6 +131,7 @@ export function ComprehensionTools({
           through the colored dot + active gradient. Trace state lives
           on its own button below; this label no longer encodes it. */}
       <button
+        data-tour="canvas-lineage-toggle"
         onClick={onToggleLineageFlow}
         title={showLineageFlow ? 'Hide the lineage mesh on the canvas' : 'Show the lineage mesh on the canvas'}
         className={cn(
@@ -185,6 +186,7 @@ export function ComprehensionTools({
           the button is gone, because the server will refuse the request anyway. */}
       {!traceEnabled ? null : traceActive ? (
         <button
+          data-tour="canvas-trace"
           onClick={onExitTrace}
           title="Exit trace mode"
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-rose-500/20 to-rose-500/10 text-rose-700 border border-rose-400/50 hover:from-rose-500/30 hover:to-rose-500/20 hover:border-rose-400/70 dark:text-rose-200 dark:border-rose-400/40 dark:hover:border-rose-300/60 dark:hover:shadow-lg dark:hover:shadow-rose-500/20 transition-all duration-300"
@@ -195,6 +197,7 @@ export function ComprehensionTools({
         </button>
       ) : !lineageReady ? (
         <button
+          data-tour="canvas-trace"
           onClick={warnLineageNotReady}
           aria-busy="true"
           title="Lineage data is still loading — Trace will become available once it finishes"
@@ -214,6 +217,7 @@ export function ComprehensionTools({
         </button>
       ) : (
         <button
+          data-tour="canvas-trace"
           onClick={canTrace ? onStartTrace : undefined}
           disabled={!canTrace}
           title={canTrace ? 'Trace lineage of selected entity' : 'Select a single entity to trace its lineage'}

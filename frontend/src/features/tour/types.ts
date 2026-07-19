@@ -24,4 +24,10 @@ export interface TourDefinition {
   /** Rough time to complete, e.g. "2 min". */
   estimate: string
   steps: TourStep[]
+  /** Only meaningful on a specific surface (e.g. an open canvas). Such tours are
+   *  offered from that surface, and from Help only while the user is there —
+   *  their targets don't exist elsewhere, so they can't be launched cold. */
+  contextual?: boolean
+  /** Path prefix a contextual tour belongs to (e.g. "/views/"). */
+  contextPathPrefix?: string
 }

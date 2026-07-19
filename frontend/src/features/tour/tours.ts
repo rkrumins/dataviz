@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass, Boxes } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes, Workflow } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -189,6 +189,51 @@ TOURS.push(
       {
         title: "That's workspaces",
         body: 'With a workspace in place, your team has an isolated home to explore lineage together. Open **Help** to replay any tour.',
+      },
+    ],
+  },
+  {
+    id: 'canvas-lineage',
+    title: 'Read the lineage canvas',
+    description: 'Search, trace, and tune the view — a lap around the canvas toolbar.',
+    icon: Workflow,
+    estimate: '2 min',
+    // Only works on an open view (`/views/:id`); its targets live in the canvas
+    // header. Offered from the canvas itself and from Help while you're here.
+    contextual: true,
+    contextPathPrefix: '/views/',
+    steps: [
+      {
+        title: 'Make sense of the graph',
+        body: "You're looking at a **view** — a slice of the graph. These toolbar controls help you read it. Leave any time with **Esc**.",
+      },
+      {
+        target: '[data-tour="canvas-search"]',
+        placement: 'bottom',
+        title: 'Find a node',
+        body: 'Search the view for any table, dataset, or dashboard and jump straight to it on the canvas.',
+      },
+      {
+        target: '[data-tour="canvas-lineage-toggle"]',
+        placement: 'bottom',
+        title: 'Show the lineage mesh',
+        body: 'Toggle the **Lineage** overlay to draw how data flows between the nodes on screen.',
+      },
+      {
+        target: '[data-tour="canvas-trace"]',
+        placement: 'bottom',
+        title: 'Trace a node',
+        body: 'Select a node and **Trace Lineage** to light up everything upstream and downstream — its blast radius. Set the depth once a trace is running.',
+      },
+      {
+        target: '[data-tour="canvas-display"]',
+        placement: 'bottom',
+        title: 'Tune the display',
+        body: 'Open **Display** to adjust zoom, density, edge direction, and how lineage is drawn — the canvas your way.',
+      },
+      {
+        title: "You've got the canvas",
+        body: 'Search to find, Trace to follow, Display to tune. Open **Help** to replay this any time.',
       },
     ],
   },

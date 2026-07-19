@@ -48,6 +48,7 @@ import { useToast } from '@/components/ui/toast'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -500,6 +501,7 @@ export function ExplorerPage() {
               <h1 className="text-xl font-bold text-ink leading-tight">Explorer</h1>
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
+            <TourLaunchButton tourId="explore-lineage" />
             <button
               data-tour="explorer-new-view"
               onClick={() => openViewEditor()}

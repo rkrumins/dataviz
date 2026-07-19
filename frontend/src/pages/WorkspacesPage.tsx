@@ -32,6 +32,7 @@ import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspa
 import { PageContainer } from '@/components/layout/PageContainer'
 import { cn } from '@/lib/utils'
 import { Check } from 'lucide-react'
+import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -456,11 +457,14 @@ export function WorkspacesPage() {
                         <p className="text-[11px] text-ink-muted">Your data domains — group sources, govern schemas, and power team views</p>
                     </div>
                 </div>
-                {canCreateWorkspace && (
-                    <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
-                        <Plus className="w-4 h-4" /> Create Workspace
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    <TourLaunchButton tourId="workspaces" />
+                    {canCreateWorkspace && (
+                        <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                            <Plus className="w-4 h-4" /> Create Workspace
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* A failed refresh used to erase the provider/ontology detail silently.

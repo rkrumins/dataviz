@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSlug from 'rehype-slug'
@@ -179,6 +179,12 @@ function HomeView({
   const toursEnabled = useFeature('toursEnabled')
   const startTour = useTourStore((s) => s.start)
   const completedTours = useTourStore((s) => s.completed)
+  const { pathname } = useLocation()
+  // Contextual tours (e.g. the canvas tour) only work on their own surface —
+  // offer them from Help only while the user is there.
+  const visibleTours = TOURS.filter(
+    (t) => !t.contextual || (t.contextPathPrefix ? pathname.startsWith(t.contextPathPrefix) : false),
+  )
 
   // Focus the search input when the home view mounts (i.e. on open / back).
   useEffect(() => {
@@ -322,7 +328,7 @@ function HomeView({
                   <Sparkles className="h-3 w-3" /> Take a tour
                 </div>
                 <ul className="space-y-1">
-                  {TOURS.map((t) => {
+                  {visibleTours.map((t) => {
                     const done = completedTours.includes(t.id)
                     return (
                       <li key={t.id}>
