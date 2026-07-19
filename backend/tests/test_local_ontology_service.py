@@ -132,20 +132,25 @@ def _make_schema_stats(
 
 
 class TestResolveThreeLayerMerge:
-    """Test the full three-layer merge logic in resolve()."""
+    """Test the two-layer merge logic in resolve() (assigned + introspection).
 
-    async def test_resolve_system_only(self):
-        """With no workspace_id, only system defaults are used."""
+    The system-default merge layer was removed (see service.resolve and
+    resolver.resolve_ontology): resolve reads only the assigned ontology plus
+    graph introspection, never a system default.
+    """
+
+    async def test_resolve_no_workspace_gates_out_system(self):
+        """With no workspace_id, no assigned ontology is loaded and the system
+        default is gated out — resolve returns an empty ontology even when the
+        repo has a system default."""
         repo = _StubOntologyRepository(system_default=_minimal_system_ontology())
         svc = LocalOntologyService(repository=repo)
         resolved = await svc.resolve()
 
         assert isinstance(resolved, ResolvedOntology)
-        assert "dataset" in resolved.entity_type_definitions
-        assert "CONTAINS" in resolved.relationship_type_definitions
-        # All sources should be "system_default"
-        for src in resolved.resolution_sources.values():
-            assert src == "system_default"
+        # System defaults are NOT merged even though the repo has one.
+        assert "dataset" not in resolved.entity_type_definitions
+        assert len(resolved.entity_type_definitions) == 0
 
     async def test_resolve_assigned_replaces_system_entirely(self):
         """When an assigned ontology exists, system defaults are gated
@@ -175,7 +180,9 @@ class TestResolveThreeLayerMerge:
         assert "container" not in resolved.entity_type_definitions
 
     async def test_resolve_introspection_gap_fills(self):
-        """Introspected types not in system or assigned get synthetic defs."""
+        """Introspected types not in the assigned ontology get synthetic defs.
+        With no assigned ontology (no workspace), every introspected type is
+        gap-filled from introspection."""
         system = _minimal_system_ontology()
         repo = _StubOntologyRepository(system_default=system)
         svc = LocalOntologyService(repository=repo)
@@ -185,8 +192,10 @@ class TestResolveThreeLayerMerge:
             introspected_rel_ids=["NOVEL_EDGE"],
         )
 
-        # dataset already in system — should NOT be introspection
-        assert resolved.resolution_sources["dataset"] == "system_default"
+        # No assigned ontology — dataset is gap-filled from introspection,
+        # not from the (gated-out) system default.
+        assert "dataset" in resolved.entity_type_definitions
+        assert resolved.resolution_sources["dataset"] == "introspection"
         # novelEntity is new — gap-filled from introspection
         assert "novelEntity" in resolved.entity_type_definitions
         assert resolved.resolution_sources["novelEntity"] == "introspection"
@@ -203,8 +212,10 @@ class TestResolveThreeLayerMerge:
         assert isinstance(resolved, ResolvedOntology)
         assert len(resolved.entity_type_definitions) == 0
 
-    async def test_resolve_data_source_error_falls_back_to_system(self):
-        """When get_for_data_source raises, resolve gracefully falls back to system."""
+    async def test_resolve_data_source_error_resolves_empty(self):
+        """When get_for_data_source raises, resolve swallows the error and
+        returns an empty ontology — it no longer falls back to a system
+        default (that merge layer was removed)."""
         system = _minimal_system_ontology()
         repo = _StubOntologyRepository(
             system_default=system,
@@ -213,9 +224,8 @@ class TestResolveThreeLayerMerge:
         svc = LocalOntologyService(repository=repo)
         resolved = await svc.resolve(workspace_id="ws_broken")
 
-        # Should still have system defaults
-        assert "dataset" in resolved.entity_type_definitions
-        assert resolved.resolution_sources["dataset"] == "system_default"
+        assert isinstance(resolved, ResolvedOntology)
+        assert len(resolved.entity_type_definitions) == 0
 
     async def test_resolve_without_workspace_skips_assigned_lookup(self):
         """If no workspace_id, get_for_data_source should NOT be called."""
@@ -235,11 +245,12 @@ class TestResolveThreeLayerMerge:
         assert "customType" not in resolved.entity_type_definitions
 
     async def test_resolve_derived_lists_populated(self):
-        """Derived flat lists (containment, lineage, etc.) should be computed."""
-        system = _minimal_system_ontology()
-        repo = _StubOntologyRepository(system_default=system)
+        """Derived flat lists (containment, roots, etc.) are computed from the
+        assigned ontology."""
+        assigned = _minimal_system_ontology()
+        repo = _StubOntologyRepository(for_data_source=assigned)
         svc = LocalOntologyService(repository=repo)
-        resolved = await svc.resolve()
+        resolved = await svc.resolve(workspace_id="ws_test")
 
         assert "CONTAINS" in resolved.containment_edge_types
         assert "dataset" in resolved.root_entity_types or "container" in resolved.root_entity_types

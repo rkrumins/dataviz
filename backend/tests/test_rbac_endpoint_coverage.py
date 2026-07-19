@@ -145,8 +145,11 @@ async def test_global_admin_router_allows_system_admin(
 
 # ── workspace-scoped data routers ────────────────────────────────────
 
+# NOTE: the workspace-scoped context-model *instance* CRUD was retired (the
+# router now only serves ``GET /templates``), so it no longer belongs here.
+# ``assets/rule-sets`` carries the same router-level ``workspace:datasource:read``
+# baseline and is the representative surface for this gate.
 _WS_READ_GET = [
-    "/api/v1/ws_a/context-models",
     "/api/v1/ws_a/assets/rule-sets",
 ]
 
@@ -215,7 +218,7 @@ async def test_ws_mutation_forbidden_for_read_only_member(
         ws_perms={"ws_a": ("workspace:datasource:read",)},
     )
     with _auth(user=_NON_ADMIN, claims=claims):
-        r = await test_client.delete("/api/v1/ws_a/context-models/cm_does_not_exist")
+        r = await test_client.delete("/api/v1/ws_a/assets/rule-sets/rs_does_not_exist")
     assert r.status_code == 403, r.status_code
 
 
@@ -231,14 +234,14 @@ async def test_ws_mutation_allowed_for_manager(test_client: AsyncClient):
         ws_perms={"ws_a": ("workspace:datasource:*",)},
     )
     with _auth(user=_NON_ADMIN, claims=claims):
-        r = await test_client.delete("/api/v1/ws_a/context-models/cm_does_not_exist")
+        r = await test_client.delete("/api/v1/ws_a/assets/rule-sets/rs_does_not_exist")
     assert r.status_code not in (401, 403), r.status_code
 
 
 @pytest.mark.asyncio
 async def test_ws_mutation_forbidden_unauthenticated(test_client: AsyncClient):
     with _auth(user=None, claims=None):
-        r = await test_client.delete("/api/v1/ws_a/context-models/cm_x")
+        r = await test_client.delete("/api/v1/ws_a/assets/rule-sets/rs_x")
     assert r.status_code == 401, r.status_code
 
 

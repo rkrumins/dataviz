@@ -41,6 +41,12 @@ vi.mock('@/store/health', () => ({
   },
 }))
 
+vi.mock('@/store/auth', () => ({
+  useAuthStore: (selector: (state: any) => unknown) => selector({
+    isAuthenticated: true,
+  }),
+}))
+
 describe('GraphProvider workspace bootstrap', () => {
   beforeEach(() => {
     vi.clearAllMocks()

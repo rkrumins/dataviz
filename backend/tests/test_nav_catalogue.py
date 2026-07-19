@@ -33,11 +33,11 @@ from backend.auth_service.interface import User
 
 # ── Route introspection ─────────────────────────────────────────────
 
-def _route_gate_perms(route: APIRoute) -> set[str]:
-    """Permissions enforced on a route, via ``requires(...)`` tags and
-    the ``require_admin`` ⇒ ``system:admin`` equivalence."""
+def _dependant_gate_perms(dependant) -> set[str]:
+    """Permissions enforced on a route's dependant, via ``requires(...)`` tags
+    and the ``require_admin`` ⇒ ``system:admin`` equivalence."""
     perms: set[str] = set()
-    stack = [route.dependant]
+    stack = [dependant]
     while stack:
         dep = stack.pop()
         call = getattr(dep, "call", None)
@@ -50,15 +50,50 @@ def _route_gate_perms(route: APIRoute) -> set[str]:
     return perms
 
 
+def _iter_route_gates():
+    """Yield ``(full_path, dependant)`` for every mounted APIRoute.
+
+    Newer FastAPI/starlette include routers lazily: children no longer flatten
+    into ``app.routes`` but sit under ``_IncludedRouter`` wrappers. Their
+    fully-resolved absolute paths AND merged dependants — which fold in
+    router-``include``-level ``dependencies=[Depends(requires(...))]`` gates,
+    not just per-route ``Depends`` — are only materialised through the
+    wrapper's ``effective_candidates()`` / ``effective_low_priority_routes()``.
+    Walk those so introspection sees every gate with a correct absolute path.
+    Falls back to the plain ``app.routes`` APIRoutes for anything not wrapped
+    (e.g. the top-level health endpoints)."""
+    import fastapi.routing as _fr
+
+    def _emit(ctx):
+        original = getattr(ctx, "original_route", None)
+        if isinstance(original, APIRoute):
+            path = getattr(ctx, "path", "") or ""
+            dependant = getattr(ctx, "dependant", None) or original.dependant
+            yield path, dependant
+
+    def _walk(routes):
+        for route in routes:
+            if isinstance(route, _fr._IncludedRouter):
+                for cand in route.effective_candidates():
+                    if isinstance(cand, _fr._IncludedRouter):
+                        yield from _walk([cand])
+                    else:
+                        yield from _emit(cand)
+                for cand in route.effective_low_priority_routes():
+                    yield from _emit(cand)
+            elif isinstance(route, APIRoute):
+                yield route.path, route.dependant
+
+    yield from _walk(app.routes)
+
+
 def _perms_under(prefixes: tuple[str, ...]) -> set[str]:
     """Union of every gate permission enforced on any route whose path
     contains one of ``prefixes``."""
     found: set[str] = set()
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        if any(p in route.path for p in prefixes):
-            found |= _route_gate_perms(route)
+    for path, dependant in _iter_route_gates():
+        if any(p in path for p in prefixes):
+            found |= _dependant_gate_perms(dependant)
     return found
 
 
@@ -67,6 +102,7 @@ def _perms_under(prefixes: tuple[str, ...]) -> set[str]:
 # under these prefixes.
 _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "overview":      ("/admin/stats-polling",),
+    "redis":         ("/admin/redis",),
     "infrastructure": ("/admin/system/status",),
     "branding":      ("/admin/branding",),
     "features":      ("/admin/features",),
