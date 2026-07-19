@@ -41,6 +41,7 @@ work established, and the prioritized road ahead.
 | Zoom | CSS `zoom`-based (layout-truthful), fit-to-width, presets, redraw wiring |
 | Lineage Lens | Ego-graph overlay, grouped/searchable, re-center stack, entry points: drawer, `f`, right-click "Focus Connections", overflow chips |
 | Lens on-demand fetch | Every visited focal node's true 1-hop lineage + partner names fetched from the provider on open/walk/drill (lens-local, never mutates canvas scope); O(degree) indexed derivation; per-node loading/error/truncation narration; drill fetches an aggregate's underlying edges via the expandEdge pair query |
+| Lens walkable containment | Containers whose relationships live at child level no longer dead-end: containment edges fetched per visited node; walkable "Contains" group in walk columns + contained-entities band in classic mode (distinct visual grammar — a descent never masquerades as a flow hop); hover row actions replace the chevron in-flow instead of overlaying the label |
 | Anchor Rail (phase 1) | Selection-scoped docked partner proxies; real-DOM chip anchoring; click-to-reveal; "+N more · Open lens" |
 | Framed mode | Explicit exit chrome with Esc hint; unified entry from Frame pill and Lens "Reveal all" |
 | Column periphery | Edge scrims ("↑ N more · M connections") with named-partner hover panels, per-layer calculated, store-isolated |

@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
+import { useContainmentEdgeTypes } from '@/store/schema'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 
 /** Per-direction edge cap per focal node — two queries per node.
@@ -81,6 +82,7 @@ export function useLensLineage(
   provider: GraphDataProvider,
   lineageEdgeTypes: string[],
 ): LensLineageData {
+  const containmentEdgeTypes = useContainmentEdgeTypes()
   const [state, setState] = useState<FetchState>(emptyState)
   // Fetches already started this session (prevents effect re-kicks);
   // errors stay in here — retry is explicit, never a loop.
@@ -127,12 +129,33 @@ export function useLensLineage(
     })
     try {
       const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
-      const [outEdges, inEdges] = await Promise.all([
+      // Flow lineage both directions PLUS containment both directions
+      // (children when the node is a parent, its own parent otherwise).
+      // Containers often carry their relationships at CHILD level — a
+      // walk into one must surface what it contains, or it dead-ends.
+      // An untyped lineage fetch already returns containment edges;
+      // typed fetches need the explicit extra queries.
+      const wantContainment = !!types && containmentEdgeTypes.length > 0
+      const [outEdges, inEdges, ...containment] = await Promise.all([
         provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: EDGE_FETCH_LIMIT }),
         provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: EDGE_FETCH_LIMIT }),
+        ...(wantContainment
+          ? [
+              provider.getEdges({ sourceUrns: [urn], edgeTypes: containmentEdgeTypes, limit: EDGE_FETCH_LIMIT }),
+              provider.getEdges({ targetUrns: [urn], edgeTypes: containmentEdgeTypes, limit: EDGE_FETCH_LIMIT }),
+            ]
+          : []),
       ])
       const truncated = outEdges.length >= EDGE_FETCH_LIMIT || inEdges.length >= EDGE_FETCH_LIMIT
-      const edges = [...outEdges, ...inEdges].map(toCanvasEdge)
+      const seenEdge = new Set<string>()
+      const edges: LineageEdge[] = []
+      for (const list of [outEdges, inEdges, ...containment]) {
+        for (const ge of list) {
+          if (seenEdge.has(ge.id)) continue
+          seenEdge.add(ge.id)
+          edges.push(toCanvasEdge(ge))
+        }
+      }
       const named = await resolveNames(edges.flatMap(e => [e.source, e.target]).filter(p => p !== urn))
       if (session !== sessionRef.current) return
       setState(prev => {
@@ -152,7 +175,7 @@ export function useLensLineage(
         return { ...prev, status }
       })
     }
-  }, [provider, lineageEdgeTypes, resolveNames])
+  }, [provider, lineageEdgeTypes, containmentEdgeTypes, resolveNames])
 
   /** Fetch the raw edges an aggregated row rolls up — the same
    *  source×target pair query the canvas's expandEdge uses, so the

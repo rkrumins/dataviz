@@ -31,7 +31,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
 import { EDGE_FETCH_LIMIT } from './useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
@@ -261,6 +261,28 @@ export function LineageLens({
     [lensStack, edgesByEndpoint, nodeMap, containmentEdgeTypes],
   )
 
+  // Containment per hop — a container's relationships often live at
+  // CHILD level, so a walk into one would dead-end on flow edges alone.
+  // Children (containment edges are parent → child) render as a
+  // walkable "Contains" group; O(degree) via the endpoint index.
+  const containmentByHop = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const id of lensStack) {
+      if (m.has(id)) continue
+      const children: string[] = []
+      const seen = new Set<string>()
+      for (const e of edgesByEndpoint.get(id) ?? []) {
+        if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
+        if (e.source === id && e.target !== id && !seen.has(e.target)) {
+          seen.add(e.target)
+          children.push(e.target)
+        }
+      }
+      m.set(id, children)
+    }
+    return m
+  }, [lensStack, edgesByEndpoint, containmentEdgeTypes])
+
   // ── Containment drill — refine an aggregated row to its constituent
   // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
   // up (`data.sourceEdges`). Honest by construction: constituents that
@@ -304,6 +326,11 @@ export function LineageLens({
   const focalType = (focalNode?.data?.type as string) ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalFetch = fetchStatus?.get(nodeId)
+  const focalChildren = containmentByHop.get(nodeId) ?? []
+  const focalChildTotal = Math.max(
+    focalChildren.length,
+    (focalNode?.data?.childCount as number | undefined) ?? 0,
+  )
 
   const q = query.trim().toLowerCase()
   const filterFn = (r: NeighborRecord) =>
@@ -349,7 +376,7 @@ export function LineageLens({
                 <span>
                   {lensStack.length > 1
                     ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
-                    : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}`}
+                    : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
                 {focalFetch === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
@@ -552,6 +579,12 @@ export function LineageLens({
                 const hopLabel = labelOf(hopId, nodeMap.get(hopId))
                 const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
                 const hopFetch = fetchStatus?.get(hopId)
+                const hopChildren = (containmentByHop.get(hopId) ?? [])
+                  .filter(cid => !isLast || q === '' || labelOf(cid, nodeMap.get(cid)).toLowerCase().includes(q))
+                const hopChildTotal = Math.max(
+                  hopChildren.length,
+                  (nodeMap.get(hopId)?.data?.childCount as number | undefined) ?? 0,
+                )
                 return (
                   <motion.div
                     key={`walk-col-${hopId}-${i}`}
@@ -700,7 +733,53 @@ export function LineageLens({
                           </div>
                         )
                       })}
-                      {byNeighbor.size === 0 && (
+                      {/* Contained entities — the containment descent that
+                          keeps a walk alive when a container carries its
+                          relationships at child level. Stepping into a
+                          child is a normal walk hop (trail + branch). */}
+                      {hopChildren.length > 0 && (
+                        <div className={byNeighbor.size > 0 ? 'mt-1 pt-1 border-t border-black/[0.05] dark:border-white/[0.05]' : ''}>
+                          <div className="flex items-center gap-1.5 px-3 py-1">
+                            <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
+                            <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
+                            <span className="text-[9.5px] tabular-nums text-ink-muted/60">{hopChildTotal}</span>
+                          </div>
+                          {hopChildren.slice(0, 100).map(cid => {
+                            const active = cid === walkedInto
+                            const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
+                            return (
+                              <button
+                                key={`child-${cid}`}
+                                type="button"
+                                onClick={() => (isLast ? onRecenter(cid) : onWalkTo(i, cid))}
+                                title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
+                                className={
+                                  active
+                                    ? 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
+                                    : 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
+                                }
+                              >
+                                <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
+                                <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
+                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
+                              </button>
+                            )
+                          })}
+                          {hopChildTotal > Math.min(hopChildren.length, 100) && (
+                            <p className="px-3 py-0.5 text-[10px] text-ink-muted/60">
+                              +{(hopChildTotal - Math.min(hopChildren.length, 100)).toLocaleString()} more contained
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      {byNeighbor.size === 0 && hopChildren.length > 0 && hopFetch !== 'loading' && (
+                        <p className="px-3 pt-2 pb-1 text-[10.5px] text-ink-muted/60 italic leading-snug">
+                          No direct {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections —
+                          step into a contained entity to keep walking, or flip the direction.
+                        </p>
+                      )}
+                      {byNeighbor.size === 0 && hopChildren.length === 0 && (
                         hopFetch === 'loading' ? (
                           <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-ink-muted/70">
                             <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
@@ -764,6 +843,43 @@ export function LineageLens({
                 </div>
                 <FlowRail color={focalColor} active={outgoingRecords.length > 0} />
               </div>
+
+              {/* Contained entities — the descent that keeps exploration
+                  alive when a container's relationships live at child
+                  level. Clicking steps the walk INTO the child. */}
+              {focalChildren.length > 0 && (
+                <div className="w-60 mt-4 min-h-0">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
+                    <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
+                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">{focalChildTotal}</span>
+                  </div>
+                  <div className="max-h-36 overflow-y-auto custom-scrollbar flex flex-col">
+                    {focalChildren.slice(0, 50).map(cid => {
+                      const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
+                      return (
+                        <button
+                          key={`focal-child-${cid}`}
+                          type="button"
+                          onClick={() => onRecenter(cid)}
+                          title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
+                          className="w-full min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
+                        >
+                          <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
+                          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
+                          <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
+                          <LucideIcons.ChevronRight className="ml-auto w-3 h-3 flex-shrink-0 text-ink-muted/30" />
+                        </button>
+                      )
+                    })}
+                    {focalChildTotal > Math.min(focalChildren.length, 50) && (
+                      <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
+                        +{(focalChildTotal - Math.min(focalChildren.length, 50)).toLocaleString()} more contained
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <NeighborColumn
@@ -1009,14 +1125,17 @@ function NeighborColumn({
                           {unloaded && <span className="italic">· not on canvas</span>}
                         </p>
                       </div>
-                      {/* Flow direction cue: data always travels left → right */}
+                      {/* Flow direction cue: data always travels left → right.
+                          On hover the actions REPLACE the chevron in normal
+                          flow (the label truncates to make room) — an absolute
+                          overlay covered the label and chevron. */}
                       <LucideIcons.ChevronRight
-                        className={cn('w-3.5 h-3.5 flex-shrink-0 group-hover:opacity-0 transition-opacity', isIn ? 'order-last' : 'order-first')}
+                        className={cn('w-3.5 h-3.5 flex-shrink-0 group-hover:hidden', isIn ? 'order-last' : 'order-first')}
                         style={{ color: `${edgeColor}99` }}
                       />
                       <span className={cn(
-                        'absolute top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
-                        isIn ? 'right-1.5' : 'left-1.5',
+                        'hidden group-hover:flex flex-shrink-0 items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
+                        isIn ? 'order-last' : 'order-first',
                       )}>
                         {onRevealOnCanvas && (
                           <button

@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens } from '../LineageLens'
 import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
 
 const node = (id: string, type = 'dataset'): LineageNode => ({
   id,
@@ -168,5 +169,30 @@ describe('LineageLens on-demand fetch merge', () => {
     renderLens(['a'], {}, { fetchStatus: new Map([['a', 'error' as const]]), onRetryFetch })
     fireEvent.click(screen.getByText('Retry'))
     expect(onRetryFetch).toHaveBeenCalledWith('a')
+  })
+
+  it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
+    } as never)
+    try {
+      useCanvasStore.setState({ nodes: [node('root')], edges: [], visibleEdges: [] } as never)
+      const onRecenter = vi.fn()
+      renderLens(['root'], { onRecenter }, {
+        supplementalEdges: [
+          { id: 'c1', source: 'root', target: 'kid', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+        ],
+        supplementalNodes: new Map([['kid', node('kid')]]),
+        fetchStatus: new Map([['root', 'done' as const]]),
+      })
+      expect(screen.getByText('Contains')).toBeTruthy()
+      // Containment must NOT count as a flow connection.
+      expect(screen.getByText(/0 direct connections · contains 1/)).toBeTruthy()
+      fireEvent.click(screen.getByText('label-kid'))
+      expect(onRecenter).toHaveBeenCalledWith('kid')
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
   })
 })
