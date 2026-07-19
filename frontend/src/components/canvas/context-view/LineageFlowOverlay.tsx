@@ -51,6 +51,7 @@ export function LineageFlowOverlay({
   flowRibbons,
   focusNodeId,
   onAnchorProxies,
+  externalCue,
 }: {
   nodes: any[],
   edges: any[],
@@ -97,6 +98,9 @@ export function LineageFlowOverlay({
   /** Rail payload per layer id — called only when the rail content
    *  actually changes (the compute pass runs per frame). */
   onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
+  /** Per-node lineage OUTSIDE the view's scope (curated views) —
+   *  hollow dashed hairline cue. Absent node = unknown, render nothing. */
+  externalCue?: Map<string, { in: number; out: number }>,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -119,6 +123,9 @@ export function LineageFlowOverlay({
     /** Volume relative to the heaviest visible node (log-scaled 0..1) —
      *  drives hairline opacity so only hubs stand out. */
     intensity: number
+    /** Out-of-view lineage cue (curated views): rendered HOLLOW/dashed,
+     *  visually distinct from the solid loaded-lineage hairline. */
+    external?: boolean
   }>>([])
   // Flow ribbons — macro volume bands between layer columns, computed per
   // updateFlow frame (≤ MAX_FLOW_RIBBONS DOM rect reads).
@@ -799,6 +806,30 @@ export function LineageFlowOverlay({
             intensity: Math.log2(1 + counts.out) / logMax,
           })
         }
+        // Ambient external cue — hollow dashed tab one step further
+        // outboard: "this side ALSO has lineage outside this view".
+        // Absent from the map = unknown → nothing (never a zero-claim).
+        const ext = externalCue?.get(nodeId)
+        if (ext) {
+          const cardLeft = rect.left - containerRect.left
+          const cardRight = rect.right - containerRect.left
+          if (ext.in > 0) {
+            newStubs.push({
+              nodeId, side: 'in', count: ext.in,
+              cx: cardLeft - RIBBON_W * 1.5 - 3, cy: midY,
+              width: RIBBON_W, height: Math.max(12, height * 0.6),
+              intensity: 0.4, external: true,
+            })
+          }
+          if (ext.out > 0) {
+            newStubs.push({
+              nodeId, side: 'out', count: ext.out,
+              cx: cardRight + RIBBON_W * 1.5 + 3, cy: midY,
+              width: RIBBON_W, height: Math.max(12, height * 0.6),
+              intensity: 0.4, external: true,
+            })
+          }
+        }
       })
       setComputedStubs(newStubs)
     } else if (computedStubs.length > 0) {
@@ -943,7 +974,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons, externalCue])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -969,7 +1000,7 @@ export function LineageFlowOverlay({
   // scroll / resize / hover.
   useEffect(() => {
     scheduleUpdate()
-  }, [showStubs, nodeStubCounts, flowRibbons, scheduleUpdate])
+  }, [showStubs, nodeStubCounts, flowRibbons, externalCue, scheduleUpdate])
 
   // ResizeObserver + IntersectionObserver for node elements.
   // Uses MutationObserver to dynamically track layer-node-* elements as they're
@@ -1751,6 +1782,22 @@ export function LineageFlowOverlay({
                 // must see where lineage exists at a glance. Intensity
                 // adds emphasis on top so hubs still stand out.
                 <g key={key} className="pointer-events-none" opacity={0.6 + stub.intensity * 0.4}>
+                  {stub.external ? (
+                    // Hollow + dashed + sky: same visual grammar as every
+                    // other "outside this view" surface.
+                    <rect
+                      x={stub.cx - stub.width / 2}
+                      y={stub.cy - stub.height / 2}
+                      width={stub.width}
+                      height={stub.height}
+                      rx={stub.width / 2}
+                      ry={stub.width / 2}
+                      fill="none"
+                      stroke="rgb(56, 189, 248)"
+                      strokeWidth={1.2}
+                      strokeDasharray="3 2"
+                    />
+                  ) : (
                   <rect
                     x={stub.cx - stub.width / 2}
                     y={stub.cy - stub.height / 2}
@@ -1760,6 +1807,7 @@ export function LineageFlowOverlay({
                     ry={stub.width / 2}
                     fill="url(#lineage-ribbon-core)"
                   />
+                  )}
                   <title>{label}</title>
                 </g>
               )

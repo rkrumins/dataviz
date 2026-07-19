@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RegistryConnections } from './RegistryConnections'
 
@@ -55,6 +56,16 @@ vi.mock('./ProviderOnboardingWizard', () => ({
   ProviderOnboardingWizard: () => null,
 }))
 
+vi.mock('@/store/auth', async () => {
+  const actual = await vi.importActual<typeof import('@/store/auth')>('@/store/auth')
+  return {
+    ...actual,
+    // Phase 18 gates the provider write paths (test/edit/delete) behind
+    // system:admin. Grant it so the delete flow under test is reachable.
+    usePermission: () => true,
+  }
+})
+
 const sampleProvider = {
   id: 'prov_1',
   name: 'Warehouse Graph',
@@ -69,7 +80,12 @@ const sampleProvider = {
 }
 
 function renderRegistry() {
-  return render(<RegistryConnections />)
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={qc}>
+      <RegistryConnections />
+    </QueryClientProvider>,
+  )
 }
 
 describe('RegistryConnections', () => {

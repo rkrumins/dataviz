@@ -39,7 +39,7 @@ async def list_stats_polling(
 ) -> list[StatsPollingRow]:
     """Return one row per data source with its polling config + last poll outcome."""
     stmt = (
-        select(
+        select(  # noqa: cross-domain — read-only admin diagnostics join
             WorkspaceDataSourceORM.id.label("data_source_id"),
             WorkspaceDataSourceORM.workspace_id,
             WorkspaceDataSourceORM.label,

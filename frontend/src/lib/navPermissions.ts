@@ -77,7 +77,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     groups:        { kind: 'perm', perm: 'system:groups:manage' },
     permissions:   { kind: 'perm', perm: 'system:admin' },
     sso:           { kind: 'perm', perm: 'system:admin' },
-    audit:         { kind: 'perm', perm: 'system:admin' },
+    audit:         { kind: 'perm', perm: 'system:audit:read' },
 }
 
 

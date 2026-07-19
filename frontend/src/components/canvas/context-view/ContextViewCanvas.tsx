@@ -92,6 +92,7 @@ import { LayerColumn } from './LayerColumn'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
+import { useLensLineage } from './useLensLineage'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
@@ -1630,6 +1631,18 @@ export function ContextViewCanvas({
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
+  // Authored column width — part of the view definition (ships to every
+  // viewer of the published view). Not staged as a reviewable change:
+  // width is presentation, not model semantics; it rides the normal
+  // layout save. Fires once per drag (pointerup), never per move.
+  const resizeLayer = useCallback((id: string, width: number | null) => {
+    const before = currentLayout()
+    persistReferenceLayout({
+      layers: layerOps.setLayerWidth(before.layers, id, width ?? undefined),
+      assignments: before.assignments,
+    })
+  }, [currentLayout, persistReferenceLayout])
+
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
     const before = currentLayout()
@@ -2626,7 +2639,16 @@ export function ContextViewCanvas({
   const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
   const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
   const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
+  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
+  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
+  // Miller-column branch: truncate to hop i, then step into nodeId.
+  const lensWalkTo = useCallback((index: number, nodeId: string) =>
+    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
   const lensClose = useCallback(() => setLensStack([]), [])
+  // On-demand lineage for every visited focal node — the lens tells the
+  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
+  // Lens-local (never written to the canvas store), cached per session.
+  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -2649,6 +2671,33 @@ export function ContextViewCanvas({
   const externalDegrees = useExternalDegrees(
     activeEntityScope === 'curated' && showMissingConnectionIndicators,
   )
+  // Ambient per-node cue: external = total − internal(loaded), for every
+  // loaded node with a KNOWN total. One O(E) pass builds internal
+  // degrees; nodes absent from externalDegrees stay absent here
+  // (unknown ≠ zero). Empty map when the feature is off — the overlay
+  // renders nothing.
+  const externalCueByNode = useMemo(() => {
+    const cue = new Map<string, { in: number; out: number }>()
+    if (externalDegrees.size === 0) return cue
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    const internal = new Map<string, { in: number; out: number }>()
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      const s = internal.get(e.source) ?? { in: 0, out: 0 }
+      s.out++; internal.set(e.source, s)
+      const tg = internal.get(e.target) ?? { in: 0, out: 0 }
+      tg.in++; internal.set(e.target, tg)
+    }
+    externalDegrees.forEach((total, urn) => {
+      const loc = internal.get(urn) ?? { in: 0, out: 0 }
+      const exIn = Math.max(0, total.in - loc.in)
+      const exOut = Math.max(0, total.out - loc.out)
+      if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
+    })
+    return cue
+  }, [externalDegrees, edges, lineageEdgeTypes])
+
   const selectedExternalLineage = useMemo(() => {
     if (!selectedNodeId) return null
     const total = externalDegrees.get(selectedNodeId)
@@ -3345,9 +3394,29 @@ export function ContextViewCanvas({
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
           lensStack={lensStack}
+          supplementalEdges={lensLineage.supplementalEdges}
+          supplementalNodes={lensLineage.supplementalNodes}
+          fetchStatus={lensLineage.status}
+          fetchTruncatedIds={lensLineage.truncatedIds}
+          onRetryFetch={lensLineage.retry}
+          drillEdges={lensLineage.drillEdges}
+          drillStatus={lensLineage.drillStatus}
+          onDrillFetch={lensLineage.fetchDrill}
           externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
+          onJumpTo={lensJumpTo}
+          onWalkTo={lensWalkTo}
+          onShowPathOnCanvas={(ids) => {
+            // Presenting a walk IS a frame action — same chrome, same exit.
+            const focal = ids[ids.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length - 1 })
+            }
+            void locateManyOnCanvas(ids)
+          }}
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}
@@ -3428,6 +3497,7 @@ export function ContextViewCanvas({
               flowRibbons={flowRibbons}
               focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
+              externalCue={externalCueByNode}
             />
           )}
 
@@ -3569,6 +3639,7 @@ export function ContextViewCanvas({
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
+                onResizeLayer={isDraft ? resizeLayer : undefined}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}

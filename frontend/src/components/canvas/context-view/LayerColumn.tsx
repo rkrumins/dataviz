@@ -114,6 +114,9 @@ interface LayerColumnProps {
    *  columns that actually scroll) — the canvas uses it to auto-load
    *  the next page of ROOTS one page ahead. */
   onEndReached?: () => void
+  /** Draft mode: persist a resized width into the VIEW definition
+   *  (null clears it). Absent ⇒ resizes stay a personal override. */
+  onResizeLayer?: (layerId: string, width: number | null) => void
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -170,6 +173,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onProxyReveal,
   onProxyMore,
   onEndReached,
+  onResizeLayer,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -187,17 +191,19 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const shouldShowGhosts = isHydratingInitial && layerHasConfiguredSources
 
-  // Per-layer custom width (resize handle on the right edge). Persisted
-  // across sessions; null = default 320–480 flex range. When set, the
-  // column pins to the exact width (min == max) so dragging feels 1:1.
+  // Per-layer column width. Precedence: personal (localStorage)
+  // override → authored view width (layer.width, ships to all viewers)
+  // → default flex range. In DRAFT mode (onResizeLayer present) a drag
+  // writes the VIEW definition and clears any personal override so the
+  // editor sees exactly what viewers will see; outside draft, drags
+  // stay personal. Width pins exactly (min == max) so dragging is 1:1.
   const [customWidth, setCustomWidthState] = useState<number | null>(() => {
     try {
       const w = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')[layer.id]
       return typeof w === 'number' ? w : null
     } catch { return null }
   })
-  const setCustomWidth = useCallback((w: number | null) => {
-    setCustomWidthState(w)
+  const persistPersonalWidth = useCallback((w: number | null) => {
     try {
       const all = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')
       if (w === null) delete all[layer.id]
@@ -205,6 +211,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       localStorage.setItem('nx-layer-widths', JSON.stringify(all))
     } catch { /* storage unavailable — session-only width */ }
   }, [layer.id])
+  const effectiveWidth = customWidth ?? layer.width ?? null
 
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
@@ -899,7 +906,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         "flex flex-col relative group/column transition-all duration-300 pointer-events-auto",
         isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1"
       )}
-      style={!isCollapsed ? { minWidth: customWidth ?? 320, maxWidth: customWidth ?? 480 } : undefined}
+      style={!isCollapsed ? { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 } : undefined}
       layout
     >
       {/* Subtle column separator line with gradient fade */}
@@ -914,18 +921,35 @@ export const LayerColumn = React.memo(function LayerColumn({
           onPointerDown={(e) => {
             e.preventDefault()
             const startX = e.clientX
-            const startW = customWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            const startW = effectiveWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            let latest = startW
             const onMove = (ev: PointerEvent) => {
-              setCustomWidth(Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX))))
+              latest = Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX)))
+              setCustomWidthState(latest)  // live visual only — persisted once, on release
             }
             const onUp = () => {
               window.removeEventListener('pointermove', onMove)
               window.removeEventListener('pointerup', onUp)
+              const w = Math.round(latest)
+              if (onResizeLayer) {
+                // Draft: the width becomes part of the VIEW definition;
+                // drop any personal override so the editor sees what
+                // viewers will see.
+                persistPersonalWidth(null)
+                setCustomWidthState(null)
+                onResizeLayer(layer.id, w)
+              } else {
+                persistPersonalWidth(w)
+              }
             }
             window.addEventListener('pointermove', onMove)
             window.addEventListener('pointerup', onUp)
           }}
-          onDoubleClick={() => setCustomWidth(null)}
+          onDoubleClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
           title="Drag to resize this layer · double-click to reset"
           className="absolute -right-1 top-0 bottom-0 w-2 z-30 cursor-col-resize opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
@@ -937,16 +961,20 @@ export const LayerColumn = React.memo(function LayerColumn({
           layer has a resized width. Names the current width and offers
           the one-click reset, so the double-click gesture on the handle
           doesn't have to be discovered to get back to defaults. ── */}
-      {!isCollapsed && customWidth !== null && (
+      {!isCollapsed && effectiveWidth !== null && (
         <button
           type="button"
           data-canvas-interactive
-          onClick={() => setCustomWidth(null)}
-          title={`This layer has a custom width (${customWidth}px). Click to reset to the default width — or double-click the drag handle on the column edge.`}
+          onClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
+          title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
           className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 backdrop-blur-sm border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
           <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
-          Reset width · {customWidth}px
+          Reset width · {effectiveWidth}px
         </button>
       )}
 

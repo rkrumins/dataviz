@@ -13,7 +13,7 @@ from backend.app.services.versioning import config, db, models
 _PG = postgresql.dialect()
 _EXPECTED_TABLES = {
     "graphs", "branches", "branch_members", "merge_requests", "projection_state",
-    "jobs", "commits", "node_versions", "edge_versions", "entity_heads",
+    "jobs", "import_rows", "commits", "node_versions", "edge_versions", "entity_heads",
     "merkle_nodes", "working_changes",
 }
 

@@ -6,7 +6,7 @@ describe('friendlyError auth classification', () => {
     it('maps auth_required (server requires auth, none provided)', () => {
         const msg = friendlyError('auth_required')
         expect(msg.toLowerCase()).toContain('requires authentication')
-        expect(msg.toLowerCase()).toContain('no credentials')
+        expect(msg.toLowerCase()).toContain('sending none')
     })
 
     it('maps auth_failed (credentials rejected)', () => {
