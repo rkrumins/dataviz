@@ -457,7 +457,7 @@ export function WorkspacesPage() {
                     </div>
                 </div>
                 {canCreateWorkspace && (
-                    <button onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                    <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                         <Plus className="w-4 h-4" /> Create Workspace
                     </button>
                 )}
@@ -660,19 +660,21 @@ export function WorkspacesPage() {
             )}
 
             {/* ── Filter toolbar ── */}
-            <WorkspaceFilterToolbar
-                search={searchInput}
-                onSearchChange={setSearchInput}
-                sort={sortKey}
-                onSortChange={s => setParam('sort', s === 'newest' ? null : s)}
-                layout={layout}
-                onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
-                healthFilter={healthFilter}
-                onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
-                healthCounts={healthCounts}
-                totalCount={workspaces.length}
-                filteredCount={filtered.length}
-            />
+            <div data-tour="workspaces-toolbar">
+                <WorkspaceFilterToolbar
+                    search={searchInput}
+                    onSearchChange={setSearchInput}
+                    sort={sortKey}
+                    onSortChange={s => setParam('sort', s === 'newest' ? null : s)}
+                    layout={layout}
+                    onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
+                    healthFilter={healthFilter}
+                    onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
+                    healthCounts={healthCounts}
+                    totalCount={workspaces.length}
+                    filteredCount={filtered.length}
+                />
+            </div>
 
             {/* Content */}
             {isLoading ? (

@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -103,28 +103,92 @@ TOURS.push(
     steps: [
       {
         title: 'Follow the data',
-        body: 'Lineage answers "where did this come from?" and "what breaks if I change it?". Here’s how to read it.',
+        body: 'Lineage answers "where did this come from?" and "what breaks if I change it?". Here’s how to read it — leave any time with **Esc**.',
       },
       {
         target: '[data-tour="nav-explore"]',
         route: '/explorer',
         placement: 'right',
         title: 'Open the Explorer',
-        body: 'The **Explorer** is where saved views live. Open one to land on the interactive canvas.',
+        body: 'The **Explorer** is home to every saved view across your workspaces.',
       },
       {
-        target: '[data-tour="search"]',
+        target: '[data-tour="explorer-results"]',
+        route: '/explorer',
+        placement: 'top',
+        title: 'Every view, one place',
+        body: 'Saved views live here. **Open one** to land on the interactive lineage canvas.',
+      },
+      {
+        target: '[data-tour="explorer-search"]',
+        route: '/explorer',
         placement: 'bottom',
-        title: 'Find a starting point',
-        body: 'Search for any table, dataset, or dashboard to jump straight to it on the graph — or press **⌘K**.',
+        title: 'Find the right view',
+        body: 'Search across every view by **name, tag, or workspace** to jump straight to it.',
       },
       {
-        title: 'Trace it',
-        body: 'Click a node and **Trace** to light up everything that feeds it (upstream) and everything it feeds (downstream) — its blast radius.',
+        target: '[data-tour="explorer-filters"]',
+        route: '/explorer',
+        placement: 'bottom',
+        title: 'Filter the list',
+        body: 'Narrow to **Favorites**, **Recent**, **Shared**, or views that **need attention**.',
+      },
+      {
+        target: '[data-tour="explorer-new-view"]',
+        route: '/explorer',
+        placement: 'left',
+        title: 'Start something new',
+        body: 'Build a brand-new view from scratch with **New View**.',
+      },
+      {
+        title: 'Trace the flow',
+        body: 'Open a view, click any node, and **Trace** to light up everything upstream and downstream — its blast radius.',
       },
       {
         title: 'Go deeper',
         body: 'The **Reading Lineage** guide has an interactive demo you can click through. Open **Help** to find it.',
+      },
+    ],
+  },
+  {
+    id: 'workspaces',
+    title: 'Organise with workspaces',
+    description: 'Group data sources, govern access, and give each team its own space.',
+    icon: Boxes,
+    estimate: '2 min',
+    steps: [
+      {
+        title: "Your team's spaces",
+        body: "A **workspace** keeps one team's data sources, people, and settings isolated. Here's how to work with them — leave any time with **Esc**.",
+      },
+      {
+        target: '[data-tour="nav-workspaces"]',
+        route: '/workspaces',
+        placement: 'right',
+        title: 'Open Workspaces',
+        body: 'Every workspace you can access lives here.',
+      },
+      {
+        target: '[data-tour="workspaces-create"]',
+        route: '/workspaces',
+        placement: 'bottom',
+        title: 'Create a workspace',
+        body: 'Spin up a new workspace and bind it to the data sources it should contain.',
+      },
+      {
+        target: '[data-tour="workspaces-toolbar"]',
+        route: '/workspaces',
+        placement: 'bottom',
+        title: 'Find & organise',
+        body: 'Search, filter by **health**, sort, and switch between grid and list.',
+      },
+      {
+        title: 'Inside a workspace',
+        body: 'Open any workspace to manage its **data sources**, **views**, **ontology**, **members**, and **reviews** — each on its own tab.',
+      },
+      {
+        title: "That's workspaces",
+        body: 'With a workspace in place, your team has an isolated home to explore lineage together. Open **Help** to replay any tour.',
       },
     ],
   },

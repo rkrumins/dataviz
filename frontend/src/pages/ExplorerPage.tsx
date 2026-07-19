@@ -501,6 +501,7 @@ export function ExplorerPage() {
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
             <button
+              data-tour="explorer-new-view"
               onClick={() => openViewEditor()}
               className={cn(
                 'inline-flex items-center gap-2 rounded-xl px-4 py-2.5',
@@ -526,7 +527,7 @@ export function ExplorerPage() {
         />
 
         {/* ── Search bar ──────────────────────────────────────── */}
-        <div className="mb-5 relative">
+        <div data-tour="explorer-search" className="mb-5 relative">
           <div className={cn(
             'relative flex items-center rounded-xl border bg-canvas-elevated overflow-hidden',
             'transition-[border-color,box-shadow] duration-200',
@@ -608,7 +609,7 @@ export function ExplorerPage() {
         </div>
 
         {/* ── Unified toolbar: filters + sort + layout ─────────── */}
-        <div className="flex items-start gap-3 mb-6">
+        <div data-tour="explorer-filters" className="flex items-start gap-3 mb-6">
           <div className="flex-1 min-w-0">
             <ExplorerFilterBar
               visibility={parsed.visibility}
@@ -714,7 +715,7 @@ export function ExplorerPage() {
         )}
 
         {/* ── Results ──────────────────────────────────────────── */}
-        <section>
+        <section data-tour="explorer-results">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
               <Compass className="w-3.5 h-3.5 text-indigo-500" />
