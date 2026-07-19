@@ -30,11 +30,21 @@ down_revision: Union[str, None] = "20260713_1000_view_visits"
 branch_labels = None
 depends_on = None
 
+# WIDEN-ONLY, including on HISTORICAL REPLAY: both lists carry 'pull'
+# even though it "belongs" to the later 20260714_1600_pull_kind
+# migration. A DB bootstrapped by worker-boot create_all gets the
+# CURRENT ORM constraint (with 'pull') and the app writes pull commits
+# immediately; when alembic then replays history, this migration's
+# original pull-less list re-added a constraint NARROWER than the live
+# data → CheckViolation on commits partitions → the whole upgrade
+# chain wedged before ever reaching the widening migration. An
+# intermediate migration must never narrow a constraint below what
+# current app code writes.
 _KINDS_WITH_RESTORE = (
-    "'genesis','edit','checkpoint','squash_publish','import','sync','revert','restore'"
+    "'genesis','edit','checkpoint','squash_publish','import','sync','revert','restore','pull'"
 )
 _KINDS_WITHOUT_RESTORE = (
-    "'genesis','edit','checkpoint','squash_publish','import','sync','revert'"
+    "'genesis','edit','checkpoint','squash_publish','import','sync','revert','pull'"
 )
 
 
