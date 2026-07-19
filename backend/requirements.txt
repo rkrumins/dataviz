@@ -43,5 +43,5 @@ anyio>=4.14.1                                 # Threadpool used by Spanner async
 python-json-logger>=4.1.0
 
 greenlet>=3.1.1          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
-python-multipart>=0.0.31 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
+python-multipart>=0.0.32 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
 openpyxl>=3.1.0          # .xlsx import/export adapter (bulk import/export) — pure-Python read+write
