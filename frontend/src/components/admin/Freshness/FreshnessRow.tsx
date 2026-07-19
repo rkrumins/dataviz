@@ -9,7 +9,7 @@
  */
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
-    Activity, AlertTriangle, CheckCircle2, Clock, Database, Loader2,
+    Activity, AlertTriangle, CheckCircle2, Clock, Database, Hammer, Loader2,
     Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -17,6 +17,13 @@ import { timeAgo } from '@/lib/timeAgo'
 import { usePermission } from '@/store/auth'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
+import { isNeverBuilt } from './freshnessTriage'
+
+/** A quiet placeholder for an empty cell — muted enough that a never-built
+ *  row's blank cells don't read as three shouting dashes. */
+function EmptyCell() {
+    return <span className="text-[11px] text-ink-muted/40">—</span>
+}
 
 // ── Shared derivations ───────────────────────────────────────────────
 
@@ -129,6 +136,11 @@ export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
     }
 
     if (badges.length === 0) {
+        // "Up to date" is an assertion — only make it for a source that has
+        // actually been built. Never-built sources say so plainly.
+        if (isNeverBuilt(row)) {
+            return <span className="text-[11px] text-ink-muted/70">Never built</span>
+        }
         return <span className="text-[11px] text-ink-muted">Up to date</span>
     }
     return <div className="flex flex-wrap items-center gap-1">{badges}</div>
@@ -140,19 +152,28 @@ interface Props {
     row: FreshnessRowData
     workspaceName?: string
     onOpenDrawer: (dsId: string) => void
-    onRefresh: (dsId: string, scope: RefreshScope) => void
+    onRefresh: (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => void
     busy?: boolean
 }
 
-const ACTIONS: { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string }[] = [
+type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean }
+
+const BUILT_ACTIONS: RowAction[] = [
     { scope: 'read-caches', label: 'Refresh caches', Icon: RefreshCw, iconClass: 'text-sky-500' },
     { scope: 'rollups', label: 'Rebuild lineage', Icon: RotateCcw, iconClass: 'text-indigo-500' },
     { scope: 'full', label: 'Full refresh', Icon: Sparkles, iconClass: 'text-emerald-500' },
 ]
 
+// A never-built source has nothing to refresh yet — its one honest action is
+// the first build (rollups, F3 semantics), which the parent confirms.
+const NEVER_BUILT_ACTIONS: RowAction[] = [
+    { scope: 'rollups', label: 'Build lineage', Icon: Hammer, iconClass: 'text-indigo-500', firstBuild: true },
+]
+
 export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
     const running = !!row.runningJobId
     const actionsDisabled = busy || running
+    const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
     // who can't manage this row's workspace (RegistryConnections convention) —
     // a disabled item would just 403 on click.
@@ -161,7 +182,7 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
     return (
         <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
             {/* Source */}
-            <td className="px-3 py-2.5 align-top">
+            <td className="px-3 py-2 align-top">
                 <button
                     onClick={() => onOpenDrawer(row.dataSourceId)}
                     className="text-left group outline-none"
@@ -177,29 +198,29 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
             </td>
 
             {/* Aggregation */}
-            <td className="px-3 py-2.5 align-top">
+            <td className="px-3 py-2 align-top">
                 <div className="flex flex-col gap-1">
                     <AggStatusPill status={row.aggregationStatus} />
                     {row.lastAggregatedAt
                         ? <TimeStamp at={row.lastAggregatedAt} prefix="updated" icon={RefreshCw} />
-                        : <span className="text-[11px] text-ink-muted">—</span>}
+                        : <EmptyCell />}
                 </div>
             </td>
 
             {/* Cache */}
-            <td className="px-3 py-2.5 align-top">
+            <td className="px-3 py-2 align-top">
                 {row.cacheAsOf
                     ? <TimeStamp at={row.cacheAsOf} prefix="as of" icon={Database} />
-                    : <span className="text-[11px] text-ink-muted">—</span>}
+                    : <EmptyCell />}
             </td>
 
             {/* Freshness */}
-            <td className="px-3 py-2.5 align-top">
+            <td className="px-3 py-2 align-top">
                 <FreshnessBadges row={row} />
             </td>
 
             {/* Last activity */}
-            <td className="px-3 py-2.5 align-top">
+            <td className="px-3 py-2 align-top">
                 {row.lastEvent
                     ? (
                         <div className="flex flex-col gap-0.5">
@@ -209,11 +230,11 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
                             <TimeStamp at={row.lastEvent.ts} icon={Activity} colorByAge={false} />
                         </div>
                     )
-                    : <span className="text-[11px] text-ink-muted">—</span>}
+                    : <EmptyCell />}
             </td>
 
             {/* Actions */}
-            <td className="px-3 py-2.5 align-top text-right" onClick={(e) => e.stopPropagation()}>
+            <td className="px-3 py-2 align-top text-right" onClick={(e) => e.stopPropagation()}>
                 {canManage && (
                 <DropdownMenu.Root modal={false}>
                     <DropdownMenu.Trigger asChild>
@@ -232,10 +253,10 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
                             sideOffset={4}
                             className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
                         >
-                            {ACTIONS.map(({ scope, label, Icon, iconClass }) => (
+                            {actions.map(({ scope, label, Icon, iconClass, firstBuild }) => (
                                 <DropdownMenu.Item
-                                    key={scope}
-                                    onSelect={() => onRefresh(row.dataSourceId, scope)}
+                                    key={label}
+                                    onSelect={() => onRefresh(row.dataSourceId, scope, firstBuild ? { firstBuild: true } : undefined)}
                                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
                                 >
                                     <Icon className={cn('w-3.5 h-3.5', iconClass)} />

@@ -1,9 +1,13 @@
 /**
  * Freshness cockpit — the tab renders a mocked fleet payload and its row
- * actions fire the unified refresh verb with the right scope.
+ * actions fire the unified refresh verb with the right scope. The triage revamp
+ * adds: stat-tile status filtering, a URL-synced faceted filter bar, severity
+ * ordering, collapsible provider groups, and honest never-built states.
  */
+import { useEffect } from 'react'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,6 +46,8 @@ beforeAll(() => {
 })
 
 import { Freshness } from './index'
+import { compareSeverity, severityRank } from './freshnessTriage'
+import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 const recent = new Date(Date.now() - 5 * 60_000).toISOString()
 
@@ -65,9 +71,25 @@ const fleet = {
     ],
 }
 
-function renderTab() {
+// Mirrors the live URL search string so a test can assert facet→URL sync.
+const probe = { search: '' }
+function LocationProbe() {
+    const { search } = useLocation()
+    useEffect(() => { probe.search = search }, [search])
+    return null
+}
+
+function renderTab(initialEntry = '/?tab=freshness') {
+    probe.search = ''
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    return render(<QueryClientProvider client={qc}><Freshness /></QueryClientProvider>)
+    return render(
+        <QueryClientProvider client={qc}>
+            <MemoryRouter initialEntries={[initialEntry]}>
+                <Freshness />
+                <LocationProbe />
+            </MemoryRouter>
+        </QueryClientProvider>,
+    )
 }
 
 describe('Freshness cockpit', () => {
@@ -144,5 +166,143 @@ describe('Freshness cockpit', () => {
         await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
         expect(screen.getByRole('button', { name: /refresh actions for orders graph/i })).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /refresh actions for customers graph/i })).not.toBeInTheDocument()
+    })
+
+    // ── R5.1 — stat band counts + tile filtering ─────────────────────
+    it('renders summary counts on the stat band and filters rows by tile', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            ...fleet,
+            summary: { total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0, recomputing: 1, needsAttention: 1, cacheStamped: 2 },
+        })
+        renderTab()
+
+        const band = await screen.findByRole('group', { name: /fleet summary/i })
+        expect(within(band).getByRole('button', { name: /total sources/i })).toHaveTextContent('2')
+        expect(within(band).getByRole('button', { name: /needs attention/i })).toHaveTextContent('1')
+
+        // Both rows visible before filtering.
+        expect(screen.getByText('Orders Graph')).toBeInTheDocument()
+        expect(screen.getByText('Customers Graph')).toBeInTheDocument()
+
+        // Clicking the "Needs attention" tile keeps only the stale row.
+        await user.click(within(band).getByRole('button', { name: /needs attention/i }))
+        await waitFor(() => expect(screen.queryByText('Customers Graph')).not.toBeInTheDocument())
+        expect(screen.getByText('Orders Graph')).toBeInTheDocument()
+        expect(probe.search).toContain('fstatus=needsAttention')
+
+        // Clicking "Total sources" clears the facet.
+        await user.click(within(band).getByRole('button', { name: /total sources/i }))
+        await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
+        expect(probe.search).not.toContain('fstatus')
+    })
+
+    // ── R5.2 — severity ordering helper ──────────────────────────────
+    it('orders rows by severity, then recency, then name', () => {
+        const mk = (p: Partial<FreshnessRowData>): FreshnessRowData =>
+            ({ dataSourceId: p.name ?? 'x', name: p.name, ...p } as FreshnessRowData)
+        const future = new Date(Date.now() + 60 * 60_000).toISOString()
+
+        const failed = mk({ name: 'failed', aggregationStatus: 'failed' })
+        const recomputing = mk({ name: 'recomputing', aggregationStatus: 'ready', staleReason: 'source_changed' })
+        const pending = mk({ name: 'pending', aggregationStatus: 'ready', runningJobId: 'job-1' })
+        const cooldown = mk({ name: 'cooldown', aggregationStatus: 'ready', cooldownUntil: future })
+        const ready = mk({ name: 'ready', aggregationStatus: 'ready' })
+        const notBuilt = mk({ name: 'notBuilt', aggregationStatus: null })
+
+        expect([
+            severityRank(failed), severityRank(recomputing), severityRank(pending),
+            severityRank(cooldown), severityRank(ready), severityRank(notBuilt),
+        ]).toEqual([0, 1, 2, 3, 4, 5])
+
+        const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing]
+        expect(shuffled.slice().sort(compareSeverity).map(r => r.name))
+            .toEqual(['failed', 'recomputing', 'pending', 'cooldown', 'ready', 'notBuilt'])
+
+        // Ties in severity break by most-recent aggregation, then name.
+        const older = mk({ name: 'aardvark', aggregationStatus: 'ready', lastAggregatedAt: '2020-01-01T00:00:00Z' })
+        const newer = mk({ name: 'zulu', aggregationStatus: 'ready', lastAggregatedAt: '2024-01-01T00:00:00Z' })
+        expect([older, newer].sort(compareSeverity).map(r => r.name)).toEqual(['zulu', 'aardvark'])
+    })
+
+    // ── R5.3 — healthy group collapses to a rollup; attention expands ─
+    it('collapses a healthy provider group and expands one with a marker', async () => {
+        listFleet.mockResolvedValue({
+            total: 3,
+            rows: [
+                { dataSourceId: 'a1', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha One', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'a2', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha Two', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'b1', workspaceId: 'ws-1', providerId: 'p-bravo', name: 'Bravo One', providerName: 'Bravo', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: 'source_changed', runningJobId: null, lastEvent: null },
+            ],
+        })
+        renderTab()
+
+        // Bravo has a marker → expanded: its row is visible. (The group-header
+        // toggle is the only button carrying aria-expanded.)
+        await waitFor(() => expect(screen.getByText('Bravo One')).toBeInTheDocument())
+        expect(screen.getByRole('button', { name: /bravo/i, expanded: true })).toBeInTheDocument()
+
+        // Alpha is healthy → collapsed: rollup line only, no rows.
+        const alphaHeader = screen.getByRole('button', { name: /alpha/i, expanded: false })
+        expect(alphaHeader).toHaveTextContent('2 ready')
+        expect(screen.queryByText('Alpha One')).not.toBeInTheDocument()
+    })
+
+    // ── R5.4 — never-built row + Build lineage ───────────────────────
+    it('shows a never-built row honestly and builds lineage with the rollups scope', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                // A marked row keeps the provider group expanded so the never-built row renders.
+                { dataSourceId: 'att', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Busy Source', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'nb', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Fresh Source', providerName: 'Warehouse', aggregationStatus: 'none', staleReason: null, cacheAsOf: null, lastAggregatedAt: null, runningJobId: null, lastEvent: null },
+            ],
+        })
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Fresh Source')).toBeInTheDocument())
+        expect(screen.getByText('Never built')).toBeInTheDocument()
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: /refresh actions for fresh source/i }))
+        // Never-built menu offers Build lineage, not Rebuild lineage.
+        expect(await screen.findByText('Build lineage')).toBeInTheDocument()
+        expect(screen.queryByText('Rebuild lineage')).not.toBeInTheDocument()
+        await user.click(screen.getByText('Build lineage'))
+
+        const dialog = await screen.findByRole('dialog')
+        await user.click(within(dialog).getByRole('button', { name: /build lineage/i }))
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('nb', expect.objectContaining({ scope: 'rollups' }))
+        })
+    })
+
+    // ── R5.5 — URL sync both ways ────────────────────────────────────
+    it('writes a provider facet to the URL and pre-applies filters from the URL', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                { dataSourceId: 'ds-1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Orders Graph', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'ds-2', workspaceId: 'ws-1', providerId: 'prov-2', name: 'Customers Graph', providerName: 'Lakehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+            ],
+        })
+
+        // Part A: selecting a provider facet stamps ?fprov=.
+        const { unmount } = renderTab('/?tab=freshness')
+        await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
+        const trigger = screen.getByRole('button', { name: 'Provider' })
+        await user.click(trigger)
+        // Scope to the dropdown container so the option (not a group header) is clicked.
+        const container = trigger.parentElement as HTMLElement
+        await user.click(within(container).getByRole('button', { name: /warehouse/i }))
+        await waitFor(() => expect(probe.search).toContain('fprov=prov-1'))
+        unmount()
+
+        // Part B: mounting with ?fprov= pre-filters the table.
+        renderTab('/?tab=freshness&fprov=prov-2')
+        await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
+        expect(screen.queryByText('Orders Graph')).not.toBeInTheDocument()
     })
 })

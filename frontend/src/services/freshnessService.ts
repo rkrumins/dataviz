@@ -53,9 +53,30 @@ export interface FreshnessDoc extends FreshnessRow {
     events: RefreshEventSummary[]
 }
 
+/** Fleet-wide stat-tile counts, computed server-side over the
+ *  workspace/provider-filtered set *before* the ``staleOnly`` facet and
+ *  pagination. ``null`` on the response when that set exceeds the backend's
+ *  bound (the assembly never does unbounded work). Mirrors the committed
+ *  ``FreshnessSummary`` pydantic aliases; ``needsAttention`` is a per-row OR
+ *  (marker present OR failed), not ``recomputing + failed``. */
+export interface FreshnessSummary {
+    total: number
+    ready: number
+    /** A rebuild job is in flight (counts the same signal as ``runningJobId``). */
+    pending: number
+    failed: number
+    notBuilt: number
+    /** A stale marker is present. */
+    recomputing: number
+    needsAttention: number
+    /** Rows with a non-null ``cacheAsOf``. */
+    cacheStamped: number
+}
+
 export interface FreshnessFleetResponse {
     rows: FreshnessRow[]
     total: number
+    summary?: FreshnessSummary | null
 }
 
 export interface RefreshResponse {

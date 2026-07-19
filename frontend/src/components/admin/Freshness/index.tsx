@@ -1,28 +1,38 @@
 /**
- * Freshness — the Ingestion → Freshness cockpit.
+ * Freshness — the Ingestion → Freshness triage cockpit.
  *
  * A cross-workspace operator view of every data source's aggregation/cache
- * freshness, grouped by provider, with per-source refresh actions and a
- * guarded per-provider batch refresh (system:admin only).
+ * freshness. The stat band doubles as the status filter; a sticky faceted bar
+ * (provider/workspace multi-select, status segment, name search) refines the
+ * fleet; the table groups by provider, orders by severity, and collapses the
+ * healthy groups into one-line rollups so attention items float to the top.
  *
- * Reads never trigger a rebuild; the fleet endpoint does no provider work.
- * Copy is plain-language and white-label throughout.
+ * All facet state lives in the URL search params (shared with Ingestion's
+ * ``?tab=``), so reload and back/forward restore the view. Provider/workspace
+ * facets filter client-side over the fetched page (≤200 rows); the tile counts
+ * come from the server ``summary``. Reads never trigger a rebuild.
  */
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Filter, RefreshCw, Zap } from 'lucide-react'
+import { RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
-import { providerService } from '@/services/providerService'
 import { workspaceService } from '@/services/workspaceService'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
+import { FreshnessStatBand } from './FreshnessStatBand'
+import { FreshnessFilterBar } from './FreshnessFilterBar'
+import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { useFleetFreshness, useRefreshSource } from './useFreshness'
+import {
+    compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
+} from './freshnessTriage'
 
 const SCOPE_LABEL: Record<RefreshScope, string> = {
     auto: 'Refresh',
@@ -31,10 +41,16 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
     full: 'Full refresh',
 }
 
-/** A row wants attention when its lineage is stale, drifted, or its last
- *  aggregation failed. Mirrors the fleet's "needs attention" definition. */
-function needsAttention(row: FreshnessRowData): boolean {
-    return !!row.staleReason || row.drifted === true || row.aggregationStatus === 'failed'
+const COLS = 6
+
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped']
+
+function parseStatus(raw: string | null): StatusFacet {
+    return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
+}
+
+function parseList(raw: string | null): string[] {
+    return (raw || '').split(',').filter(Boolean)
 }
 
 export function Freshness() {
@@ -42,30 +58,63 @@ export function Freshness() {
     const isSystemAdmin = usePermission('system:admin')
     const { showToast } = useToast()
 
-    const [workspaceId, setWorkspaceId] = useState('')
-    const [providerId, setProviderId] = useState('')
-    const [attentionOnly, setAttentionOnly] = useState(false)
+    const [searchParams, setSearchParams] = useSearchParams()
 
+    // ── URL-synced facet state ────────────────────────────────────────
+    const fprov = useMemo(() => parseList(searchParams.get('fprov')), [searchParams])
+    const fws = useMemo(() => parseList(searchParams.get('fws')), [searchParams])
+    const fstatus = parseStatus(searchParams.get('fstatus'))
+    const fq = searchParams.get('fq') ?? ''
+
+    // Patch specific params, preserving everything else (notably ``tab``).
+    // Discrete facet changes push a history entry; only debounced search
+    // typing replaces (so keystrokes don't flood back/forward).
+    const patchParams = useCallback((patch: Record<string, string | null>, replace = false) => {
+        setSearchParams(prev => {
+            const p = new URLSearchParams(prev)
+            for (const [k, v] of Object.entries(patch)) {
+                if (v == null || v === '') p.delete(k)
+                else p.set(k, v)
+            }
+            return p
+        }, { replace })
+    }, [setSearchParams])
+
+    // Search: immediate local box, debounced (~200ms) into the URL. A ref of
+    // the last value we wrote lets external navigation (back/forward) adopt a
+    // new ``fq`` without a facet toggle clobbering unsynced keystrokes.
+    const [searchInput, setSearchInput] = useState(() => searchParams.get('fq') ?? '')
+    const prevUrlQ = useRef(fq)
+    useEffect(() => {
+        const id = setTimeout(() => {
+            if (searchInput !== (searchParams.get('fq') ?? '')) {
+                patchParams({ fq: searchInput || null }, true)
+            }
+        }, 200)
+        return () => clearTimeout(id)
+    }, [searchInput, searchParams, patchParams])
+    useEffect(() => {
+        if (fq !== prevUrlQ.current) {
+            prevUrlQ.current = fq
+            setSearchInput(prev => (prev === fq ? prev : fq))
+        }
+    }, [fq])
+
+    // ── Local (non-URL) UI state ──────────────────────────────────────
     const [drawerDsId, setDrawerDsId] = useState<string | null>(null)
-    const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope } | null>(null)
+    const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
+    const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
 
-    const fleet = useFleetFreshness({
-        workspaceId: workspaceId || undefined,
-        providerId: providerId || undefined,
-    })
+    // ── Data ──────────────────────────────────────────────────────────
+    // No server-side provider/workspace/stale filter: those are client facets
+    // now, so one broad fetch feeds both the table and a fleet-wide summary.
+    const fleet = useFleetFreshness()
     const refreshSource = useRefreshSource()
 
-    // Stable filter options + workspace-name resolution (independent of the
-    // current filter, so the dropdowns don't collapse when one is applied).
     const workspacesQ = useQuery({
         queryKey: ['freshness', 'workspaces'],
         queryFn: () => workspaceService.list(),
-        staleTime: 5 * 60_000,
-    })
-    const providersQ = useQuery({
-        queryKey: ['freshness', 'providers'],
-        queryFn: () => providerService.list(),
         staleTime: 5 * 60_000,
     })
     const workspaceName = useMemo(() => {
@@ -74,30 +123,99 @@ export function Freshness() {
         return m
     }, [workspacesQ.data])
 
-    const rows = fleet.data?.rows ?? []
-    const visibleRows = attentionOnly ? rows.filter(needsAttention) : rows
-    const attentionCount = rows.filter(needsAttention).length
+    const rows = useMemo(() => fleet.data?.rows ?? [], [fleet.data])
+    const summary = fleet.data?.summary ?? null
 
-    // Group by provider, preserving the server's per-source ordering.
+    // ── Facet options + counts (from the fetched rows) ────────────────
+    const providerOptions = useMemo(() => {
+        const m = new Map<string, { name: string; count: number }>()
+        for (const r of rows) {
+            if (!r.providerId) continue
+            const e = m.get(r.providerId) ?? { name: r.providerName || 'Unknown provider', count: 0 }
+            e.count++
+            m.set(r.providerId, e)
+        }
+        return [...m.entries()]
+            .map(([id, e]) => ({ id, label: e.name, sublabel: `${e.count} ${e.count === 1 ? 'source' : 'sources'}` }))
+            .sort((a, b) => a.label.localeCompare(b.label))
+    }, [rows])
+
+    const workspaceOptions = useMemo(() => {
+        const m = new Map<string, number>()
+        for (const r of rows) {
+            if (r.workspaceId) m.set(r.workspaceId, (m.get(r.workspaceId) ?? 0) + 1)
+        }
+        return [...m.entries()]
+            .map(([id, count]) => ({ id, label: workspaceName.get(id) || id, sublabel: `${count} ${count === 1 ? 'source' : 'sources'}` }))
+            .sort((a, b) => a.label.localeCompare(b.label))
+    }, [rows, workspaceName])
+
+    // ── Filtering: provider/workspace scope → status facet + name search ─
+    const scopeRows = useMemo(() => {
+        const provSet = new Set(fprov)
+        const wsSet = new Set(fws)
+        return rows.filter(r =>
+            (provSet.size === 0 || (r.providerId != null && provSet.has(r.providerId))) &&
+            (wsSet.size === 0 || (r.workspaceId != null && wsSet.has(r.workspaceId))),
+        )
+    }, [rows, fprov, fws])
+
+    const q = fq.trim().toLowerCase()
+    const tableRows = useMemo(() => scopeRows.filter(r =>
+        matchesFacet(r, fstatus) &&
+        (q === '' ||
+            (r.name || r.dataSourceId).toLowerCase().includes(q) ||
+            (r.providerName ?? '').toLowerCase().includes(q)),
+    ), [scopeRows, fstatus, q])
+
+    // ── Grouping: attention groups first, severity-sorted within ──────
     const groups = useMemo(() => {
         const byProvider = new Map<string, { name: string; rows: FreshnessRowData[] }>()
-        for (const row of visibleRows) {
+        for (const row of tableRows) {
             const pid = row.providerId ?? '—'
             const g = byProvider.get(pid) ?? { name: row.providerName || 'Unknown provider', rows: [] }
             g.rows.push(row)
             byProvider.set(pid, g)
         }
-        return [...byProvider.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name))
-    }, [visibleRows])
+        const arr = [...byProvider.entries()]
+        for (const [, g] of arr) g.rows.sort(compareSeverity)
+        arr.sort((a, b) => {
+            const aa = a[1].rows.filter(isGroupAttention).length
+            const bb = b[1].rows.filter(isGroupAttention).length
+            if ((aa > 0) !== (bb > 0)) return aa > 0 ? -1 : 1
+            if (aa !== bb) return bb - aa
+            return a[1].name.localeCompare(b[1].name)
+        })
+        return arr
+    }, [tableRows])
 
-    const doRefresh = (dsId: string, scope: RefreshScope) => {
+    // Healthy groups default collapsed; attention groups default expanded.
+    // A manual toggle wins.
+    const isExpanded = (pid: string, hasAttention: boolean) => expandOverride[pid] ?? hasAttention
+    const toggleGroup = (pid: string, currentlyExpanded: boolean) =>
+        setExpandOverride(prev => ({ ...prev, [pid]: !currentlyExpanded }))
+
+    // ── Sticky offset: the header row pins just under the filter bar ──
+    const stickyRef = useRef<HTMLDivElement>(null)
+    const [headerTop, setHeaderTop] = useState(0)
+    useLayoutEffect(() => {
+        const el = stickyRef.current
+        if (!el) return
+        const measure = () => setHeaderTop(el.offsetHeight)
+        measure()
+        window.addEventListener('resize', measure)
+        return () => window.removeEventListener('resize', measure)
+    }, [fprov, fws, fstatus, fq])
+
+    // ── Refresh actions ───────────────────────────────────────────────
+    const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean) => {
         const name = rows.find(r => r.dataSourceId === dsId)?.name || 'source'
         refreshSource.mutate({ dsId, scope }, {
             onSuccess: () => {
                 const msg = scope === 'read-caches'
                     ? `Caches refreshed for ${name}.`
                     : scope === 'rollups'
-                        ? `Lineage rebuild queued for ${name}.`
+                        ? `Lineage ${firstBuild ? 'build' : 'rebuild'} queued for ${name}.`
                         : `Full refresh started for ${name}.`
                 showToast('success', msg)
             },
@@ -106,64 +224,54 @@ export function Freshness() {
     }
 
     // read-caches is non-destructive → run immediately; rebuilds confirm first.
-    const onRefresh = (dsId: string, scope: RefreshScope) => {
+    const onRefresh = (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => {
         if (scope === 'read-caches') doRefresh(dsId, scope)
-        else setConfirm({ dsId, scope })
+        else setConfirm({ dsId, scope, firstBuild: opts?.firstBuild })
     }
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
     const truncated = (fleet.data?.total ?? 0) > rows.length
+    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || q !== ''
+    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, fq: null })
+    const buildMode = confirm?.firstBuild === true
 
     return (
         <div className="space-y-4">
-            {/* Filters */}
-            <div className="flex flex-wrap items-center gap-2">
-                <Filter className="w-4 h-4 text-ink-muted" />
-                <select
-                    aria-label="Filter by workspace"
-                    value={workspaceId}
-                    onChange={(e) => setWorkspaceId(e.target.value)}
-                    className="h-8 rounded-lg border border-glass-border bg-canvas px-2 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                >
-                    <option value="">All workspaces</option>
-                    {(workspacesQ.data ?? []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </select>
-                <select
-                    aria-label="Filter by provider"
-                    value={providerId}
-                    onChange={(e) => setProviderId(e.target.value)}
-                    className="h-8 rounded-lg border border-glass-border bg-canvas px-2 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                >
-                    <option value="">All providers</option>
-                    {(providersQ.data ?? []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
+            {/* Reload — the fleet also auto-refreshes every 30s while mounted. */}
+            <div className="flex items-center justify-end">
                 <button
-                    onClick={() => setAttentionOnly(v => !v)}
-                    className={cn(
-                        'inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-semibold transition-colors',
-                        attentionOnly
-                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                            : 'border-glass-border text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
-                    )}
+                    onClick={() => fleet.refetch()}
+                    disabled={fleet.isFetching}
+                    aria-label="Reload freshness"
+                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
                 >
-                    <AlertTriangle className="w-3.5 h-3.5" />
-                    Needs attention{attentionCount > 0 ? ` (${attentionCount})` : ''}
+                    <RefreshCw className={cn('w-3.5 h-3.5', fleet.isFetching && 'animate-spin')} />
+                    Reload
                 </button>
+            </div>
 
-                <div className="ml-auto flex items-center gap-2">
-                    <span className="text-[11px] text-ink-muted">
-                        {fleet.data?.total ?? 0} {(fleet.data?.total ?? 0) === 1 ? 'source' : 'sources'}
-                    </span>
-                    <button
-                        onClick={() => fleet.refetch()}
-                        disabled={fleet.isFetching}
-                        aria-label="Reload freshness"
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                    >
-                        <RefreshCw className={cn('w-3.5 h-3.5', fleet.isFetching && 'animate-spin')} />
-                        Reload
-                    </button>
-                </div>
+            {/* Stat band — scrolls away; the tiles are the status filter. */}
+            <FreshnessStatBand
+                summary={summary}
+                activeFacet={fstatus}
+                onToggle={(facet) => patchParams({ fstatus: facet || null })}
+            />
+
+            {/* Sticky faceted filter bar */}
+            <div ref={stickyRef} className="sticky top-0 z-20 -mt-1 bg-canvas border-b border-glass-border py-2.5">
+                <FreshnessFilterBar
+                    providerOptions={providerOptions}
+                    selectedProviders={fprov}
+                    onProvidersChange={(ids) => patchParams({ fprov: ids.join(',') || null })}
+                    workspaceOptions={workspaceOptions}
+                    selectedWorkspaces={fws}
+                    onWorkspacesChange={(ids) => patchParams({ fws: ids.join(',') || null })}
+                    status={fstatus}
+                    onStatusChange={(s) => patchParams({ fstatus: s || null })}
+                    search={searchInput}
+                    onSearchChange={setSearchInput}
+                    onClearAll={clearAll}
+                />
             </div>
 
             {truncated && (
@@ -181,56 +289,55 @@ export function Freshness() {
                 <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-300">
                     Could not load freshness. <button onClick={() => fleet.refetch()} className="underline">Retry</button>
                 </div>
-            ) : visibleRows.length === 0 ? (
+            ) : tableRows.length === 0 ? (
                 <div className="rounded-xl border border-glass-border bg-glass-base/20 px-4 py-12 text-center text-sm text-ink-muted">
-                    {attentionOnly ? 'Nothing needs attention right now.' : 'No data sources match these filters.'}
+                    {hasFilters ? (
+                        <>
+                            No sources match these filters.{' '}
+                            <button onClick={clearAll} className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Clear all</button>
+                        </>
+                    ) : 'No data sources found.'}
                 </div>
             ) : (
-                <div className="overflow-x-auto rounded-xl border border-glass-border">
+                <div className="rounded-xl border border-glass-border">
                     <table className="w-full min-w-[720px] text-left">
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
-                                <th className="px-3 py-2 font-semibold">Source</th>
-                                <th className="px-3 py-2 font-semibold">Aggregation</th>
-                                <th className="px-3 py-2 font-semibold">Cache</th>
-                                <th className="px-3 py-2 font-semibold">Freshness</th>
-                                <th className="px-3 py-2 font-semibold">Last activity</th>
-                                <th className="px-3 py-2 font-semibold text-right">Actions</th>
+                                {['Source', 'Aggregation', 'Cache', 'Freshness', 'Last activity'].map(h => (
+                                    <th key={h} style={{ top: headerTop }} className="px-3 py-2 font-semibold sticky z-10 bg-canvas">{h}</th>
+                                ))}
+                                <th style={{ top: headerTop }} className="px-3 py-2 font-semibold sticky z-10 bg-canvas text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {groups.map(([pid, g]) => (
-                                <Fragment key={pid}>
-                                    <tr className="bg-black/[0.02] dark:bg-white/[0.02] border-t border-glass-border">
-                                        <td colSpan={5} className="px-3 py-2">
-                                            <span className="text-xs font-semibold text-ink-secondary">{g.name}</span>
-                                            <span className="ml-2 text-[11px] text-ink-muted">
-                                                {g.rows.length} {g.rows.length === 1 ? 'source' : 'sources'}
-                                            </span>
-                                        </td>
-                                        <td className="px-3 py-2 text-right">
-                                            {isSystemAdmin && pid !== '—' && (
-                                                <button
-                                                    onClick={() => setProviderDialog({ id: pid, name: g.name })}
-                                                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
-                                                >
-                                                    <Zap className="w-3.5 h-3.5" /> Refresh provider…
-                                                </button>
-                                            )}
-                                        </td>
-                                    </tr>
-                                    {g.rows.map(row => (
-                                        <FreshnessRow
-                                            key={row.dataSourceId}
-                                            row={row}
-                                            workspaceName={row.workspaceId ? workspaceName.get(row.workspaceId) : undefined}
-                                            onOpenDrawer={setDrawerDsId}
-                                            onRefresh={onRefresh}
-                                            busy={busyDsId === row.dataSourceId}
+                            {groups.map(([pid, g]) => {
+                                const hasAttention = g.rows.some(isGroupAttention)
+                                const expanded = isExpanded(pid, hasAttention)
+                                return (
+                                    <Fragment key={pid}>
+                                        <FreshnessGroupHeader
+                                            providerId={pid}
+                                            name={g.name}
+                                            rows={g.rows}
+                                            expanded={expanded}
+                                            onToggle={() => toggleGroup(pid, expanded)}
+                                            isSystemAdmin={isSystemAdmin}
+                                            onRefreshProvider={(id, name) => setProviderDialog({ id, name })}
+                                            colSpan={COLS}
                                         />
-                                    ))}
-                                </Fragment>
-                            ))}
+                                        {expanded && g.rows.map(row => (
+                                            <FreshnessRow
+                                                key={row.dataSourceId}
+                                                row={row}
+                                                workspaceName={row.workspaceId ? workspaceName.get(row.workspaceId) : undefined}
+                                                onOpenDrawer={setDrawerDsId}
+                                                onRefresh={onRefresh}
+                                                busy={busyDsId === row.dataSourceId}
+                                            />
+                                        ))}
+                                    </Fragment>
+                                )
+                            })}
                         </tbody>
                     </table>
                 </div>
@@ -250,17 +357,19 @@ export function Freshness() {
 
             <ConfirmDialog
                 open={confirm != null}
-                title={confirm ? SCOPE_LABEL[confirm.scope] : ''}
+                title={buildMode ? 'Build lineage' : (confirm ? SCOPE_LABEL[confirm.scope] : '')}
                 message={
-                    confirm?.scope === 'full'
-                        ? 'This refreshes caches and rebuilds aggregated lineage for this source. It can take a while.'
-                        : 'This rebuilds aggregated lineage for this source. It can take a while.'
+                    buildMode
+                        ? 'Builds lineage rollups for this source for the first time. This may take a while on large sources.'
+                        : confirm?.scope === 'full'
+                            ? 'This refreshes caches and rebuilds aggregated lineage for this source. It can take a while.'
+                            : 'This rebuilds aggregated lineage for this source. It can take a while.'
                 }
-                confirmLabel={confirm ? SCOPE_LABEL[confirm.scope] : ''}
+                confirmLabel={buildMode ? 'Build lineage' : (confirm ? SCOPE_LABEL[confirm.scope] : '')}
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
                 confirmIcon={Zap}
                 onConfirm={() => {
-                    if (confirm) doRefresh(confirm.dsId, confirm.scope)
+                    if (confirm) doRefresh(confirm.dsId, confirm.scope, confirm.firstBuild)
                     setConfirm(null)
                 }}
                 onCancel={() => setConfirm(null)}

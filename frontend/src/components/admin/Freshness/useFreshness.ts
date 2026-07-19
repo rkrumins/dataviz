@@ -116,11 +116,13 @@ export function useRefreshBatch(
         queryKey: FRESHNESS_KEYS.batch(batchId ?? ''),
         queryFn: () => freshnessService.getBatch(batchId!),
         enabled: enabled && !!batchId,
-        // Stop once the batch is done, or after ~5 consecutive status-GET
-        // failures (a dead runner shouldn't poll forever — the dialog's Close
-        // stays enabled so the user can still dismiss it).
+        // Stop once the batch is done, or after 5 terminal errors with no
+        // success since (a dead runner shouldn't poll forever — the dialog's
+        // Close stays enabled so the user can still dismiss it).
         refetchInterval: (q) =>
-            q.state.data?.state === 'done' || q.state.fetchFailureCount >= 5 ? false : BATCH_POLL_MS,
+            q.state.data?.state === 'done' ||
+            (q.state.errorUpdateCount >= 5 && q.state.errorUpdatedAt > q.state.dataUpdatedAt)
+                ? false : BATCH_POLL_MS,
         refetchIntervalInBackground: false,
         retry: 1,
     })
