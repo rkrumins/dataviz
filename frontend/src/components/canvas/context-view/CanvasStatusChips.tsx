@@ -47,6 +47,9 @@ export function CanvasStatusChips({
   focusShown,
   focusTotal,
   onOpenFocusLens,
+  rootsLoaded,
+  rootsHaveMore,
+  onLoadMoreRoots,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -72,6 +75,11 @@ export function CanvasStatusChips({
   focusShown?: number
   focusTotal?: number
   onOpenFocusLens?: () => void
+  /** Root pagination: top-level entities loaded so far; `rootsHaveMore`
+   *  = the last page was full, so more likely exist beyond it. */
+  rootsLoaded?: number
+  rootsHaveMore?: boolean
+  onLoadMoreRoots?: () => void
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -80,8 +88,9 @@ export function CanvasStatusChips({
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
   const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
+  const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots) return null
 
   return (
     // Bottom-RIGHT, beneath the Edge Legend — the bottom-left corner
@@ -92,6 +101,38 @@ export function CanvasStatusChips({
       style={{ bottom: 'calc(1rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
+      {showRoots && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">More top-level entities exist</p>
+              <p className="text-ink-muted">
+                {rootsLoaded!.toLocaleString()} top-level entities are loaded so far
+                and the last page came back full — the source likely has more.
+                Loading is additive: nothing on the canvas is replaced.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <ListPlus className="w-3 h-3 text-sky-500/80" />
+            <span>
+              <span className="tabular-nums">{rootsLoaded!.toLocaleString()}</span> top-level loaded
+            </span>
+            {onLoadMoreRoots && (
+              <button
+                type="button"
+                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                onClick={onLoadMoreRoots}
+              >
+                Load more
+              </button>
+            )}
+          </div>
+        </InfoTooltip>
+      )}
+
       {showAdaptive && (
         <InfoTooltip
           side="right"

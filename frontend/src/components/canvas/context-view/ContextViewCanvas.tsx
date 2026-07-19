@@ -1676,7 +1676,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
+  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -3145,6 +3145,9 @@ export function ContextViewCanvas({
             unassigned entities, truncated aggregated detail). The canvas
             never hides lineage silently. */}
         <CanvasStatusChips
+          rootsLoaded={rootsLoaded}
+          rootsHaveMore={rootsHaveMore}
+          onLoadMoreRoots={() => { void loadMoreRoots() }}
           unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}
