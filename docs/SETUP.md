@@ -295,11 +295,10 @@ synodic/
 
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VM / self-host guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system overview
-- [superpowers/specs/2026-04-18-resilient-dev-environments-design.md](superpowers/specs/2026-04-18-resilient-dev-environments-design.md) — design rationale for the current dev-env resilience model
 
 ### Related in-app docs
 
 - [Backend guide](/docs/backend) — services, API surface, and startup lifecycle
 - [Frontend & UX](/docs/frontend) — the Vite SPA you run with `./dev.sh frontend`
 - [Platform Services overview](/docs/services-overview) — process roles (`SYNODIC_ROLE`) and topology
-- [Local integration testing](/docs/local-integration-testing) — the draft/branch graph journey
+- [Local integration testing](/docs/integration-testing) — the draft/branch graph journey

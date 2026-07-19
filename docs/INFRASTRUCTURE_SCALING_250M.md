@@ -15,7 +15,7 @@ Companion documents — this specification composes with, and does not replace:
 
 - [FalkorDB Deployment](/docs/falkordb-deployment) — cluster routing semantics, client configuration (§7), DR protocol
 - [architecture-when-scaling.md](./architecture-when-scaling.md) — application-tier role split (web / worker / controlplane), cache-vs-coordination Redis rules
-- [versioning/09-scale-limits-and-roadmap.md](./versioning/09-scale-limits-and-roadmap.md) — measured complexity envelope and known hotspots of the versioned store
+- [versioning/09-scale-limits-and-roadmap.md](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) — measured complexity envelope and known hotspots of the versioned store
 
 ---
 
@@ -381,7 +381,7 @@ App node pool: `n4-standard-8`, autoscaled 6–16 nodes across 3 zones.
 
 ## 9. Known Scaling Risks at 250M (and their mitigations)
 
-From [versioning/09-scale-limits-and-roadmap.md](./versioning/09-scale-limits-and-roadmap.md) — these are properties of the software, restated here because the infrastructure must absorb them:
+From [versioning/09-scale-limits-and-roadmap.md](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) — these are properties of the software, restated here because the infrastructure must absorb them:
 
 1. **Full FalkorDB seed is `O(N·E)` and composes live state in memory.** Mitigation: streaming rebuild stays enabled (§4.5); a 50M-element reseed is a *minutes-long, IOPS-heavy* event on the graphver instance — the 4 TB/IOPS headroom in §2.1 exists for this. Schedule bulk reseeds off-peak.
 2. **Draft-checkpoint Merkle rebuild is `O(graph)` at the top levels.** Watch checkpoint latency on graphs > 10M elements; the roadmap item (incremental Merkle) becomes funded work when p99 checkpoint > seconds.

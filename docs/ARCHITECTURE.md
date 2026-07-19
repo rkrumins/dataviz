@@ -818,4 +818,4 @@ kubectl -n synodic logs -l app=viz-service -f
 - [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
 - [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are materialized
 - [Technical Debt](/docs/technical-debt) — security, scaling, and testing risks
-- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred horizontal-scale plan
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan

@@ -43,7 +43,7 @@ a **read cache** that must remain a faithful, rebuildable projection of committe
 | Fork | **Fork** | copy-on-write; no rows copied |
 | `git rebase`/pull | **Rebase / pull-latest** | 3-way merge `main` into the draft |
 | `git revert` | **Revert** | inverse of a `main` commit, audited |
-| 3-way merge | **3-way field-level merge** | per-entity, per-field; see [03](03-branching-commits-merge.md) |
+| 3-way merge | **3-way field-level merge** | per-entity, per-field; see [03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md) |
 
 > **Not Git:** the unit of change is an **entity** (node/edge), not a text line; merges are
 > **field-level** over JSON payloads with ontology-aware set fields; `main` history is **squash-only**
@@ -73,7 +73,7 @@ graph LR
 
 The cache can be evicted, corrupted, or lost and **rebuilt in full from Postgres** — so the projector
 is free to be aggressive (drop + reseed) as long as it never advances its **watermark** before a batch
-lands. Details: [04 · Projection & Cache](04-projection-and-cache.md).
+lands. Details: [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md).
 
 ### 3b. A draft is `main ⊕ a sparse delta`
 
@@ -84,8 +84,8 @@ lands. Details: [04 · Projection & Cache](04-projection-and-cache.md).
 This is guaranteed *by construction*, not by re-derivation: the `DraftOverlayProvider` wraps whatever
 serves `main` and overlays only the draft's bounded change set. **An empty delta ⇒ a pure
 pass-through**, so a no-op draft literally *is* `main`. This is why opening a draft is cheap and why a
-draft never silently diverges. See [03](03-branching-commits-merge.md) and
-[04](04-projection-and-cache.md).
+draft never silently diverges. See [03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md) and
+[04](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md).
 
 ## 4. Where it sits in the stack
 
@@ -129,12 +129,12 @@ graph TB
 
 - **Providers / ontology / views / aggregation** are the surrounding stack — see
   [`../DATA_ARCHITECTURE.md`](../DATA_ARCHITECTURE.md).
-- **Ontology governance** is enforced at the commit boundary: [05](05-ontology-governance.md).
+- **Ontology governance** is enforced at the commit boundary: [05](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md).
 - **Views** scope which entities a draft/import/export touches (via
-  `context_models.instance_assignments`): [07](07-frontend-integration.md),
-  [08](08-import-export.md).
+  `context_models.instance_assignments`): [07](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/07-frontend-integration.md),
+  [08](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md).
 - **Aggregation** (`:AGGREGATED` rollups) is maintained incrementally by the projector and rebuilt via
-  a hook: [04](04-projection-and-cache.md).
+  a hook: [04](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md).
 
 ## 5. Read routing — the freshest correct source, per request
 
@@ -159,18 +159,18 @@ flowchart TD
 
 > **Limitation.** Two read surfaces compute "fresh" slightly differently (the neighbors endpoint
 > honors `READ_MAX_LAG`; ContextEngine uses strict `projected ≥ committed`). They coincide at the
-> default `READ_MAX_LAG=0`. See [09](09-scale-limits-and-roadmap.md).
+> default `READ_MAX_LAG=0`. See [09](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md).
 
 ## 6. Write paths — two ways in, one system of record
 
 1. **Draft flow (the reviewed path).** Edit → `working_changes` → **checkpoint** (fold into version
    rows + a commit) → **publish** or open a **merge request**. This is what the canvas and bulk import
-   use. See [03](03-branching-commits-merge.md), [07](07-frontend-integration.md),
-   [08](08-import-export.md).
+   use. See [03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md), [07](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/07-frontend-integration.md),
+   [08](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md).
 2. **Write-through (the direct path).** `VersionedWriteProvider` wraps any provider so an ordinary
    graph write **also lands as an audited commit** on the data source's versioned graph before hitting
    the backing store — making versioning the system of record even for non-draft writes (toggle
-   `GRAPHVER_VERSIONED_WRITES`). See [04](04-projection-and-cache.md).
+   `GRAPHVER_VERSIONED_WRITES`). See [04](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md).
 
 Both funnel through `GraphVersioningService.apply_ops` (`O(ops)`), which enforces ontology + edge
 integrity and writes append-only version rows. `update` ops are **field-level patches**, not wholesale
@@ -183,7 +183,7 @@ replaces — a defensive invariant that closed a real merge-time data-loss class
   `GRAPHVER_PROJECTION_INPROCESS=1` (set in the dev compose) — see `backend/app/main.py:872-908`.
 - **Standalone projection worker.** `python -m backend.app.services.versioning` runs the reconciling
   projector as its own process for production/multi-node. (One known gap: it lacks the
-  `on_rollups_stale` wiring the in-process/interactive paths have — [09](09-scale-limits-and-roadmap.md).)
+  `on_rollups_stale` wiring the in-process/interactive paths have — [09](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md).)
 - **Aggregation worker.** Maintains `:AGGREGATED` rollups on full-seed / stale windows via a triggered
   job. **Redis** carries projection nudges (stream) and cache leases/locks.
 - **Postgres.** The `graphver` schema is **decoupled** — point `GRAPHVER_DB_URL` at its own instance
@@ -242,37 +242,37 @@ sequenceDiagram
 > **Decision — Postgres source of truth, FalkorDB rebuildable cache.** Correctness and durability live
 > in an append-only relational log; the graph DB is a fast, disposable read model. Rationale: graph
 > DBs are excellent at traversal but weaker at the transactional, append-only, point-in-time
-> guarantees versioning needs. The cache can always be rebuilt. ([04](04-projection-and-cache.md))
+> guarantees versioning needs. The cache can always be rebuilt. ([04](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md))
 
 > **Decision — append-only versions + a mutable head pointer.** Version tables are never `UPDATE`d;
 > "latest" is a small `entity_heads` pointer. Rationale: preserves full history and audit for free,
 > keeps the high-cardinality tables churn-free, and makes point-in-time reconstruction a range scan.
-> ([02](02-data-model.md))
+> ([02](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/02-data-model.md))
 
 > **Decision — a draft is `main ⊕ sparse delta`.** Chosen over recomputing rollups per read or
 > materializing a per-draft FalkorDB graph. Rationale: reuses `main`'s caches and rollups, costs
-> `O(delta)`, and makes "no-op draft ≡ main" true by construction. ([03](03-branching-commits-merge.md))
+> `O(delta)`, and makes "no-op draft ≡ main" true by construction. ([03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md))
 
 > **Decision — `update` is a field-level PATCH, not a replace.** The canvas sends only edited fields;
 > treating that as a whole-entity replace silently erased unmentioned fields on publish. Patch
-> semantics make every partial caller safe. ([03](03-branching-commits-merge.md))
+> semantics make every partial caller safe. ([03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md))
 
 > **Decision — squash-only `main`, 3-way field-level merge.** `main` history stays linear and legible
 > (one commit per publish/merge); concurrent edits merge per-field with ontology-aware set fields, and
-> only genuine same-field clashes conflict. ([03](03-branching-commits-merge.md))
+> only genuine same-field clashes conflict. ([03](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md))
 
 > **Decision — ontology enforced at the commit boundary, injected from the API layer.** The versioning
 > package never imports the management DB; rules are resolved and pushed down at write time and
-> **re-checked at merge** against current published rules. ([05](05-ontology-governance.md))
+> **re-checked at merge** against current published rules. ([05](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md))
 
 > **Decision — HASH-partition the append-only tables on `graph_id`; blake2b content/Merkle hashing.**
 > Fixed-modulo partitioning (not partition-per-data-source) bounds partition count; blake2b + a
 > length-prefixed encoding give collision-resistant, unambiguous hashes. Both are
-> **immutable-after-data**. ([02](02-data-model.md))
+> **immutable-after-data**. ([02](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/02-data-model.md))
 
 > **Decision — a provider-capability seam (managed vs federated).** Each provider type declares whether
 > we own its store (writable) or merely present a view of an external catalog. This is the hinge for
-> connecting authoritative sources like DataHub / OpenMetadata. ([10](10-authoritative-sources-datahub-openmetadata.md))
+> connecting authoritative sources like DataHub / OpenMetadata. ([10](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/10-authoritative-sources-datahub-openmetadata.md))
 
 ---
 
@@ -280,10 +280,10 @@ sequenceDiagram
 
 - **[API Reference](/docs/versioning-api-reference)** — the REST contract for the routers, auth/RBAC, and request/response shapes described here.
 - **[End-to-End Testing Guide](/docs/versioning-e2e)** — bring up the stack and drive the whole flow over HTTP.
-- [02 · Data Model](02-data-model.md) — the `graphver` schema and its invariants.
-- [03 · Branching, Commits & Merge](03-branching-commits-merge.md) — the engine.
-- [04 · Projection & Cache](04-projection-and-cache.md) — FalkorDB as a rebuildable read model.
-- [05 · Ontology Governance](05-ontology-governance.md) — commit-boundary enforcement.
-- [09 · Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) — the honest edges.
-- [10 · Authoritative Sources](10-authoritative-sources-datahub-openmetadata.md) — the federation
+- [02 · Data Model](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/02-data-model.md) — the `graphver` schema and its invariants.
+- [03 · Branching, Commits & Merge](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md) — the engine.
+- [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md) — FalkorDB as a rebuildable read model.
+- [05 · Ontology Governance](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md) — commit-boundary enforcement.
+- [09 · Scale, Limits & Roadmap](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) — the honest edges.
+- [10 · Authoritative Sources](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/10-authoritative-sources-datahub-openmetadata.md) — the federation
   direction.

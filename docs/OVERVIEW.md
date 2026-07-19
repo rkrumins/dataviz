@@ -607,4 +607,4 @@ ADMIN_PASSWORD=<strong-random-password>                                # Recomme
 - [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
 - [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
 - [Technical Debt](/docs/technical-debt) — known risks and the remediation plan
-- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred horizontal-scale plan
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan

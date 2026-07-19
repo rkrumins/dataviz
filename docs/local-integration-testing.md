@@ -2,7 +2,7 @@
 
 This guide is the focused, **backend-only** path to stand the graph service up locally and exercise the
 draft journey end to end: **create a graph → import an existing one → edit on a draft → publish**. It
-complements the general setup in [`QUICKSTART.md`](../QUICKSTART.md) and [`docs/SETUP.md`](SETUP.md)
+complements the general setup in [`QUICKSTART.md`](https://github.com/rkrumins/dataviz/blob/main/QUICKSTART.md) and [`docs/SETUP.md`](SETUP.md)
 — read those for the full stack; this doc only covers what's specific to the versioned-graph / draft path
 and how to test it.
 

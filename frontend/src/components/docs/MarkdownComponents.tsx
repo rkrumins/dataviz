@@ -9,7 +9,7 @@ import { MermaidBlock } from './MermaidBlock'
 // docsConfig.ts? Add its filename here too, or its relative .md links from
 // other docs will fall through to the "external link" branch below instead
 // of routing in-SPA.
-const filenameMap: Record<string, string> = {
+export const filenameMap: Record<string, string> = {
   'OVERVIEW.md': 'overview',
   'SETUP.md': 'setup',
   'ARCHITECTURE.md': 'architecture',

@@ -438,5 +438,5 @@ gantt
 - [Architecture](/docs/architecture) — the security controls and deployment model these risks apply to
 - [Data Architecture](/docs/data-architecture) — credential encryption, migrations, and outbox details
 - [Decisions](/docs/decisions) — ADRs that resolved several items here (Alembic, Redis roles, graph-service retirement)
-- [Architecture When Scaling](/docs/architecture-when-scaling) — the deferred multi-tier design behind the cache-isolation and scaling gaps
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred multi-tier design behind the cache-isolation and scaling gaps
 - [Overview](/docs/overview) — platform vision, maturity assessment, and roadmap
