@@ -25,9 +25,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "feature_definitions",
-        sa.Column("impact_when_off", sa.Text(), nullable=True),
+    # IF NOT EXISTS: the feature-flags service creates/repairs its tables
+    # at CURRENT model shape on boot, so a live DB may already carry this
+    # column before historical replay reaches this revision (the
+    # bootstrap-then-replay wedge — see 20260713_1200_restore_kind).
+    op.execute(
+        "ALTER TABLE feature_definitions "
+        "ADD COLUMN IF NOT EXISTS impact_when_off text"
     )
 
 
