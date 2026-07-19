@@ -171,6 +171,83 @@ describe('LineageLens on-demand fetch merge', () => {
     expect(onRetryFetch).toHaveBeenCalledWith('a')
   })
 
+  it('groups field partners under their parent dataset and demotes coarser rollups', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { canContain: ['SCHEMAFIELD'] } },
+          { id: 'SCHEMAFIELD', hierarchy: { canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({ nodes: [node('ds', 'DATASET')], edges: [], visibleEdges: [] } as never)
+      const onRecenter = vi.fn()
+      renderLens(['ds'], { onRecenter }, {
+        supplementalEdges: [
+          edge('f1', 'fieldA', 'ds'),
+          { id: 'c1', source: 'parentDs', target: 'fieldA', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+          edge('f2', 'plat', 'ds'),
+        ],
+        supplementalNodes: new Map([
+          ['fieldA', node('fieldA', 'SCHEMAFIELD')],
+          ['parentDs', node('parentDs', 'DATASET')],
+          ['plat', node('plat', 'CONTAINER')],
+        ]),
+        fetchStatus: new Map([['ds', 'done' as const]]),
+      })
+      // Field grouped under its parent dataset (structural story).
+      expect(screen.getByText('label-parentDs')).toBeTruthy()
+      expect(screen.getByText('label-fieldA')).toBeTruthy()
+      // Coarser CONTAINER partner demoted to the labeled Rollups tier.
+      expect(screen.getByText('Rollups')).toBeTruthy()
+      expect(screen.getByText('label-plat')).toBeTruthy()
+      expect(screen.getByText('rollup')).toBeTruthy()
+      // Headline counts split by grain — units never mix.
+      expect(screen.getByText(/1 direct connection · 1 rolled-up/)).toBeTruthy()
+      // Parent header re-centers on the parent itself.
+      fireEvent.click(screen.getByText('label-parentDs'))
+      expect(onRecenter).toHaveBeenCalledWith('parentDs')
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
+  it('type chips toggle a grain off without silent loss (count stays visible)', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { canContain: ['SCHEMAFIELD'] } },
+          { id: 'SCHEMAFIELD', hierarchy: { canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({ nodes: [node('ds', 'DATASET')], edges: [], visibleEdges: [] } as never)
+      renderLens(['ds'], {}, {
+        supplementalEdges: [edge('f1', 'fieldA', 'ds'), edge('f2', 'plat', 'ds')],
+        supplementalNodes: new Map([
+          ['fieldA', node('fieldA', 'SCHEMAFIELD')],
+          ['plat', node('plat', 'CONTAINER')],
+        ]),
+      })
+      expect(screen.getByText('label-plat')).toBeTruthy()
+      // Toggle the CONTAINER chip off — rows hide, the count note appears.
+      fireEvent.click(screen.getByText('CONTAINER'))
+      expect(screen.queryByText('label-plat')).toBeNull()
+      expect(screen.getByText(/1 connection hidden by the type chips/)).toBeTruthy()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({

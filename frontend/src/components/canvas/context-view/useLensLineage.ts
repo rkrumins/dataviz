@@ -156,6 +156,33 @@ export function useLensLineage(
           edges.push(toCanvasEdge(ge))
         }
       }
+      // Parent context for flow partners — one bounded query for the
+      // containment edges POINTING AT the partners (parent → partner).
+      // A field name without its parent dataset isn't identifying
+      // information; the Lens groups partner rows under these parents.
+      if (containmentEdgeTypes.length > 0) {
+        const partnerUrns: string[] = []
+        const seenPartner = new Set<string>()
+        for (const ge of [...outEdges, ...inEdges]) {
+          for (const p of [ge.sourceUrn, ge.targetUrn]) {
+            if (!p || p === urn || seenPartner.has(p)) continue
+            seenPartner.add(p)
+            partnerUrns.push(p)
+          }
+        }
+        if (partnerUrns.length > 0) {
+          const parentEdges = await provider.getEdges({
+            targetUrns: partnerUrns.slice(0, NAME_CAP),
+            edgeTypes: containmentEdgeTypes,
+            limit: EDGE_FETCH_LIMIT,
+          })
+          for (const ge of parentEdges) {
+            if (seenEdge.has(ge.id)) continue
+            seenEdge.add(ge.id)
+            edges.push(toCanvasEdge(ge))
+          }
+        }
+      }
       const named = await resolveNames(edges.flatMap(e => [e.source, e.target]).filter(p => p !== urn))
       if (session !== sessionRef.current) return
       setState(prev => {

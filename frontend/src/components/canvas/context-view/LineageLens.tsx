@@ -26,18 +26,19 @@
  * Lens-local ESC handling runs in the capture phase so canvas keyboard
  * shortcuts don't fire underneath.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap } from '@/store/schema'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
 import { EDGE_FETCH_LIMIT } from './useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 
 const ROWS_CAP = 200
+const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 
 export interface LineageLensProps {
   /** Focal-node stack; last entry is the current focal. Empty = closed. */
@@ -283,6 +284,56 @@ export function LineageLens({
     return m
   }, [lensStack, edgesByEndpoint, containmentEdgeTypes])
 
+  // ── Grain machinery — data-driven from the schema's entity-type
+  // hierarchy. closure(T) = every type T can transitively contain; a
+  // partner is a COARSER-grain rollup relative to a base node when the
+  // partner's type can contain the base's type (e.g. CONTAINER and
+  // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
+  // schema helpers. Tiny input (schema type list), computed once.
+  const hierarchyMap = useEntityTypeHierarchyMap()
+  const canContainClosure = useMemo(() => {
+    const closure = new Map<string, Set<string>>()
+    for (const [t, h] of Object.entries(hierarchyMap)) {
+      const seen = new Set<string>()
+      const stack = [...h.canContain]
+      while (stack.length > 0) {
+        const c = stack.pop()!
+        const cu = c.toUpperCase()
+        if (seen.has(cu)) continue
+        seen.add(cu)
+        for (const g of hierarchyMap[c]?.canContain ?? []) stack.push(g)
+      }
+      closure.set(t.toUpperCase(), seen)
+    }
+    return closure
+  }, [hierarchyMap])
+  const isCoarserThan = useCallback((partnerType: string | undefined, baseType: string): boolean => {
+    if (!partnerType) return false
+    return canContainClosure.get(partnerType.toUpperCase())?.has(baseType.toUpperCase()) ?? false
+  }, [canContainClosure])
+
+  // Containment parent of a node, when known — fetched or loaded
+  // containment edge pointing at it, else the canvas's own assignment.
+  const resolveParent = useCallback((id: string): string | null => {
+    for (const e of edgesByEndpoint.get(id) ?? []) {
+      if (e.target === id && e.source !== id
+        && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) return e.source
+    }
+    return (nodeMap.get(id)?.data?.parentId as string | undefined) ?? null
+  }, [edgesByEndpoint, containmentEdgeTypes, nodeMap])
+
+  // Type-filter chips — lens-local, keyed to the focal (like the text
+  // filter) so re-centering starts clean. Shared across both columns.
+  const [hiddenTypesState, setHiddenTypesState] = useState<{ nodeId: string | null; types: ReadonlySet<string> }>({ nodeId: null, types: EMPTY_TYPE_SET })
+  const hiddenTypes = hiddenTypesState.nodeId === nodeId ? hiddenTypesState.types : EMPTY_TYPE_SET
+  const toggleHiddenType = (t: string) => setHiddenTypesState(prev => {
+    const base = prev.nodeId === nodeId ? prev.types : EMPTY_TYPE_SET
+    const next = new Set(base)
+    if (next.has(t)) next.delete(t)
+    else next.add(t)
+    return { nodeId, types: next }
+  })
+
   // ── Containment drill — refine an aggregated row to its constituent
   // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
   // up (`data.sourceEdges`). Honest by construction: constituents that
@@ -331,6 +382,12 @@ export function LineageLens({
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
   )
+  // Headline counts split by grain so units never mix: direct (finer/
+  // peer) connections vs coarser rolled-up summaries of those flows.
+  let focalRollupTotal = 0
+  for (const r of incomingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
+  for (const r of outgoingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
+  const focalDirectTotal = incomingRecords.length + outgoingRecords.length - focalRollupTotal
 
   const q = query.trim().toLowerCase()
   const filterFn = (r: NeighborRecord) =>
@@ -376,7 +433,7 @@ export function LineageLens({
                 <span>
                   {lensStack.length > 1
                     ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
-                    : `${incomingRecords.length + outgoingRecords.length} direct connection${incomingRecords.length + outgoingRecords.length === 1 ? '' : 's'}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                    : `${focalDirectTotal} direct connection${focalDirectTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
                 {focalFetch === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
@@ -573,9 +630,17 @@ export function LineageLens({
                 }
                 const isLast = i === lensStack.length - 1
                 const walkedInto = !isLast ? lensStack[i + 1] : null
-                const rows = [...byNeighbor.values()]
-                  .filter(({ rec }) => !isLast || filterFn(rec))
-                  .slice(0, 200)
+                const hopType = (nodeMap.get(hopId)?.data?.type as string) ?? 'entity'
+                // Finer/peer rows first; coarser-grain rollups demoted to
+                // the end (visible, badged — never silently dropped).
+                const rowsFiner: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
+                const rowsCoarser: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
+                for (const { rec, n } of byNeighbor.values()) {
+                  if (isLast && !filterFn(rec)) continue
+                  const coarser = isCoarserThan(rec.neighborNode?.data?.type as string | undefined, hopType)
+                  ;(coarser ? rowsCoarser : rowsFiner).push({ rec, n, coarser })
+                }
+                const rows = [...rowsFiner, ...rowsCoarser].slice(0, 200)
                 const hopLabel = labelOf(hopId, nodeMap.get(hopId))
                 const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
                 const hopFetch = fetchStatus?.get(hopId)
@@ -606,10 +671,17 @@ export function LineageLens({
                       </span>
                     </div>
                     <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
-                      {rows.map(({ rec, n }) => {
+                      {rows.map(({ rec, n, coarser }) => {
                         const rid = rec.neighborId
                         const active = rid === walkedInto
                         const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
+                        // Parent breadcrumb — a bare field name isn't
+                        // identifying; say which dataset it belongs to
+                        // (omitted when the parent IS this hop).
+                        const rowParent = resolveParent(rid)
+                        const rowParentLabel = rowParent && rowParent !== hopId
+                          ? labelOf(rowParent, nodeMap.get(rowParent))
+                          : null
                         const aggData = rec.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
                         const drillKey = `${i}:${rid}`
                         const canDrill = !!aggData?.isAggregated
@@ -642,12 +714,25 @@ export function LineageLens({
                                 className={
                                   active
                                     ? 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
-                                    : 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
+                                    : `flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors${coarser ? ' opacity-70 hover:opacity-100' : ''}`
                                 }
                               >
                                 <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
                                 <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
+                                {rowParentLabel && (
+                                  <span className="flex-shrink min-w-0 max-w-[45%] truncate text-[9px] text-ink-muted/50">
+                                    · {rowParentLabel}
+                                  </span>
+                                )}
                                 {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
+                                {coarser && (
+                                  <span
+                                    className="flex-shrink-0 flex items-center"
+                                    title="A coarser-grain summary of finer flows — not an additional connection"
+                                  >
+                                    <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/40" />
+                                  </span>
+                                )}
                                 <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
                               </button>
                               {canDrill && (
@@ -809,6 +894,11 @@ export function LineageLens({
               totalCount={incomingRecords.length}
               direction="incoming"
               fetchState={focalFetch}
+              nodeMap={nodeMap}
+              resolveParent={resolveParent}
+              isCoarser={(t) => isCoarserThan(t, focalType)}
+              hiddenTypes={hiddenTypes}
+              onToggleType={toggleHiddenType}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -889,6 +979,11 @@ export function LineageLens({
               totalCount={outgoingRecords.length}
               direction="outgoing"
               fetchState={focalFetch}
+              nodeMap={nodeMap}
+              resolveParent={resolveParent}
+              isCoarser={(t) => isCoarserThan(t, focalType)}
+              hiddenTypes={hiddenTypes}
+              onToggleType={toggleHiddenType}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1007,6 +1102,99 @@ function labelOf(id: string, node: LineageNode | undefined): string {
     ?? id
 }
 
+/** One neighbor row — shared by parent groups, type groups, and the
+ *  rollup tier so the interaction contract stays identical everywhere. */
+function NeighborRow({
+  r,
+  isIn,
+  accentColor,
+  rollup,
+  onRecenter,
+  onRevealOnCanvas,
+  onOpenDetails,
+}: {
+  r: NeighborRecord
+  isIn: boolean
+  accentColor: string
+  /** Coarser-grain summary row — muted, badged, never counted as more data. */
+  rollup?: boolean
+  onRecenter: (nodeId: string) => void
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onOpenDetails?: (nodeId: string) => void
+}) {
+  const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
+  const bundleCount = (r.edge as { edgeCount?: number }).edgeCount
+    ?? (r.edge.data as { edgeCount?: number } | undefined)?.edgeCount
+  const unloaded = !r.neighborNode
+  return (
+    <div
+      className={cn(
+        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-all border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0',
+        rollup && 'opacity-75 hover:opacity-100',
+      )}
+      style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
+      onClick={() => onRecenter(r.neighborId)}
+      title={`Re-center on ${labelOf(r.neighborId, r.neighborNode)}`}
+    >
+      <div className="flex-1 min-w-0">
+        <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
+          <span className="truncate">{labelOf(r.neighborId, r.neighborNode)}</span>
+          {rollup && (
+            <span
+              className="flex-shrink-0 flex items-center gap-0.5 px-1 py-px rounded bg-black/[0.05] dark:bg-white/[0.07] text-[8.5px] font-semibold uppercase tracking-wide text-ink-muted/70"
+              title="A coarser-grain summary of finer flows — not an additional connection"
+            >
+              <LucideIcons.Layers className="w-2.5 h-2.5" />
+              rollup
+            </span>
+          )}
+        </p>
+        <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
+          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
+          <span className="truncate uppercase tracking-wide">{r.edgeTypeNorm || 'relationship'}</span>
+          {bundleCount != null && bundleCount > 1 && (
+            <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
+          )}
+          {unloaded && <span className="italic">· not on canvas</span>}
+        </p>
+      </div>
+      {/* Flow direction cue: data always travels left → right.
+          On hover the actions REPLACE the chevron in normal flow (the
+          label truncates to make room) — an absolute overlay covered
+          the label and chevron. */}
+      <LucideIcons.ChevronRight
+        className={cn('w-3.5 h-3.5 flex-shrink-0 group-hover:hidden', isIn ? 'order-last' : 'order-first')}
+        style={{ color: `${edgeColor}99` }}
+      />
+      <span className={cn(
+        'hidden group-hover:flex flex-shrink-0 items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
+        isIn ? 'order-last' : 'order-first',
+      )}>
+        {onRevealOnCanvas && (
+          <button
+            type="button"
+            title="Reveal on canvas"
+            onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
+            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            <LucideIcons.Crosshair className="w-3 h-3" />
+          </button>
+        )}
+        {onOpenDetails && (
+          <button
+            type="button"
+            title="Open details"
+            onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
+            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            <LucideIcons.PanelRight className="w-3 h-3" />
+          </button>
+        )}
+      </span>
+    </div>
+  )
+}
+
 function NeighborColumn({
   title,
   subtitle,
@@ -1014,6 +1202,11 @@ function NeighborColumn({
   totalCount,
   direction,
   fetchState,
+  nodeMap,
+  resolveParent,
+  isCoarser,
+  hiddenTypes,
+  onToggleType,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -1026,23 +1219,67 @@ function NeighborColumn({
   /** On-demand fetch status for the focal node — keeps an in-flight
    *  fetch from reading as "no connections". */
   fetchState?: 'loading' | 'done' | 'error'
+  nodeMap: Map<string, LineageNode>
+  /** Containment parent of a node, when known (fetched or loaded). */
+  resolveParent: (id: string) => string | null
+  /** True when the given entity type is a COARSER grain than the focal
+   *  (its type can transitively contain the focal's type) — those rows
+   *  are summaries of finer flows, demoted to the rollup tier. */
+  isCoarser: (type: string | undefined) => boolean
+  hiddenTypes: ReadonlySet<string>
+  onToggleType: (type: string) => void
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
-  // Group by entity type (unknown/unloaded neighbors grouped under "Not loaded").
-  const groups = useMemo(() => {
-    const g = new Map<string, NeighborRecord[]>()
-    for (const r of records.slice(0, ROWS_CAP)) {
-      const type = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      const list = g.get(type) ?? []
-      list.push(r)
-      g.set(type, list)
+  // Three-way organization, replacing the flat by-type grouping:
+  //  1. finer/peer rows grouped by their PARENT dataset when known —
+  //     the column reads "which datasets feed me, via which fields";
+  //  2. rows with no known parent grouped by entity type (as before);
+  //  3. coarser-grain rows demoted to a labeled Rollups tier — visible
+  //     (never silently dropped) but muted and explained, because they
+  //     summarize the finer flows above rather than add connections.
+  const { typeChips, groups, rollups, hiddenCount } = useMemo(() => {
+    const typeCounts = new Map<string, number>()
+    for (const r of records) {
+      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+      typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
     }
-    return [...g.entries()].sort((a, b) => b[1].length - a[1].length)
-  }, [records])
+    const typeChips = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
+    let hiddenCount = 0
+    const shown: NeighborRecord[] = []
+    for (const r of records) {
+      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+      if (hiddenTypes.has(t)) { hiddenCount++; continue }
+      if (shown.length < ROWS_CAP) shown.push(r)
+    }
+    const rollups: NeighborRecord[] = []
+    const finer: NeighborRecord[] = []
+    for (const r of shown) {
+      if (isCoarser(r.neighborNode?.data?.type as string | undefined)) rollups.push(r)
+      else finer.push(r)
+    }
+    const groupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: NeighborRecord[] }>()
+    for (const r of finer) {
+      const parent = resolveParent(r.neighborId)
+      const mapKey = parent ? `p:${parent}` : `t:${(r.neighborNode?.data?.type as string) ?? 'not loaded'}`
+      let g = groupMap.get(mapKey)
+      if (!g) {
+        g = {
+          kind: parent ? 'parent' : 'type',
+          key: parent ?? ((r.neighborNode?.data?.type as string) ?? 'not loaded'),
+          rows: [],
+        }
+        groupMap.set(mapKey, g)
+      }
+      g.rows.push(r)
+    }
+    const groups = [...groupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
+    return { typeChips, groups, rollups, hiddenCount }
+  }, [records, hiddenTypes, isCoarser, resolveParent])
 
   const isIn = direction === 'incoming'
+  const allFilteredOff = records.length > 0 && groups.length === 0 && rollups.length === 0
 
   return (
     <div className={cn(
@@ -1066,7 +1303,41 @@ function NeighborColumn({
           {totalCount}
         </span>
       </div>
+      {/* Grain/type chips — one per entity type present, click to
+          toggle. An off chip stays visible with its count (explicit
+          user choice, not silent loss). */}
+      {typeChips.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1 px-3 pb-1.5 flex-shrink-0">
+          {typeChips.map(([t, n]) => {
+            const off = hiddenTypes.has(t)
+            const chipColor = t === 'not loaded' ? '#94a3b8' : generateColorFromType(t)
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => onToggleType(t)}
+                title={off ? `Show ${t} connections again` : `Hide ${t} connections in both columns`}
+                className={cn(
+                  'flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-black/10 dark:border-white/10 text-[9px] font-semibold uppercase tracking-wide transition-colors',
+                  off
+                    ? 'text-ink-muted/40 line-through decoration-ink-muted/40'
+                    : 'text-ink-muted hover:text-ink bg-black/[0.03] dark:bg-white/[0.04]',
+                )}
+              >
+                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor, opacity: off ? 0.35 : 1 }} />
+                <span className="max-w-[90px] truncate">{t}</span>
+                <span className="tabular-nums">{n}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
+        {allFilteredOff && (
+          <p className="px-2 py-6 text-center text-[11px] text-ink-muted/70 leading-snug">
+            All {totalCount} connection{totalCount === 1 ? '' : 's'} hidden by the type chips above.
+          </p>
+        )}
         {records.length === 0 && (
           totalCount === 0 && fetchState === 'loading' ? (
             <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
@@ -1089,82 +1360,101 @@ function NeighborColumn({
             </div>
           )
         )}
-        {groups.map(([type, rows]) => {
-          const unloaded = type === 'not loaded'
-          const typeColor = unloaded ? '#94a3b8' : generateColorFromType(type)
+        {groups.map((g) => {
+          if (g.kind === 'parent') {
+            const parentLabel = labelOf(g.key, nodeMap.get(g.key))
+            const parentColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
+            return (
+              <div key={`p-${g.key}`} className="mb-2.5">
+                {/* Parent-dataset header — the structural story ("which
+                    datasets feed me, via which fields"). Clicking steps
+                    the walk into the parent itself. */}
+                <button
+                  type="button"
+                  onClick={() => onRecenter(g.key)}
+                  title={`Re-center on ${parentLabel}`}
+                  className="w-full min-w-0 flex items-center gap-1.5 px-1.5 py-1 rounded-md text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
+                >
+                  <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/60" />
+                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
+                  <span className="min-w-0 truncate text-[10px] font-bold tracking-wide text-ink-muted/90">{parentLabel}</span>
+                  <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
+                </button>
+                <div className="flex flex-col gap-1">
+                  {g.rows.map((r, i) => (
+                    <NeighborRow
+                      key={`${r.edge.id}-${i}`}
+                      r={r}
+                      isIn={isIn}
+                      accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
+                      onRecenter={onRecenter}
+                      onRevealOnCanvas={onRevealOnCanvas}
+                      onOpenDetails={onOpenDetails}
+                    />
+                  ))}
+                </div>
+              </div>
+            )
+          }
+          const unloaded = g.key === 'not loaded'
+          const typeColor = unloaded ? '#94a3b8' : generateColorFromType(g.key)
           return (
-            <div key={type} className="mb-2.5">
+            <div key={`t-${g.key}`} className="mb-2.5">
               <div className="flex items-center gap-1.5 px-1.5 py-1">
                 <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: typeColor }} />
-                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">{type}</span>
-                <span className="text-[9.5px] tabular-nums text-ink-muted/60">{rows.length}</span>
+                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">{g.key}</span>
+                <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
               </div>
               <div className="flex flex-col gap-1">
-                {rows.map((r, i) => {
-                  const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
-                  const bundleCount = (r.edge as { edgeCount?: number }).edgeCount
-                    ?? (r.edge.data as { edgeCount?: number } | undefined)?.edgeCount
-                  return (
-                    <div
-                      key={`${r.edge.id}-${i}`}
-                      className="group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-all border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0"
-                      style={{ borderLeftWidth: 3, borderLeftColor: typeColor }}
-                      onClick={() => onRecenter(r.neighborId)}
-                      title={`Re-center on ${labelOf(r.neighborId, r.neighborNode)}`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="truncate text-[12px] font-medium text-ink leading-snug">
-                          {labelOf(r.neighborId, r.neighborNode)}
-                        </p>
-                        <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
-                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
-                          <span className="truncate uppercase tracking-wide">{r.edgeTypeNorm || 'relationship'}</span>
-                          {bundleCount != null && bundleCount > 1 && (
-                            <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
-                          )}
-                          {unloaded && <span className="italic">· not on canvas</span>}
-                        </p>
-                      </div>
-                      {/* Flow direction cue: data always travels left → right.
-                          On hover the actions REPLACE the chevron in normal
-                          flow (the label truncates to make room) — an absolute
-                          overlay covered the label and chevron. */}
-                      <LucideIcons.ChevronRight
-                        className={cn('w-3.5 h-3.5 flex-shrink-0 group-hover:hidden', isIn ? 'order-last' : 'order-first')}
-                        style={{ color: `${edgeColor}99` }}
-                      />
-                      <span className={cn(
-                        'hidden group-hover:flex flex-shrink-0 items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
-                        isIn ? 'order-last' : 'order-first',
-                      )}>
-                        {onRevealOnCanvas && (
-                          <button
-                            type="button"
-                            title="Reveal on canvas"
-                            onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
-                            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                          >
-                            <LucideIcons.Crosshair className="w-3 h-3" />
-                          </button>
-                        )}
-                        {onOpenDetails && (
-                          <button
-                            type="button"
-                            title="Open details"
-                            onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
-                            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                          >
-                            <LucideIcons.PanelRight className="w-3 h-3" />
-                          </button>
-                        )}
-                      </span>
-                    </div>
-                  )
-                })}
+                {g.rows.map((r, i) => (
+                  <NeighborRow
+                    key={`${r.edge.id}-${i}`}
+                    r={r}
+                    isIn={isIn}
+                    accentColor={typeColor}
+                    onRecenter={onRecenter}
+                    onRevealOnCanvas={onRevealOnCanvas}
+                    onOpenDetails={onOpenDetails}
+                  />
+                ))}
               </div>
             </div>
           )
         })}
+        {/* Rollup tier — coarser-grain summaries (containers, platforms)
+            of the flows above. Visible and labeled, never silently
+            dropped — but demoted so they can't read as extra data. */}
+        {rollups.length > 0 && (
+          <div className="mt-1 pt-1.5 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
+            <div
+              className="flex items-center gap-1.5 px-1.5 py-1"
+              title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
+            >
+              <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
+              <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollups.length}</span>
+            </div>
+            <div className="flex flex-col gap-1">
+              {rollups.map((r, i) => (
+                <NeighborRow
+                  key={`${r.edge.id}-${i}`}
+                  r={r}
+                  isIn={isIn}
+                  accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
+                  rollup
+                  onRecenter={onRecenter}
+                  onRevealOnCanvas={onRevealOnCanvas}
+                  onOpenDetails={onOpenDetails}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {hiddenCount > 0 && !allFilteredOff && (
+          <p className="px-2 py-1.5 text-[10px] text-ink-muted/60">
+            {hiddenCount} connection{hiddenCount === 1 ? '' : 's'} hidden by the type chips
+          </p>
+        )}
         {records.length > ROWS_CAP && (
           <p className="px-2 py-1.5 text-[10px] text-ink-muted/70">
             +{records.length - ROWS_CAP} more — use the filter to narrow
