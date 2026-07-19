@@ -60,7 +60,11 @@ def _system_ontology() -> OntologyData:
 
 
 def _resolved():
-    return resolve_ontology(system_default=_system_ontology(), assigned=None)
+    # The system-default merge layer was removed from resolve_ontology (it now
+    # ignores `system_default` and reads only the assigned ontology + graph
+    # introspection). These golden scenarios exercise the standard entity/edge
+    # hierarchy, so drive them through the surviving `assigned` layer.
+    return resolve_ontology(system_default=None, assigned=_system_ontology())
 
 
 # ─── Scenario 1: Full hierarchy ───────────────────────────────────────────────

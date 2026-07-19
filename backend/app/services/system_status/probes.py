@@ -833,7 +833,7 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
         async with asyncio.timeout(_BUDGET_DB):
             async with get_session_factory(PoolRole.READONLY)() as s:
                 rows = (await s.execute(
-                    select(
+                    select(  # noqa: cross-domain — read-only admin diagnostics join
                         WorkspaceDataSourceORM.id,
                         WorkspaceDataSourceORM.label,
                         WorkspaceDataSourceORM.workspace_id,
@@ -1279,7 +1279,7 @@ async def probe_stats_polling() -> Optional[dict]:
     from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 
     stmt = (
-        select(
+        select(  # noqa: cross-domain — read-only admin diagnostics join
             WorkspaceDataSourceORM.id.label("data_source_id"),
             WorkspaceDataSourceORM.workspace_id,
             WorkspaceDataSourceORM.label,

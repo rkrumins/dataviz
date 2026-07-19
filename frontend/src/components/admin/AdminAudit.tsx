@@ -68,7 +68,7 @@ function formatRelative(iso: string): string {
 
 
 export function AdminAudit() {
-    const canViewAudit = usePermission('system:admin')
+    const canViewAudit = usePermission('system:audit:read')
 
     const [events, setEvents] = useState<AuditEvent[]>([])
     const [loading, setLoading] = useState(true)
@@ -170,10 +170,10 @@ export function AdminAudit() {
                 <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-6 flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
                     <div>
-                        <p className="text-sm font-semibold text-ink">Audit log requires Super Admin</p>
+                        <p className="text-sm font-semibold text-ink">Audit log requires audit access</p>
                         <p className="text-xs text-ink-muted mt-1">
                             The audit history contains sensitive role and permission changes
-                            and is restricted to Super Admins (<code className="font-mono">system:admin</code>).
+                            and requires audit read access (<code className="font-mono">system:audit:read</code>).
                         </p>
                     </div>
                 </div>
