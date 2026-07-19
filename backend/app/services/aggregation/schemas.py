@@ -530,6 +530,17 @@ class FreshnessDoc(FreshnessRow):
     live_node_count: Optional[int] = Field(None, alias="liveNodeCount")
     live_edge_count: Optional[int] = Field(None, alias="liveEdgeCount")
     events: List[RefreshEventSummary] = Field(default_factory=list)
+    # Rebuild-cadence detail for the drawer's "Rebuild cadence" row. The raw
+    # per-source override (null = none), the RESOLVED window, and where it
+    # came from ("custom" | "global" | "default") — computed server-side so a
+    # ds:manage (non-admin) viewer never needs to read the global settings.
+    rebuild_override_secs: Optional[int] = Field(None, alias="rebuildOverrideSecs")
+    resolved_rebuild_interval_secs: Optional[int] = Field(
+        None, alias="resolvedRebuildIntervalSecs",
+    )
+    rebuild_interval_source: Optional[str] = Field(
+        None, alias="rebuildIntervalSource",
+    )
 
     class Config:
         populate_by_name = True
@@ -567,9 +578,34 @@ class FreshnessFleetResponse(BaseModel):
 # ── Global defaults (settings) ───────────────────────────────────────
 
 
+class AggregationCadence(BaseModel):
+    """Persisted global rebuild cadence — the env-only knobs
+    ``AGGREGATION_REBUILD_MIN_INTERVAL_SECS`` and
+    ``AGGREGATION_DRIFT_AUTO_REBUILD`` made editable. Each field ``None``
+    means "unset → fall through to the env default"; this is NOT part of
+    ``AggregationTuning`` on purpose (cadence is a scheduler/cooldown
+    concern, never frozen onto a per-job pipeline run)."""
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
+        description="Minimum seconds between automatic rebuilds of a source "
+                    "(0 disables the throttle). Unset → env default.",
+    )
+    drift_auto_rebuild: Optional[bool] = Field(
+        None, alias="driftAutoRebuild",
+        description="Whether the scheduler auto-queues a rebuild when it "
+                    "detects drift. Unset → env default.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
 class AggregationSettingsRequest(BaseModel):
-    """PUT /aggregation/settings body — replaces the stored defaults."""
-    tuning: AggregationTuning
+    """PUT /aggregation/settings body. ``tuning`` and ``cadence`` are
+    independent: each is applied only when present, so the tuning-defaults
+    editor and the cadence editor can write without clobbering each other."""
+    tuning: Optional[AggregationTuning] = None
+    cadence: Optional[AggregationCadence] = None
 
     class Config:
         populate_by_name = True
@@ -577,8 +613,33 @@ class AggregationSettingsRequest(BaseModel):
 
 class AggregationSettingsResponse(BaseModel):
     tuning: Optional[AggregationTuning] = None
+    cadence: Optional[AggregationCadence] = None
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessSettingsRequest(BaseModel):
+    """PATCH /data-sources/{id}/freshness-settings body — the per-source
+    rebuild-interval override. ``None`` clears the override (back to the
+    resolved global/env default)."""
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessSettingsResponse(BaseModel):
+    """The stored per-source override after a PATCH (echoes the effective
+    override; ``None`` = no override, source resolves global/env)."""
+    data_source_id: str = Field(alias="dataSourceId")
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs",
+    )
 
     class Config:
         populate_by_name = True

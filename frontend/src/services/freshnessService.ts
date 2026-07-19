@@ -51,6 +51,18 @@ export interface FreshnessDoc extends FreshnessRow {
     liveNodeCount?: number | null
     liveEdgeCount?: number | null
     events: RefreshEventSummary[]
+    /** Raw per-source rebuild-interval override (null = none). */
+    rebuildOverrideSecs?: number | null
+    /** Effective rebuild window after resolving override → global → default. */
+    resolvedRebuildIntervalSecs?: number | null
+    /** Where the resolved interval came from. */
+    rebuildIntervalSource?: 'custom' | 'global' | 'default' | null
+}
+
+/** Echo of the stored per-source override after a freshness-settings PATCH. */
+export interface FreshnessSettings {
+    dataSourceId: string
+    rebuildMinIntervalSecs?: number | null
 }
 
 /** Fleet-wide stat-tile counts, computed server-side over the
@@ -158,5 +170,17 @@ export const freshnessService = {
 
     getBatch(batchId: string): Promise<BatchStatus> {
         return authFetch<BatchStatus>(`${BASE}/refresh-batches/${batchId}`)
+    },
+
+    /** Set or clear a source's rebuild-cadence override (null clears it →
+     *  the source resolves the global/env default). ds:manage only. */
+    patchFreshnessSettings(
+        dsId: string,
+        body: { rebuildMinIntervalSecs: number | null },
+    ): Promise<FreshnessSettings> {
+        return authFetch<FreshnessSettings>(`${BASE}/data-sources/${dsId}/freshness-settings`, {
+            method: 'PATCH',
+            body: JSON.stringify(body),
+        })
     },
 }

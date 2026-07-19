@@ -35,7 +35,10 @@ from backend.app.db.repositories import refresh_events_repo as events_repo_mod
 from backend.app.services import graph_cache as gc_mod
 from backend.app.services.aggregation import service as svc_mod
 from backend.app.services.aggregation.schemas import (
+    AggregationCadence,
     FreshnessDoc,
+    FreshnessSettingsRequest,
+    FreshnessSettingsResponse,
     RefreshResponse,
 )
 from backend.app.services.aggregation.service import (
@@ -153,6 +156,27 @@ def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
     async def _stale():
         return stale or []
     monkeypatch.setattr(gc_mod, "list_stale_sources", _stale)
+
+    # F9: neutralize the cadence reads by default (empty global, no overrides)
+    # so existing tests keep their exact queued-result ordering; the cadence
+    # tests below override these. Both are batched/cached, not per-row.
+    _patch_cadence(monkeypatch)
+
+
+def _patch_cadence(monkeypatch, *, global_secs=None, overrides=None,
+                   drift_auto=None):
+    """Stub the two F9 cadence reads: the cached global cadence and the
+    batched per-source override map. Neither touches ``session.execute`` so
+    the queued-result ordering the other collaborators rely on is preserved."""
+    async def _cadence(session):
+        return AggregationCadence(
+            rebuild_min_interval_secs=global_secs, drift_auto_rebuild=drift_auto,
+        )
+    monkeypatch.setattr(svc_mod, "read_global_cadence", _cadence)
+
+    async def _overrides(session, ds_ids):
+        return dict(overrides or {})
+    monkeypatch.setattr(svc_mod, "_rebuild_override_map", _overrides)
 
 
 # ── Fleet assembly ──────────────────────────────────────────────────────
@@ -401,6 +425,88 @@ def test_fleet_takes_no_provider_registry():
     assert "provider" not in params
 
 
+# ── F9: cooldownUntil derives from the resolved rebuild interval ────────
+
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+
+def _ago(seconds: int) -> str:
+    return (_dt.now(_tz.utc) - _td(seconds=seconds)).isoformat()
+
+
+def test_fleet_cooldown_until_honors_per_source_override(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    ds_a = _ds(id="ds-a", last_agg=_ago(120))
+
+    # No override → env 900 window still open → a cooldown IS reported.
+    _patch_fleet_collaborators(monkeypatch)
+    session = _FakeSession([_FakeResult(scalar=1), _FakeResult(rows=[(ds_a, "Prov A")])])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    assert resp.rows[0].cooldown_until is not None
+
+    # 60s per-source override → 120s since last rebuild → window elapsed →
+    # the badge derivation reports NO cooldown. Proves the override flows
+    # into cooldownUntil (badge-vs-behavior parity).
+    _patch_fleet_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, overrides={"ds-a": 60})
+    session2 = _FakeSession([_FakeResult(scalar=1), _FakeResult(rows=[(ds_a, "Prov A")])])
+    resp2 = _run(assemble_fleet_freshness(session2, page=1, page_size=50))
+    assert resp2.rows[0].cooldown_until is None
+
+
+def test_fleet_cooldown_until_honors_global_cadence(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    ds_a = _ds(id="ds-a", last_agg=_ago(120))
+    _patch_fleet_collaborators(monkeypatch)
+    # Persisted global of 60 (no per-source override) → 120s elapsed → none.
+    _patch_cadence(monkeypatch, global_secs=60)
+    session = _FakeSession([_FakeResult(scalar=1), _FakeResult(rows=[(ds_a, "Prov A")])])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    assert resp.rows[0].cooldown_until is None
+
+
+def test_source_doc_cooldown_until_honors_override(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    _patch_source_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, overrides={"ds-1": 60})
+    session = _FakeSession([_FakeResult(rows=[(_ds(last_agg=_ago(120)), "Prov A")])])
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.cooldown_until is None
+
+
+def test_source_doc_exposes_resolved_and_source(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+
+    # custom: a per-source override wins → source "custom", resolved = override.
+    _patch_source_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, global_secs=300, overrides={"ds-1": 60})
+    session = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.rebuild_override_secs == 60
+    assert doc.resolved_rebuild_interval_secs == 60
+    assert doc.rebuild_interval_source == "custom"
+
+    # global: no override, a persisted global → source "global", resolved = global.
+    _patch_source_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, global_secs=300)
+    session2 = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+    doc2 = _run(svc.assemble_source_freshness("ds-1", session2, probe=False))
+    assert doc2.rebuild_override_secs is None
+    assert doc2.resolved_rebuild_interval_secs == 300
+    assert doc2.rebuild_interval_source == "global"
+
+    # default: nothing set → source "default", resolved = env default (900).
+    _patch_source_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch)
+    session3 = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+    doc3 = _run(svc.assemble_source_freshness("ds-1", session3, probe=False))
+    assert doc3.rebuild_override_secs is None
+    assert doc3.resolved_rebuild_interval_secs == 900
+    assert doc3.rebuild_interval_source == "default"
+
+
 # ── Per-source assembly: probe gating ───────────────────────────────────
 
 
@@ -421,6 +527,8 @@ def _patch_source_collaborators(monkeypatch, *, signals=None, lkg=(2, 120),
     async def _running(session, ds_ids):
         return {}
     monkeypatch.setattr(svc_mod, "_running_job_map", _running)
+
+    _patch_cadence(monkeypatch)
 
 
 def test_source_probe_false_does_no_provider_work(monkeypatch):
@@ -736,6 +844,102 @@ def test_provider_batch_requires_provider_manage_gate():
 def test_refresh_batch_status_requires_ingestion_gate():
     fns = _dep_calls(_route("/refresh-batches/{batch_id}", "GET").dependant)
     assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns)
+
+
+# ── F9: per-source rebuild-cadence override PATCH ───────────────────────
+
+
+class _FakeSettingsSvc:
+    def __init__(self, *, raises=None):
+        self._raises = raises
+        self.called_with = None
+
+    async def set_source_rebuild_interval(self, ds_id, secs, session):
+        self.called_with = (ds_id, secs)
+        if self._raises:
+            raise self._raises
+        return secs
+
+
+def test_freshness_settings_request_validates_bounds():
+    from pydantic import ValidationError
+
+    # null clears; 0 (disable) and the 86400 ceiling are valid.
+    assert FreshnessSettingsRequest(rebuildMinIntervalSecs=None).rebuild_min_interval_secs is None
+    assert FreshnessSettingsRequest(rebuildMinIntervalSecs=0).rebuild_min_interval_secs == 0
+    assert FreshnessSettingsRequest(rebuildMinIntervalSecs=86400).rebuild_min_interval_secs == 86400
+    # negative / oversized → 422 (schema rejects before the handler runs).
+    with pytest.raises(ValidationError):
+        FreshnessSettingsRequest(rebuildMinIntervalSecs=-1)
+    with pytest.raises(ValidationError):
+        FreshnessSettingsRequest(rebuildMinIntervalSecs=86401)
+
+
+def test_freshness_settings_route_delegates_and_returns(_direct_mode):
+    svc = _FakeSettingsSvc()
+    body = FreshnessSettingsRequest(rebuildMinIntervalSecs=120)
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", body, _FakeRequest(), svc=svc, session=object(),
+    ))
+    assert svc.called_with == ("ds-1", 120)
+    assert isinstance(out, FreshnessSettingsResponse)
+    assert out.data_source_id == "ds-1"
+    assert out.rebuild_min_interval_secs == 120
+
+
+def test_freshness_settings_route_null_clears(_direct_mode):
+    svc = _FakeSettingsSvc()
+    body = FreshnessSettingsRequest(rebuildMinIntervalSecs=None)
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", body, _FakeRequest(), svc=svc, session=object(),
+    ))
+    assert svc.called_with == ("ds-1", None)
+    assert out.rebuild_min_interval_secs is None
+
+
+def test_freshness_settings_route_maps_notfound_to_404(_direct_mode):
+    svc = _FakeSettingsSvc(raises=NotFoundError("no such ds"))
+    body = FreshnessSettingsRequest(rebuildMinIntervalSecs=60)
+    with pytest.raises(HTTPException) as ei:
+        _run(fresh_mod.patch_freshness_settings(
+            "ds-x", body, _FakeRequest(), svc=svc, session=object(),
+        ))
+    assert ei.value.status_code == 404
+
+
+def test_freshness_settings_route_proxies(monkeypatch):
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", True)
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    body = FreshnessSettingsRequest(rebuildMinIntervalSecs=60)
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", body, _FakeRequest(b'{"rebuildMinIntervalSecs":60}'),
+        svc=None, session=object(),
+    ))
+    assert out == "proxied"
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/aggregation/data-sources/ds-1/freshness-settings"
+
+
+def test_freshness_settings_requires_manage_gate():
+    fns = _dep_calls(_route("/data-sources/{ds_id}/freshness-settings", "PATCH").dependant)
+    assert _REQUIRE_DS_MANAGE in fns
+
+
+def test_cp_freshness_settings_twin_delegates():
+    from backend.app.services.aggregation import controlplane as cp
+
+    svc = _FakeSettingsSvc()
+    body = FreshnessSettingsRequest(rebuildMinIntervalSecs=90)
+    out = _run(cp.set_freshness_settings("ds-1", body=body, svc=svc, session=object()))
+    assert svc.called_with == ("ds-1", 90)
+    assert out.rebuild_min_interval_secs == 90
 
 
 if __name__ == "__main__":

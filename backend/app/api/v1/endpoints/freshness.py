@@ -48,6 +48,8 @@ from backend.app.services.aggregation.schemas import (
     BatchStatus,
     FreshnessDoc,
     FreshnessFleetResponse,
+    FreshnessSettingsRequest,
+    FreshnessSettingsResponse,
     RefreshRequest,
     RefreshResponse,
 )
@@ -208,6 +210,45 @@ async def refresh_data_source(
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+# ── PATCH /data-sources/{ds_id}/freshness-settings — cadence override ──
+
+@router.patch(
+    "/data-sources/{ds_id}/freshness-settings",
+    response_model=FreshnessSettingsResponse,
+    summary="Set or clear a data source's rebuild-cadence override",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
+)
+async def patch_freshness_settings(
+    ds_id: str,
+    body: FreshnessSettingsRequest,
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Persist the per-source rebuild-interval override (``None`` clears it).
+    The body carries only the interval — there is no client-controlled
+    actor/origin here — and it is validated (0–86400) by
+    ``FreshnessSettingsRequest`` before this handler runs, in both modes."""
+    if _PROXY_ENABLED:
+        raw = await request.body()
+        return await _proxy(
+            "PATCH", f"/aggregation/data-sources/{ds_id}/freshness-settings",
+            request,
+            body=raw or _json.dumps(body.model_dump(by_alias=True)).encode(),
+        )
+    from backend.app.services.aggregation.service import NotFoundError
+
+    try:
+        stored = await svc.set_source_rebuild_interval(
+            ds_id, body.rebuild_min_interval_secs, session,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return FreshnessSettingsResponse(
+        data_source_id=ds_id, rebuild_min_interval_secs=stored,
+    )
 
 
 # ── POST /providers/{provider_id}/refresh — guarded batch refresh ───

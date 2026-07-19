@@ -259,6 +259,8 @@ from .schemas import (  # noqa: E402
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    FreshnessSettingsRequest,
+    FreshnessSettingsResponse,
     RefreshRequestInternal,
     RefreshResponse,
     ResumeOverrides,
@@ -562,7 +564,7 @@ async def put_settings(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
-    return await svc.put_settings(session, body.tuning)
+    return await svc.put_settings(session, body.tuning, cadence=body.cadence)
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
@@ -595,6 +597,30 @@ async def set_schedule(
         await svc.set_schedule(ds_id, body.cron_expression, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── PATCH /aggregation/data-sources/{ds_id}/freshness-settings ────────
+
+@app.patch(
+    "/aggregation/data-sources/{ds_id}/freshness-settings",
+    response_model=FreshnessSettingsResponse,
+    summary="Set or clear a data source's rebuild-cadence override",
+)
+async def set_freshness_settings(
+    ds_id: str,
+    body: FreshnessSettingsRequest,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    try:
+        stored = await svc.set_source_rebuild_interval(
+            ds_id, body.rebuild_min_interval_secs, session,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return FreshnessSettingsResponse(
+        data_source_id=ds_id, rebuild_min_interval_secs=stored,
+    )
 
 
 # ── GET /aggregation/data-sources/{ds_id}/drift ──────────────────────

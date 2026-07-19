@@ -21,6 +21,7 @@ import {
     type FleetParams,
     type FreshnessDoc,
     type FreshnessFleetResponse,
+    type FreshnessSettings,
     type RefreshResponse,
     type RefreshScope,
 } from '@/services/freshnessService'
@@ -89,6 +90,25 @@ export function useRefreshSource(): UseMutationResult<RefreshResponse, Error, Re
         mutationFn: ({ dsId, scope, force }) =>
             freshnessService.refreshSource(dsId, { scope, force }),
         onSuccess: () => {
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        },
+    })
+}
+
+export interface SetFreshnessSettingsVars {
+    dsId: string
+    rebuildMinIntervalSecs: number | null
+}
+
+/** Set/clear a source's rebuild-cadence override; invalidates that source's
+ *  doc and the fleet so the badge + drawer reflect the new window. */
+export function useSetFreshnessSettings(): UseMutationResult<FreshnessSettings, Error, SetFreshnessSettingsVars> {
+    const qc = useQueryClient()
+    return useMutation<FreshnessSettings, Error, SetFreshnessSettingsVars>({
+        mutationFn: ({ dsId, rebuildMinIntervalSecs }) =>
+            freshnessService.patchFreshnessSettings(dsId, { rebuildMinIntervalSecs }),
+        onSuccess: (_res, { dsId }) => {
+            void qc.invalidateQueries({ queryKey: ['freshness', 'doc', dsId] })
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
         },
     })

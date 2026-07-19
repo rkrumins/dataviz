@@ -92,7 +92,11 @@ class AggregationScheduler:
         """
         from .models import AggregationDataSourceStateORM, AggregationJobORM
         from .fingerprint import compute_graph_fingerprint, fingerprints_match
-        from .service import get_active_service
+        from .service import (
+            get_active_service,
+            read_global_cadence,
+            resolve_rebuild_interval,
+        )
         from backend.app.services.graph_cache import (
             clear_source_stale,
             get_source_stale_reason,
@@ -100,6 +104,16 @@ class AggregationScheduler:
         )
 
         async with self._session_factory() as session:
+            # F9: resolve the persisted global cadence ONCE per tick (cached
+            # in-process, so the 60s cadence never hammers the DB). The
+            # drift-auto flag and every cooldown pre-check below resolve
+            # through it — persisted value when set, env default otherwise.
+            cadence = await read_global_cadence(session)
+            drift_auto = (
+                cadence.drift_auto_rebuild
+                if cadence.drift_auto_rebuild is not None
+                else _DRIFT_AUTO_REBUILD
+            )
             # Find data sources with schedules configured AND status = 'ready'
             # Uses aggregation-owned state table (no public schema dependency)
             result = await session.execute(
@@ -150,7 +164,7 @@ class AggregationScheduler:
                         # reconciler picks it up instead. (Guarded by the flag:
                         # when off, drifted_ids is never consumed, so the marker
                         # lookup would be pointless work.)
-                        if _DRIFT_AUTO_REBUILD and await get_source_stale_reason(
+                        if drift_auto and await get_source_stale_reason(
                             state.workspace_id, state.data_source_id,
                         ):
                             continue
@@ -167,7 +181,7 @@ class AggregationScheduler:
             # re-runs the change gate and rebuild cooldown, so nothing here
             # duplicates that timing logic. Gated by AGGREGATION_DRIFT_AUTO_
             # REBUILD — off preserves the notify-only sweep above exactly.
-            if _DRIFT_AUTO_REBUILD:
+            if drift_auto:
                 svc = get_active_service()
                 if svc is not None:
                     for ds_id in drifted_ids:
@@ -220,9 +234,13 @@ class AggregationScheduler:
                                 state = await s2.get(
                                     AggregationDataSourceStateORM, ds,
                                 )
+                                interval_secs = resolve_rebuild_interval(
+                                    getattr(state, "rebuild_min_interval_secs", None),
+                                    cadence.rebuild_min_interval_secs,
+                                )
                                 if state is not None and (
                                     state.aggregation_status in ("pending", "running")
-                                    or svc._within_rebuild_cooldown(state)
+                                    or svc._within_rebuild_cooldown(state, interval_secs)
                                 ):
                                     logger.debug(
                                         "stale-marker reconcile: %s in-flight/"

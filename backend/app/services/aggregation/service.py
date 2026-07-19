@@ -21,6 +21,7 @@ from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
 from .reservation import claim_exclusive
 from .schemas import (
+    AggregationCadence,
     AggregationJobResponse,
     AggregationSettingsResponse,
     AggregationSkipRequest,
@@ -56,6 +57,71 @@ logger = logging.getLogger(__name__)
 AGGREGATION_REBUILD_MIN_INTERVAL_SECS = int(
     __import__("os").getenv("AGGREGATION_REBUILD_MIN_INTERVAL_SECS", "900")
 )
+
+
+# ── F9: configurable rebuild cadence ─────────────────────────────────────
+# The env-only cooldown/drift knobs are now overridable by a persisted
+# GLOBAL (aggregation_settings.cadence_json) and a per-source override
+# (data_source_state.rebuild_min_interval_secs). ONE resolution chain —
+# ``resolve_rebuild_interval`` — is used by every consumer (the cooldown
+# gate, the scheduler reconciler pre-check, and the web-tier badge
+# derivation) so the "Next rebuild in Xm" badge never disagrees with the
+# behavior. The persisted global is read through a small in-process cache
+# (≤ _SETTINGS_CACHE_TTL_S) so the 60s scheduler tick and the fleet read
+# never hammer the settings row; put_settings busts it for same-process
+# immediacy, and the cache TTL bounds cross-process (web ⇄ CP) propagation.
+_SETTINGS_CACHE_TTL_S = 30.0
+_GLOBAL_CADENCE_CACHE: dict = {"cadence": None, "at": 0.0}
+
+
+def resolve_rebuild_interval(
+    override_secs: Optional[int], global_secs: Optional[int],
+) -> int:
+    """Per-source override → persisted global → env default (900).
+
+    ``None`` at a level means "unset, fall through"; 0 is a real value
+    (throttle disabled) and is honored, not treated as unset."""
+    if override_secs is not None:
+        return override_secs
+    if global_secs is not None:
+        return global_secs
+    return AGGREGATION_REBUILD_MIN_INTERVAL_SECS
+
+
+def invalidate_global_cadence_cache() -> None:
+    """Drop the cached global cadence so the next read reflects a just-written
+    value in THIS process (put_settings calls this). Cross-process staleness
+    is bounded by the cache TTL, not this."""
+    _GLOBAL_CADENCE_CACHE["at"] = 0.0
+
+
+async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
+    """Persisted global cadence (aggregation_settings.cadence_json), cached
+    in-process for ≤ _SETTINGS_CACHE_TTL_S. NEVER raises — any DB/parse
+    failure degrades to an empty cadence (⇒ callers fall through to env),
+    mirroring the never-raise convention of the freshness read path."""
+    import time as _time
+    from .models import AggregationSettingsORM
+
+    now = _time.monotonic()
+    cached = _GLOBAL_CADENCE_CACHE
+    if cached["cadence"] is not None and (now - cached["at"]) < _SETTINGS_CACHE_TTL_S:
+        return cached["cadence"]
+
+    cadence = AggregationCadence()
+    try:
+        row = await session.get(AggregationSettingsORM, "global")
+        raw = getattr(row, "cadence_json", None) if row is not None else None
+        if raw:
+            cadence = AggregationCadence(**json.loads(raw))
+    except Exception as exc:  # pragma: no cover - defensive, never fail a read
+        logger.warning(
+            "Global cadence read failed (using env defaults): %s", exc,
+        )
+        return cadence
+    cached["cadence"] = cadence
+    cached["at"] = now
+    return cadence
 
 # Bounds for ``refresh_source(wait="complete")`` — it polls a queued rebuild
 # to a terminal status before returning, so an operator can refresh-then-read
@@ -797,14 +863,25 @@ class AggregationService:
         from .models import AggregationSettingsORM
 
         row = await session.get(AggregationSettingsORM, "global")
-        if row is None or not row.tuning_json:
+        if row is None:
             return AggregationSettingsResponse(tuning=None)
         try:
-            tuning = AggregationTuning(**json.loads(row.tuning_json))
+            tuning = (
+                AggregationTuning(**json.loads(row.tuning_json))
+                if row.tuning_json else None
+            )
         except Exception:
             tuning = None
+        try:
+            cadence = (
+                AggregationCadence(**json.loads(row.cadence_json))
+                if getattr(row, "cadence_json", None) else None
+            )
+        except Exception:
+            cadence = None
         return AggregationSettingsResponse(
             tuning=tuning,
+            cadence=cadence,
             updated_at=row.updated_at,
             updated_by=row.updated_by,
         )
@@ -812,22 +889,32 @@ class AggregationService:
     async def put_settings(
         self,
         session: AsyncSession,
-        tuning: AggregationTuning,
+        tuning: Optional[AggregationTuning] = None,
         updated_by: Optional[str] = None,
+        cadence: Optional[AggregationCadence] = None,
     ) -> AggregationSettingsResponse:
+        """Persist the global aggregation defaults. ``tuning`` and ``cadence``
+        are independent columns on the single settings row: each is written
+        only when supplied, so the pipeline-tuning editor and the cadence
+        editor never clobber each other. Busts the in-process cadence cache
+        so a same-process consumer sees the change immediately."""
         from .models import AggregationSettingsORM
 
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
             row = AggregationSettingsORM(id="global")
             session.add(row)
-        row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+        if tuning is not None:
+            row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+        if cadence is not None:
+            row.cadence_json = json.dumps(cadence.model_dump(exclude_none=True))
         row.updated_at = _now()
         row.updated_by = updated_by
         await session.commit()
-        return AggregationSettingsResponse(
-            tuning=tuning, updated_at=row.updated_at, updated_by=row.updated_by,
-        )
+        invalidate_global_cadence_cache()
+        # Echo the stored state (re-parse the columns rather than only the
+        # request, so a tuning-only PUT still returns the persisted cadence).
+        return await self.get_settings(session)
 
     # ── Resume ────────────────────────────────────────────────────────
 
@@ -1165,6 +1252,28 @@ class AggregationService:
 
         logger.info("Aggregation schedule %s for data source %s", cron or "cleared", ds_id)
 
+    async def set_source_rebuild_interval(
+        self, ds_id: str, secs: Optional[int], session: AsyncSession
+    ) -> Optional[int]:
+        """Set or clear the per-source rebuild-interval override. ``None``
+        clears it (the source resolves the global/env default). Requires the
+        aggregation state row to exist (mirrors ``set_schedule``): the
+        override only bites once a source has been aggregated, which is when
+        the state row exists. Returns the stored value."""
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
+
+        state.rebuild_min_interval_secs = secs
+        await session.commit()
+        logger.info(
+            "Rebuild interval override %s for data source %s",
+            f"{secs}s" if secs is not None else "cleared", ds_id,
+        )
+        return secs
+
     # ── Change Detection ──────────────────────────────────────────────
 
     async def check_drift(
@@ -1375,7 +1484,12 @@ class AggregationService:
         trigger_outcome = None
         trigger_detail = None
         if applicable:
-            if not force and self._within_rebuild_cooldown(state):
+            cadence = await read_global_cadence(session)
+            interval_secs = resolve_rebuild_interval(
+                getattr(state, "rebuild_min_interval_secs", None),
+                cadence.rebuild_min_interval_secs,
+            )
+            if not force and self._within_rebuild_cooldown(state, interval_secs):
                 deferred = True
                 logger.info(
                     "signal_source_changed: rebuild deferred (cooldown) for "
@@ -1489,16 +1603,20 @@ class AggregationService:
             )
             return None
 
-    def _within_rebuild_cooldown(self, state) -> bool:
+    def _within_rebuild_cooldown(self, state, interval_secs: int) -> bool:
         """True when a rebuild for ``state`` falls inside the throttle
         window and should be deferred to the reconciler.
 
+        ``interval_secs`` is the RESOLVED window (per-source override →
+        persisted global → env default; see ``resolve_rebuild_interval``) —
+        this stays a pure function of ``(state, interval_secs)`` so the
+        signal gate and the scheduler reconciler pre-check share it exactly.
         Reference time is the state row's ``last_aggregated_at`` — the only
         "when did we last rebuild" timestamp on the aggregation state row.
         Returns False (⇒ trigger now) when the throttle is disabled, no
         reference time exists (never aggregated), the timestamp is
         unparseable, or the window has already elapsed."""
-        if AGGREGATION_REBUILD_MIN_INTERVAL_SECS <= 0:
+        if interval_secs <= 0:
             return False
         ref = state.last_aggregated_at if state is not None else None
         if not ref:
@@ -1510,7 +1628,7 @@ class AggregationService:
         if ref_dt.tzinfo is None:
             ref_dt = ref_dt.replace(tzinfo=timezone.utc)
         elapsed = (datetime.now(timezone.utc) - ref_dt).total_seconds()
-        return elapsed < AGGREGATION_REBUILD_MIN_INTERVAL_SECS
+        return elapsed < interval_secs
 
     # ── Unified refresh verb (operator-facing) ──────────────────────
 
@@ -1804,6 +1922,19 @@ class AggregationService:
             [(ds.workspace_id, ds.id)]
         )).get((str(ds.workspace_id), str(ds.id)), (None, None, None))
         running = await _running_job_map(session, [ds.id])
+        # Resolved rebuild window for this source (per-source override →
+        # persisted global → env), so the badge matches the cooldown gate.
+        cadence = await read_global_cadence(session)
+        overrides = await _rebuild_override_map(session, [ds.id])
+        override_secs = overrides.get(ds.id)
+        cooldown_interval_secs = resolve_rebuild_interval(
+            override_secs, cadence.rebuild_min_interval_secs,
+        )
+        rebuild_interval_source = (
+            "custom" if override_secs is not None
+            else "global" if cadence.rebuild_min_interval_secs is not None
+            else "default"
+        )
         events = await list_refresh_events(session, ds.id, limit=5)
         last_event = events[0] if events else None
         lkg_count, lkg_oldest_age = await _gc.read_lkg_stats(
@@ -1828,6 +1959,7 @@ class AggregationService:
                 ds, provider_name=provider_name, signals=signals,
                 running_job_id=running.get(ds.id), last_event=last_event,
                 drifted=drifted,
+                cooldown_interval_secs=cooldown_interval_secs,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
@@ -1835,6 +1967,9 @@ class AggregationService:
             live_node_count=live_node_count,
             live_edge_count=live_edge_count,
             events=[_event_summary(e) for e in events],
+            rebuild_override_secs=override_secs,
+            resolved_rebuild_interval_secs=cooldown_interval_secs,
+            rebuild_interval_source=rebuild_interval_source,
         )
 
     async def _probe_live_stats(
@@ -2178,11 +2313,15 @@ def _event_summary(row) -> Optional[RefreshEventSummary]:
     return RefreshEventSummary(origin=row.origin, outcome=row.outcome, ts=row.ts)
 
 
-def _rebuild_cooldown_until(last_aggregated_at: Optional[str]) -> Optional[str]:
-    """``cooldown_until = last_aggregated_at + rebuild-min-interval``, but
-    only while that instant is still in the future — once the window has
-    elapsed there is no cooldown to report, so return ``None``."""
-    if not last_aggregated_at or AGGREGATION_REBUILD_MIN_INTERVAL_SECS <= 0:
+def _rebuild_cooldown_until(
+    last_aggregated_at: Optional[str], interval_secs: int,
+) -> Optional[str]:
+    """``cooldown_until = last_aggregated_at + interval_secs``, but only while
+    that instant is still in the future — once the window has elapsed there is
+    no cooldown to report, so return ``None``. ``interval_secs`` is the
+    RESOLVED window (``resolve_rebuild_interval``), so this badge derivation
+    matches the actual cooldown-gate behavior for the source."""
+    if not last_aggregated_at or interval_secs <= 0:
         return None
     try:
         ref = datetime.fromisoformat(last_aggregated_at)
@@ -2190,7 +2329,7 @@ def _rebuild_cooldown_until(last_aggregated_at: Optional[str]) -> Optional[str]:
         return None
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
-    until = ref + timedelta(seconds=AGGREGATION_REBUILD_MIN_INTERVAL_SECS)
+    until = ref + timedelta(seconds=interval_secs)
     if until <= datetime.now(timezone.utc):
         return None
     return until.isoformat()
@@ -2198,11 +2337,14 @@ def _rebuild_cooldown_until(last_aggregated_at: Optional[str]) -> Optional[str]:
 
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
+    cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
     ``signals`` is ``(generation, cache_as_of, stale_reason)`` from
-    :func:`graph_cache.read_freshness_signals`."""
+    :func:`graph_cache.read_freshness_signals`. ``cooldown_interval_secs`` is
+    the resolved per-source rebuild window (default = env), so the
+    ``cooldownUntil`` the badge reads reflects any global/per-source override."""
     generation, cache_as_of, stale_reason = signals
     return dict(
         data_source_id=ds.id,
@@ -2220,7 +2362,9 @@ def _freshness_row_kwargs(
         generation=generation,
         stale_reason=stale_reason,
         stale_since=None,
-        cooldown_until=_rebuild_cooldown_until(ds.last_aggregated_at),
+        cooldown_until=_rebuild_cooldown_until(
+            ds.last_aggregated_at, cooldown_interval_secs,
+        ),
         stored_fingerprint=ds.graph_fingerprint,
         drifted=drifted,
         running_job_id=running_job_id,
@@ -2251,6 +2395,31 @@ async def _running_job_map(
     for ds_id, job_id in rows:
         out.setdefault(ds_id, job_id)  # first per ds = newest (ordered)
     return out
+
+
+async def _rebuild_override_map(
+    session: AsyncSession, ds_ids: List[str],
+) -> dict[str, Optional[int]]:
+    """Per-source rebuild-interval override (``data_source_state``) for a set
+    of data sources, in ONE query (batched like ``_running_job_map`` — no
+    per-row reads). Sources without a state row or without an override are
+    simply absent from the map (⇒ resolve to global/env). Never raises: a
+    failure degrades to an empty map so the freshness read still assembles."""
+    if not ds_ids:
+        return {}
+    from .models import AggregationDataSourceStateORM
+
+    try:
+        rows = (await session.execute(
+            select(
+                AggregationDataSourceStateORM.data_source_id,
+                AggregationDataSourceStateORM.rebuild_min_interval_secs,
+            ).where(AggregationDataSourceStateORM.data_source_id.in_(ds_ids))
+        )).all()
+    except Exception as exc:  # pragma: no cover - defensive, never fail a read
+        logger.warning("Rebuild-override map read failed (using defaults): %s", exc)
+        return {}
+    return {ds_id: secs for ds_id, secs in rows if secs is not None}
 
 
 # Fleet summary is skipped (returned as None) once the workspace/provider-
@@ -2333,6 +2502,11 @@ async def assemble_fleet_freshness(
     )
     events = await latest_refresh_event_map(session, ds_ids)
     running = await _running_job_map(session, ds_ids)
+    # Resolved rebuild window per source: ONE settings read (cached) for the
+    # global + ONE batched query for the per-source overrides, so the
+    # ``cooldownUntil`` badge honors both without any per-row reads.
+    cadence = await read_global_cadence(session)
+    overrides = await _rebuild_override_map(session, ds_ids)
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -2343,6 +2517,9 @@ async def assemble_fleet_freshness(
             ),
             running_job_id=running.get(ds.id),
             last_event=events.get(ds.id),
+            cooldown_interval_secs=resolve_rebuild_interval(
+                overrides.get(ds.id), cadence.rebuild_min_interval_secs,
+            ),
         ))
         for ds in ds_list
     ]

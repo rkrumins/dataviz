@@ -268,7 +268,9 @@ async def put_aggregation_settings(
     import json as _json
     from backend.app.services.aggregation.schemas import AggregationSettingsRequest
     body_model = AggregationSettingsRequest(**_json.loads(await request.body()))
-    return await svc.put_settings(session, body_model.tuning)
+    return await svc.put_settings(
+        session, body_model.tuning, cadence=body_model.cadence,
+    )
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────

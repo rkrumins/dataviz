@@ -91,13 +91,15 @@ class _MemRedis:
         return removed
 
 
-def _state(status="ready", fp="STORED", ws="ws-1", last_aggregated_at=None):
+def _state(status="ready", fp="STORED", ws="ws-1", last_aggregated_at=None,
+           rebuild_min_interval_secs=None):
     return types.SimpleNamespace(
         data_source_id="ds-1",
         workspace_id=ws,
         aggregation_status=status,
         graph_fingerprint=fp,
         last_aggregated_at=last_aggregated_at,
+        rebuild_min_interval_secs=rebuild_min_interval_secs,
     )
 
 
@@ -471,6 +473,76 @@ def test_cooldown_disabled_always_triggers(monkeypatch):
     assert order == _FULL_SEQUENCE
 
 
+# ── F9: configurable rebuild cadence — resolution chain + override ──────
+
+
+def test_resolve_rebuild_interval_precedence(monkeypatch):
+    # Env default is the final fallback.
+    monkeypatch.setattr(svc_mod, "AGGREGATION_REBUILD_MIN_INTERVAL_SECS", 900)
+    resolve = svc_mod.resolve_rebuild_interval
+
+    # Nothing set → env default.
+    assert resolve(None, None) == 900
+    # Persisted global set, no override → global.
+    assert resolve(None, 300) == 300
+    # Per-source override set → override wins over both global and env.
+    assert resolve(60, 300) == 60
+    assert resolve(60, None) == 60
+    # 0 is a real value (disables the throttle), not "unset".
+    assert resolve(0, 300) == 0
+    assert resolve(None, 0) == 0
+
+
+def test_within_cooldown_honors_resolved_interval(monkeypatch):
+    # The gate is a pure function of (state, interval): the same state that is
+    # inside a 900s window is past a 60s one.
+    svc, *_ = _build(monkeypatch, state=None)
+    state = _state(last_aggregated_at=_secs_ago(100))
+    assert svc._within_rebuild_cooldown(state, 900) is True   # 100 < 900
+    assert svc._within_rebuild_cooldown(state, 60) is False   # 100 > 60
+    assert svc._within_rebuild_cooldown(state, 0) is False    # disabled
+
+
+def test_signal_per_source_override_shrinks_deferral_window(monkeypatch):
+    # env cooldown 900, last rebuild 100s ago → would defer; a per-source
+    # override of 60 makes 100s "past cooldown" → the rebuild fires now.
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(
+            status="ready", fp="OLD",
+            last_aggregated_at=_secs_ago(100),
+            rebuild_min_interval_secs=60,
+        ),
+        current_fp="NEW",
+        cooldown=900,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.deferred is False
+    assert resp.job_id == "agg_new"
+    assert order == _FULL_SEQUENCE
+
+
+def test_signal_global_cadence_defers_when_env_would_not(monkeypatch):
+    # env cooldown 60 (would trigger at 100s), but a persisted GLOBAL of 900
+    # (no per-source override) defers. Proves the global is resolved, not env.
+    async def _fake_cadence(session):
+        from backend.app.services.aggregation.schemas import AggregationCadence
+        return AggregationCadence(rebuild_min_interval_secs=900)
+    monkeypatch.setattr(svc_mod, "read_global_cadence", _fake_cadence)
+
+    svc, session, order, captured = _build(
+        monkeypatch,
+        state=_state(status="ready", fp="OLD", last_aggregated_at=_secs_ago(100)),
+        current_fp="NEW",
+        cooldown=60,
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True
+    assert resp.deferred is True
+    assert "trigger" not in order
+
+
 # ── Audit emission: exactly one refresh_events event per invocation ─────
 
 
@@ -795,7 +867,7 @@ class _FakeSchedSvc:
         self._responses = responses or {}
         self._cooldown_ds = set(cooldown_ds or [])
 
-    def _within_rebuild_cooldown(self, state):
+    def _within_rebuild_cooldown(self, state, interval_secs=None):
         return getattr(state, "data_source_id", None) in self._cooldown_ds
 
     async def signal_source_changed(

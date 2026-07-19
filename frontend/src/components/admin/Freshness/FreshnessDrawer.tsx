@@ -10,13 +10,16 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
-    Activity, AlertTriangle, CheckCircle2, Database, RefreshCw, Radar, X,
+    Activity, AlertTriangle, CheckCircle2, Clock, Database, RefreshCw, Radar, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { usePermission } from '@/store/auth'
+import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
-import { useSourceFreshness } from './useFreshness'
+import { useSetFreshnessSettings, useSourceFreshness } from './useFreshness'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
+import type { FreshnessDoc } from '@/services/freshnessService'
 
 function shortFp(fp?: string | null): string {
     if (!fp) return '—'
@@ -28,6 +31,102 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
         <div className="min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-ink-muted mb-0.5">{label}</div>
             <div className="text-sm text-ink truncate">{children}</div>
+        </div>
+    )
+}
+
+const MAX_INTERVAL_SECS = 86400
+
+function fmtInterval(secs?: number | null): string {
+    if (secs == null) return '—'
+    if (secs === 0) return 'Off (rebuild every change)'
+    if (secs % 3600 === 0) return `${secs / 3600}h`
+    return `${Math.round(secs / 60)}m`
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+    custom: 'Custom',
+    global: 'Global default',
+    default: 'System default',
+}
+
+/**
+ * "Rebuild cadence" — the resolved rebuild window + where it came from, with a
+ * ds:manage-gated override editor (minutes; "Reset to default" clears it). The
+ * value flows from the same server-side resolution the cooldown badge reads.
+ */
+function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
+    const { showToast } = useToast()
+    const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
+    const setSettings = useSetFreshnessSettings()
+
+    const overrideMins = doc.rebuildOverrideSecs != null
+        ? String(Math.round(doc.rebuildOverrideSecs / 60))
+        : ''
+    const [mins, setMins] = useState(overrideMins)
+    const source = doc.rebuildIntervalSource ?? 'default'
+
+    const save = (value: number | null) => {
+        setSettings.mutate({ dsId: doc.dataSourceId, rebuildMinIntervalSecs: value }, {
+            onSuccess: () => showToast('success', value == null
+                ? 'Rebuild cadence reset to the default.'
+                : 'Rebuild cadence updated.'),
+            onError: (e) => showToast('error', e.message || 'Could not update rebuild cadence.'),
+        })
+    }
+
+    const onSave = () => {
+        const n = mins.trim() === '' ? null : Number(mins)
+        if (n != null && (!Number.isFinite(n) || n < 0 || n * 60 > MAX_INTERVAL_SECS)) {
+            showToast('error', 'Enter a whole number of minutes between 0 and 1440.')
+            return
+        }
+        save(n == null ? null : Math.round(n * 60))
+    }
+
+    return (
+        <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+                    <Clock className="w-4 h-4 text-ink-muted" /> Rebuild cadence
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
+                    {SOURCE_LABEL[source] ?? source}
+                </span>
+            </div>
+            <p className="text-[11px] text-ink-muted">
+                Minimum time between automatic rebuilds of this source. Currently{' '}
+                <span className="font-semibold text-ink">{fmtInterval(doc.resolvedRebuildIntervalSecs)}</span>.
+            </p>
+            {canManage && (
+                <div className="flex items-center gap-2 pt-1">
+                    <input
+                        type="number" min={0} max={1440} step={1}
+                        value={mins}
+                        onChange={(e) => setMins(e.target.value)}
+                        placeholder="Use default"
+                        aria-label="Rebuild cadence override (minutes)"
+                        className="w-28 h-8 px-2 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
+                    />
+                    <span className="text-[11px] text-ink-muted">minutes</span>
+                    <button
+                        onClick={onSave}
+                        disabled={setSettings.isPending}
+                        className="ml-auto inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                    >
+                        Save
+                    </button>
+                    {doc.rebuildOverrideSecs != null && (
+                        <button
+                            onClick={() => { setMins(''); save(null) }}
+                            disabled={setSettings.isPending}
+                            className="inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
+                        >
+                            Reset to default
+                        </button>
+                    )}
+                </div>
+            )}
         </div>
     )
 }
@@ -110,6 +209,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         </Fact>
                                         <Fact label="Stored fingerprint"><span className="font-mono text-xs">{shortFp(doc.storedFingerprint)}</span></Fact>
                                     </div>
+
+                                    {/* Rebuild cadence (resolved + per-source override) */}
+                                    <RebuildCadenceRow doc={doc} />
 
                                     {/* Live probe */}
                                     <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3">

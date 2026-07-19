@@ -203,6 +203,10 @@ class AggregationDataSourceStateORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
+    # Per-source rebuild-cooldown override (seconds). NULL = fall through to
+    # the persisted global cadence, then the env default. Resolved by
+    # ``resolve_rebuild_interval`` across the service, scheduler and web tier.
+    rebuild_min_interval_secs = Column(Integer, nullable=True)
 
 
 class AggregationSettingsORM(Base):
@@ -217,5 +221,9 @@ class AggregationSettingsORM(Base):
 
     id = Column(Text, primary_key=True, default="global")
     tuning_json = Column(Text, nullable=True)  # JSON: AggregationTuning fields
+    # JSON: AggregationCadence fields (rebuild_min_interval_secs,
+    # drift_auto_rebuild). Kept separate from tuning_json so the global
+    # cadence never leaks into per-job frozen tuning.
+    cadence_json = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True)
     updated_by = Column(Text, nullable=True)

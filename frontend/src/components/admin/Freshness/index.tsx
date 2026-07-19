@@ -15,7 +15,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { RefreshCw, Zap } from 'lucide-react'
+import { Clock, RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { usePermission } from '@/store/auth'
@@ -29,6 +29,7 @@ import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
+import { CadenceSettingsDialog } from './CadenceSettingsDialog'
 import { useFleetFreshness, useRefreshSource } from './useFreshness'
 import {
     compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
@@ -104,6 +105,7 @@ export function Freshness() {
     const [drawerDsId, setDrawerDsId] = useState<string | null>(null)
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
+    const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
 
     // ── Data ──────────────────────────────────────────────────────────
@@ -238,7 +240,16 @@ export function Freshness() {
     return (
         <div className="space-y-4">
             {/* Reload — the fleet also auto-refreshes every 30s while mounted. */}
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-2">
+                {isSystemAdmin && (
+                    <button
+                        onClick={() => setCadenceOpen(true)}
+                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                    >
+                        <Clock className="w-3.5 h-3.5" />
+                        Cadence settings
+                    </button>
+                )}
                 <button
                     onClick={() => fleet.refetch()}
                     disabled={fleet.isFetching}
@@ -276,7 +287,7 @@ export function Freshness() {
 
             {truncated && (
                 <div className="rounded-xl border border-glass-border bg-glass-base/30 px-4 py-2 text-[11px] text-ink-muted">
-                    Showing the {rows.length} most recently updated sources of {fleet.data?.total}. Use the filters to narrow the list.
+                    Showing the {rows.length} most recently updated sources of {fleet.data?.total}.
                 </div>
             )}
 
@@ -381,6 +392,11 @@ export function Freshness() {
                 providerName={providerDialog?.name ?? ''}
                 isOpen={providerDialog != null}
                 onClose={() => setProviderDialog(null)}
+            />
+
+            <CadenceSettingsDialog
+                isOpen={cadenceOpen}
+                onClose={() => setCadenceOpen(false)}
             />
         </div>
     )
