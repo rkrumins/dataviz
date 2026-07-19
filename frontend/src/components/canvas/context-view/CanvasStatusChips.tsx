@@ -23,7 +23,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
-  'border border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
+  'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
 
@@ -135,7 +135,7 @@ export function CanvasStatusChips({
             {onPreviewExternal && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onPreviewExternal}
               >
                 Preview
@@ -167,7 +167,7 @@ export function CanvasStatusChips({
             {onLoadMoreRoots && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onLoadMoreRoots}
               >
                 Load more
@@ -201,7 +201,7 @@ export function CanvasStatusChips({
             {onShowAllEdges && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onShowAllEdges}
               >
                 Show all
@@ -234,7 +234,7 @@ export function CanvasStatusChips({
             {onOpenFocusLens && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onOpenFocusLens}
               >
                 Open lens
@@ -336,7 +336,7 @@ export function CanvasStatusChips({
           {onLoadMoreDetail && (
             <button
               type="button"
-              className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+              className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               onClick={onLoadMoreDetail}
             >
               Load more
