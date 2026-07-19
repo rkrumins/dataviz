@@ -9,6 +9,13 @@ Related reading: [Platform Services](/docs/services-overview),
 [Backend guide](/docs/backend), [Assignment Engine](/docs/services-assignments),
 [Aggregation pipeline](/docs/aggregation-pipeline).
 
+**This page covers:**
+
+- **What it does** — three-layer ontology resolution and the read surface it exposes
+- **Context models and lenses** — how saved view configs get their semantics
+- **Where it runs** — the per-request/per-job orchestration layer (not a process)
+- **Configuration** (cache TTL, provider binding) and **limitations**
+
 ## Purpose / What it does
 
 `ContextEngine` (`backend/app/services/context_engine.py`) is the layer between
@@ -25,6 +32,25 @@ work correctly. Resolution is eager (so call sites that hit
 `engine.provider.*` directly still see a configured provider) and non-fatal on
 failure (the engine still returns so the endpoint can surface a clean error and
 retry once the cache TTL rolls).
+
+```mermaid
+flowchart LR
+    SD["System defaults<br/>base types"]
+    AO["Workspace-assigned<br/>definitions (DB)"]
+    IT["Provider-introspected<br/>types (gap-fill)"]
+    RO["ResolvedOntology<br/>+ containment edge types"]
+    P["Configured provider<br/>reads · lineage · schema"]
+
+    SD --> RO
+    AO --> RO
+    IT --> RO
+    RO -->|injected| P
+
+    style RO fill:#312e81,stroke:#6366f1,color:#e2e8f0
+    style P fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+```
+
+> **Important:** The resolved ontology is cached for **5 minutes per engine instance** (`_ONTOLOGY_CACHE_TTL`). A just-changed ontology can take up to one TTL to be reflected by an already-warm engine — the engine is created per request/job precisely because it holds this per-instance cache.
 
 On top of ontology resolution, the engine exposes the read surface the product
 is built on, including:

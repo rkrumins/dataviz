@@ -11,6 +11,34 @@ no separate "draft editing" API. Omit `branchId` (or pass `main`) and you read/w
 `br_…` draft id and the same endpoints read and write that draft (served from Postgres). Branch *lifecycle*
 (open draft, publish) lives in the `/versioning` router.
 
+**This guide covers:**
+
+- The **two tiers** — Postgres-only automated tests vs the full-stack manual journey
+- **Tier 0** — running the pytest draft-journey suite against Postgres only
+- **Tier 1** — the smoke script and the by-hand `curl` walkthrough
+- A **status & coverage** matrix and the **known gaps**
+
+> **Important:** The `?branchId=` param is the whole seam. No `branchId` (or `main`) reads/writes the live trunk through the provider; a `br_…` id reads/writes that draft's overlay from Postgres. Get this wrong in a test and you'll assert against the wrong store.
+
+### The draft journey
+
+```mermaid
+graph LR
+    Create["Create versioned graph<br/>POST /versioning/graphs"]
+    Import["Import existing<br/>bulk-ingest / bootstrap"]
+    Draft["Open draft<br/>POST …/branches → br_…"]
+    Edit["Edit on draft<br/>/graph/nodes/create?branchId="]
+    Read["Read-your-writes<br/>/graph/nodes/query?branchId="]
+    Publish["Publish<br/>…/branches/br_…/publish"]
+    Main["Verify on main<br/>/graph/nodes/query (no branchId)"]
+
+    Create --> Import --> Draft --> Edit --> Read --> Publish --> Main
+
+    style Draft fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style Publish fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+    style Main fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
+```
+
 ---
 
 ## Two tiers
@@ -167,3 +195,14 @@ provider's current state into one `import` commit (idempotent). Use `bulk-ingest
 - **Cached draft reads** (`/graph/.../children-with-edges`, `/trace/v2`, `/trace/expand`, `/nodes/top-level`)
   aren't in the automated HTTP test because they hit the Redis cache; test them with a real Redis (Tier 1) or
   add `fakeredis` to the harness.
+
+> **Warning:** A publish becomes visible through `/graph` main reads only once the projection worker catches up (Tier 1) — those reads can briefly lag a publish. Assert immediate publish results via the versioning `/state` endpoint (Postgres) instead, as Tier 0 does.
+
+---
+
+## Related
+
+- [Developer Setup](/docs/setup) — the full local stack this guide builds on
+- [Backend guide](/docs/backend) — the `/graph` and versioning routers, and the enable-VC bootstrap job
+- [Platform Services overview](/docs/services-overview) — the versioning projection worker's process role
+- [Aggregation pipeline](/docs/aggregation-pipeline)

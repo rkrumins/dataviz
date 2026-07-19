@@ -8,6 +8,13 @@ lens's layer rules into concrete per-entity assignments.
 Related reading: [Platform Services](/docs/services-overview),
 [Context Engine](/docs/services-context-engine), [Backend guide](/docs/backend).
 
+**This page covers:**
+
+- **What it does** — the rendered-scope inputs and the `LayerAssignmentResult`
+- The fixed **placement precedence** and how curated vs open scope differ
+- **Ontology (foreign-schema) mapping** for non-{brandShort} graphs
+- **Where it runs**, the compute **endpoint**, configuration, and **limitations**
+
 ## Purpose / What it does
 
 `AssignmentEngine.compute_assignments` (`backend/app/services/assignment_engine.py`)
@@ -39,6 +46,34 @@ In **curated scope**, only tiers 1–2 apply; anything that falls through is lef
 unassigned. Containment direction comes from the resolved ontology's
 **containment edge types** (not hardcoded), which is why the engine resolves the
 ontology through the `ContextEngine` before building the parent map.
+
+```mermaid
+flowchart TD
+    E["Entity in scope"]
+    T1{"1. Explicit<br/>assignment?"}
+    T2{"2. Containment<br/>inheritance?"}
+    T3{"3. Persisted<br/>layerAssignment?<br/>(open scope)"}
+    T4{"4. Generic rule?<br/>type / tag / URN<br/>(open scope)"}
+    T5["5. Default → layers[0]<br/>(open scope)"]
+    U["Unassigned"]
+    A["Assigned to layer"]
+
+    E --> T1
+    T1 -->|yes| A
+    T1 -->|no| T2
+    T2 -->|yes| A
+    T2 -->|no, curated| U
+    T2 -->|no, open| T3
+    T3 -->|yes| A
+    T3 -->|no| T4
+    T4 -->|yes| A
+    T4 -->|no| T5 --> A
+
+    style A fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+    style U fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
+```
+
+> **Important:** Scope is **exactly the rendered set, never the whole graph** — the engine reads only the entities the caller is placing (`request.urns`, ancestors included). In **curated scope** only tiers 1–2 apply; anything else is left unassigned by design.
 
 ### Ontology mapping (foreign-schema mapping)
 

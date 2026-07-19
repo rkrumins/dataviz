@@ -1,8 +1,13 @@
 # Platform Services
 
-This page is the catalog of backend services that make up the {brand}. It
-describes what each service is responsible for, the process roles they run
-under, and how they fit together at runtime.
+> **At a glance:** The catalog of backend services that make up {brandShort} — what each is responsible for, the process role it runs under, and how they fit together at runtime. Start here, then follow the links into each service page.
+
+**This page covers:**
+
+- The **service catalog** and links to each service's detail page
+- **Process roles** (`SYNODIC_ROLE`) and which subsystems each starts
+- The **runtime topology** and shared backing stores
+- **Configuration** entry points and cross-cutting limitations
 
 For deeper reading, see [Architecture](/docs/architecture), the
 [Backend guide](/docs/backend), the [Aggregation pipeline](/docs/aggregation-pipeline),
@@ -30,6 +35,8 @@ The services documented in this section:
 
 The process role is selected by the `SYNODIC_ROLE` environment variable. It
 controls which subsystems the FastAPI lifespan starts.
+
+> **Important:** The same image runs as every role — `SYNODIC_ROLE` alone decides which subsystems boot. A misconfigured value falls back to `dev` (all-in-one), so verify the role in each deployed process; the `controlplane` role is a singleton and must not be run twice.
 
 | Role (`SYNODIC_ROLE`) | Starts | Notes |
 |-----------------------|--------|-------|

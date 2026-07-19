@@ -8,6 +8,13 @@ healthy?" from cache instead of hitting a provider on every request.
 Related reading: [Platform Services](/docs/services-overview),
 [Aggregation pipeline](/docs/aggregation-pipeline), [Backend guide](/docs/backend).
 
+**This page covers:**
+
+- **What it does** — the counts and deep facets, discovery, and top-level materialization
+- **Where it runs** — the headless process, its scheduler/worker loop, lanes, and admission control
+- The admin **cache-only endpoints** and the read envelope
+- **Configuration** knobs and the service's **limitations**
+
 ## Purpose / What it does
 
 The service continuously polls registered data sources and profiles their graphs,
@@ -62,11 +69,39 @@ discovery), `sweep` (background discovery), `heavy` (deep schema scans), and
 fresh. On `SIGTERM` the service drains in-flight jobs (up to
 `STATS_DRAIN_TIMEOUT_SECS`) so restarts don't leave partial upserts.
 
+```mermaid
+flowchart LR
+    Sched["Scheduler<br/>every tick"]
+    Read["Read-path 'stale' + write-path enqueues"]
+    Streams[("Redis Streams<br/>stats · deep · discovery · purge")]
+    subgraph Worker["Worker (XREADGROUP)"]
+        Fast["fast lane<br/>counts + discovery"]
+        Sweep["sweep lane<br/>bg discovery"]
+        Heavy["heavy lane<br/>deep schema"]
+        Purge["purge lane"]
+    end
+    PG[("PostgreSQL<br/>data_source_stats")]
+    DLQ[("insights.dlq")]
+
+    Sched --> Streams
+    Read --> Streams
+    Streams --> Fast --> PG
+    Streams --> Sweep --> PG
+    Streams --> Heavy --> PG
+    Streams --> Purge
+    Worker -.->|exhausted| DLQ
+
+    style Streams fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+    style PG fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+```
+
 **Admission control** guards provider I/O: a per-provider **Redis-backed GCRA
 token bucket** caps the request rate across the whole worker fleet, and a
 **rolling success window** (persisted to `provider_health_window`) feeds the
 "provider degraded" UI. Duplicate enqueues are prevented by a Redis `SET NX`
 dedup claim per `(data_source_id, tick)` with a size-aware TTL.
+
+> **Note:** All Redis state here is **advisory** — streams, dedup claims, and cooldown keys. If Redis is lost, in-flight queue entries are lost with it but heal on the next scheduler tick; **Postgres rows are the only authority**.
 
 **Degradation contract:** if Redis is down the stats pipeline pauses (streams,
 dedup claims, and cooldown keys all live in Redis), the web read path keeps

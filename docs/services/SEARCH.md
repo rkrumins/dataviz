@@ -8,6 +8,13 @@ predicate-tree queries against it.
 Related reading: [Platform Services](/docs/services-overview),
 [Context Engine](/docs/services-context-engine), [RBAC](/docs/rbac).
 
+**This page covers:**
+
+- The **two layers** — provider-agnostic Deep Search and the Advanced Search service
+- The **validate → scope → execute** pipeline and its correctness invariant
+- The **workspace-scoped endpoints** and their headers
+- **Configuration** (`DEEP_SEARCH_*`) and current **limitations**
+
 ## Purpose / What it does
 
 Advanced Search replaces free-text node search with a structured predicate tree,
@@ -36,6 +43,24 @@ Two layers cooperate:
   regardless of what the client passes in `scope.rootUrns` (out-of-view URNs are
   dropped server-side).
 
+```mermaid
+flowchart LR
+    Q["SearchQuery<br/>predicate tree"]
+    V["Validate<br/>depth · leaves · OR-branch caps"]
+    S["Resolve view scope<br/>ViewScopeResolver (server-side)"]
+    St["Stamp resolved scope<br/>drop out-of-view URNs"]
+    D["provider.deep_search<br/>compile Cypher + execute"]
+    R["Page<br/>aggregates / hits"]
+
+    Q --> V --> S --> St --> D --> R
+
+    style S fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+    style St fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+    style D fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+```
+
+> **Important:** View scoping is enforced **server-side, before any Cypher is generated**. Whatever a client passes in `scope.rootUrns`, out-of-view URNs are dropped — cross-view leakage would be a correctness/RBAC violation, so a search without a resolvable `scope.viewId` fails by design.
+
 ## Where it runs
 
 Search runs **in the WEB role**, as endpoints on the workspace-scoped graph
@@ -43,6 +68,8 @@ router. Execution flows through the request's `ContextEngine` to the active grap
 provider. The routes use a dedicated read database session
 (`get_graph_read_db_session`) held across the provider call, isolating the search
 path from the main web session pool.
+
+> **Warning:** **FalkorDB only.** Deep Search is implemented for the FalkorDB adapter today; Neo4j / DataHub / Spanner raise `NotImplementedError`, which the route maps to HTTP `501` for `/search/advanced` until they implement the Protocol.
 
 **Provider support is not uniform.** Only the FalkorDB adapter implements
 `deep_search` today; other providers raise `NotImplementedError`, which the route

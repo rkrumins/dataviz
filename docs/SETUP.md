@@ -3,6 +3,13 @@
 > Step-by-step instructions for getting {brand} running locally, whether
 > you're actively iterating on source code or just want the platform up.
 
+**This guide covers:**
+
+- The **mental model** — the `dev.sh` (source-iteration) vs `deploy.sh` (self-host) workflows
+- **Prerequisites**, **first-time setup**, and the **daily three-terminal** workflow
+- The `dev.sh` **subcommand reference**, persistence model, and **troubleshooting**
+- The full **environment-variable reference** and a **production checklist**
+
 For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 
 > **Working on the auth / SSO surface?** Read
@@ -28,7 +35,9 @@ For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 └───────────────────────────┴────────────────────────────┘
 ```
 
-The two stacks use **different compose project names** and **different volume names**, so they can coexist without data collisions. Mixing them (running `deploy.sh` while `dev.sh infra` is up, or vice versa) causes port conflicts — pick one.
+The two stacks use **different compose project names** and **different volume names**, so they can coexist without data collisions.
+
+> **Warning:** Don't run both stacks at once. Starting `deploy.sh` while `dev.sh infra` is up (or vice versa) causes **port conflicts** — pick one workflow per machine.
 
 ### Three capabilities you care about
 
@@ -86,7 +95,9 @@ Access:
 | Backend API docs | http://localhost:8000/docs |
 | FalkorDB browser UI | http://localhost:3000 |
 
-Default admin: `admin@nexuslineage.local` / `admin123` (change after first login).
+Default admin: `admin@nexuslineage.local` / `admin123`.
+
+> **Caution:** The default admin password is only for local dev. Change it after first login, and never carry these bootstrap credentials into a shared or production deployment — see the [Production Environment Checklist](#production-environment-checklist).
 
 ### Seed demo graph data (optional)
 
@@ -285,3 +296,10 @@ synodic/
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VM / self-host guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system overview
 - [superpowers/specs/2026-04-18-resilient-dev-environments-design.md](superpowers/specs/2026-04-18-resilient-dev-environments-design.md) — design rationale for the current dev-env resilience model
+
+### Related in-app docs
+
+- [Backend guide](/docs/backend) — services, API surface, and startup lifecycle
+- [Frontend & UX](/docs/frontend) — the Vite SPA you run with `./dev.sh frontend`
+- [Platform Services overview](/docs/services-overview) — process roles (`SYNODIC_ROLE`) and topology
+- [Local integration testing](/docs/local-integration-testing) — the draft/branch graph journey

@@ -1,5 +1,14 @@
 # Frontend & UX Documentation
 
+> **At a glance:** The architecture, state model, and design system of the {brand} single-page app. Written for frontend engineers and anyone tracing how a user action becomes a rendered graph.
+
+**This doc covers:**
+
+- The **technology stack** and **component architecture**
+- Core **user flows** — auth, workspace navigation, graph exploration, view management
+- **State management** (Zustand stores) and the **data-fetching** layer
+- The **design system**, **performance** techniques, the **admin/onboarding** surface, and the **Layer System**
+
 ## Overview
 
 The {brand} frontend is a **React 19** single-page application built with **Vite**, **TypeScript**, **Tailwind CSS**, and **Zustand** for state management. It provides a rich graph visualization experience powered by **@xyflow/react** with layout computation offloaded to **Web Workers** (ELK.js).
@@ -138,6 +147,8 @@ graph TB
     style Sidebar fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
 ```
 
+> **Note:** Views and ontology cache are keyed by the composite scope `${workspaceId}/${dataSourceId}`. Switching workspace or data source invalidates that cache and forces a schema reload — so a stale ontology never leaks across scopes.
+
 **Workspace scoping:** Navigation is workspace-aware. Changing workspaces or data sources triggers:
 1. `useWorkspacesStore` updates active IDs
 2. `useSchemaStore.setActiveScopeKey()` invalidates ontology cache
@@ -258,6 +269,30 @@ graph TB
 ---
 
 ## 5. Data Fetching
+
+Component data flows from React Query and the graph provider down through a single authenticated `fetch` wrapper:
+
+```mermaid
+graph LR
+    Comp["Component / Hook"]
+    RQ["React Query<br/>cache + staleTime"]
+    RGP["RemoteGraphProvider<br/>workspace-scoped"]
+    Svc["Service modules<br/>authService, viewApiService, …"]
+    AF["authFetch()<br/>JWT inject · 401 logout"]
+    BE["Backend API<br/>/api/v1/…"]
+    Mock["MockProvider<br/>(fallback)"]
+
+    Comp --> RQ
+    Comp --> RGP
+    RQ --> Svc
+    RGP --> Svc
+    RGP -.->|backend unreachable| Mock
+    Svc --> AF --> BE
+
+    style RQ fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style AF fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
+    style Mock fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
+```
 
 ### API Client
 
@@ -636,7 +671,7 @@ Views and schema are scoped by a composite key: `${workspaceId}/${dataSourceId}`
 
 ---
 
-## 10. Directory Structure
+## 14. Directory Structure
 
 ```
 frontend/src/
@@ -690,3 +725,12 @@ frontend/src/
 ├── lib/                        # Shared library code
 └── workers/                    # elk-layout.worker.ts
 ```
+
+---
+
+## Related
+
+- [Backend guide](/docs/backend) — the API this app consumes
+- [Features API contract](/docs/api-features) — feature flags that gate frontend surfaces
+- [Developer Setup](/docs/setup) — running the Vite dev server locally
+- [Platform Services overview](/docs/services-overview) · [Search](/docs/services-search) · [Assignments](/docs/services-assignments)
