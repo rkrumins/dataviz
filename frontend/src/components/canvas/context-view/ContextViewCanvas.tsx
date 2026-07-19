@@ -1630,6 +1630,18 @@ export function ContextViewCanvas({
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
+  // Authored column width — part of the view definition (ships to every
+  // viewer of the published view). Not staged as a reviewable change:
+  // width is presentation, not model semantics; it rides the normal
+  // layout save. Fires once per drag (pointerup), never per move.
+  const resizeLayer = useCallback((id: string, width: number | null) => {
+    const before = currentLayout()
+    persistReferenceLayout({
+      layers: layerOps.setLayerWidth(before.layers, id, width ?? undefined),
+      assignments: before.assignments,
+    })
+  }, [currentLayout, persistReferenceLayout])
+
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
     const before = currentLayout()
@@ -3582,6 +3594,7 @@ export function ContextViewCanvas({
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
+                onResizeLayer={isDraft ? resizeLayer : undefined}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
