@@ -47,9 +47,6 @@ graph TB
     WK -->|project committed main| FDB
     PG -->|watermark: projected vs target| WK
 
-    style PG fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style FDB fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style Viz fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **The two invariants everything rests on:** (1) **Postgres is truth, FalkorDB is derived** — the

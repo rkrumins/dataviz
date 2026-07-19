@@ -1,10 +1,18 @@
-# Sign-up and User Service — Implementation Plan (Revised)
+# User & Sign-up Service
 
-**Design principles (holistic).** This plan treats the feature as one system: **auditability and safe evolution** (database), **clarity and trust** (UI/UX), **predictable behavior and operability** (engineering), **growth without rewrites** (scalability), and **defense in depth** (security). The revised version enforces a **logical split** so the User Service can be cut and pasted into its own repository and database without breaking the main application.
+> **At a glance.** The design reference for {brand}'s User & Sign-up Service — schema,
+> APIs, UX, and the principles behind them: the "logical split" that lets the user domain
+> be lifted into its own repo/DB, the transactional-outbox event model, the admin approval
+> flow, and defense-in-depth security. The **What's implemented** table below tracks what
+> shipped versus what's still pending. For the authorization model see [RBAC](/docs/rbac);
+> for the SSO layer built on top, [SSO](/docs/sso) and the
+> [SSO Integration Guide](/docs/sso-integration).
+
+This is the reference for the User & Sign-up Service: its schema, APIs, UX, and the design principles behind them. The service treats user management as one system — **auditability and safe evolution** (database), **clarity and trust** (UI/UX), **predictable behavior and operability** (engineering), **growth without rewrites** (scalability), and **defense in depth** (security) — and enforces a **logical split** so the user domain can be lifted into its own repository and database without breaking the main application.
 
 ---
 
-## Implementation Status (2026 Q1)
+## What's implemented
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -16,14 +24,17 @@
 | **Admin approval flow** | **Done** | Pending → Approve/Reject with audit trail in `user_approvals` |
 | **Frontend auth pages** (Login, SignUp, Reset) | **Done** | Glass-panel design, zxcvbn strength meter |
 | **Transactional outbox** (write side) | **Done** | Events written in same transaction as user operations |
-| **Outbox consumer** (read/publish side) | **Pending** | Events accumulate with `processed = false`. No consumer process implemented yet. See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md). |
-| **SSO (SAML2/OIDC)** | **Pending** | `auth_provider` field exists in schema but SSO login flow not implemented |
+| **Outbox consumer** (read/publish side) | **Done** | The outbox relay drains `outbox_events` and lands them in `auth_audit_log`, deduped by `source_event_id`. See [SSO Integration Guide](/docs/sso-integration) §6.4. |
+| **SSO (OIDC + SAML2)** | **Done** | DB-backed IdP providers, multi-identity per user, JIT provisioning, group→role/group mapping, Argon2 local identity. See [SSO](/docs/sso) and the [SSO Integration Guide](/docs/sso-integration). |
 | **Force password change on first login** | **Pending** | `must_change_password` flag not implemented |
 | **Rate limiting** | **Partial** | Feature flag rate limits exist; per-IP signup/login limits not yet at API gateway level |
 
 ---
 
-## 1. Current State (as of plan creation)
+## 1. Origin — what this service replaced
+
+Before the service existed, the platform ran on a client-only auth stub. That
+starting point is recorded here for context:
 
 - **Auth:** Client-only in `frontend/src/store/auth.ts` — env-based username/password hash (SHA-256), no backend auth API.
 - **Backend:** FastAPI at `/api/v1`, async SQLAlchemy in `backend/app/db/models.py`, repos + Pydantic in `backend/common/models/management.py`. `ViewFavouriteORM` has `user_id` (Text) with no FK; views endpoints use `_PLACEHOLDER_USER`.
@@ -229,6 +240,12 @@ Routers in `api/` depend on `services/` and `schemas/`; services use `repositori
 
 ## 8. Security Summary (Defense in Depth)
 
+> **Important:** Two rules are non-negotiable before exposing self-signup publicly:
+> credential-masking middleware must strip `password` / `password_hash` from **all** JSON
+> logs, and the public signup response must not leak whether an email already exists
+> (return a generic success and notify existing users out-of-band). A 409 "email already
+> registered" is acceptable only for internal-only deployments.
+
 - **Credentials:** Passwords only in request body over HTTPS; never in URL, query, or logs. Server hashes (Argon2id) and compares with constant-time verification.
 - **Credential masking:** Middleware strips `password` and `password_hash` from all JSON logs.
 - **Rate limiting:** Leaky bucket at gateway (e.g. 5 signups per IP per hour).
@@ -239,7 +256,10 @@ Routers in `api/` depend on `services/` and `schemas/`; services use `repositori
 
 ---
 
-## 9. Implementation Order
+## 9. Build sequence
+
+The service shipped in the order below; it is kept here as a build reference. The
+"optional follow-ups" at the end are remaining enhancements, not blockers.
 
 1. **Backend — DB and domain**
    - Add ORM models: `users` (UUID v7 id, email, password_hash, first_name, last_name, status, auth_provider, external_id, metadata, created_at, updated_at, deleted_at), `user_roles`, `user_approvals`, `outbox_events`. Use logical references only; no FK from other domains to `users`.

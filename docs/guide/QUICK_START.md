@@ -1,12 +1,16 @@
 # Quick Start — Your First 10 Minutes
 
+```tour-getting-started
+```
+
 This is the fastest path from "logged in" to "I get it." Follow the five steps
 below and you'll have traced real lineage and saved your first View. No prior
 graph knowledge required.
 
-> 💡 **Before you start:** make sure you can log in and that an administrator has
-> set up at least one workspace with a data source. If you see *"No data source
-> for workspace,"* ask your admin to finish [Admin Setup](/guide/admin-setup).
+> **Important:** Before you start, make sure you can log in and that an
+> administrator has set up at least one workspace with a data source. If you see
+> *"No data source for workspace,"* ask your admin to finish
+> [Admin Setup](/guide/admin-setup).
 
 ```mermaid
 flowchart LR
@@ -30,7 +34,7 @@ layout:
 - **Main area** — the Dashboard shows your workspaces and a gallery of popular
   and recent Views.
 
-> 💡 **Tip:** Anything you can *look at* is safe. You can't break data by
+> **Tip:** Anything you can *look at* is safe. You can't break data by
 > clicking around — editing always requires a deliberate action.
 
 ---
@@ -42,7 +46,7 @@ then enter the one you want to work in. Each screen shows you which workspace
 you're in — there's no separate global switcher to keep in sync. The workspace
 determines which data you'll see.
 
-When you enter a workspace, Synodic loads its **data source** and its
+When you enter a workspace, {brand} loads its **data source** and its
 **ontology** (the colours and meanings). The canvas will re-render around the new
 context.
 
@@ -62,14 +66,14 @@ The graph appears with the saved layout, filters, and layers already applied.
 You're now looking at real lineage. See [Reading Lineage](/guide/reading-lineage)
 to interpret what's on screen.
 
-> 💡 **No views yet?** Open the **Explorer** instead and use the search box to
+> **Tip:** No views yet? Open the **Explorer** instead and use the search box to
 > find any node by name — then continue to Step 4.
 
 ---
 
 ## Step 4 — Trace lineage
 
-This is the heart of Synodic. Pick any node that interests you and follow its
+This is the heart of {brand}. Pick any node that interests you and follow its
 connections:
 
 1. **Click a node** to select it. A details panel opens with its properties,
@@ -83,8 +87,8 @@ connections:
 As you trace, watch how the highlighted path shows the *blast radius* — every
 item that would be affected if your selected node changed.
 
-> 💡 **Power move:** press `⌘K` / `Ctrl-K` to open the **Command Palette** and
-> jump straight to actions like search, trace, and filter.
+> **Tip:** *Power move* — press `⌘K` / `Ctrl-K` to open the **Command Palette**
+> and jump straight to actions like search, trace, and filter.
 
 Full details: [Exploring the Graph](/guide/exploring-graph).
 

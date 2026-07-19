@@ -1,6 +1,6 @@
 # Governance & Operations
 
-*For Administrators.* Once Synodic is set up and people are using it, your job
+*For Administrators.* Once {brand} is set up and people are using it, your job
 shifts to keeping it **healthy, trustworthy, and well-communicated**. This page
 covers the recurring operational tasks and the governance levers you have.
 
@@ -8,7 +8,7 @@ covers the recurring operational tasks and the governance levers you have.
 
 ## Keeping providers healthy
 
-Your Views are only as good as the connections feeding them. Synodic
+Your Views are only as good as the connections feeding them. {brand}
 continuously tracks **provider health**:
 
 - Watch **connection status** in **Admin → Overview** / **Ingestion** — a
@@ -18,15 +18,15 @@ continuously tracks **provider health**:
   empty or outdated graphs.
 
 **Not every unhealthy provider is a hard outage.** When a provider drops offline
-but Synodic still holds recent data for it, the status shows a **"Cached ·
+but {brand} still holds recent data for it, the status shows a **"Cached ·
 updated X ago"** chip rather than an error. That means users can keep working
-with slightly-stale-but-real data — nothing is broken. Synodic keeps re-checking
+with slightly-stale-but-real data — nothing is broken. {brand} keeps re-checking
 the provider (roughly every 30 seconds) and the chip clears itself automatically
 once the connection is back. Only step in if the "updated" time keeps climbing,
 which signals the provider has been down long enough to look at.
 
-> 💡 Make provider health a quick part of your routine. A red provider is the
-> root cause behind most "the graph looks wrong" reports.
+> **Tip:** Make provider health a quick part of your routine. A red provider is
+> the root cause behind most "the graph looks wrong" reports.
 
 ---
 
@@ -67,7 +67,7 @@ background job with states like *pending → running → ready*.
 
 ## Auditing changes
 
-Trust comes from traceability. Synodic records **audit trails** for sensitive
+Trust comes from traceability. {brand} records **audit trails** for sensitive
 actions — most notably the **ontology lifecycle** (created, updated, published,
 deleted). Use these to:
 
@@ -94,13 +94,31 @@ planned maintenance, new features, or known issues. Good announcement hygiene:
 
 ## Managing feature flags
 
-**Admin → Features** lets you toggle **feature flags** to enable experimental or
-gradual-rollout capabilities. Treat flags deliberately:
+**Admin → Features** is the master panel for turning platform capabilities on
+and off. The switches you'll find there include:
 
-- Roll new features to a **small group first** where possible.
+- **Version control** — the draft-review-publish workflow for editing graph data
+  (the master switch behind [Versioning & Change Control](/guide/versioning-change-control)).
+- **Trace** — the upstream/downstream tracing controls on the canvas.
+- **Edit mode** — whether users can enter a data source's draft and make changes.
+- **Allowed view modes** — which canvas layouts (graph, hierarchy, layered, and
+  so on) people can pick from.
+- **Sign-up** — whether new people can self-register (**off by default**;
+  approvals still apply — see [Users & Access](/guide/users-access)).
+- **Announcements** — the banner-notification system covered above.
+- **Graph export** — whether users can export a data source or View to a file.
+- **Blank models** — starting a data source from an empty graph rather than a
+  discovered one.
+- **Semantic-layer flags** — a related group covering ontology **editing**,
+  **import** and **export**, **auto-suggest**, **version history**, and whether
+  **non-admins** may edit ontologies.
+
+Treat flags deliberately:
+
+- Roll new capabilities to a **small group first** where possible.
 - **Document** what you've enabled so behaviour changes aren't a mystery to your
   team.
-- Turn off experiments that aren't working rather than leaving them half-on.
+- Turn off anything you're trialling rather than leaving it half-on.
 
 ---
 

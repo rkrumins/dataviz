@@ -74,6 +74,7 @@ _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "redis":         ("Redis & Graph Store", NavSpecPerm(perm="system:admin")),
     "branding":      ("Branding",        NavSpecPerm(perm="system:admin")),
     "features":      ("Features",        NavSpecPerm(perm="system:admin")),
+    "telemetry":     ("Telemetry",       NavSpecPerm(perm="system:audit:read")),
     "announcements": ("Announcements",   NavSpecPerm(perm="system:admin")),
     "users":         ("User Management", NavSpecPerm(perm="system:admin")),
     "groups":        ("Groups",          NavSpecPerm(perm="system:groups:manage")),

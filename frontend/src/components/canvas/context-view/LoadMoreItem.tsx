@@ -88,15 +88,15 @@ export function LoadMoreItem({
         {parentIsLast.map((pIsLast, idx) => (
           <div key={idx} className="w-5 h-full flex justify-center">
             {!pIsLast && (
-              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+              <div className="w-px h-full bg-gradient-to-b from-black/[0.06] via-black/[0.10] to-black/[0.06] dark:from-white/[0.08] dark:via-white/[0.12] dark:to-white/[0.08]" />
             )}
           </div>
         ))}
         {depth > 0 && (
           <div className="w-5 h-full relative">
-            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-1/2" style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-1/2 bg-gradient-to-b from-transparent via-glass-border to-transparent" />
             <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
-              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+              <div className="w-3 h-px bg-gradient-to-r from-black/[0.10] to-black/[0.06] dark:from-white/[0.12] dark:to-white/[0.06]" />
             </div>
           </div>
         )}
@@ -110,11 +110,11 @@ export function LoadMoreItem({
         disabled={isLoading}
         aria-label={`Load ${nextPage} more of ${count.toLocaleString()} remaining`}
         className={cn(
-          'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200',
-          'bg-white/[0.03] border-white/[0.08] text-ink-muted',
+          'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+          'bg-black/[0.02] border-black/[0.08] dark:bg-white/[0.03] dark:border-white/[0.08] text-ink-muted',
           isLoading
             ? 'cursor-wait opacity-70'
-            : 'hover:bg-white/[0.06] hover:border-white/[0.15] hover:text-ink/90 active:scale-[0.98]',
+            : 'hover:bg-black/[0.04] hover:border-black/[0.12] dark:hover:bg-white/[0.06] dark:hover:border-white/[0.15] hover:text-ink/90 active:scale-[0.98]',
         )}
       >
         {isLoading ? (
@@ -124,7 +124,7 @@ export function LoadMoreItem({
           </>
         ) : (
           <>
-            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.05] group-hover/item:bg-white/[0.08] transition-colors">
+            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-black/[0.04] group-hover/item:bg-black/[0.06] dark:bg-white/[0.05] dark:group-hover/item:bg-white/[0.08] transition-colors">
               <LucideIcons.Plus className="w-3.5 h-3.5 text-ink-muted/70" />
             </span>
             <span className="tracking-wide">

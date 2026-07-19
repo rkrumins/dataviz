@@ -1,6 +1,15 @@
-# Synodic — Local Setup Guide
+# Local Setup Guide
 
-Get the full Synodic platform running locally with pre-loaded sample data. No external dependencies beyond Docker.
+**What this is:** the fastest way to get the platform running on your machine with pre-loaded sample data. **Who it's for:** anyone evaluating the platform or setting up a local development environment. No external dependencies beyond Docker.
+
+There are three ways to run the platform. This guide covers the compose-based paths in detail:
+
+- **Contributor** (edit source with hot-reload) — `./dev.sh` (see [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)).
+- **Self-host** (containers on a VM) — `./deploy.sh up` (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+- **Quickstart** (zero-config demo) — `docker compose -f docker-compose.quickstart.yml up`, described as Option A below.
+
+> [!TIP]
+> First time here? **Option A (Quickstart)** is the shortest path to a running UI — one command, everything pre-seeded.
 
 ---
 
@@ -165,11 +174,12 @@ npm install
 npm run dev    # Vite dev server on http://localhost:5173
 ```
 
+> [!IMPORTANT]
 > **Postgres-only.** There is no SQLite fallback. The management DB is Postgres v16+ in every environment — dev, CI, prod. Any `MANAGEMENT_DB_URL` that isn't a `postgresql+asyncpg://` URL is rejected immediately at startup.
 
 ### 6. Schema migrations (Alembic)
 
-Synodic uses Alembic to own all schema lifecycle, but the application itself never runs migrations — `init_db()` only *verifies* the schema is at the expected head and fails loudly (or serves in degraded mode) if it isn't. Migrations are applied by a dedicated `synodic-upgrade` step: a Helm pre-install/pre-upgrade hook Job in Kubernetes, a one-shot `upgrade` service in Docker Compose, or manually via `python -m backend.scripts.upgrade upgrade` for a local `uvicorn` boot. For manual control over individual migrations:
+The platform uses Alembic to own all schema lifecycle, but the application itself never runs migrations — `init_db()` only *verifies* the schema is at the expected head and fails loudly (or serves in degraded mode) if it isn't. Migrations are applied by a dedicated `synodic-upgrade` step: a Helm pre-install/pre-upgrade hook Job in Kubernetes, a one-shot `upgrade` service in Docker Compose, or manually via `python -m backend.scripts.upgrade upgrade` for a local `uvicorn` boot. For manual control over individual migrations:
 
 ```bash
 cd backend

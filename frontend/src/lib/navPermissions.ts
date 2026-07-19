@@ -71,6 +71,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     infrastructure: { kind: 'perm', perm: 'system:admin' },
     branding:      { kind: 'perm', perm: 'system:admin' },
     features:      { kind: 'perm', perm: 'system:admin' },
+    telemetry:     { kind: 'perm', perm: 'system:audit:read' },
     announcements: { kind: 'perm', perm: 'system:admin' },
     users:         { kind: 'perm', perm: 'system:admin' },
     groups:        { kind: 'perm', perm: 'system:groups:manage' },

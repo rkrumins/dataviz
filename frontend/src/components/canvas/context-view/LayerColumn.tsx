@@ -1254,7 +1254,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               >
                 <button
                   onClick={() => handleBreadcrumbClick(null)}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-black/[0.04] hover:bg-black/[0.08] border border-black/[0.08] dark:bg-white/[0.06] dark:hover:bg-white/[0.12] dark:border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
                 >
                   <LucideIcons.Home className="w-3 h-3" />
                   <span className="text-[10px] font-medium">Root</span>
@@ -1264,7 +1264,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
                     <button
                       onClick={() => handleBreadcrumbClick(node)}
-                      className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
+                      className="px-2 py-1 rounded-lg bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.06] dark:bg-white/[0.04] dark:hover:bg-white/[0.08] dark:border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
                       title={node.name}
                     >
                       {node.name}
@@ -1342,7 +1342,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(0, 'start')}
-                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                     style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
                   >
                     <LucideIcons.ChevronUp className="w-3 h-3" />
@@ -1411,7 +1411,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                     style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
                   >
                     <LucideIcons.ChevronDown className="w-3 h-3" />
@@ -1453,7 +1453,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
                   title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
                   style={{ borderLeft: `2px solid ${p.color}` }}
                 >
                   {p.direction === 'up'
@@ -1472,7 +1472,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
                   title="Every connection of the selected entity, grouped and searchable"
-                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
                   +{anchorProxies.moreCount} more · Open lens

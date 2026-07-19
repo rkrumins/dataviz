@@ -19,13 +19,13 @@ import { fetchPublicBranding } from '@/services/brandingService'
 /** Stock defaults — mirror the backend env defaults so first paint matches
  *  an un-rebranded deployment exactly. */
 export const DEFAULT_BRANDING: Branding = {
-    appName: 'Nexus Lineage',
-    shortName: 'NexusLineage',
+    appName: 'Context Visualization Platform',
+    shortName: 'CVP',
     description: 'Interactive Data Lineage Visualization',
     logoUrl: '',
     faviconUrl: '/nexus-icon.svg',
     accentColor: '#6366f1',
-    copyrightText: '© 2026 Nexus Lineage',
+    copyrightText: '© 2026 Context Visualization Platform',
     supportEmail: '',
     loginTagline: 'Sign in to continue',
     version: 0,

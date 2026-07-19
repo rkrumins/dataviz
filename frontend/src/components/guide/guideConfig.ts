@@ -220,6 +220,24 @@ export const guideEntries: GuideEntry[] = [
     readingTime: '7 min',
     importFn: () => import('@docs/guide/EXPLORING_GRAPH.md?raw'),
   },
+  {
+    slug: 'lineage-lens',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'The Lineage Lens & Context View',
+    description: 'Focus on one thing’s upstream and downstream — and what sits just outside the view',
+    readingTime: '8 min',
+    importFn: () => import('@docs/guide/LINEAGE_LENS.md?raw'),
+  },
+  {
+    slug: 'navigating-layers',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Navigating Layers',
+    description: 'The Layer Strip, resizable columns, load-more paging, and the Anchor Rail',
+    readingTime: '7 min',
+    importFn: () => import('@docs/guide/NAVIGATING_LAYERS.md?raw'),
+  },
 
   // For Builders
   {
@@ -361,6 +379,14 @@ export const keyJourneys: KeyJourney[] = [
     persona: 'viewer',
     icon: Network,
     time: '7 min',
+  },
+  {
+    title: 'Focus with the Lineage Lens',
+    outcome: 'Isolate one thing’s upstream and downstream — and what sits just outside the view',
+    slug: 'lineage-lens',
+    persona: 'viewer',
+    icon: Eye,
+    time: '8 min',
   },
   {
     title: 'Save & share a View',

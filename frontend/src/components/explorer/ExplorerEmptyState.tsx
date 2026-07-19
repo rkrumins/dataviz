@@ -6,6 +6,7 @@
 import { Compass, SearchX, FilterX, Plus, LayoutGrid, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { DocsLink } from '@/components/help/DocsLink'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -98,6 +99,11 @@ export function ExplorerEmptyState({
           <Plus className="h-4 w-4" />
           Create Your First View
         </button>
+
+        {/* Contextual help */}
+        <div className="mt-6">
+          <DocsLink slug="creating-views" label="New to Views? Read the guide" />
+        </div>
       </div>
     )
   }

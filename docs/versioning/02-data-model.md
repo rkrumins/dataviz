@@ -309,8 +309,6 @@ graph LR
     HEAD["entity_heads<br/>(graph, main, ent_A)<br/>head_version_id → V3<br/>is_tombstone = true"]
     V3 -. current .-> HEAD
 
-    style NV fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style HEAD fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 Reading "current state on `main`" = join `entity_heads` → the referenced version rows (skipping
@@ -335,7 +333,6 @@ graph TB
         MN["merkle_nodes"]:::t
         WC["working_changes"]:::t
     end
-    classDef t fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 - **Why HASH, not per-source.** A per-data-source partition scheme would create unbounded partitions

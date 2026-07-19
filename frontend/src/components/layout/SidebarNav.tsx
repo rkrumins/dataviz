@@ -11,6 +11,9 @@ import {
   PanelLeftOpen,
   BookOpen,
   Sparkles,
+  Rocket,
+  Check,
+  X,
 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { tabForPath, type NavigationTab } from '@/store/navigation'
@@ -20,6 +23,8 @@ import { useIsClipped } from '@/hooks/useIsClipped'
 import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
+import { useHelpPanelStore } from '@/store/helpPanel'
+import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -154,6 +159,7 @@ function NavButton({ item, collapsed, active, onClick }: NavButtonProps) {
     <>
     <button
       ref={buttonRef}
+      data-tour={`nav-${item.id}`}
       onClick={onClick}
       {...reveal}
       className={cn(
@@ -309,6 +315,134 @@ function SidebarFooterLink({
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Getting Started launcher (footer)
+// ─────────────────────────────────────────────────────────────────────
+/** A tiny determinate progress ring — the launcher's at-a-glance status. */
+function OnboardingRing({ done, total }: { done: number; total: number }) {
+  const size = 20
+  const stroke = 2.5
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const pct = total > 0 ? Math.min(1, done / total) : 0
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0 -rotate-90" aria-hidden="true">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} className="stroke-black/10 dark:stroke-white/10" />
+      <circle
+        cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} strokeLinecap="round"
+        className="stroke-accent-lineage transition-[stroke-dashoffset] duration-500 ease-out"
+        strokeDasharray={c} strokeDashoffset={c * (1 - pct)}
+      />
+    </svg>
+  )
+}
+
+/**
+ * A progress-aware entry into the onboarding hub, opening the Help drawer's
+ * Getting Started view. Always present (so the hub — and the product tour, when
+ * enabled — stay one click away), but it drops its accent "nudge" chrome for a
+ * calm, checked state once every step is done, so it never nags a set-up user.
+ * The product tour appears as a step in the hub only when the ``toursEnabled``
+ * flag is on (handled in useOnboardingProgress).
+ */
+function SidebarGettingStarted({ collapsed }: { collapsed: boolean }) {
+  const { completedCount, total, allDone, isLoading } = useOnboardingProgress()
+  const openGettingStarted = useHelpPanelStore((s) => s.openGettingStarted)
+  const hidden = usePreferencesStore((s) => s.gettingStartedHidden)
+  const setHidden = usePreferencesStore((s) => s.setGettingStartedHidden)
+
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [tooltipOpen, setTooltipOpen] = useState(false)
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const openTooltip = useCallback(() => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    openTimer.current = setTimeout(() => setTooltipOpen(true), TOOLTIP_DELAY_MS)
+  }, [])
+  const closeTooltip = useCallback(() => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    setTooltipOpen(false)
+  }, [])
+  useEffect(() => () => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+  }, [])
+
+  // Wait for the first counts to settle so the row doesn't flash a wrong state.
+  // Hidden by the user? Gone — they can bring it back from Help → Getting started.
+  if (isLoading || hidden) return null
+
+  const countLabel = `${completedCount}/${total}`
+  const reveal = collapsed
+    ? { onMouseEnter: openTooltip, onMouseLeave: closeTooltip, onFocus: openTooltip, onBlur: closeTooltip }
+    : {}
+
+  return (
+    <>
+      <div className="group/gs relative">
+        <button
+          ref={btnRef}
+          onClick={() => openGettingStarted()}
+          {...reveal}
+          aria-label={allDone ? 'Getting started — all steps complete' : `Getting started — ${countLabel} steps complete`}
+          className={cn(
+            "w-full flex items-center rounded-lg transition-all duration-150",
+            allDone
+              // Calm once there's nothing left to do — reads like the other footer links.
+              ? "text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+              // A gentle nudge while steps remain.
+              : "border border-accent-lineage/25 bg-accent-lineage/[0.05] text-ink-secondary hover:text-ink hover:bg-accent-lineage/[0.09] hover:border-accent-lineage/40",
+            collapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2",
+          )}
+        >
+          <div className={cn(
+            "flex items-center justify-center rounded-lg shrink-0 bg-gradient-to-br from-accent-lineage to-violet-600 text-white",
+            collapsed ? "w-8 h-8" : "w-7 h-7",
+          )}>
+            <Rocket className={cn(collapsed ? "w-4 h-4" : "w-3.5 h-3.5")} />
+          </div>
+          {!collapsed && (
+            <>
+              <span className="flex-1 text-left text-xs font-semibold">Getting started</span>
+              {/* Status fades out on hover so the dismiss × can take its place. */}
+              <span className="flex items-center gap-1.5 shrink-0 transition-opacity group-hover/gs:opacity-0">
+                {allDone ? (
+                  <Check className="w-4 h-4 text-emerald-500" />
+                ) : (
+                  <>
+                    <span className="text-2xs font-semibold text-ink-muted tabular-nums">{countLabel}</span>
+                    <OnboardingRing done={completedCount} total={total} />
+                  </>
+                )}
+              </span>
+            </>
+          )}
+        </button>
+
+        {/* Dismiss — hides the launcher; sibling of the button so it isn't a
+            nested interactive element. Crossfades in where the status sits. */}
+        {!collapsed && (
+          <button
+            type="button"
+            onClick={() => setHidden(true)}
+            aria-label="Hide Getting started"
+            title="Hide Getting started"
+            className="absolute right-2 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-ink-muted opacity-0 transition-opacity hover:bg-black/10 hover:text-ink dark:hover:bg-white/10 group-hover/gs:opacity-100 focus-visible:opacity-100 focus-visible:outline-none"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      {tooltipOpen && collapsed && (
+        <SidebarTooltip anchorRef={btnRef}>
+          <span className="text-sm font-semibold text-ink whitespace-nowrap">
+            {allDone ? 'Getting started · Complete' : `Getting started · ${countLabel}`}
+          </span>
+        </SidebarTooltip>
+      )}
+    </>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Main SidebarNav
 // ─────────────────────────────────────────────────────────────────────
 export function SidebarNav() {
@@ -400,6 +534,7 @@ export function SidebarNav() {
 
   return (
     <aside
+      data-tour="nav"
       className="relative shrink-0 h-full z-40 bg-canvas-elevated border-r border-glass-border flex flex-col"
       style={{ width: sidebarCollapsed ? COLLAPSED_WIDTH : width, transition: resizing.current ? 'none' : 'width 200ms ease' }}
     >
@@ -435,8 +570,10 @@ export function SidebarNav() {
         </div>
       </nav>
 
-      {/* User Guide link */}
-      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 pt-2" : "px-2.5 pt-2")}>
+      {/* Footer: the Getting Started launcher (auto-hides when complete), then
+          the Guide & Docs links — one top border for the whole group. */}
+      <div className={cn("border-t border-glass-border space-y-0.5", sidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-2")}>
+        <SidebarGettingStarted collapsed={sidebarCollapsed} />
         <SidebarFooterLink
           href="/guide"
           label="User Guide"
@@ -444,10 +581,6 @@ export function SidebarNav() {
           iconClass="bg-gradient-to-br from-indigo-500 to-violet-600 text-white"
           collapsed={sidebarCollapsed}
         />
-      </div>
-
-      {/* Documentation link */}
-      <div className={cn(sidebarCollapsed ? "px-1.5 pb-2" : "px-2.5 pb-2")}>
         <SidebarFooterLink
           href="/docs"
           label="Documentation"

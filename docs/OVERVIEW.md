@@ -1,5 +1,17 @@
 # {brand}: Project Overview, Vision & Roadmap
 
+The starting point for understanding {brand} — what it is, the problem it solves, what has shipped, and where it's headed.
+
+**Who it's for:** anyone new to the platform — admins, data engineers, business stakeholders, and developers looking for orientation before the deeper design docs.
+
+**What you'll find here:**
+- Key terms and a role-based reading guide
+- The problem, the vision, and core design principles
+- Shipped capabilities and honest maturity assessment
+- Competitive positioning and forward-looking roadmap
+
+> **Tip:** Skim the [Key Terms](#key-terms) table first — the four-entity vocabulary (Provider, CatalogItem, Ontology, Workspace) recurs across every other doc.
+
 ---
 
 ## What is {brand}?
@@ -68,6 +80,16 @@ mindmap
       Audit Trail (OntologyAuditLog)
       Source Mappings
       Drift Detection
+    Graph Change Control
+      Drafts + review & merge (PR-style)
+      Publish, revert, restore
+      Version-control master switch
+      Resumable enable-VC bootstrap job
+    Lineage Lens / Context View
+      External-degree signal
+      Curated-view chip
+      Layer Strip
+      Anchor Rail + one-page-ahead pagination
     Data Catalog
       CatalogItems
       Workspace Bindings
@@ -124,7 +146,6 @@ graph LR
         P5["Dual-Audience<br/>Business + Technical"]
     end
 
-    style Principles fill:#1e293b,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Principle | What It Means | Why It Matters |
@@ -149,12 +170,6 @@ graph LR
     D --> E["Explore Lineage<br/>(trace, filter, aggregate)"]
     E --> F["Save Views<br/>(share with team)"]
 
-    style A fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style B fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style C fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style D fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style E fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style F fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
 ```
 
 1. **Connect** a graph database (FalkorDB, Neo4j, or DataHub) via the admin panel
@@ -209,9 +224,6 @@ graph TB
     Column -.->|"Zoom out"| Table
     Table -.->|"Zoom out"| Domain
 
-    style Column fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Table fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Domain fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 Trace lineage at any level of the ontology hierarchy. The server aggregates fine-grained edges (column-to-column) into coarser edges (table-to-table, domain-to-domain) on the fly, driven by the ontology's hierarchy levels.
@@ -228,7 +240,6 @@ graph LR
         Clone --> Draft
     end
 
-    style Lifecycle fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
 ```
 
 - **Three-layer resolution:** System defaults + workspace-assigned ontology + introspected gap-fill
@@ -262,8 +273,6 @@ graph LR
 
     Studio --> Smart
 
-    style Studio fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Smart fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 Organize complex graphs into meaningful layers. The Layer Studio provides a three-panel WYSIWYG editor with drag-drop, undo/redo, and AI-powered organization suggestions.
@@ -288,6 +297,20 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 - **OnboardingProgress tracker** -- step-by-step progress through platform configuration
 - **AssetOnboardingWizard** for streamlined setup -- 4-step guided flow (workspace allocation, aggregation, semantics, review)
 - **Reduces time-to-first-value** for new admins -- from manual multi-step configuration to guided flow
+
+### 8. Graph Versioning & Change Control (Shipped)
+
+- **Drafts + review & merge:** Edit on a draft branch (`?branchId=`), then review and merge PR-style before it hits `main`
+- **Publish, revert, restore:** Publish a draft, **revert** a change ("Undo this change"), or **restore** the graph to a historical commit ("Restore to this point", with a diff preview)
+- **Version-control master switch:** An admin flag (`versioningEnabled`) gates every `/graph` write
+- **Resumable enable-VC bootstrap:** Turning on version control for a data source runs an async, resumable job that copies the whole source graph into the versioned store as an integrity-checked `import` commit — verified on a 7.7M-entity graph
+
+### 9. Lineage Lens / Context View (Shipped)
+
+- **Context View:** Layer-organized, curated exploration with a **Layer Strip**, **resizable layer columns**, and one-page-ahead pagination
+- **Lineage Lens:** Ego-graph overlay — click a node to see immediate upstream/downstream neighbors grouped by type, regardless of canvas scale
+- **External-degree signal:** A "lineage outside this view" chip driven by total lineage degree per node (`POST /{ws_id}/graph/nodes/degree`)
+- **Anchor Rail:** Keeps the focal entity stable as columns paginate and resize
 
 ---
 
@@ -377,11 +400,6 @@ graph TB
     Ontology --> MgmtDB
     VizSvc --> MgmtDB
 
-    style Users fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
-    style Frontend fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Backend fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Semantic fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Data fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 For detailed architecture documentation, see:
@@ -394,113 +412,70 @@ For detailed architecture documentation, see:
 
 ---
 
-## Roadmap
+## Current State & Roadmap
 
-### Current State: Late MVP
+### Current State: Shipped Platform
 
-The platform has a solid architectural foundation with the core capabilities built:
+The platform is past MVP. The four-entity core, the ontology system, the interactive canvas, and — most recently — **graph versioning with full change control** are all shipped and in use.
 
 ```mermaid
 timeline
-    title {brand} Development Phases
-    section Completed
-        Core Architecture : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
-                          : Pluggable provider system (FalkorDB, Neo4j, DataHub, Mock)
-                          : Workspace-centric API with legacy backward compatibility
+    title {brand} Delivered Capabilities
+    section Core (Shipped)
+        Architecture      : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
+                          : Pluggable providers (FalkorDB default, Neo4j, DataHub, Spanner Graph, Mock)
+                          : Workspace-centric API
         Lineage Engine    : Multi-directional trace (upstream/downstream/both)
                           : Granularity aggregation (column → table → domain)
                           : Containment hierarchy traversal
                           : Aggregated edge materialization
         Ontology System   : Versioned definitions with publish/clone lifecycle
                           : Three-layer resolution (system + assigned + introspected)
-                          : Rich entity/relationship type definitions with visual config
                           : Impact analysis and coverage checking
-        Frontend Core     : Interactive canvas with ELK layout (Web Worker)
-                          : Schema-driven GenericNode rendering
-                          : Persona toggle (business/technical)
-                          : Dashboard with search, KPIs, view gallery
-                          : View wizard (5-step creation)
         Auth & Users      : JWT authentication with Argon2id
-                          : Signup with admin approval workflow
-                          : Role-based access (admin/user/viewer)
-                          : Password reset flow
-        Admin System      : Provider management with connectivity testing
-                          : Workspace and data source management
-                          : Ontology management with versioning
-                          : Feature flag administration
+                          : Signup with admin approval (default OFF)
+                          : Role-based + workspace-scoped access
         Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
                           : Permission-controlled asset registration
                           : Impact analysis before deletion
-        Guided Onboarding : FirstRunHero for empty platforms
-                          : OnboardingProgress tracker
-                          : AssetOnboardingWizard (4-step flow)
-    section In Progress
-        Data Integrations : Additional provider adapters
-                          : Schema drift detection
-        UX Refinement     : Layer Studio (WYSIWYG editor)
-                          : Smart assignment and auto-organize
-                          : Context lenses
-    section Planned
-        Security Hardening : HttpOnly cookie auth (replace localStorage JWT)
-                           : Mandatory credential encryption
-                           : Production environment guards
-        Testing & CI/CD    : GitHub Actions pipeline
-                           : 70%+ test coverage
-                           : Automated quality gates
-        Legacy Cleanup     : Remove GraphConnectionORM
-                           : Delete dual code paths
-                           : Alembic migration system
+    section Exploration (Shipped)
+        Canvas            : Interactive canvas with ELK layout (Web Worker)
+                          : Schema-driven GenericNode rendering
+                          : Persona toggle (business/technical)
+        Lineage Lens      : Lineage Lens / Context View
+                          : External-degree signal + curated-view chip (POST /nodes/degree)
+                          : Layer Strip + resizable layer columns
+                          : Anchor Rail + one-page-ahead pagination
+    section Change Control (Shipped)
+        Versioning        : Drafts, review & merge (PR-style), publish
+                          : Revert ("Undo this change") + restore ("Restore to this point")
+                          : Version-control admin master switch
+                          : Resumable async enable-VC bootstrap job with integrity report
+                          : Verified on a 7.7M-entity graph
+    section Forward-Looking
+        Integrations      : Additional provider adapters (Apache Atlas, dbt, Airflow)
+                          : Real-time lineage ingestion (event streaming)
+        Enterprise        : SSO (SAML2 / OIDC)
+                          : Workspace-level access-control policies
+                          : GraphQL API layer
+        Scale-out         : Horizontal scale (WEB/WORKER/CONTROLPLANE tiers) when load justifies
 ```
 
-### Phase 1: Hardening (Next)
+### Forward-Looking Work
 
-**Goal:** Production-ready security, testing, and observability.
+The following items are **not yet shipped** and remain genuinely forward-looking:
 
-| Priority | Item | Impact |
-|----------|------|--------|
-| P0 | Mandatory credential encryption in production | Prevents plaintext credential leaks |
-| P0 | JWT migration to HttpOnly cookies | Eliminates XSS token theft |
-| P0 | Production environment guards (require PostgreSQL, strong admin password) | Prevents misconfigurations |
-| P1 | CI/CD pipeline (GitHub Actions) | Automated quality gates |
-| P1 | Auth + provider registry test coverage (70%+) | Catches regressions on critical paths |
-| P1 | Graph hydration fix (edges on initial load) | Unblocks deep-linking and page refresh |
-| P2 | Prometheus metrics + structured alerting | Production observability |
-| P2 | Error boundaries in frontend | Graceful error recovery |
+| Area | Item | Rationale |
+|------|------|-----------|
+| Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Broader ecosystem coverage |
+| Integrations | Real-time lineage ingestion (event streaming) | Live pipeline monitoring |
+| Enterprise | SSO (SAML2 / OIDC) — see [SSO.md](SSO.md) | Enterprise auth requirements |
+| Enterprise | Workspace-level access-control policies | Finer-grained tenant isolation |
+| Enterprise | GraphQL API layer | Alternative query interface |
+| Scale-out | Horizontal scale-out (WEB/WORKER/CONTROLPLANE roles) | Deferred until load justifies — see [architecture-when-scaling.md](architecture-when-scaling.md) |
+| Collaboration | Comments, annotations, change proposals | Team workflow |
 
-### Phase 2: Architecture Cleanup
-
-**Goal:** Remove legacy debt, establish migration framework.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P1 | Alembic migration framework | Reliable schema evolution |
-| P1 | Remove legacy `GraphConnectionORM` and dual code paths | Reduces complexity by ~30% |
-| P2 | Redis-backed ProviderRegistry cache | Multi-worker cache coherence |
-| P2 | Increase ontology cache TTL + event-based invalidation | Reduces DB load |
-
-### Phase 3: Enterprise Features
-
-**Goal:** Multi-tenant SaaS readiness.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P1 | User Service extraction (separate DB + message bus) | Independent scaling and deployment |
-| P1 | Workspace-level access control policies | Fine-grained tenant isolation |
-| P2 | Audit logging (user actions, workspace changes, credential access) | Compliance readiness |
-| P2 | SSO integration (SAML2, OIDC) | Enterprise auth requirements |
-| P3 | GraphQL API layer | Alternative query interface |
-
-### Phase 4: Platform Growth
-
-**Goal:** Ecosystem expansion and advanced capabilities.
-
-| Priority | Item | Impact |
-|----------|------|--------|
-| P2 | Additional provider integrations (Apache Atlas, dbt, Airflow) | Broader ecosystem coverage |
-| P2 | Real-time lineage ingestion (event streaming) | Live pipeline monitoring |
-| P3 | Collaboration features (comments, annotations, change proposals) | Team workflow |
-| P3 | Data quality scoring integrated into lineage | Quality-aware governance |
-| P3 | API-first SDK for programmatic lineage management | Developer experience |
+> Process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) exist today; the single-process **DEV** all-in-one role is the standard deployment shape, with the multi-tier split available when scale demands it.
 
 ---
 
@@ -510,16 +485,15 @@ timeline
 
 - **Architecture is right:** The four-entity model (Provider + CatalogItem + Ontology + Workspace), provider abstraction, and ontology system are well-designed for the target use cases
 - **Ontology system is powerful:** Versioning, impact analysis, and three-layer resolution provide genuine schema governance
-- **Frontend is ambitious:** Canvas-first exploration with persona toggle and Layer Studio positions this ahead of static lineage tools
+- **Change control is shipped:** Graph versioning (drafts, review & merge, publish, revert, restore) plus the version-control master switch and a resumable enable-VC bootstrap job — verified on a 7.7M-entity graph
+- **Exploration is differentiated:** Canvas-first exploration with persona toggle, Lineage Lens / Context View, external-degree signals, the Layer Strip, and the Anchor Rail put this ahead of static lineage tools
 - **Multi-tenant from day one:** Workspace isolation is architectural, not bolted on
 
 ### Areas for Improvement
 
-- **Security defaults need hardening:** Optional encryption, weak admin password, and JWT in localStorage must be fixed before production
-- **Testing coverage is minimal:** ~10 backend tests, ~3 frontend tests; critical paths (auth, provider registry) lack coverage
-- **Observability is absent:** No metrics, no structured alerting, startup failures silenced
-- **Legacy migration incomplete:** Dual code paths (connection + workspace) add complexity and confusion
-- **Frontend hydration gap:** ~~Missing edges on initial load~~ — `useGraphHydration` hook implemented (verify full wiring across all canvas entry points)
+- **Security defaults still need production hardening:** Credential encryption is optional in dev, JWT is stored in localStorage, and the default admin password must be rotated before production
+- **Legacy migration ongoing:** Some dual code paths remain from the pre-workspace era
+- **Horizontal scale-out not yet built:** The platform runs single-process (DEV role); the WEB/WORKER/CONTROLPLANE split is designed but deferred until load justifies it
 
 ### Honest State
 
@@ -527,12 +501,11 @@ timeline
 |-----------|--------|-------|
 | Architecture | Strong | Four-entity model, provider abstraction, workspace isolation, catalog governance |
 | Ontology System | Strong | Versioning, impact analysis, drift detection |
-| Frontend UX | Promising | Canvas, persona, Layer Studio, guided onboarding |
+| Change Control | Strong | Graph versioning shipped (drafts, merge, publish, revert, restore); enable-VC bootstrap verified at 7.7M entities |
+| Frontend UX | Strong | Canvas, persona, Lineage Lens, Layer Strip, Anchor Rail, guided onboarding |
 | Backend API | Solid | 50+ endpoints, clear REST patterns |
-| Security | Needs Work | JWT in localStorage, optional encryption, weak defaults |
-| Testing | Weak | Minimal coverage, no CI/CD |
-| Observability | Missing | No metrics, no alerting |
-| Documentation | Improving | This documentation effort addresses major gaps |
+| Security | Needs Work | JWT in localStorage, optional encryption in dev, rotate default admin password |
+| Scale-out | Deferred | Single-process today; multi-tier design ready when needed |
 
 ---
 
@@ -555,9 +528,6 @@ graph TB
         PM["Product Manager<br/>Understand data dependencies<br/>for feature planning"]
     end
 
-    style Primary fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Secondary fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Future fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ---
@@ -606,3 +576,14 @@ CORS_ALLOWED_ORIGINS=https://your-domain.com                          # Required
 ADMIN_EMAIL=admin@your-org.com                                        # Recommended
 ADMIN_PASSWORD=<strong-random-password>                                # Recommended
 ```
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — system design, service topology, deployment
+- [Data Architecture](/docs/data-architecture) — data models, entity relationships, caching, Redis topology
+- [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
+- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
+- [Technical Debt](/docs/technical-debt) — known risks and the remediation plan
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan

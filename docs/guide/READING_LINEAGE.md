@@ -1,10 +1,18 @@
 # Reading Lineage
 
+```tour-explore-lineage
+```
+
 *For Viewers.* A lineage graph can look busy at first. This page teaches you to
 read it fluently — what the shapes, colours, and lines mean, and how to change
 the level of detail until the picture answers your question.
 
 ![A real lineage picture: domains and datasets grouped into Raw, Curated, and Aggregated layers](/docs-assets/guide/reading-lineage-hero.png)
+
+*Try it: click a node below to trace its lineage — upstream, downstream, and blast radius.*
+
+```lineage-demo
+```
 
 ---
 
@@ -26,8 +34,8 @@ Every lineage graph is made of just two things:
   things contain one another. An arrow points in the direction of flow —
   *from* source *to* consumer.
 
-> 💡 **Direction is everything.** Follow arrows *backwards* to find where data
-> came from (**upstream**); follow them *forwards* to find what it affects
+> **Important:** Direction is everything. Follow arrows *backwards* to find where
+> data came from (**upstream**); follow them *forwards* to find what it affects
 > (**downstream**).
 
 ---
@@ -62,6 +70,12 @@ Edges come in two flavours, and telling them apart is key to reading the graph:
 
 When you click to *expand* a node, you're following containment. When you *trace*,
 you're following lineage.
+
+> **Tip:** *Too busy to read?* Turn on the **Lineage Lens** (the **Context View**)
+> to spotlight just the lineage around one node and dim the rest, or step
+> through the **Layer Strip** to read the graph one tier at a time. See
+> [The Lineage Lens](/guide/lineage-lens) and
+> [Navigating Layers](/guide/navigating-layers).
 
 ---
 
@@ -126,6 +140,8 @@ When a graph first appears, ask yourself, in order:
 ## Where to next
 
 - Go beyond reading and start tracing actively → [Exploring the Graph](/guide/exploring-graph)
+- Spotlight the context around one node → [The Lineage Lens](/guide/lineage-lens)
+- Read a big graph one tier at a time → [Navigating Layers](/guide/navigating-layers)
 - Save a picture you've understood → [Creating Views](/guide/creating-views)
 - Confused by a term or colour? → [Key Concepts](/guide/key-concepts) ·
   [Glossary](/guide/glossary)

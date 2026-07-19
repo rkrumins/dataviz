@@ -1,8 +1,19 @@
 # Self-Host Deployment Guide
 
+> **At a glance.** Everything an operator needs to stand up, back up, upgrade, and harden
+> a self-hosted {brand} on a single VM or bare-metal host with Docker Compose. Covers the
+> one-command install, the `deploy.sh` subcommands, reboot behavior, backup/restore, and
+> a public-facing hardening checklist. No local Python/Node required — everything runs in
+> containers.
+
 Deploy {brand} on a VM or bare-metal server using Docker Compose. Everything runs in containers — no local Python/Node needed.
 
 For local development (editing source code), see [SETUP.md](SETUP.md).
+
+> **Tip:** This guide is the single-host path. For the managed-GCP / Kubernetes
+> deployment at scale (Cloud SQL, Memorystore, a FalkorDB Redis Cluster), see
+> [FalkorDB Deployment](/docs/falkordb-deployment) and the
+> [FalkorDB DR Runbook](/docs/falkordb-dr).
 
 ## Prerequisites
 
@@ -84,7 +95,9 @@ Every service is configured with `restart: unless-stopped`. When the VM reboots:
 #     synodic_redis_data.tgz
 ```
 
-Back up before: upgrading, running migrations, changing `.env`, or any destructive operation.
+> **Important:** Back up before **any** destructive or state-changing operation —
+> upgrading, running migrations, editing `.env`, or a restore. The backup tars the named
+> Postgres, FalkorDB, and Redis volumes; keep a copy off the VM (below).
 
 **Off-site storage** — copy the backup directory off the VM:
 
@@ -120,6 +133,10 @@ If the upgrade includes schema changes, Alembic migrations run automatically on 
 
 ## Resetting all data
 
+> **Warning:** `down -v` **permanently deletes** the Postgres, FalkorDB, and Redis
+> volumes — every graph, version, and user. There is no undo. Take a backup first if
+> there is any chance you'll want the data back.
+
 ```bash
 ./deploy.sh down
 docker compose -f docker-compose.yml down -v   # explicit: wipes volumes
@@ -128,6 +145,10 @@ docker compose -f docker-compose.yml down -v   # explicit: wipes volumes
 Then `./deploy.sh up` rebuilds from an empty state.
 
 ## Hardening for public-facing VMs
+
+> **Caution:** Out of the box, ports bind to `0.0.0.0` and the FalkorDB browser UI
+> (port 3000) is **authentication-free**. Do not expose a default install to the public
+> internet — complete this checklist first.
 
 Beyond the defaults, for a production deployment:
 
@@ -159,3 +180,8 @@ docker compose -f docker-compose.yml down -v --rmi all
 # Optional: remove the checkout
 cd .. && rm -rf synodic
 ```
+
+## Related
+
+- [FalkorDB Deployment](/docs/falkordb-deployment) — the graph read layer's topology, memory sizing, AOF durability, and engine-upgrade procedure.
+- [FalkorDB DR Runbook](/docs/falkordb-dr) — backup/restore and region-loss recovery for the graph layer.

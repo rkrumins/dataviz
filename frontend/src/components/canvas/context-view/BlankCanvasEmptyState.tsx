@@ -19,6 +19,7 @@ import type { EntityTypeSchema } from '@/types/schema'
 import { DeclaredVsPhysical } from '@/features/ontology/components/DeclaredVsPhysical'
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
+import { DocsLink } from '@/components/help/DocsLink'
 
 const MAX_QUICK_TYPES = 4
 
@@ -113,6 +114,9 @@ export function BlankCanvasEmptyState({
                   relationships become edge types:
                 </p>
                 <DeclaredVsPhysical entityExample={quickTypes[0]?.id || 'Customer'} />
+                <div className="mt-2">
+                  <DocsLink slug="semantic-layer" />
+                </div>
               </div>
             )}
           </div>
@@ -162,10 +166,15 @@ export function BlankCanvasEmptyState({
         ) : !versioningEnabled ? (
           // Not a permissions problem, and saying it is would send the user to ask the wrong
           // person. Nobody can build here — the capability itself is switched off.
-          <p className="mt-4 text-xs text-ink-muted">
-            Editing is turned off for this workspace, so this model is view-only.
-            An administrator can turn it back on.
-          </p>
+          <>
+            <p className="mt-4 text-xs text-ink-muted">
+              Editing is turned off for this workspace, so this model is view-only.
+              An administrator can turn it back on.
+            </p>
+            <div className="mt-2">
+              <DocsLink slug="versioning-change-control" />
+            </div>
+          </>
         ) : (
           <p className="mt-4 text-xs text-ink-muted">
             Nothing has been added yet. Someone with edit access can start building this model.

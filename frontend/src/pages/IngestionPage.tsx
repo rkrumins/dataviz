@@ -13,6 +13,7 @@ import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
 
@@ -167,6 +168,7 @@ export function IngestionPage() {
                             <h1 className="text-xl font-bold text-ink leading-tight">Data Ingestion</h1>
                             <p className="text-[11px] text-ink-muted">Connect providers, register assets, and monitor your pipeline</p>
                         </div>
+                        <TourLaunchButton tourId="ingestion" className="ml-auto" />
                         {providerSnoozed && (
                             <div className="ml-auto flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 pl-3 pr-1.5 py-1 text-xs text-amber-700 dark:text-amber-300">
                                 <BellOff className="w-3.5 h-3.5" />
@@ -214,6 +216,7 @@ export function IngestionPage() {
 
                     {/* Tabs */}
                     <div
+                        data-tour="ingestion-tabs"
                         role="tablist"
                         aria-label="Ingestion sections"
                         className="flex items-center gap-1 border-b border-glass-border"

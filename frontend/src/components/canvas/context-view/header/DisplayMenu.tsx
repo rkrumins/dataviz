@@ -122,6 +122,7 @@ export function DisplayMenu({
     <>
       <button
         ref={triggerRef}
+        data-tour="canvas-display"
         type="button"
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"

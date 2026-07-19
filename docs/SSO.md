@@ -1,8 +1,15 @@
-# SSO — operator + reviewer reference
+# SSO — operator reference
 
-Single source of truth for the SSO/IdP integration shipped in Phases
-0–4. Read this end-to-end before reviewing the branch; share the
-relevant sub-sections with operators standing up a new IdP.
+> **At a glance.** The operator reference for {brand}'s single sign-on: **what exists**
+> and **how to run it**. Covers the OIDC + SAML2 transport, DB-backed per-row IdP
+> providers, multi-identity users, claim mapping, group→role/group mapping, 24h SSO
+> re-auth, and the platform posture switches — plus step-by-step operator playbooks
+> (§2) and verification procedures (§3). For *how to integrate, extend, and debug*, read
+> the [SSO Integration Guide](/docs/sso-integration).
+
+Single source of truth for the SSO/IdP integration. Read this end-to-end
+before working on the auth surface; share the relevant sub-sections with
+operators standing up a new IdP.
 
 > **For developers integrating on top of SSO** — read alongside
 > [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md). That guide covers
@@ -14,17 +21,48 @@ relevant sub-sections with operators standing up a new IdP.
 > *how to operate it*; the integration guide focuses on *how to
 > read, extend, test, and debug it*.
 
-Branch under review: `claude/audit-rbac-enforcement-PikQK`
-Phases landed: **Phase 0** (RBAC hardening + fail-fast secrets) →
-**Phase 1** (OIDC) → **Phase 2** (SAML, custom dev IdP, 24h re-auth,
-group→role mapping v1) → **Phase 3** (multi-IdP, multi-identity,
-configurable claim mapping, group→Group mapping) → **Phase 4** (signup
-provenance, indexed claim attributes, platform posture switches,
-admin lookup + search).
+The SSO surface today: **OIDC** (Authlib, Authorization Code + PKCE + JWKS
+verify) and **SAML2** (python3-saml strict mode) alongside local password
+auth; DB-backed per-row IdP providers plus a custom dev IdP; multi-identity
+per user; configurable claim mapping with indexed attribute pass-through;
+group→role and group→internal-group mapping; 24h SSO re-authentication;
+signup provenance; platform posture switches; and admin lookup + search.
 
 ---
 
 ## 1. What's implemented
+
+**The login flow at a glance** — both SSO kinds converge on one `complete_sso_login`
+path (JIT-provision, link, or reject by policy), then reconcile group→role/group
+mappings before minting the session cookies:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant FE as Login page
+    participant A as /auth/{slug}/…
+    participant IdP as OIDC / SAML IdP
+    participant Svc as complete_sso_login
+    U->>FE: pick a provider button
+    FE->>A: GET /auth/{slug}/login
+    A->>IdP: redirect (OIDC PKCE+nonce · or SAML AuthnRequest)
+    IdP-->>A: callback (code) / POST /acs (SAMLResponse)
+    A->>A: verify (JWKS / x509 + replay) → claim-map
+    A->>Svc: identity + linking_policy
+    alt subject known
+        Svc->>Svc: touch last login
+    else email free
+        Svc->>Svc: JIT provision (signup_source='sso_jit')
+    else email collides
+        Svc->>Svc: linking_policy decides link vs reject
+    end
+    Svc->>Svc: reconcile_sso_targets (role bindings + group members)
+    Svc-->>U: 302 + Set-Cookie nx_access / nx_refresh / nx_csrf
+```
+
+Full per-flow sequence diagrams (15 of them, including the collision-blocked and 24h
+re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 
 ### 1.1 Authentication transport
 
@@ -379,10 +417,10 @@ ahead of every `helm install/upgrade`.
 Admin → SSO → Group mappings → **Create mapping**.
 
 * **Role-binding target** — "Everyone in the IdP group
-  `DataViz-Admins` gets `admin` globally":
+  `DataViz-Admins` gets `super_admin` globally":
   * `idpGroup`: `DataViz-Admins`
   * `targetType`: `role_binding`
-  * `roleName`: `admin`
+  * `roleName`: `super_admin`
   * `scopeType`: `global`
 * **Group-membership target** — "Everyone in the IdP group
   `engineering` joins the internal `Engineers` group":
@@ -393,7 +431,20 @@ Admin → SSO → Group mappings → **Create mapping**.
 Mapping takes effect on the next SSO login OR the next `/refresh`
 (within ~5 min) for sessions already in flight.
 
+> **Warning:** An IdP-group mapping that grants a **global admin** role (`super_admin`
+> or `org_admin`) hands platform-wide power to whoever your IdP puts in that group.
+> Validation refuses `roleName: system:admin` outright (a forbidden auto-role — that is
+> a *permission*, not a bindable role), and `role_is_bindable_in_scope` must pass, but a
+> valid `super_admin` binding is exactly as powerful as it sounds. Prefer mapping to
+> `group_membership` and managing privileged membership internally. Role names come from
+> the [RBAC taxonomy](/docs/rbac).
+
 ### 2.4 Disable local login (SSO-only mode)
+
+> **Caution:** This is a lockout-class change. The API refuses it (HTTP 409) if any
+> active admin lacks an SSO identity, and refuses `sso_enabled=false` +
+> `allow_local_login=false` together (no way left to log in) — but you still want an
+> SSO login verified end-to-end **before** you flip it.
 
 Pre-flight: every admin must have at least one linked SSO identity.
 Check via `Admin → SSO → Find user` and confirm each admin has a
@@ -530,7 +581,7 @@ export JWT_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(4
    show `user.sso_jit_blocked`.
 8. Toggle everything back ON.
 
-### 3.4 PR review checklist (for reviewers)
+### 3.4 Review checklist
 
 1. Read `docs/SSO.md` (this file) end-to-end.
 2. Walk the migrations in chronological order:
@@ -582,7 +633,7 @@ we go beyond the typical pattern:
   any admin. Most platforms make the operator manually verify; we
   enforce it.
 
-Known follow-ups (deferred, not in scope for this PR):
+Known follow-ups (not yet implemented):
 
 * SCIM 2.0 user + group provisioning / deprovisioning. Currently
   group sync is reactive (per login); SCIM would be push-based.

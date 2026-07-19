@@ -59,11 +59,6 @@ graph LR
         M2 -->|project| F2[("FalkorDB<br/>read cache")]
         M2 -.->|optional write_back| EXT
     end
-    style EXT fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style F1 fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style F2 fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style M1 fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style M2 fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ---

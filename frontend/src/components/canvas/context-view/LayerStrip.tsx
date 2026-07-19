@@ -91,7 +91,7 @@ export function LayerStrip({
       style={{ bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
-      <div className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 max-w-[70vw] overflow-x-auto custom-scrollbar">
+      <div className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-black/10 dark:border-white/10 shadow-lg bg-canvas-elevated/90 max-w-[70vw] overflow-x-auto custom-scrollbar">
         {layers.map(layer => {
           const active = visibleIds.has(layer.id)
           return (
@@ -100,8 +100,9 @@ export function LayerStrip({
               type="button"
               onClick={() => jumpTo(layer.id)}
               title={`Jump to ${layer.name}`}
+              aria-current={active}
               className={cn(
-                'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-all hover:scale-[1.03] active:scale-95',
+                'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-[background-color,color,transform] hover:scale-[1.03] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                 active ? 'text-ink' : 'text-ink-muted/70 hover:text-ink',
               )}
               style={active
@@ -118,19 +119,19 @@ export function LayerStrip({
             type="button"
             onClick={onAddLayer}
             title="Add a layer"
-            className="flex items-center px-2 py-1 rounded-full text-ink-muted/70 hover:text-ink hover:bg-white/[0.06] transition-colors"
+            className="flex items-center px-2 py-1 rounded-full text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
           >
             <LucideIcons.Plus className="w-3 h-3" />
           </button>
         )}
         {onFit && (
           <>
-            <div className="w-px self-stretch my-0.5 bg-white/10" />
+            <div className="w-px self-stretch my-0.5 bg-black/10 dark:bg-white/10" />
             <button
               type="button"
               onClick={onFit}
               title="Fit all layers to the window (⌘0)"
-              className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-ink-muted/70 hover:text-ink hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
               <LucideIcons.Maximize2 className="w-3 h-3" />
               Fit

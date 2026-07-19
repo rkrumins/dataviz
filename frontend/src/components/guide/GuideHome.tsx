@@ -10,6 +10,13 @@ import {
   Sparkles,
   ChevronDown,
   FileText,
+  Network,
+  Eye,
+  Share2,
+  Users,
+  History,
+  PlugZap,
+  type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ReactMarkdown from 'react-markdown'
@@ -38,6 +45,17 @@ const fade = {
     transition: { duration: 0.4, delay: i * 0.05, ease: 'easeOut' },
   }),
 }
+
+// Jobs-first entry: the hub leads with what people are trying to DO, phrased as
+// goals, each routing straight to the article that gets them there.
+const topJobs: { title: string; outcome: string; slug: string; icon: LucideIcon }[] = [
+  { title: 'See what a change will break', outcome: 'Trace a dataset upstream and downstream to find its blast radius', slug: 'reading-lineage', icon: Network },
+  { title: 'Find and open the right view', outcome: 'Browse curated explorations and pin the ones you use most', slug: 'browsing-views', icon: Eye },
+  { title: 'Save & share a view with my team', outcome: 'Turn an exploration into a durable, shareable asset', slug: 'creating-views', icon: Share2 },
+  { title: 'Give someone the right access', outcome: 'Approve people and grant exactly the access they need', slug: 'users-access', icon: Users },
+  { title: 'Undo or roll back a change', outcome: 'Reverse one edit, or reset the graph to a known-good point', slug: 'versioning-change-control', icon: History },
+  { title: 'Connect a new data source', outcome: 'Provider → catalog → workspace → data source, end to end', slug: 'admin-setup', icon: PlugZap },
+]
 
 export function GuideHome() {
   const brand = useBrand()
@@ -158,6 +176,38 @@ export function GuideHome() {
           </div>
         ) : (
           <>
+            {/* ── Jobs-first ──────────────────────────────── */}
+            <Section title="What do you want to do?" subtitle="Jump straight to the task — the guide meets you where you are.">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {topJobs.map((job, i) => (
+                  <motion.div
+                    key={job.slug}
+                    initial="hidden"
+                    whileInView="show"
+                    viewport={{ once: true, margin: '-40px' }}
+                    custom={i % 3}
+                    variants={fade}
+                  >
+                    <Link
+                      to={`/guide/${job.slug}`}
+                      className="group flex h-full items-start gap-3 rounded-xl border border-glass-border bg-canvas-elevated p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-500/30 hover:shadow-glass"
+                    >
+                      <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/20">
+                        <job.icon className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="flex items-center gap-1 text-sm font-bold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                          {job.title}
+                          <ArrowRight className="h-3.5 w-3.5 opacity-0 -translate-x-1 transition-all group-hover:opacity-100 group-hover:translate-x-0" />
+                        </h3>
+                        <p className="mt-1 text-xs text-ink-muted leading-relaxed">{job.outcome}</p>
+                      </div>
+                    </Link>
+                  </motion.div>
+                ))}
+              </div>
+            </Section>
+
             {/* ── Persona cards ───────────────────────────── */}
             <Section title="Choose your path" subtitle="Most people are mainly one of these — start where you fit.">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">

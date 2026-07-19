@@ -36,6 +36,7 @@ import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighb
 import { EDGE_FETCH_LIMIT } from './useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
+import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 const ROWS_CAP = 200
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
@@ -474,7 +475,7 @@ export function LineageLens({
               <button
                 type="button"
                 onClick={onBack}
-                className="ml-2 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                className="ml-2 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
                 <LucideIcons.ArrowLeft className="w-3 h-3" />
                 Back
@@ -487,14 +488,24 @@ export function LineageLens({
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Filter connections…"
-                  className="w-48 pl-6 pr-2 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05] border border-black/10 dark:border-white/10 text-[11.5px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
+                  className="w-48 pl-6 pr-7 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05] border border-black/10 dark:border-white/10 text-[11.5px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery('')}
+                    aria-label="Clear filter"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded flex items-center justify-center text-ink-muted/70 hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    <LucideIcons.X className="w-3 h-3" />
+                  </button>
+                )}
               </div>
               <button
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
                 <LucideIcons.X className="w-4 h-4" />
               </button>
@@ -1231,14 +1242,15 @@ export function LineageLens({
                         <span className="flex-shrink-0 text-[9px] uppercase tracking-wider text-ink-muted/50">{r.edgeType}</span>
                       )}
                       {onTrace && (
-                        <button
-                          type="button"
-                          onClick={() => { onClose(); onTrace(r.urn) }}
-                          title={`Trace lineage from ${r.label} — brings its lineage onto the canvas`}
-                          className="ml-auto flex-shrink-0 text-[10px] font-semibold text-accent-lineage hover:underline"
-                        >
-                          Trace
-                        </button>
+                        <InfoTooltip side="top" content={`Trace lineage from ${r.label} — brings its lineage onto the canvas`}>
+                          <button
+                            type="button"
+                            onClick={() => { onClose(); onTrace(r.urn) }}
+                            className="ml-auto flex-shrink-0 rounded text-[10px] font-semibold text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                          >
+                            Trace
+                          </button>
+                        </InfoTooltip>
                       )}
                     </div>
                   ))}
@@ -1266,7 +1278,7 @@ export function LineageLens({
                     onClose()
                     void onLocateAll(ids)
                   }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 >
                   <LucideIcons.Frame className="w-3 h-3" />
                   Reveal all on canvas
@@ -1276,7 +1288,7 @@ export function LineageLens({
                 <button
                   type="button"
                   onClick={() => { onClose(); onTrace(nodeId) }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 >
                   <LucideIcons.GitBranch className="w-3 h-3" />
                   Trace from here
@@ -1385,16 +1397,19 @@ function NeighborRow({
   const unloaded = !r.neighborNode
   return (
     <div
+      role="button"
+      tabIndex={0}
       className={cn(
         // content-visibility skips layout+paint for offscreen rows —
         // lightweight virtualization; columns can hold 200 cards.
         // transition-colors (not -all): animating every property makes
         // hover sweeps during scroll recompute layout per row.
-        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0',
+        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
         rollup && 'opacity-75 hover:opacity-100',
       )}
       style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
       onClick={() => onRecenter(r.neighborId)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.neighborId) } }}
       title={`Re-center on ${labelOf(r.neighborId, r.neighborNode)}`}
     >
       <div className="flex-1 min-w-0">
@@ -1431,24 +1446,26 @@ function NeighborRow({
         'hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
       )}>
         {onRevealOnCanvas && (
-          <button
-            type="button"
-            title="Reveal on canvas"
-            onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
-            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.Crosshair className="w-3 h-3" />
-          </button>
+          <InfoTooltip side="top" content="Reveal on canvas">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
+              className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.Crosshair className="w-3 h-3" />
+            </button>
+          </InfoTooltip>
         )}
         {onOpenDetails && (
-          <button
-            type="button"
-            title="Open details"
-            onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
-            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.PanelRight className="w-3 h-3" />
-          </button>
+          <InfoTooltip side="top" content="Open details">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
+              className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.PanelRight className="w-3 h-3" />
+            </button>
+          </InfoTooltip>
         )}
       </span>
     </div>

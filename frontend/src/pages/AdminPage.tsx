@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network, History, Palette, Database,
+    UserCog, Users2, KeyRound, Network, History, Palette, Database, LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
@@ -38,6 +38,7 @@ const adminGroups = [
             { path: 'redis', label: 'Redis & Graph Store', icon: Database, description: 'Streams, cache & default graph endpoints — auth, TLS, provenance' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
+            { path: 'telemetry', label: 'Telemetry', icon: LineChart, description: 'Product usage & content gaps' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
         ]
     },
@@ -77,6 +78,7 @@ export function AdminPage() {
     const redisVisible = useNavPermission(useAdminSectionSpec('redis'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
+    const telemetryVisible     = useNavPermission(useAdminSectionSpec('telemetry'))
     const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
     const usersVisible         = useNavPermission(useAdminSectionSpec('users'))
     const groupsVisible        = useNavPermission(useAdminSectionSpec('groups'))
@@ -90,6 +92,7 @@ export function AdminPage() {
         redis:         redisVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
+        telemetry:     telemetryVisible,
         announcements: announcementsVisible,
         users:         usersVisible,
         groups:        groupsVisible,

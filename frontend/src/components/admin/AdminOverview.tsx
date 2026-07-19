@@ -7,7 +7,7 @@ import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { useNavigate } from 'react-router-dom'
 import {
     CircleDot, ArrowRightLeft, Database, Layers, Server,
-    Loader2, Activity, Plus, Shield
+    Activity, Plus, Shield
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
@@ -122,7 +122,46 @@ export function AdminOverview() {
 
     if (isLoading) {
         return (
-            <div className="flex items-center justify-center h-full"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
+            <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-10">
+                    <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-black/5 dark:bg-white/10 animate-pulse" />
+                        <div className="space-y-2">
+                            <div className="h-8 w-48 rounded-lg bg-black/5 dark:bg-white/10 animate-pulse" />
+                            <div className="h-4 w-72 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                        </div>
+                    </div>
+                </div>
+
+                {/* KPI cards */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                    {[1, 2, 3, 4].map(i => (
+                        <div key={i} className="border border-glass-border rounded-xl p-5 bg-canvas-elevated">
+                            <div className="w-9 h-9 rounded-lg bg-black/5 dark:bg-white/10 animate-pulse mb-3" />
+                            <div className="h-7 w-16 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                            <div className="h-3 w-20 rounded bg-black/5 dark:bg-white/10 animate-pulse mt-2" />
+                        </div>
+                    ))}
+                </div>
+
+                {/* Per-workspace table */}
+                <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
+                    <div className="px-5 py-3 border-b border-glass-border bg-black/5 dark:bg-white/5">
+                        <div className="h-4 w-32 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                    </div>
+                    {[1, 2, 3, 4, 5].map(i => (
+                        <div key={i} className="flex items-center justify-between px-5 py-3 border-b last:border-b-0 border-glass-border">
+                            <div className="h-4 w-40 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                            <div className="flex items-center gap-8">
+                                <div className="h-4 w-10 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                                <div className="h-4 w-10 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                                <div className="h-4 w-10 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </PageContainer>
         )
     }
 

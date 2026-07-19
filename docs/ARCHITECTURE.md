@@ -1,12 +1,24 @@
-# Synodic Platform Architecture
+# {brand} Platform Architecture
 
-> **Synodic** is a workspace-centric graph visualization and data lineage platform. It enables teams to explore, trace, and manage data relationships across heterogeneous graph backends through a unified semantic layer.
+> **{brand}** is a workspace-centric graph visualization and data lineage platform. It enables teams to explore, trace, and manage data relationships across heterogeneous graph backends through a unified semantic layer.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the current service/process-role topology (WEB, WORKER, CONTROLPLANE, DEV).
+
+This is the system-design reference: how the frontend, backend, semantic layer, and graph providers fit together, and how a request flows through them.
+
+**Who it's for:** developers and architects who need the end-to-end picture before diving into a subsystem.
+
+**What you'll find here:**
+- The three-layer system topology and the four-entity core model
+- Service architecture and the request lifecycle
+- Authentication, security controls, and scalability caveats
+- Deployment (Docker Compose + Kubernetes) and the technology stack
 
 ---
 
 ## System Overview
 
-Synodic is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Mock).
+{brand} is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Spanner Graph, Mock).
 
 ```mermaid
 graph TB
@@ -48,9 +60,6 @@ graph TB
     PR -->|Cached Instances| DH
     Repos --> MgmtDB
 
-    style Frontend fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style VizService fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
-    style Storage fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ---
@@ -73,7 +82,7 @@ erDiagram
     Provider {
         text id PK "prov_*"
         text name
-        text provider_type "falkordb | neo4j | datahub | mock"
+        text provider_type "falkordb | neo4j | datahub | spanner | mock"
         text host
         int port
         text credentials "Fernet-encrypted JSON"
@@ -171,7 +180,9 @@ erDiagram
 | **Workspace** | Operational context (team project, environment) | Contains data sources, views, context models |
 | **DataSource** | Binding of Provider + Graph + Ontology within a Workspace | Unique per (workspace, provider, graph_name) |
 
-> See [DECISIONS.md ADR-001](DECISIONS.md#adr-001) for the rationale behind this design.
+> **Important:** A `WorkspaceDataSource` is the only unit of data access, and it is unique per `(workspace_id, provider_id, graph_name)`. This invariant is what keeps tenants isolated — no view or query can reach a graph that isn't bound into its workspace.
+
+> See [ADR-001](/docs/decisions#adr-001) for the rationale behind this design.
 
 ---
 
@@ -209,6 +220,7 @@ graph LR
         FP[FalkorDBProvider]
         NP[Neo4jProvider]
         DP[DataHubProvider]
+        SP[SpannerGraphProvider]
         MP[MockProvider]
     end
 
@@ -227,12 +239,9 @@ graph LR
     PR2 --> FP
     PR2 --> NP
     PR2 --> DP
+    PR2 --> SP
     PR2 --> MP
 
-    style Routes fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Services fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Data fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Providers fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### In-Process Provider Connectivity
@@ -325,9 +334,6 @@ graph TB
     Scopes --> GlobalR
     Scopes --> WSR
 
-    style AuthFlow fill:#1e293b,stroke:#ef4444,color:#e2e8f0
-    style Security fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
-    style Roles fill:#1e293b,stroke:#10b981,color:#e2e8f0
 ```
 
 Authorization separates **global-tier roles** (organization-wide) from **workspace-scoped roles** (per-workspace), enforced through a permission-scope system checked on every request rather than a fixed set of coarse roles. See [RBAC.md](RBAC.md) for the current role and permission catalogue.
@@ -345,9 +351,11 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 
 ### Production Security Notes
 
+> **Warning:** The three items below are non-negotiable before a production deployment. Shipping with the dev defaults (plaintext credentials, localStorage tokens, the bootstrap admin password) leaves the platform exploitable. See [Technical Debt § Security](/docs/technical-debt#1-security-concerns) for the full risk analysis.
+
 - **JWT Storage**: Currently stored in `localStorage` (XSS risk). Planned migration to HttpOnly cookies with CSRF protection.
 - **Credential Encryption**: Optional in development (`CREDENTIAL_ENCRYPTION_KEY` not set falls back to plaintext). **REQUIRED in production** — generate a key via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-- **Default Admin Password**: Bootstrap uses `"changeme"` — must be changed immediately in production.
+- **Default Admin Password**: Bootstrap uses `admin@nexuslineage.local` / `admin123` (override via `ADMIN_EMAIL` / `ADMIN_PASSWORD`) — must be changed immediately in production.
 
 ### Scalability Considerations
 
@@ -382,8 +390,6 @@ graph TB
     Gunicorn1 --> PG
     Gunicorn1 --> FDB2
 
-    style Dev fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Prod fill:#1e293b,stroke:#10b981,color:#e2e8f0
 ```
 
 ### Quick Start
@@ -789,3 +795,15 @@ kubectl -n synodic logs -l app=viz-service -f
 ```
 
 > **Note:** FalkorDB and PostgreSQL are shown inline in the Docker Compose setup. For Kubernetes, use managed services (e.g., AWS ElastiCache, Cloud SQL, RDS) or deploy them via Helm charts (`bitnami/postgresql`, `falkordb/falkordb`) with persistent volume claims.
+
+---
+
+## Related
+
+- [Overview](/docs/overview) — vision, capabilities, and roadmap
+- [Data Architecture](/docs/data-architecture) — schemas, entity relationships, caching, Redis topology
+- [Decisions](/docs/decisions) — ADRs behind the entity model, services, and Redis design
+- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are materialized
+- [Technical Debt](/docs/technical-debt) — security, scaling, and testing risks
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan
