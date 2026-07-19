@@ -396,6 +396,15 @@ export function LineageLens({
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
   )
+  // Containment parent of the focal — breadcrumb context ("ticket_key
+  // in fact_support"). Header display suppresses it when the PREVIOUS
+  // hop already is the parent (saying it twice reads as noise).
+  const focalParentId = resolveParent(nodeId)
+  const focalParentLabel = focalParentId ? labelOf(focalParentId, nodeMap.get(focalParentId)) : null
+  const focalParentInHeader = focalParentId && focalParentId !== lensStack[lensStack.length - 2]
+    ? focalParentLabel
+    : null
+
   // Headline counts split by grain so units never mix: direct (finer/
   // peer) connections vs coarser rolled-up summaries of those flows.
   let focalRollupTotal = 0
@@ -442,7 +451,14 @@ export function LineageLens({
               <LucideIcons.Focus className="w-4 h-4" style={{ color: focalColor }} />
             </div>
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
+              <div className="flex items-baseline gap-1.5 min-w-0">
+                <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
+                {focalParentInHeader && (
+                  <span className="flex-shrink-0 max-w-[160px] truncate text-[10px] text-ink-muted/70">
+                    in {focalParentInHeader}
+                  </span>
+                )}
+              </div>
               <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
                 <span>
                   {lensStack.length > 1
@@ -523,6 +539,12 @@ export function LineageLens({
                 const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
                 const meta = i > 0 ? hopMeta[i - 1] : null
                 const afterGap = collapseTrail && pos === 2
+                // Parent context — "ticket_key · fact_support" — except
+                // when the previous hop already IS the parent.
+                const chipParent = resolveParent(id)
+                const chipParentLabel = chipParent && chipParent !== lensStack[i - 1]
+                  ? labelOf(chipParent, nodeMap.get(chipParent))
+                  : null
                 return (
                   <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
                     {i > 0 && (
@@ -543,15 +565,20 @@ export function LineageLens({
                       type="button"
                       disabled={isCurrent}
                       onClick={() => onJumpTo(i)}
-                      title={isCurrent ? label : `Jump back to ${label}`}
+                      title={`${isCurrent ? label : `Jump back to ${label}`}${chipParentLabel ? ` — in ${chipParentLabel}` : ''}`}
                       className={
                         isCurrent
-                          ? 'flex items-center gap-1.5 max-w-[180px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
-                          : 'flex items-center gap-1.5 max-w-[160px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
+                          ? 'flex items-center gap-1.5 max-w-[230px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
+                          : 'flex items-center gap-1.5 max-w-[210px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
                       }
                     >
                       <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
                       <span className="truncate">{label}</span>
+                      {chipParentLabel && (
+                        <span className="flex-shrink min-w-0 max-w-[90px] truncate text-[9px] font-normal text-ink-muted/60">
+                          · {chipParentLabel}
+                        </span>
+                      )}
                     </button>
                   </div>
                 )
@@ -584,11 +611,20 @@ export function LineageLens({
                 <button
                   type="button"
                   onClick={() => {
+                    // Parent-qualified hops (fact_support.ticket_key) so a
+                    // pasted path carries full context; the qualifier is
+                    // dropped when the previous hop already is the parent.
                     void navigator.clipboard?.writeText(
-                      lensStack.map(id => labelOf(id, nodeMap.get(id))).join(' → '),
+                      lensStack.map((id, idx) => {
+                        const p = resolveParent(id)
+                        const qualified = p && p !== lensStack[idx - 1]
+                        return qualified
+                          ? `${labelOf(p, nodeMap.get(p))}.${labelOf(id, nodeMap.get(id))}`
+                          : labelOf(id, nodeMap.get(id))
+                      }).join(' → '),
                     )
                   }}
-                  title="Copy this path as text (acct_num → System A → …)"
+                  title="Copy this path as text (fact_support.ticket_key → System A → …)"
                   className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
                 >
                   <LucideIcons.Copy className="w-3 h-3" />
@@ -713,6 +749,14 @@ export function LineageLens({
                     <div className="flex items-center gap-1.5 px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.06]">
                       <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: hopColor }} />
                       <span className="truncate text-[11.5px] font-semibold text-ink">{hopLabel}</span>
+                      {(() => {
+                        const hp = resolveParent(hopId)
+                        return hp && hp !== lensStack[i - 1] ? (
+                          <span className="flex-shrink min-w-0 max-w-[40%] truncate text-[9.5px] text-ink-muted/60">
+                            · {labelOf(hp, nodeMap.get(hp))}
+                          </span>
+                        ) : null
+                      })()}
                       <span className="ml-auto flex-shrink-0 flex items-center gap-1 text-[10px] tabular-nums text-ink-muted/70">
                         {hopFetch === 'loading' && (
                           <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
@@ -1070,6 +1114,19 @@ export function LineageLens({
                     {focalType}
                   </p>
                   <p className="text-[15px] font-semibold text-ink break-words leading-snug">{focalLabel}</p>
+                  {/* Parent breadcrumb — where this entity LIVES; click
+                      steps the lens up into the parent. */}
+                  {focalParentId && (
+                    <button
+                      type="button"
+                      onClick={() => onRecenter(focalParentId)}
+                      title={`Re-center on ${focalParentLabel}`}
+                      className="mt-0.5 flex items-center gap-1 max-w-full text-[10px] text-ink-muted hover:text-accent-lineage transition-colors"
+                    >
+                      <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
+                      <span className="truncate">in {focalParentLabel}</span>
+                    </button>
+                  )}
                   <div className="flex items-center gap-3 mt-2.5 pt-2 border-t border-black/[0.07] dark:border-white/[0.08] text-[11px] font-medium tabular-nums">
                     <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
                       <LucideIcons.ArrowDownLeft className="w-3.5 h-3.5" />

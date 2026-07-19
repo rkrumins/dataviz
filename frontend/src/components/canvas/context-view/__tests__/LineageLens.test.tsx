@@ -321,6 +321,34 @@ describe('LineageLens on-demand fetch merge', () => {
     }
   })
 
+  it('walk trail and headers carry the focal node\'s parent context', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('a'), node('kid')],
+        edges: [edge('e1', 'a', 'kid')],
+        visibleEdges: [],
+      } as never)
+      renderLens(['a', 'kid'], {}, {
+        onWalkTo: vi.fn(),
+        onJumpTo: vi.fn(),
+        supplementalEdges: [
+          // P contains kid; P is NOT the previous hop, so the breadcrumb
+          // must surface it (that's the expanded-parent context the bare
+          // trail was losing).
+          { id: 'c1', source: 'P', target: 'kid', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+        ],
+        supplementalNodes: new Map([['P', node('P')]]),
+      })
+      expect(screen.getAllByText(/label-P/).length).toBeGreaterThanOrEqual(1)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
