@@ -7,7 +7,7 @@
  * where off-by-ones hide. The handlers in ContextViewCanvas (addLayer/renameLayer/deleteLayer/
  * reorderLayer) are thin wrappers that mint ids/persist; all the list logic lives here.
  */
-import type { LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
+import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { compareOrderKeys, generateNKeysBetween } from '@/utils/orderKeys'
 
@@ -105,7 +105,7 @@ export function setLayerNodeSortMode(
  */
 export function setViewDefaultSortMode(
   layout: NormalizedReferenceLayout,
-  mode: 'alpha-asc' | 'alpha-desc',
+  mode: LayerNodeSortAlgo,
 ): NormalizedReferenceLayout {
   const layers = layout.layers.map((l) => {
     if (!l.nodeSortMode || l.nodeSortMode === 'custom') return l
@@ -113,4 +113,40 @@ export function setViewDefaultSortMode(
     return rest as ViewLayerConfig
   })
   return { ...layout, layers, defaultNodeSortMode: mode }
+}
+
+/**
+ * Discard a layer's manual arrangement: remove every `orderKey` on its
+ * assignment entries AND clear its `nodeSortMode` override, so the column
+ * falls back to the view default. Returns the same layout when there is
+ * nothing to reset (no keys and no override).
+ */
+export function clearLayerOrderKeys(
+  layout: NormalizedReferenceLayout,
+  layerId: string,
+): NormalizedReferenceLayout {
+  const target = layout.layers.find((l) => l.id === layerId)
+  const hasKeys = Object.values(layout.assignments).some(
+    (e) => e.layerId === layerId && e.orderKey,
+  )
+  if (!hasKeys && !target?.nodeSortMode) return layout
+
+  const layers = layout.layers.map((l) => {
+    if (l.id !== layerId || l.nodeSortMode === undefined) return l
+    const { nodeSortMode: _drop, ...rest } = l
+    return rest as ViewLayerConfig
+  })
+  let assignments = layout.assignments
+  if (hasKeys) {
+    assignments = {}
+    for (const [urn, entry] of Object.entries(layout.assignments)) {
+      if (entry.layerId === layerId && entry.orderKey) {
+        const { orderKey: _dropKey, ...rest } = entry
+        assignments[urn] = rest
+      } else {
+        assignments[urn] = entry
+      }
+    }
+  }
+  return { ...layout, layers, assignments }
 }

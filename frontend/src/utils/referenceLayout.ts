@@ -12,7 +12,7 @@
  * `nodeSortMode` survives); the scalar `defaultNodeSortMode` side-field is
  * caller-managed on the raw layout, like `displayRules`.
  */
-import type { LayerAssignmentEntry, LogicalNodeConfig, ViewContentConfig, ViewLayerConfig } from '@/types/schema'
+import type { LayerAssignmentEntry, LayerNodeSortAlgo, LogicalNodeConfig, ViewContentConfig, ViewLayerConfig } from '@/types/schema'
 
 export interface NormalizedReferenceLayout {
     layers: ViewLayerConfig[]
@@ -22,7 +22,7 @@ export interface NormalizedReferenceLayout {
      * ('alpha-asc' when absent). Carried through normalization so the canvas's
      * persist path (which writes the normalized shape wholesale) never wipes it.
      */
-    defaultNodeSortMode?: 'alpha-asc' | 'alpha-desc'
+    defaultNodeSortMode?: LayerNodeSortAlgo
 }
 
 const GLOB_CHARS = /[*?]/
@@ -119,10 +119,10 @@ export function normalizeReferenceLayout(raw: unknown): NormalizedReferenceLayou
         return rest as ViewLayerConfig
     })
 
-    const defaultNodeSortMode =
-        source.defaultNodeSortMode === 'alpha-asc' || source.defaultNodeSortMode === 'alpha-desc'
-            ? source.defaultNodeSortMode
-            : undefined
+    const VALID_DEFAULTS: readonly string[] = ['alpha-asc', 'alpha-desc', 'type-asc', 'count-desc']
+    const defaultNodeSortMode = VALID_DEFAULTS.includes(source.defaultNodeSortMode as string)
+        ? (source.defaultNodeSortMode as LayerNodeSortAlgo)
+        : undefined
     return defaultNodeSortMode ? { layers, assignments, defaultNodeSortMode } : { layers, assignments }
 }
 

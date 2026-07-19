@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ViewLayerConfig } from '@/types/schema'
-import { appendLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode } from './layerMutations'
+import { appendLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys } from './layerMutations'
 
 const L = (id: string, name: string, order: number): ViewLayerConfig => ({
   id,
@@ -141,5 +141,49 @@ describe('setViewDefaultSortMode', () => {
     expect(out.layers.find((l) => l.id === 'a')?.nodeSortMode).toBeUndefined()
     expect(out.layers.find((l) => l.id === 'b')?.nodeSortMode).toBe('custom')
     expect(out.layers.find((l) => l.id === 'c')?.nodeSortMode).toBeUndefined()
+  })
+})
+
+describe('clearLayerOrderKeys', () => {
+  const entry = (layerId: string, orderKey?: string) => ({
+    layerId,
+    inheritsChildren: true,
+    ...(orderKey ? { orderKey } : {}),
+  })
+
+  it('drops the layer\'s orderKeys and mode override, leaving other layers alone', () => {
+    const out = clearLayerOrderKeys({
+      layers: [{ ...L('a', 'Alpha', 0), nodeSortMode: 'custom' }, L('b', 'Beta', 1)],
+      assignments: {
+        'urn:x': entry('a', 'a1'),
+        'urn:y': entry('a'),
+        'urn:z': entry('b', 'a9'),
+      },
+    }, 'a')
+    expect(out.layers.find(l => l.id === 'a')?.nodeSortMode).toBeUndefined()
+    expect(out.assignments['urn:x'].orderKey).toBeUndefined()
+    expect(out.assignments['urn:y']).toEqual(entry('a'))
+    expect(out.assignments['urn:z'].orderKey).toBe('a9') // other layer untouched
+  })
+
+  it('is a no-op (same layout) when there is nothing to reset', () => {
+    const input = { layers: base(), assignments: { 'urn:x': entry('b') } }
+    expect(clearLayerOrderKeys(input, 'a')).toBe(input)
+  })
+
+  it('preserves defaultNodeSortMode', () => {
+    const out = clearLayerOrderKeys({
+      layers: [{ ...L('a', 'Alpha', 0), nodeSortMode: 'custom' }],
+      assignments: {},
+      defaultNodeSortMode: 'type-asc',
+    }, 'a')
+    expect(out.defaultNodeSortMode).toBe('type-asc')
+  })
+})
+
+describe('setViewDefaultSortMode — widened modes', () => {
+  it('accepts the property-derived modes as view defaults', () => {
+    const out = setViewDefaultSortMode({ layers: base(), assignments: {} }, 'count-desc')
+    expect(out.defaultNodeSortMode).toBe('count-desc')
   })
 })

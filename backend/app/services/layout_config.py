@@ -151,6 +151,74 @@ def parse_reference_layout(config: Optional[dict]) -> ReferenceLayout:
     return _normalize(_resolve_raw_layout(config))
 
 
+# ── Node-ordering write-side sanitation ───────────────────────────────────
+# Mirrors frontend/src/types/schema.ts `LayerNodeSortMode` — keep in sync.
+VALID_NODE_SORT_MODES = frozenset({"alpha-asc", "alpha-desc", "type-asc", "count-desc", "custom"})
+# 'custom' is inherently per-layer (it needs per-assignment orderKeys), so it
+# can never be the view-wide default.
+VALID_DEFAULT_SORT_MODES = VALID_NODE_SORT_MODES - {"custom"}
+# Fractional keys grow logarithmically with insertions; a well-formed key is
+# tens of chars at most. Anything beyond this is corrupt or hostile input.
+MAX_ORDER_KEY_LEN = 256
+
+
+def sanitize_node_ordering(raw_layout: dict) -> dict:
+    """Write-side self-heal for the node-ordering fields of a BARE
+    ``referenceLayout``: drop (never reject) an invalid ``defaultNodeSortMode``,
+    per-layer ``nodeSortMode``, or per-assignment ``orderKey``.
+
+    Dropping instead of 422-ing is deliberate: the canvas re-writes the whole
+    layout on every gesture, so pre-existing junk from an older client or a
+    hand-edited config must never block a user's unrelated save. The
+    comparators are string-defensive, so this is belt-and-braces against
+    unbounded/typed-wrong values reaching storage. Never mutates its input;
+    returns the same object when nothing needed fixing."""
+    if not isinstance(raw_layout, dict):
+        return raw_layout
+    out = raw_layout
+    changed = False
+
+    default = raw_layout.get("defaultNodeSortMode")
+    if default is not None and default not in VALID_DEFAULT_SORT_MODES:
+        out = dict(out)
+        out.pop("defaultNodeSortMode", None)
+        changed = True
+
+    layers = raw_layout.get("layers")
+    if isinstance(layers, list) and any(
+        isinstance(l, dict) and "nodeSortMode" in l and l.get("nodeSortMode") not in VALID_NODE_SORT_MODES
+        for l in layers
+    ):
+        if not changed:
+            out = dict(out)
+            changed = True
+        out["layers"] = [
+            {k: v for k, v in l.items() if k != "nodeSortMode"}
+            if isinstance(l, dict) and "nodeSortMode" in l and l.get("nodeSortMode") not in VALID_NODE_SORT_MODES
+            else l
+            for l in layers
+        ]
+
+    assignments = raw_layout.get("assignments")
+    if isinstance(assignments, dict):
+        def bad_key(entry: Any) -> bool:
+            if not isinstance(entry, dict) or "orderKey" not in entry:
+                return False
+            key = entry.get("orderKey")
+            return not isinstance(key, str) or not key or len(key) > MAX_ORDER_KEY_LEN
+
+        if any(bad_key(entry) for entry in assignments.values()):
+            if not changed:
+                out = dict(out)
+                changed = True
+            out["assignments"] = {
+                urn: ({k: v for k, v in entry.items() if k != "orderKey"} if bad_key(entry) else entry)
+                for urn, entry in assignments.items()
+            }
+
+    return out
+
+
 def derive_entity_scope(config: Optional[dict]) -> str:
     """'all' | 'curated'. Explicit `content.entityScope` wins; otherwise
     derived from whether any assignments exist."""

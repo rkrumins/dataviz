@@ -23,10 +23,10 @@ import {
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
-import type { LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
+import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
-import { LayerSortMenu } from './LayerSortMenu'
+import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
@@ -88,12 +88,14 @@ interface LayerColumnProps {
   /** True when the column deviates from the view default (sort menu indicator dot). */
   sortIsOverride?: boolean
   /** The view-wide default named in the sort menu's "View default" item. */
-  viewDefaultSortMode?: 'alpha-asc' | 'alpha-desc'
+  viewDefaultSortMode?: LayerNodeSortAlgo
   /** Draft mode — enables the persisted sort actions (Custom order / Apply to all layers). */
   canPersistSort?: boolean
   /** Presence mounts the header sort menu. `mode === null` clears the layer override. */
   onSetSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
   onApplySortToView?: (layerId: string) => void
+  /** Presence shows "Reset custom order" in the sort menu (custom-sorted layers). */
+  onResetCustomOrder?: (layerId: string) => void
   /** Custom-order drag-reorder (draft + custom sort mode): root rows show
    *  before/after drop bands; drops land in handleReorderNode on the canvas. */
   reorderEnabled?: boolean
@@ -178,6 +180,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   canPersistSort = false,
   onSetSortMode,
   onApplySortToView,
+  onResetCustomOrder,
   reorderEnabled = false,
   onReorderDrop,
   isHydratingInitial = false,
@@ -1142,7 +1145,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               <div
                 className="relative px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
-                title={sortIsOverride ? `Sorted: ${sortMode === 'custom' ? 'custom order' : sortMode === 'alpha-desc' ? 'Z → A' : 'A → Z'}` : undefined}
+                title={sortIsOverride ? `Sorted: ${SORT_MODE_LABELS[sortMode]}` : undefined}
               >
                 {totalCount}
                 {/* Sort-override indicator survives collapse, so a curated
@@ -1253,6 +1256,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     canPersist={canPersistSort}
                     onSelectMode={(mode) => onSetSortMode(layer.id, mode)}
                     onApplyToView={() => onApplySortToView?.(layer.id)}
+                    onResetCustomOrder={onResetCustomOrder ? () => onResetCustomOrder(layer.id) : undefined}
                   />
                 )}
                 {onAddToLayer && (

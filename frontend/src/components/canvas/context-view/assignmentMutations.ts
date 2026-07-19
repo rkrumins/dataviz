@@ -10,7 +10,7 @@
  */
 import type { AssignmentConflict, LayerAssignmentEntry } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
-import { generateKeyBetween } from '@/utils/orderKeys'
+import { generateNKeysBetween } from '@/utils/orderKeys'
 
 export interface AssignEntitiesOptions {
   logicalNodeId?: string
@@ -110,6 +110,23 @@ export function keyForInsertion(
   order: readonly string[],
   insertIdx: number,
 ): string | null {
+  const keys = keysForInsertion(layout, layerId, order, insertIdx, 1)
+  return keys ? keys[0] : null
+}
+
+/**
+ * Block variant of `keyForInsertion`: mint `count` consecutive keys at
+ * `insertIdx` (a multi-select drag moves several roots as one contiguous
+ * block). Same outward walk / append-fallback semantics; returns null when
+ * the neighbor keys are malformed.
+ */
+export function keysForInsertion(
+  layout: NormalizedReferenceLayout,
+  layerId: string,
+  order: readonly string[],
+  insertIdx: number,
+  count: number,
+): string[] | null {
   let prevKey: string | null = null
   for (let i = insertIdx - 1; i >= 0; i--) {
     const key = layout.assignments[order[i]]?.orderKey
@@ -124,7 +141,7 @@ export function keyForInsertion(
     prevKey = lastOrderKeyInLayer(layout, layerId)
   }
   try {
-    return generateKeyBetween(prevKey, nextKey)
+    return generateNKeysBetween(prevKey, nextKey, count)
   } catch {
     return null
   }

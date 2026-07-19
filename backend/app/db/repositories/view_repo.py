@@ -35,7 +35,7 @@ from backend.common.models.management import (
     ViewFacetsResponse,
     ViewCatalogStats,
 )
-from backend.app.services.layout_config import derive_entity_scope
+from backend.app.services.layout_config import derive_entity_scope, sanitize_node_ordering
 from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
@@ -550,7 +550,9 @@ async def update_view_layout(
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
-    layout["referenceLayout"] = req.reference_layout
+    # Self-heal invalid node-ordering fields (drop, never reject — see
+    # sanitize_node_ordering) before the wholesale write.
+    layout["referenceLayout"] = sanitize_node_ordering(req.reference_layout)
     config["layout"] = layout
 
     if req.entity_scope is not None:
@@ -706,7 +708,7 @@ async def update_overlay_layout(
 
     overlay = await ensure_overlay(session, view_id, branch_id)
 
-    reference_layout = dict(req.reference_layout)
+    reference_layout = dict(sanitize_node_ordering(req.reference_layout))
     if req.display_rules is not None:
         reference_layout["displayRules"] = req.display_rules
     overlay.reference_layout = json.dumps(reference_layout)

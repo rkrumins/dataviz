@@ -9,6 +9,7 @@ import {
   setAssignmentOrderKey,
   lastOrderKeyInLayer,
   keyForInsertion,
+  keysForInsertion,
 } from '../assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
@@ -304,5 +305,35 @@ describe('assignmentMutations — keyForInsertion (drag-reorder neighbor walk)',
   it('returns null (refuses) on malformed neighbor keys', () => {
     const l = layoutWith({ a: entry('l1', '!!bad'), b: entry('l1', 'a2') })
     expect(keyForInsertion(l, 'l1', ['a', 'b'], 1)).toBe(null)
+  })
+})
+
+describe('assignmentMutations — keysForInsertion (multi-select block reorder)', () => {
+  const entry = (layerId: string, orderKey?: string): LayerAssignmentEntry => ({
+    layerId,
+    inheritsChildren: true,
+    ...(orderKey ? { orderKey } : {}),
+  })
+  const layoutWith = (assignments: Record<string, LayerAssignmentEntry>): NormalizedReferenceLayout => ({
+    layers: [{ id: 'l1', name: 'L1', order: 0, entityTypes: [], nodeSortMode: 'custom' }],
+    assignments,
+  })
+
+  it('mints N strictly increasing keys inside the gap', () => {
+    const l = layoutWith({ a: entry('l1', 'a1'), b: entry('l1', 'a2') })
+    const keys = keysForInsertion(l, 'l1', ['a', 'b'], 1, 3)
+    expect(keys).toHaveLength(3)
+    let prev = 'a1'
+    for (const k of keys!) {
+      expect(k > prev && k < 'a2').toBe(true)
+      prev = k
+    }
+  })
+
+  it('block append after the layer max when both sides are unkeyed', () => {
+    const l = layoutWith({ a: entry('l1', 'a5') })
+    const keys = keysForInsertion(l, 'l1', ['x', 'y'], 1, 2)
+    expect(keys).toHaveLength(2)
+    expect(keys![0] > 'a5' && keys![1] > keys![0]).toBe(true)
   })
 })

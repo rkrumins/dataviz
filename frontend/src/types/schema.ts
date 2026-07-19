@@ -248,7 +248,7 @@ export interface ViewLayoutConfig {
     // View-wide default node sort for layers without an explicit
     // nodeSortMode. Absent = 'alpha-asc'. 'custom' is inherently per-layer
     // (it needs per-assignment orderKeys) so it can never be the default.
-    defaultNodeSortMode?: 'alpha-asc' | 'alpha-desc';
+    defaultNodeSortMode?: LayerNodeSortAlgo;
   };
 
   // LOD (Level of Detail) configuration
@@ -282,10 +282,18 @@ export interface LayerAssignmentEntry {
 }
 
 /**
- * Node sort mode for a layer column: alphabetical ascending/descending or
- * user-defined manual order ('custom', driven by LayerAssignmentEntry.orderKey).
+ * Node sort mode for a layer column: alphabetical ascending/descending,
+ * property-derived orders ('type-asc' groups by entity type; 'count-desc'
+ * puts the biggest containers first), or user-defined manual order
+ * ('custom', driven by LayerAssignmentEntry.orderKey). Property modes apply
+ * to ROOT nodes client-side (roots are fully client-held, like custom);
+ * children of expanded nodes always sort alphabetically server-side.
  */
-export type LayerNodeSortMode = 'alpha-asc' | 'alpha-desc' | 'custom'
+export type LayerNodeSortMode = 'alpha-asc' | 'alpha-desc' | 'type-asc' | 'count-desc' | 'custom'
+
+/** Every algorithmic mode — i.e. anything but 'custom', which is inherently
+ *  per-layer (it needs per-assignment orderKeys) and can't be a view default. */
+export type LayerNodeSortAlgo = Exclude<LayerNodeSortMode, 'custom'>
 
 /**
  * Layer configuration for Reference Model view

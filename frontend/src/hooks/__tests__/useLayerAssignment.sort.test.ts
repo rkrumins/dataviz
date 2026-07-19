@@ -13,7 +13,7 @@ import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useLayerAssignment } from '../useLayerAssignment'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
+import type { LayerAssignmentEntry, LayerNodeSortAlgo, ViewLayerConfig } from '@/types/schema'
 
 type TestNode = { id: string; data: Record<string, unknown> }
 
@@ -40,8 +40,8 @@ function rootNames(opts: {
   nodes: TestNode[]
   sortedLayers: ViewLayerConfig[]
   assignments: Record<string, LayerAssignmentEntry>
-  defaultNodeSortMode?: 'alpha-asc' | 'alpha-desc'
-  sortOverrides?: ReadonlyMap<string, 'alpha-asc' | 'alpha-desc'>
+  defaultNodeSortMode?: LayerNodeSortAlgo
+  sortOverrides?: ReadonlyMap<string, LayerNodeSortAlgo>
   childMap?: Map<string, string[]>
   parentMap?: Map<string, string>
 }): Map<string, string[]> {
@@ -167,5 +167,48 @@ describe('useLayerAssignment — node sort modes', () => {
     )
     const root = result.current.nodesByLayer.get('l1')?.[0]
     expect(root?.children.map(c => c.name)).toEqual(['cc', 'bb', 'aa'])
+  })
+})
+
+describe('useLayerAssignment — property-derived sort modes', () => {
+  it("'type-asc' groups roots by type id, alphabetical within a group", () => {
+    const nodes = [
+      { id: 'zeta', data: { urn: 'zeta', type: 'table', label: 'zeta' } },
+      { id: 'alpha', data: { urn: 'alpha', type: 'view', label: 'alpha' } },
+      { id: 'beta', data: { urn: 'beta', type: 'table', label: 'beta' } },
+    ]
+    const out = rootNames({
+      nodes,
+      sortedLayers: [layer('l1', 0, { nodeSortMode: 'type-asc' })],
+      assignments: { zeta: assign('l1'), alpha: assign('l1'), beta: assign('l1') },
+    })
+    expect(out.get('l1')).toEqual(['beta', 'zeta', 'alpha']) // tables first, alpha within
+  })
+
+  it("'count-desc' puts the biggest containers first (backend childCount wins)", () => {
+    const nodes = [
+      { id: 'small', data: { urn: 'small', type: 'obj', label: 'small', childCount: 2 } },
+      { id: 'big', data: { urn: 'big', type: 'obj', label: 'big', childCount: 90 } },
+      { id: 'mid', data: { urn: 'mid', type: 'obj', label: 'mid', childCount: 10 } },
+    ]
+    const out = rootNames({
+      nodes,
+      sortedLayers: [layer('l1', 0, { nodeSortMode: 'count-desc' })],
+      assignments: { small: assign('l1'), big: assign('l1'), mid: assign('l1') },
+    })
+    expect(out.get('l1')).toEqual(['big', 'mid', 'small'])
+  })
+
+  it('property modes are valid view defaults', () => {
+    const out = rootNames({
+      nodes: [
+        { id: 'a', data: { urn: 'a', type: 'obj', label: 'a', childCount: 1 } },
+        { id: 'b', data: { urn: 'b', type: 'obj', label: 'b', childCount: 5 } },
+      ],
+      sortedLayers: [layer('l1', 0)],
+      assignments: { a: assign('l1'), b: assign('l1') },
+      defaultNodeSortMode: 'count-desc',
+    })
+    expect(out.get('l1')).toEqual(['b', 'a'])
   })
 })

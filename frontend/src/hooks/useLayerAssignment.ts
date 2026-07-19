@@ -9,7 +9,7 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortMode } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -57,13 +57,14 @@ export interface UseLayerAssignmentOptions {
    * View-wide default node sort (`referenceLayout.defaultNodeSortMode`) for
    * layers without their own `nodeSortMode`. Defaults to 'alpha-asc'.
    */
-  defaultNodeSortMode?: 'alpha-asc' | 'alpha-desc'
+  defaultNodeSortMode?: LayerNodeSortAlgo
   /**
    * Ephemeral per-layer sort overrides (session-local, e.g. a read-only viewer
-   * flipping a column to Z→A). Wins over persisted config; asc/desc only —
-   * 'custom' requires persisted orderKeys so it can't be an ephemeral state.
+   * flipping a column to Z→A or By type). Wins over persisted config;
+   * algorithmic modes only — 'custom' requires persisted orderKeys so it
+   * can't be an ephemeral state.
    */
-  sortOverrides?: ReadonlyMap<string, 'alpha-asc' | 'alpha-desc'>
+  sortOverrides?: ReadonlyMap<string, LayerNodeSortAlgo>
 }
 
 export interface UseLayerAssignmentResult {
@@ -157,6 +158,17 @@ export function useLayerAssignment({
     // root-level concept (children are server-paginated).
     const alphaAsc = (a: HierarchyNode, b: HierarchyNode) => a.name.localeCompare(b.name)
     const alphaDesc = (a: HierarchyNode, b: HierarchyNode) => b.name.localeCompare(a.name)
+    // Property-derived root orders. Type groups alphabetically by the stable
+    // type id (display names would need a schema lookup this hook doesn't
+    // have); container size prefers the backend's childCount (total, not just
+    // loaded) and falls back to the loaded child list. Both tie-break to
+    // name so equal groups stay alphabetical inside.
+    const typeAsc = (a: HierarchyNode, b: HierarchyNode) =>
+      (a.typeId || '').localeCompare(b.typeId || '') || alphaAsc(a, b)
+    const countOf = (n: HierarchyNode) =>
+      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0
+    const countDesc = (a: HierarchyNode, b: HierarchyNode) =>
+      countOf(b) - countOf(a) || alphaAsc(a, b)
     const customRootCmp = (a: HierarchyNode, b: HierarchyNode) => {
       const ka = assignments[a.id]?.orderKey
       const kb = assignments[b.id]?.orderKey
@@ -165,16 +177,22 @@ export function useLayerAssignment({
       if (kb) return 1
       return alphaAsc(a, b)
     }
+    const ROOT_CMPS: Record<LayerNodeSortMode, (a: HierarchyNode, b: HierarchyNode) => number> = {
+      'alpha-asc': alphaAsc,
+      'alpha-desc': alphaDesc,
+      'type-asc': typeAsc,
+      'count-desc': countDesc,
+      custom: customRootCmp,
+    }
     const childCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     const rootCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     sortedLayers.forEach(layer => {
       const mode: LayerNodeSortMode =
         sortOverrides?.get(layer.id) ?? layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
+      // Children always sort alphabetically (their pages come from the server
+      // in displayName order); only alpha-desc flips their direction.
       childCmpByLayer.set(layer.id, mode === 'alpha-desc' ? alphaDesc : alphaAsc)
-      rootCmpByLayer.set(
-        layer.id,
-        mode === 'custom' ? customRootCmp : mode === 'alpha-desc' ? alphaDesc : alphaAsc,
-      )
+      rootCmpByLayer.set(layer.id, ROOT_CMPS[mode] ?? alphaAsc)
     })
 
     // Initialize layers

@@ -315,6 +315,31 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 1,
         "deprecated": False,
     },
+    # ── Display & UI ──────────────────────────────────────────────────────────
+    {
+        "key": "nodeSortingEnabled",
+        "name": "Node sorting controls",
+        "description": (
+            "Let people choose how nodes are ordered inside a Context View layer — alphabetical, "
+            "by type, by size, or a hand-arranged custom order (drag to reorder in a draft)."
+        ),
+        "impact_when_off": (
+            "The per-layer sort menu and drag-to-reorder disappear from the canvas. Orders already "
+            "saved on a view still RENDER exactly as curated — this only removes the controls for "
+            "changing them, so nothing anyone published is disturbed."
+        ),
+        "category_id": "display",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A kill switch for staged rollouts or locked-down estates where view curation is owned "
+            "by a central team. Off = consumers see curated views verbatim and cannot re-sort."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
     # ── Semantic layers ────────────────────────────────────────────────────────
     {
         "key": "semanticLayerEditMode",
