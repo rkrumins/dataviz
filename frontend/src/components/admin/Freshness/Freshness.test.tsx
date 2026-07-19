@@ -7,11 +7,16 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, listProviders, listWorkspaces } = vi.hoisted(() => ({
+const { listFleet, refreshSource, listProviders, listWorkspaces, permissionFn } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
     listProviders: vi.fn(),
     listWorkspaces: vi.fn(),
+    permissionFn: vi.fn(),
+}))
+
+vi.mock('@/store/auth', () => ({
+    usePermission: (perm: string, workspaceId?: string | null) => permissionFn(perm, workspaceId),
 }))
 
 vi.mock('@/services/freshnessService', async () => {
@@ -72,6 +77,8 @@ describe('Freshness cockpit', () => {
         refreshSource.mockResolvedValue({ scope: 'read-caches', gate: 'n/a', changed: true, actions: [], deferred: false })
         listProviders.mockResolvedValue([{ id: 'prov-1', name: 'Warehouse' }])
         listWorkspaces.mockResolvedValue([{ id: 'ws-1', name: 'Analytics' }])
+        // Default: caller can manage sources (rows show actions); not admin.
+        permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
     })
 
     it('renders fleet rows with cache age and the Recomputing badge', async () => {
@@ -118,5 +125,24 @@ describe('Freshness cockpit', () => {
         await waitFor(() => {
             expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
         })
+    })
+
+    it('shows the actions menu only for workspaces the caller can manage', async () => {
+        // ds-1 is in ws-1 (manageable), ds-2 in ws-2 (not).
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                { ...fleet.rows[0], dataSourceId: 'ds-1', workspaceId: 'ws-1', name: 'Orders Graph' },
+                { ...fleet.rows[1], dataSourceId: 'ds-2', workspaceId: 'ws-2', name: 'Customers Graph' },
+            ],
+        })
+        permissionFn.mockImplementation(
+            (perm: string, ws?: string) => perm === 'workspace:datasource:manage' && ws === 'ws-1',
+        )
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
+        expect(screen.getByRole('button', { name: /refresh actions for orders graph/i })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /refresh actions for customers graph/i })).not.toBeInTheDocument()
     })
 })

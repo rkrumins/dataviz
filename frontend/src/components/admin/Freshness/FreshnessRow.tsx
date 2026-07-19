@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { usePermission } from '@/store/auth'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 
@@ -152,6 +153,10 @@ const ACTIONS: { scope: RefreshScope; label: string; Icon: typeof RefreshCw; ico
 export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
     const running = !!row.runningJobId
     const actionsDisabled = busy || running
+    // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
+    // who can't manage this row's workspace (RegistryConnections convention) —
+    // a disabled item would just 403 on click.
+    const canManage = usePermission('workspace:datasource:manage', row.workspaceId)
 
     return (
         <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
@@ -209,6 +214,7 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
 
             {/* Actions */}
             <td className="px-3 py-2.5 align-top text-right" onClick={(e) => e.stopPropagation()}>
+                {canManage && (
                 <DropdownMenu.Root modal={false}>
                     <DropdownMenu.Trigger asChild>
                         <button
@@ -239,6 +245,7 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
                         </DropdownMenu.Content>
                     </DropdownMenu.Portal>
                 </DropdownMenu.Root>
+                )}
             </td>
         </tr>
     )

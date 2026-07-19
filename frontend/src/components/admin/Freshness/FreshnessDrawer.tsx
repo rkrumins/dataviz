@@ -8,7 +8,7 @@
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
     Activity, AlertTriangle, CheckCircle2, Database, RefreshCw, Radar, X,
 } from 'lucide-react'
@@ -48,11 +48,12 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     return createPortal(
         <>
             <Backdrop open={isOpen && !!dsId} onClick={onClose} />
-            <AnimatePresence>
+            {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
+            <>
                 {isOpen && dsId && (
                     <motion.div
                         role="dialog" aria-label="Data source freshness"
-                        initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
+                        initial={{ x: '100%' }} animate={{ x: 0 }}
                         transition={{ type: 'spring', stiffness: 400, damping: 40 }}
                         className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl"
                     >
@@ -174,7 +175,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                         </div>
                     </motion.div>
                 )}
-            </AnimatePresence>
+            </>
         </>,
         document.body,
     )
