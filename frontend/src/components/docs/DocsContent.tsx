@@ -16,6 +16,10 @@ import { readingTime } from './reading/readingTime'
 import { OnThisPage } from './reading/OnThisPage'
 import { Pager } from './reading/Pager'
 import { ContentSkeleton } from './reading/ContentSkeleton'
+import { UpdatedChip } from './reading/UpdatedChip'
+import { PageFeedback } from './reading/PageFeedback'
+import { getDocType, DocTypeBadge } from './reading/DocTypeBadge'
+import { docMeta } from './reading/docMeta.generated'
 
 export function DocsContent() {
   const { slug } = useParams<{ slug: string }>()
@@ -70,14 +74,16 @@ export function DocsContent() {
         {/* Article column */}
         <div className="min-w-0">
           {/* Meta row */}
-          {minutes && (
-            <div className="flex flex-wrap items-center gap-2 mb-4">
+          <div className="flex flex-wrap items-center gap-2 mb-5">
+            <DocTypeBadge type={getDocType(entry.slug)} />
+            {minutes && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-ink-muted bg-black/[0.04] dark:bg-white/[0.06]">
                 <Clock className="w-3.5 h-3.5" />
                 {minutes} read
               </span>
-            </div>
-          )}
+            )}
+            <UpdatedChip date={docMeta[entry.slug]?.updated} />
+          </div>
 
           <article className="prose-synodic">
             <ReactMarkdown
@@ -89,6 +95,8 @@ export function DocsContent() {
               {interp(content ?? '')}
             </ReactMarkdown>
           </article>
+
+          <PageFeedback path={docMeta[entry.slug]?.path} pageKey={`docs:${entry.slug}`} />
 
           <Pager
             basePath="/docs"

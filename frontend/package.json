@@ -11,8 +11,9 @@
     "test": "vitest run",
     "gen-auth": "node scripts/generate-auth.js",
     "gen:search-schema": "node scripts/gen-search-schema.mjs",
+    "gen:doc-meta": "node scripts/gen-doc-meta.mjs",
     "generate:features-fallback": "node scripts/generate-features-fallback.js",
-    "prebuild": "node scripts/generate-features-fallback.js || true",
+    "prebuild": "node scripts/generate-features-fallback.js || true; node scripts/gen-doc-meta.mjs || true",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {

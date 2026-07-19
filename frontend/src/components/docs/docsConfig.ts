@@ -89,11 +89,11 @@ export const docPersonas: DocPersona[] = [
     sectionId: 'dev-workflow',
     startSlug: 'setup',
     accent: {
-      gradient: 'from-cyan-500 to-blue-600',
-      text: 'text-cyan-600 dark:text-cyan-400',
-      soft: 'bg-cyan-500/10',
-      border: 'border-cyan-500/20',
-      glow: 'shadow-cyan-500/20',
+      gradient: 'from-sky-500 to-blue-600',
+      text: 'text-sky-600 dark:text-sky-400',
+      soft: 'bg-sky-500/10',
+      border: 'border-sky-500/20',
+      glow: 'shadow-sky-500/20',
     },
   },
   {

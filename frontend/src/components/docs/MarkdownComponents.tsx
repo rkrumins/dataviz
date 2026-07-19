@@ -5,6 +5,7 @@ import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, type Lu
 import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
 import { ZoomableImage } from './reading/ZoomableImage'
+import { LineageTraceDemo } from '../guide/demo/LineageTraceDemo'
 
 // Map the actual filenames from docs/ to route slugs. Adding a new doc to
 // docsConfig.ts? Add its filename here too, or its relative .md links from
@@ -182,7 +183,7 @@ function extractCodeFromPre(children: React.ReactNode): { lang: string | null; t
   const child = Children.toArray(children)[0]
   if (!isValidElement(child)) return null
   const props = child.props as { className?: string; children?: React.ReactNode }
-  const match = /language-(\w+)/.exec(props.className || '')
+  const match = /language-([\w-]+)/.exec(props.className || '')
   return {
     lang: match?.[1] ?? null,
     text: String(props.children ?? '').replace(/\n$/, ''),
@@ -203,6 +204,11 @@ export const markdownComponents: Components = {
     const info = extractCodeFromPre(children)
     if (info?.lang === 'mermaid') {
       return <MermaidBlock code={info.text} />
+    }
+    // Interactive "trace lineage" demo — the fenced block body is ignored;
+    // the widget is fully self-contained.
+    if (info?.lang === 'lineage-demo') {
+      return <LineageTraceDemo />
     }
     return (
       <div className="group relative">

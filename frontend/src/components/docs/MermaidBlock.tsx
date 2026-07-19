@@ -30,11 +30,43 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
     async function render() {
       try {
         const mermaid = (await loadMermaid()).default
+        // Brand the diagrams from the app's live design tokens so they echo the
+        // product (accent-bordered nodes on an elevated surface, muted lines)
+        // and flip cleanly with the theme.
+        const cs = getComputedStyle(document.documentElement)
+        const g = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback
+        const accent = g('--nx-accent-lineage', '#6366f1')
+        const bgEl = g('--nx-bg-elevated', isDark ? '#161b22' : '#ffffff')
+        const bgCanvas = g('--nx-bg-canvas', isDark ? '#0d1117' : '#fafbfc')
+        const textP = g('--nx-text-primary', isDark ? '#e6edf3' : '#1a1d21')
+        const muted = g('--nx-accent-muted', '#64748b')
         mermaid.initialize({
           startOnLoad: false,
-          theme: isDark ? 'dark' : 'default',
+          theme: 'base',
           securityLevel: 'loose',
           fontFamily: 'Inter Variable, Inter, system-ui, sans-serif',
+          themeVariables: {
+            darkMode: isDark,
+            background: bgCanvas,
+            primaryColor: bgEl,
+            primaryBorderColor: accent,
+            primaryTextColor: textP,
+            secondaryColor: bgEl,
+            secondaryBorderColor: muted,
+            secondaryTextColor: textP,
+            tertiaryColor: bgCanvas,
+            tertiaryBorderColor: muted,
+            tertiaryTextColor: textP,
+            mainBkg: bgEl,
+            nodeBorder: accent,
+            nodeTextColor: textP,
+            lineColor: muted,
+            textColor: textP,
+            titleColor: textP,
+            clusterBkg: isDark ? 'rgba(99,102,241,0.08)' : 'rgba(99,102,241,0.05)',
+            clusterBorder: muted,
+            edgeLabelBackground: bgEl,
+          },
         })
         const id = `mermaid-${++renderCounter}`
         const { svg } = await mermaid.render(id, code)

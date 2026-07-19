@@ -21,6 +21,9 @@ import { extractHeadings } from '@/components/docs/reading/headings'
 import { OnThisPage } from '@/components/docs/reading/OnThisPage'
 import { Pager } from '@/components/docs/reading/Pager'
 import { ContentSkeleton } from '@/components/docs/reading/ContentSkeleton'
+import { UpdatedChip } from '@/components/docs/reading/UpdatedChip'
+import { PageFeedback } from '@/components/docs/reading/PageFeedback'
+import { guideMeta } from '@/components/docs/reading/docMeta.generated'
 
 export function GuideContent() {
   const brand = useBrand()
@@ -93,6 +96,7 @@ export function GuideContent() {
               <Clock className="w-3.5 h-3.5" />
               {entry.readingTime} read
             </span>
+            <UpdatedChip date={guideMeta[entry.slug]?.updated} />
           </div>
 
           <article className="prose-synodic">
@@ -105,6 +109,8 @@ export function GuideContent() {
               {interp(content ?? '')}
             </ReactMarkdown>
           </article>
+
+          <PageFeedback path={guideMeta[entry.slug]?.path} pageKey={`guide:${entry.slug}`} />
 
           <Pager
             basePath="/guide"
