@@ -293,6 +293,19 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=("Admins can always manage layers", "Everyone can read layers"),
         depends_on=("semanticLayerEditMode",),
     ),
+    # ── Experimental ─────────────────────────────────────────────────────────────
+    "toursEnabled": FeatureWiring(
+        key="toursEnabled",
+        posture="capability",
+        # Preview: ships OFF, and the both-halves reference rule is relaxed for
+        # experimental flags. The tour is entirely client-side — no server gate.
+        stage="experimental",
+        server_gates=(),
+        ui_surfaces=(),
+        still_allowed=(
+            "The Help panel and every guide stay available whether tours are on or off",
+        ),
+    ),
 }
 
 

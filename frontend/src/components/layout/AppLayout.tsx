@@ -28,6 +28,9 @@ import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { ToastContainer } from '@/components/ui/toast'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
+import { useFeature } from '@/store/features'
+import { TourOverlay } from '@/features/tour/TourOverlay'
+import { TourLauncher } from '@/features/tour/TourLauncher'
 
 export { useViewEditorModal }
 
@@ -38,6 +41,7 @@ export function AppLayout() {
   // only re-renders when these specific fields change, not on every
   // unrelated preference write (sidebar collapse, pinned views, …).
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+  const toursEnabled = useFeature('toursEnabled')
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -166,6 +170,10 @@ export function AppLayout() {
         <HelpPanel />
         <ToastContainer />
         <AccessDeniedModal />
+
+        {/* Guided tours — experimental, gated by the toursEnabled feature flag */}
+        {toursEnabled && <TourOverlay />}
+        {toursEnabled && <TourLauncher />}
       </div>
     </ViewEditorContext.Provider>
   )

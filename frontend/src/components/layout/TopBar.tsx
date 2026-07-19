@@ -147,6 +147,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             'bg-gradient-to-r from-accent-business/30 via-accent-explore/20 to-accent-lineage/30'
           )} />
           <button
+            data-tour="search"
             onClick={onOpenCommandPalette}
             className={cn(
               "relative w-full flex items-center gap-3 px-4 py-2 rounded-xl",
@@ -169,7 +170,9 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         {/* Right: Actions — 3 groups separated by dividers */}
         <div className="flex items-center gap-2">
           {/* Group 1: Mode */}
-          <PersonaToggle />
+          <span data-tour="persona" className="inline-flex">
+            <PersonaToggle />
+          </span>
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
@@ -183,6 +186,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           <ThemeSwitcher theme={theme} onChange={setTheme} />
 
           <button
+            data-tour="help"
             className="btn btn-ghost p-2 rounded-lg"
             onClick={() => useHelpPanelStore.getState().openHelp()}
             title="Help (?)"

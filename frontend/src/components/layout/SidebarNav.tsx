@@ -400,6 +400,7 @@ export function SidebarNav() {
 
   return (
     <aside
+      data-tour="nav"
       className="relative shrink-0 h-full z-40 bg-canvas-elevated border-r border-glass-border flex flex-col"
       style={{ width: sidebarCollapsed ? COLLAPSED_WIDTH : width, transition: resizing.current ? 'none' : 'width 200ms ease' }}
     >

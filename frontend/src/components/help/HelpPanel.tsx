@@ -29,7 +29,11 @@ import {
   ArrowUpRight,
   FileText,
   BookOpen,
+  Sparkles,
 } from 'lucide-react'
+import { useFeature } from '@/store/features'
+import { useTourStore } from '@/features/tour/tourStore'
+import { getTour, FIRST_RUN_TOUR } from '@/features/tour/tours'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -159,6 +163,9 @@ function HomeView({
   const { ready, search } = useDocsSearchIndex()
   const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const toursEnabled = useFeature('toursEnabled')
+  const startTour = useTourStore((s) => s.start)
+  const tour = getTour(FIRST_RUN_TOUR)
 
   // Focus the search input when the home view mounts (i.e. on open / back).
   useEffect(() => {
@@ -281,6 +288,24 @@ function HomeView({
         ) : (
           // Quick-start links
           <div className="pt-1">
+            {toursEnabled && tour && (
+              <button
+                onClick={() => {
+                  startTour(FIRST_RUN_TOUR)
+                  onClose()
+                }}
+                className="mb-4 flex w-full items-center gap-3 rounded-xl border border-accent-lineage/25 bg-gradient-to-r from-accent-lineage/[0.08] to-violet-500/[0.05] p-3 text-left transition-colors hover:border-accent-lineage/40"
+              >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/20">
+                  <Sparkles className="h-4.5 w-4.5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-ink">Take the product tour</p>
+                  <p className="text-xs text-ink-muted">A quick guided lap · {tour.estimate}</p>
+                </div>
+                <ArrowUpRight className="h-4 w-4 shrink-0 text-accent-lineage" />
+              </button>
+            )}
             <div className="px-1 pb-2 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
               Quick start
             </div>
