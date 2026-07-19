@@ -286,7 +286,7 @@ export function RegistryConnections() {
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
             {/* Header / Actions */}
-            <div className="flex items-center justify-between">
+            <div data-tour="ingestion-connect" className="flex items-center justify-between">
                 <div>
                     <h2 className="text-xl font-bold text-ink">Providers</h2>
                     <p className="text-sm text-ink-muted mt-1">Manage database providers and catalog availability.</p>

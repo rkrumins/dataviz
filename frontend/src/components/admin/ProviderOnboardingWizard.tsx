@@ -36,6 +36,7 @@ import {
 } from '@/services/providerService'
 import { fetchRedisConfig } from '@/services/redisConfigService'
 import { useToast } from '@/components/ui/toast'
+import { DocsLink } from '@/components/help/DocsLink'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
 import { DataHubLogo, FalkorDBLogo, Neo4jLogo, SpannerLogo } from './ProviderLogos'
 
@@ -1905,7 +1906,7 @@ export function ProviderOnboardingWizard({
           )}
         </div>
 
-        <div className="space-y-4 rounded-2xl border border-glass-border bg-gradient-to-br from-slate-50 to-white p-5 dark:from-slate-800 dark:to-slate-900">
+        <div className="space-y-4 rounded-2xl border border-glass-border bg-black/[0.02] p-5 dark:bg-white/[0.02]">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
               <Shield className="h-5 w-5" />
@@ -2478,9 +2479,9 @@ export function ProviderOnboardingWizard({
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.08 }}
-        className="mx-auto w-full overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm dark:border-slate-700 dark:from-slate-800 dark:to-slate-900"
+        className="mx-auto w-full overflow-hidden rounded-2xl border border-glass-border bg-canvas-elevated shadow-sm"
       >
-        <div className="divide-y divide-slate-200 dark:divide-slate-700">
+        <div className="divide-y divide-glass-border">
           <div className="p-6">
             <div className="mb-4 flex items-center gap-3">
               <div className={cn('flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm', currentConfig.color)}>
@@ -2745,16 +2746,19 @@ export function ProviderOnboardingWizard({
               <p className="mt-0.5 text-sm text-ink-muted">
                 {wizardPhase === 'success'
                   ? 'Provider created'
-                  : activeStep?.title ?? 'Provider setup'}
+                  : `Step ${currentStepIndex + 1} of ${steps.length}: ${activeStep?.title ?? 'Provider setup'}`}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={handleClose}
-              className="rounded-lg p-2 text-ink-muted transition-colors hover:bg-black/5 hover:text-ink dark:hover:bg-white/5"
-            >
-              <X className="h-5 w-5" />
-            </button>
+            <div className="flex items-center gap-1">
+              <DocsLink slug="admin-setup" variant="icon" />
+              <button
+                type="button"
+                onClick={handleClose}
+                className="rounded-lg p-2 text-ink-muted transition-colors hover:bg-black/5 hover:text-ink dark:hover:bg-white/5"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
           </div>
 
           {wizardPhase === 'steps' && (

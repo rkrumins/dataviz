@@ -15,6 +15,8 @@ follow the deep-reference links below into whichever chapter you need.
   read/write routing, deployment, and the headline design decisions.
 - **[API Reference](/docs/versioning-api-reference)** — the REST contract: the versioning and
   draft-aware graph routers, auth/RBAC/tenancy, and request/response shapes.
+- **[End-to-End Testing Guide](/docs/versioning-e2e)** — the hands-on companion: bring up the
+  Postgres stack and drive the whole draft → publish → fork → PR → merge flow over HTTP.
 
 ## Deep reference
 

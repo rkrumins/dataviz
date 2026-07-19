@@ -1,11 +1,14 @@
 # The Semantic Layer (Ontology)
 
+```tour-semantic-layers
+```
+
 *For Builders and curious Viewers.* The **ontology** is what turns a raw graph of
 anonymous nodes into a *readable* picture with meaning, colour, and structure.
 This page explains it without the jargon — what it is, why it's versioned, and
 how to evolve it safely.
 
-> 💡 **In one line:** the ontology is your data's **shared dictionary** — it
+> **Note:** *In one line* — the ontology is your data's **shared dictionary**: it
 > defines what each type of thing *is*, how things relate, and how they *look*.
 
 ---
@@ -81,8 +84,8 @@ intact.
 
 ### This is ontology versioning — not data versioning
 
-> 💡 **Two different things share the word "versioning."** This page is about
-> versioning the **ontology** — the *meaning* layer (what entity types and colours
+> **Important:** Two different things share the word "versioning." This page is
+> about versioning the **ontology** — the *meaning* layer (what entity types and colours
 > stand for), where publishing freezes a version so your Views keep rendering
 > correctly. That's separate from versioning the **graph data itself** — opening a
 > draft branch on the actual nodes and edges, editing them, and going through a
@@ -98,10 +101,10 @@ intact.
 1. **Create or import** a draft ontology (start from a template or an existing
    version).
 2. **Define** entity types, relationship types, hierarchy, and visuals.
-3. **Validate** — Synodic checks for problems like cycles or missing references.
+3. **Validate** — {brand} checks for problems like cycles or missing references.
 4. **Check coverage** — compare the ontology against the *actual* types found in
    your graph, so nothing real is left undefined.
-5. **Publish** — make it immutable; Synodic records the change and (where
+5. **Publish** — make it immutable; {brand} records the change and (where
    relevant) shows the impact.
 6. **Audit** — every lifecycle event (created, updated, published) is logged for
    traceability.
@@ -112,7 +115,7 @@ intact.
 
 If your underlying system uses its own labels (for example a DataHub or
 OpenMetadata type name), **source mappings** translate those external labels into
-your Synodic entity types. Synodic can also flag **drift** — external types it
+your {brand} entity types. {brand} can also flag **drift** — external types it
 finds that *aren't* yet mapped — so your dictionary stays complete as sources
 evolve.
 

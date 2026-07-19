@@ -15,9 +15,9 @@ Open a View you own (or have edit access to) and you can:
   nodes — then **re-save** to update the snapshot.
 - **Re-tag** to keep it discoverable as your conventions evolve.
 
-> 💡 **Edits are deliberate.** Panning, zooming, and exploring a View never change
-> it. Only an explicit *save* updates the stored snapshot — so you can investigate
-> freely inside a shared View without disturbing it.
+> **Note:** Edits are deliberate. Panning, zooming, and exploring a View never
+> change it. Only an explicit *save* updates the stored snapshot — so you can
+> investigate freely inside a shared View without disturbing it.
 
 ---
 
@@ -47,8 +47,8 @@ Explicit shares are perfect for co-ownership ("let Dana edit this") or for
 reaching someone outside the View's normal visibility. See the broader access
 model in [Users & Access](/guide/users-access).
 
-> 💡 **Principle of least access:** share as narrowly as the need requires. It's
-> easy to widen later and awkward to claw back.
+> **Tip:** *Principle of least access* — share as narrowly as the need requires.
+> It's easy to widen later and awkward to claw back.
 
 ---
 

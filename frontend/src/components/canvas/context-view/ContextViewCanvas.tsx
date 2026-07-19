@@ -45,6 +45,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
@@ -92,6 +93,7 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
+import { useLensLineage } from './useLensLineage'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import { StartEditingDialog } from './StartEditingDialog'
@@ -1690,6 +1692,18 @@ export function ContextViewCanvas({
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
+  // Authored column width — part of the view definition (ships to every
+  // viewer of the published view). Not staged as a reviewable change:
+  // width is presentation, not model semantics; it rides the normal
+  // layout save. Fires once per drag (pointerup), never per move.
+  const resizeLayer = useCallback((id: string, width: number | null) => {
+    const before = currentLayout()
+    persistReferenceLayout({
+      layers: layerOps.setLayerWidth(before.layers, id, width ?? undefined),
+      assignments: before.assignments,
+    })
+  }, [currentLayout, persistReferenceLayout])
+
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
     const before = currentLayout()
@@ -1962,7 +1976,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration } = useGraphHydration()
+  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2974,7 +2988,16 @@ export function ContextViewCanvas({
   const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
   const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
   const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
+  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
+  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
+  // Miller-column branch: truncate to hop i, then step into nodeId.
+  const lensWalkTo = useCallback((index: number, nodeId: string) =>
+    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
   const lensClose = useCallback(() => setLensStack([]), [])
+  // On-demand lineage for every visited focal node — the lens tells the
+  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
+  // Lens-local (never written to the canvas store), cached per session.
+  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -2989,13 +3012,141 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
+  // ── External lineage (curated views) — "no lineage" vs "outside this
+  // view". Total degrees fetched per hydration settle; external =
+  // total − internal(loaded). Selection-scoped surface: a status chip
+  // for the selected node. Absent totals mean UNKNOWN → no chip, never
+  // a false "no lineage" claim.
+  const externalDegrees = useExternalDegrees(
+    activeEntityScope === 'curated' && showMissingConnectionIndicators,
+  )
+  // Ambient per-node cue: external = total − internal(loaded), for every
+  // loaded node with a KNOWN total. One O(E) pass builds internal
+  // degrees; nodes absent from externalDegrees stay absent here
+  // (unknown ≠ zero). Empty map when the feature is off — the overlay
+  // renders nothing.
+  const externalCueByNode = useMemo(() => {
+    const cue = new Map<string, { in: number; out: number }>()
+    if (externalDegrees.size === 0) return cue
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    const internal = new Map<string, { in: number; out: number }>()
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      const s = internal.get(e.source) ?? { in: 0, out: 0 }
+      s.out++; internal.set(e.source, s)
+      const tg = internal.get(e.target) ?? { in: 0, out: 0 }
+      tg.in++; internal.set(e.target, tg)
+    }
+    externalDegrees.forEach((total, urn) => {
+      const loc = internal.get(urn) ?? { in: 0, out: 0 }
+      const exIn = Math.max(0, total.in - loc.in)
+      const exOut = Math.max(0, total.out - loc.out)
+      if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
+    })
+    return cue
+  }, [externalDegrees, edges, lineageEdgeTypes])
+
+  const selectedExternalLineage = useMemo(() => {
+    if (!selectedNodeId) return null
+    const total = externalDegrees.get(selectedNodeId)
+    if (!total) return null
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    let inLoaded = 0
+    let outLoaded = 0
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      if (e.source === selectedNodeId) outLoaded++
+      else if (e.target === selectedNodeId) inLoaded++
+    }
+    const exIn = Math.max(0, total.in - inLoaded)
+    const exOut = Math.max(0, total.out - outLoaded)
+    return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
+  }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+
+  // ── External lineage PREVIEW (feature-flagged) — the guided
+  // click-through: fetch ONE node's out-of-scope partners on demand
+  // (bounded: two edge queries + one name lookup) and show them in the
+  // Lens, badged. Nothing enters the canvas store — a preview must
+  // never mutate a curated view's scope.
+  const externalLineagePreview = usePreferencesStore((s) => s.externalLineagePreview)
+  const [externalPreview, setExternalPreview] = useState<{
+    nodeId: string
+    loading: boolean
+    records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
+  } | null>(null)
+  const handlePreviewExternal = useCallback(async () => {
+    const urn = selectedNodeId
+    if (!urn) return
+    setExternalPreview({ nodeId: urn, loading: true, records: [] })
+    openLens(urn)
+    try {
+      const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
+      const [outEdges, inEdges] = await Promise.all([
+        provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
+        provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
+      ])
+      const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+      const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
+      for (const e of outEdges) {
+        const p = e.targetUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
+      }
+      for (const e of inEdges) {
+        const p = e.sourceUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+      }
+      const partnerUrns = [...partners.keys()].slice(0, 100)
+      const named = partnerUrns.length > 0
+        ? await provider.getNodes({ urns: partnerUrns, limit: partnerUrns.length })
+        : []
+      const labelByUrn = new Map(named.map(n => [n.urn, n.displayName]))
+      setExternalPreview({
+        nodeId: urn,
+        loading: false,
+        records: partnerUrns.map(p => ({
+          urn: p,
+          label: labelByUrn.get(p) || p.split(':').pop() || p,
+          direction: partners.get(p)!.direction,
+          edgeType: partners.get(p)!.edgeType,
+        })),
+      })
+    } catch {
+      // Preview is advisory — fail closed to "no preview", never block the lens.
+      setExternalPreview({ nodeId: urn, loading: false, records: [] })
+    }
+  }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+
   const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
   const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
     setAnchorProxyGroups(groups)
   }, [])
+
+  // Rail focus: selection wins instantly; hover engages after a short
+  // DWELL (so drive-by mouse movement doesn't flash chips) and, when the
+  // hover ends with nothing selected, the rail LINGERS long enough for
+  // the pointer to travel to a chip — the reason a naive hover-scoped
+  // rail is unusable (it dismisses itself en route). Timers are
+  // effect-scoped; every transition cancels the previous one.
+  const [railFocusId, setRailFocusId] = useState<string | null>(null)
+  useEffect(() => {
+    if (selectedNodeId) {
+      const raf = requestAnimationFrame(() => setRailFocusId(selectedNodeId))
+      return () => cancelAnimationFrame(raf)
+    }
+    if (hoveredNodeId) {
+      const t = setTimeout(() => setRailFocusId(hoveredNodeId), 250)
+      return () => clearTimeout(t)
+    }
+    const t = setTimeout(() => setRailFocusId(null), 1500)
+    return () => clearTimeout(t)
+  }, [selectedNodeId, hoveredNodeId])
+
   const handleProxyMore = useCallback(() => {
-    if (selectedNodeId) openLens(selectedNodeId)
-  }, [selectedNodeId, openLens])
+    const target = railFocusId ?? selectedNodeId
+    if (target) openLens(target)
+  }, [railFocusId, selectedNodeId, openLens])
 
   // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
   // Never auto-scrolls: business users hate surprise camera moves. The
@@ -3472,6 +3623,11 @@ export function ContextViewCanvas({
             unassigned entities, truncated aggregated detail). The canvas
             never hides lineage silently. */}
         <CanvasStatusChips
+          rootsLoaded={rootsLoaded}
+          rootsHaveMore={rootsHaveMore}
+          onLoadMoreRoots={() => { void loadMoreRoots() }}
+          selectedExternal={selectedExternalLineage}
+          onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
           unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}
@@ -3587,8 +3743,29 @@ export function ContextViewCanvas({
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
           lensStack={lensStack}
+          supplementalEdges={lensLineage.supplementalEdges}
+          supplementalNodes={lensLineage.supplementalNodes}
+          fetchStatus={lensLineage.status}
+          fetchTruncatedIds={lensLineage.truncatedIds}
+          onRetryFetch={lensLineage.retry}
+          drillEdges={lensLineage.drillEdges}
+          drillStatus={lensLineage.drillStatus}
+          onDrillFetch={lensLineage.fetchDrill}
+          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
+          onJumpTo={lensJumpTo}
+          onWalkTo={lensWalkTo}
+          onShowPathOnCanvas={(ids) => {
+            // Presenting a walk IS a frame action — same chrome, same exit.
+            const focal = ids[ids.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length - 1 })
+            }
+            void locateManyOnCanvas(ids)
+          }}
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}
@@ -3667,8 +3844,9 @@ export function ContextViewCanvas({
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
-              focusNodeId={selectedNodeId}
+              focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
+              externalCue={externalCueByNode}
             />
           )}
 
@@ -3816,6 +3994,8 @@ export function ContextViewCanvas({
                 anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
+                onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
+                onResizeLayer={isDraft ? resizeLayer : undefined}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}

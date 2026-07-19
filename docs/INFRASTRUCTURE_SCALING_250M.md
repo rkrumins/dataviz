@@ -4,17 +4,24 @@
 **Target Environment:** GCP — Cloud SQL for PostgreSQL 16 + GKE (FalkorDB Redis Cluster, 3 StatefulSets)
 **Workload:** Read-dominant interactive graph traversal; Postgres-authoritative append-only writes with asynchronous projection
 
+> **At a glance.** The upper-bound sizing spec for {brand} at **250M graph elements** — for
+> the engineers planning that jump. Covers the Cloud SQL management/`graphver` split, the
+> 9-pod / 3-StatefulSet FalkorDB cluster (with full manifests), the connection budget, DR,
+> and the known software-level scaling risks the infrastructure must absorb (§9). Its
+> smaller-corpus companion is the launch-scale spec — the two share topology and philosophy
+> but **not** their numbers; do not mix them.
+
 Companion documents — this specification composes with, and does not replace:
 
-- [FALKORDB_DEPLOYMENT.md](./FALKORDB_DEPLOYMENT.md) — cluster routing semantics, client configuration (§7), DR protocol
+- [FalkorDB Deployment](/docs/falkordb-deployment) — cluster routing semantics, client configuration (§7), DR protocol
 - [architecture-when-scaling.md](./architecture-when-scaling.md) — application-tier role split (web / worker / controlplane), cache-vs-coordination Redis rules
-- [versioning/09-scale-limits-and-roadmap.md](./versioning/09-scale-limits-and-roadmap.md) — measured complexity envelope and known hotspots of the versioned store
+- [versioning/09-scale-limits-and-roadmap.md](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) — measured complexity envelope and known hotspots of the versioned store
 
 ---
 
 ## 1. Executive Summary
 
-This document specifies the infrastructure required to operate Synodic at **250 million graph elements** (nodes + edges combined, across all workspace graphs):
+This document specifies the infrastructure required to operate {brand} at **250 million graph elements** (nodes + edges combined, across all workspace graphs):
 
 - **System of record:** Cloud SQL for PostgreSQL 16 (Enterprise Plus), split into a **management instance** and a dedicated **graphver instance** (the versioned node/edge store — the split needs no code change; it is the `GRAPHVER_DB_URL` decoupling designed into `backend/app/services/versioning/config.py`).
 - **Graph read layer:** FalkorDB in **Redis Cluster mode**, deployed as **3 StatefulSets (one per shard), 3 pods each** — 9 pods spread across 3 GCP zones. FalkorDB remains a *disposable projection*: any graph can be dropped and rebuilt from Postgres, which is what makes an aggressive-but-recoverable memory posture safe.
@@ -146,6 +153,11 @@ Connectivity: private IP (PSC) only; app connects via the Cloud SQL connector or
 `synodic-mgmt` uses defaults scaled to its size; the only flag worth pinning is `max_connections=500`.
 
 ### 3.3 Connection budget (the arithmetic that must always balance)
+
+> **Warning:** Per-role pools are per-process — untuned, 4 web pods × 4 workers × 65 =
+> **1,040 connections**, over budget on its own before any autoscaling. Front both
+> instances with a transaction-mode pooler and right-size the pools with the
+> `DB_<ROLE>_POOL_SIZE` env vars; never raise `max_connections` to fix pool exhaustion.
 
 The app opens **per-role pools** per process (`backend/app/db/engine.py`): WEB 20+10, JOBS 8+4, READONLY 10+5, PROVIDER_PROBE 4+2, ADMIN 2+0 → **65 peak per process**, and viz runs `GUNICORN_WORKERS` processes per pod. Untuned, 4 web pods × 4 workers × 65 = 1,040 connections — over budget on its own.
 
@@ -369,7 +381,7 @@ App node pool: `n4-standard-8`, autoscaled 6–16 nodes across 3 zones.
 
 ## 9. Known Scaling Risks at 250M (and their mitigations)
 
-From [versioning/09-scale-limits-and-roadmap.md](./versioning/09-scale-limits-and-roadmap.md) — these are properties of the software, restated here because the infrastructure must absorb them:
+From [versioning/09-scale-limits-and-roadmap.md](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) — these are properties of the software, restated here because the infrastructure must absorb them:
 
 1. **Full FalkorDB seed is `O(N·E)` and composes live state in memory.** Mitigation: streaming rebuild stays enabled (§4.5); a 50M-element reseed is a *minutes-long, IOPS-heavy* event on the graphver instance — the 4 TB/IOPS headroom in §2.1 exists for this. Schedule bulk reseeds off-peak.
 2. **Draft-checkpoint Merkle rebuild is `O(graph)` at the top levels.** Watch checkpoint latency on graphs > 10M elements; the roadmap item (incremental Merkle) becomes funded work when p99 checkpoint > seconds.

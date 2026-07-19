@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Command } from 'cmdk'
 import {
@@ -32,6 +32,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
+import { guideEntries } from '@/components/guide/guideConfig'
+import { interpolateBrand } from '@/lib/brandText'
 
 interface CommandPaletteProps {
   open: boolean
@@ -159,6 +161,21 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     }
     close()
   }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, close])
+
+  // Guide articles matching the current search — the palette runs its own
+  // filtering (shouldFilter={false}), so we filter here. Empty search shows
+  // none (the "Open the User Guide" entry always stands in for browse).
+  const guideDocResults = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return []
+    return guideEntries
+      .filter((e) => {
+        const title = interpolateBrand(e.title, brand).toLowerCase()
+        const desc = interpolateBrand(e.description, brand).toLowerCase()
+        return title.includes(q) || desc.includes(q)
+      })
+      .slice(0, 6)
+  }, [search, brand])
 
   // Reset search when closing
   useEffect(() => {
@@ -372,6 +389,25 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   description="Discover and explore all views"
                   onSelect={() => handleAction('navigate:/explorer')}
                 />
+              </Command.Group>
+
+              {/* Help & Docs — the User Guide, searchable from anywhere */}
+              <Command.Group heading="Help & Docs">
+                <CommandItem
+                  icon={BookOpen}
+                  label="Open the User Guide"
+                  description="Browse every guide article"
+                  onSelect={() => handleAction('navigate:/guide')}
+                />
+                {guideDocResults.map((e) => (
+                  <CommandItem
+                    key={e.slug}
+                    icon={BookOpen}
+                    label={interpolateBrand(e.title, brand)}
+                    description={`${interpolateBrand(e.description, brand)} · ${e.readingTime}`}
+                    onSelect={() => handleAction(`navigate:/guide/${e.slug}`)}
+                  />
+                ))}
               </Command.Group>
 
               {/* Settings — always shown */}

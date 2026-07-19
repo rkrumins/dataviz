@@ -53,20 +53,20 @@ export function DocsHome() {
       {/* Ambient gradient backdrop */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-gradient-to-b from-cyan-500/[0.07] via-slate-500/[0.04] to-transparent"
+        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-gradient-to-b from-accent-lineage/[0.07] via-violet-500/[0.04] to-transparent"
       />
 
       <div className="relative mx-auto max-w-6xl px-6 sm:px-10 py-14">
         {/* ── Hero ─────────────────────────────────────────── */}
         <motion.div initial="hidden" animate="show" custom={0} variants={fade}>
-          <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 border border-cyan-500/20">
+          <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold text-accent-lineage dark:text-accent-lineage bg-accent-lineage/10 border border-accent-lineage/20">
             <FileText className="w-3.5 h-3.5" />
             {brand.appName} Documentation
           </span>
           <h1 className="mt-5 font-display text-4xl sm:text-5xl font-bold tracking-tight text-ink leading-[1.1]">
             The technical reference
             <br className="hidden sm:block" />
-            <span className="bg-gradient-to-r from-cyan-500 to-slate-600 bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-accent-lineage to-violet-500 bg-clip-text text-transparent">
               {' '}for building on {brand.appName}
             </span>
           </h1>
@@ -123,12 +123,12 @@ export function DocsHome() {
                     <Link
                       key={e.slug}
                       to={`/docs/${e.slug}`}
-                      className="group flex items-start gap-3 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3.5 hover:border-cyan-500/30 hover:bg-cyan-500/[0.03] transition-colors"
+                      className="group flex items-start gap-3 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3.5 hover:border-accent-lineage/30 hover:bg-accent-lineage/[0.03] transition-colors"
                     >
                       <FileText className="w-4 h-4 mt-0.5 text-ink-muted shrink-0" />
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-ink truncate group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
+                          <span className="text-sm font-semibold text-ink truncate group-hover:text-accent-lineage dark:group-hover:text-accent-lineage transition-colors">
                             {interp(e.title)}
                           </span>
                           {section && (
@@ -220,15 +220,15 @@ export function DocsHome() {
                   >
                     <Link
                       to={`/docs/${j.slug}`}
-                      className="group flex h-full flex-col rounded-xl border border-glass-border bg-canvas-elevated p-4 hover:border-cyan-500/30 hover:bg-cyan-500/[0.03] transition-colors"
+                      className="group flex h-full flex-col rounded-xl border border-glass-border bg-canvas-elevated p-4 hover:border-accent-lineage/30 hover:bg-accent-lineage/[0.03] transition-colors"
                     >
                       <div className="flex items-center justify-between">
-                        <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
+                        <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-accent-lineage/10 text-accent-lineage dark:text-accent-lineage">
                           <j.icon className="w-5 h-5" />
                         </div>
                         <span className="text-[10px] text-ink-muted">{j.time}</span>
                       </div>
-                      <h3 className="mt-3 text-sm font-bold text-ink group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
+                      <h3 className="mt-3 text-sm font-bold text-ink group-hover:text-accent-lineage dark:group-hover:text-accent-lineage transition-colors">
                         {j.title}
                       </h3>
                       <p className="mt-1 text-xs text-ink-muted leading-relaxed flex-1">
@@ -320,7 +320,7 @@ function FaqAccordion() {
             className={cn(
               'rounded-xl border transition-all duration-200',
               isOpen
-                ? 'border-cyan-500/20 bg-gradient-to-r from-cyan-500/5 to-slate-500/5'
+                ? 'border-accent-lineage/20 bg-gradient-to-r from-accent-lineage/5 to-violet-500/5'
                 : 'border-glass-border bg-canvas-elevated hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
             )}
           >
@@ -348,7 +348,7 @@ function FaqAccordion() {
       })}
       <Link
         to="/docs/faq"
-        className="inline-flex items-center gap-1 mt-2 text-sm font-semibold text-cyan-600 dark:text-cyan-400"
+        className="inline-flex items-center gap-1 mt-2 text-sm font-semibold text-accent-lineage dark:text-accent-lineage"
       >
         See all questions
         <ArrowRight className="w-4 h-4" />

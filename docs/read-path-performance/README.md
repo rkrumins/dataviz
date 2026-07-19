@@ -4,9 +4,9 @@ How the graph read paths — canvas open/expand, aggregated edges, `/edges/betwe
 top-level nodes, and trace — were re-engineered to hold sub-second server times and
 never-504 semantics on multi-million-element graphs, over real network round-trips.
 
-> **Status:** WS0–WS5 shipped on `feature/major-data-reload-refactor`. WS7 (saturation
-> control, cache TTLs, transport) shipped. WS6 landed its resilience half; the canvas
-> frontend adoption of the batched contract is deferred (see [Current status](#current-status--whats-deferred)).
+> **Status:** WS0–WS5 shipped. WS7 (saturation control, cache TTLs, transport)
+> shipped. WS6 landed its resilience half; the canvas frontend adoption of the
+> batched contract is deferred (see [Current status](#current-status--whats-deferred)).
 
 ---
 
@@ -42,6 +42,15 @@ Under load the two combined into a **saturation cascade**: FalkorDB runs on
 `THREAD_COUNT=4` workers; a handful of 10–26s queries occupied every worker, so
 queued queries blew the 5s provider read budget and returned **503 at exactly 5.03s**
 (`ProviderUnavailable`), which then tripped the shared frontend circuit breaker.
+
+```mermaid
+flowchart LR
+    G["one canvas gesture"] --> S["request storm<br/>(7+ /aggregated + between + compute)"]
+    S --> Q["queued on 6 browser conns<br/>× full RTT each"]
+    Q --> W["FalkorDB THREAD_COUNT=4<br/>workers all busy on 10–26s reads"]
+    W --> T["queue wait blows 5s budget<br/>→ 503 @ 5.03s (ProviderUnavailable)"]
+    T --> B["frontend circuit breaker trips<br/>→ whole canvas blacks out"]
+```
 
 Decisively, the 10–26s reads happened on a **healthy** graph (`_AggMeta`
 boundary / `stampVersion=2`, 595k cells, materialized that day) — proving the cost was
@@ -409,6 +418,11 @@ status machine (which must never render a failed load as an empty canvas).
 ---
 
 ## Appendix: FalkorDB gotchas encoded here
+
+> **Caution:** These are load-bearing constraints of the FalkorDB build, not
+> observations — every hot read path and its regression tests depend on them. Violate one
+> (an unlabeled anchor, a wrapped `ORDER BY`, an unnamespaced cache key) and you
+> reintroduce a full scan, a pagination skip, or a cross-tenant leak.
 
 - **No label-less URN index** on this build; labels are **case-sensitive**. Every hot
   anchor must be label-qualified (WS2) — an unlabeled `urn IN $list` is a full scan.

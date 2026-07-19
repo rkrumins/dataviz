@@ -1,8 +1,19 @@
 # Enterprise FalkorDB Architecture & Disaster Recovery Specification
 
+> **At a glance.** The reference architecture and operations spec for {brand}'s FalkorDB
+> graph read layer on GKE — for SREs and infra engineers deploying and running it. Covers
+> the multi-zonal Redis Cluster topology, auto-healing and failover, the memory / AOF /
+> engine-upgrade rules that keep an instance alive, cross-region DR, and the
+> topology-aware application client. FalkorDB is a **disposable projection** of Cloud SQL:
+> any graph rebuilds from the system of record, which is what makes an aggressive,
+> evictable posture safe.
+
 **Document Version:** 1.0
 **Target Environment:** Google Kubernetes Engine (GKE)
 **Workload:** Multi-Tenant Enterprise Graph Service (Heavy Reads, Spiky Writes)
+
+**Related:** [FalkorDB DR Runbook](/docs/falkordb-dr) (backup/restore procedures) ·
+[Self-Host Deployment](/docs/deployment) (single-host Compose path).
 
 ---
 
@@ -46,6 +57,35 @@ Kubernetes `topologySpreadConstraints` and strict `podAntiAffinity` are used to 
 | **Zone C** | `gke-node-c-1` | `fdp-7` | Replica | Shard 1 (Replica C) |
 | **Zone C** | `gke-node-c-1` | `fdp-8` | Replica | Shard 2 (Replica C) |
 
+The invariant this layout guarantees: **every shard keeps a master and at least one
+replica in the surviving zones through any single-zone loss** — no shard ever falls back
+to master-only reads.
+
+```mermaid
+flowchart TB
+    subgraph ZA["Zone A"]
+        A0["fdp-0 · Shard 1 MASTER"]
+        A1["fdp-1 · Shard 2 replica"]
+        A2["fdp-2 · Shard 3 replica"]
+    end
+    subgraph ZB["Zone B"]
+        B0["fdp-3 · Shard 2 MASTER"]
+        B1["fdp-4 · Shard 3 replica"]
+        B2["fdp-5 · Shard 1 replica"]
+    end
+    subgraph ZC["Zone C"]
+        C0["fdp-6 · Shard 3 MASTER"]
+        C1["fdp-7 · Shard 1 replica"]
+        C2["fdp-8 · Shard 2 replica"]
+    end
+    A0 -. replica .-> B2
+    A0 -. replica .-> C1
+    B0 -. replica .-> A1
+    B0 -. replica .-> C2
+    C0 -. replica .-> A2
+    C0 -. replica .-> B1
+```
+
 ---
 
 ## 4. Routing & Data Distribution
@@ -88,6 +128,11 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 
 ## 5a. Memory Sizing Rule (read this before raising maxmemory)
 
+> **Warning:** Setting `maxmemory` **above** the host/VM capacity converts graceful
+> `OOM command not allowed` write errors into host-level OOM **kills** of the whole
+> instance — each restart then pays a multi-minute AOF replay. `maxmemory` is a ceiling,
+> not a reservation. Grow the host first, then `maxmemory`.
+
 `maxmemory` must fit INSIDE the machine that runs the container, with
 headroom — it is a Redis-level ceiling, not a reservation, and setting
 it above the host/VM capacity converts graceful `OOM command not
@@ -114,6 +159,11 @@ minutes, during which liveness MUST NOT kill the process (see below).
 
 ## 5b. Local Durability: AOF Is Mandatory
 
+> **Important:** Snapshot-only persistence is **not** sufficient — a restart reloads the
+> last RDB and silently drops every write since it. Every shipped topology must run with
+> AOF on (`--appendonly yes --appendfsync everysec --aof-load-truncated yes`), which
+> bounds the loss window to ~1 second and tolerates a torn AOF tail after a crash.
+
 Every shipped topology (compose files, k8s manifests) runs FalkorDB with
 `--appendonly yes --appendfsync everysec --aof-load-truncated yes`.
 
@@ -129,6 +179,12 @@ refusing to start. Keep RDB snapshots enabled alongside AOF — they
 remain the fast-restart and DR-export mechanism.
 
 ## 5c. Engine Version Upgrades: Reload From RDB, Not AOF
+
+> **Caution:** Never carry an AOF incremental across an engine-version bump. Replaying an
+> incremental written by the previous engine can SIGSEGV *during the startup AOF load* —
+> and with `restart: unless-stopped` that becomes a permanent crash loop that the
+> healthcheck may still report as "(healthy)". Migrate persistence through the **RDB
+> base** (portable across versions) using the procedure below.
 
 **The AOF *incremental* is NOT portable across FalkorDB engine versions; the
 RDB *base* is.** FalkorDB persists graph mutations to the AOF incremental as a
@@ -183,6 +239,7 @@ In the event of a total GCP Region loss (e.g., `us-central1` goes completely off
 2. **Multi-Region Bucket:** Export snapshots automatically to a GCP Cloud Storage Bucket configured with **Multi-Region Replication** (e.g., replicating to `europe-west1`).
 3. **Cold Standby / Active-Passive:** Maintain a scaled-down GKE cluster in the secondary region. 
 4. **Recovery Protocol:** In a disaster, scale up the secondary GKE cluster, deploy the FalkorDB operator, and initialize the cluster using the latest RDB file from the replicated storage bucket.
+5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.
 
 ---
 
@@ -309,7 +366,6 @@ always on (the legacy bulk/streaming strategies and their
 `AGGREGATION_*_REBUILD_ENABLED` flags were removed; rollback is a version
 rollback). Sizing, tuning knobs and provider-protection parameters live in
 `docs/AGGREGATION_PIPELINE.md`.
-5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.
 
 ---
 

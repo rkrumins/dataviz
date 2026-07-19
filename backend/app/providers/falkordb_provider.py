@@ -8328,6 +8328,62 @@ class FalkorDBProvider(GraphDataProvider):
 
         return result
 
+    async def get_node_degrees(
+        self, urns: List[str], edge_types: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, int]]:
+        """TOTAL lineage degree (in/out) per URN over the FULL graph.
+
+        The canvas subtracts its loaded (internal) degree from these
+        totals to derive how much lineage lies OUTSIDE the current
+        view's scope — the "no lineage" vs "lineage outside this view"
+        distinction for curated subset views. Per-node adjacency
+        aggregates (never a set-membership XOR over all edges), with
+        label-bucketed URN seeks so no bucket falls back to a full node
+        scan.
+
+        Semantics: a URN ABSENT from the result is UNKNOWN (its bucket's
+        query failed) — callers must not treat absence as zero. URNs in
+        a successfully-queried bucket that simply have no edges are
+        explicitly zero-filled.
+        """
+        out: Dict[str, Dict[str, int]] = {}
+        if not urns:
+            return out
+        await self._ensure_connected()
+        rel_alt = "|".join(_sanitize_label(t) for t in (edge_types or []) if t)
+        rel_frag = f":{rel_alt}" if rel_alt else ""
+        for label, bucket_urns in await self._label_buckets(urns):
+            lbl_frag = f":{label}" if label else ""
+            bucket_ok = True
+            counts: Dict[str, Dict[str, int]] = {}
+            for direction, pattern in (
+                ("out", f"(n{lbl_frag})-[r{rel_frag}]->()"),
+                ("in", f"(n{lbl_frag})<-[r{rel_frag}]-()"),
+            ):
+                cypher = (
+                    f"MATCH {pattern} WHERE n.urn IN $urns "
+                    "RETURN n.urn AS urn, count(r) AS c"
+                )
+                try:
+                    result = await self._ro_query(
+                        cypher, params={"urns": bucket_urns}, timeout=2.0,
+                        op="node_degrees",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "get_node_degrees %s failed (%d urns, label=%r): %s",
+                        direction, len(bucket_urns), label, exc,
+                    )
+                    bucket_ok = False
+                    break
+                for row in (result.result_set or []):
+                    counts.setdefault(str(row[0]), {"in": 0, "out": 0})[direction] = int(row[1] or 0)
+            if not bucket_ok:
+                continue  # absent = unknown, never zero
+            for urn in bucket_urns:
+                out[urn] = counts.get(urn, {"in": 0, "out": 0})
+        return out
+
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
         if property_name in ("entityType", "entitytype"):

@@ -49,6 +49,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerVersionHistory: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
     signupEnabled: false,                 // fail CLOSED — this one is a door
+    toursEnabled: false,                  // experimental preview — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

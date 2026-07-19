@@ -128,6 +128,13 @@ interface LayerColumnProps {
   onProxyReveal?: (nodeId: string) => void
   /** "+N more" overflow — open the Lineage Lens for the full list. */
   onProxyMore?: () => void
+  /** The user scrolled this column to its true end (only fires on
+   *  columns that actually scroll) — the canvas uses it to auto-load
+   *  the next page of ROOTS one page ahead. */
+  onEndReached?: () => void
+  /** Draft mode: persist a resized width into the VIEW definition
+   *  (null clears it). Absent ⇒ resizes stay a personal override. */
+  onResizeLayer?: (layerId: string, width: number | null) => void
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -192,6 +199,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   anchorProxies,
   onProxyReveal,
   onProxyMore,
+  onEndReached,
+  onResizeLayer,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -217,17 +226,19 @@ export const LayerColumn = React.memo(function LayerColumn({
   const completeOnboardingStep = usePreferencesStore(s => s.completeOnboardingStep)
   const [endZoneHover, setEndZoneHover] = useState(false)
 
-  // Per-layer custom width (resize handle on the right edge). Persisted
-  // across sessions; null = default 320–480 flex range. When set, the
-  // column pins to the exact width (min == max) so dragging feels 1:1.
+  // Per-layer column width. Precedence: personal (localStorage)
+  // override → authored view width (layer.width, ships to all viewers)
+  // → default flex range. In DRAFT mode (onResizeLayer present) a drag
+  // writes the VIEW definition and clears any personal override so the
+  // editor sees exactly what viewers will see; outside draft, drags
+  // stay personal. Width pins exactly (min == max) so dragging is 1:1.
   const [customWidth, setCustomWidthState] = useState<number | null>(() => {
     try {
       const w = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')[layer.id]
       return typeof w === 'number' ? w : null
     } catch { return null }
   })
-  const setCustomWidth = useCallback((w: number | null) => {
-    setCustomWidthState(w)
+  const persistPersonalWidth = useCallback((w: number | null) => {
     try {
       const all = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')
       if (w === null) delete all[layer.id]
@@ -235,6 +246,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       localStorage.setItem('nx-layer-widths', JSON.stringify(all))
     } catch { /* storage unavailable — session-only width */ }
   }, [layer.id])
+  const effectiveWidth = customWidth ?? layer.width ?? null
 
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
@@ -880,6 +892,27 @@ export const LayerColumn = React.memo(function LayerColumn({
   // unlabeled numbers in different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
 
+  // ── End-reached sentinel (roots auto-paging) ─────────────────────────
+  // Fires when the user scrolls this column to its true end. Guards, in
+  // the order that killed the historical auto-load pump:
+  // - only on columns that ACTUALLY scroll (a short column is always "at
+  //   its end" and would otherwise drain every root page on load);
+  // - latched per flatTree.length, re-armed only when content grows;
+  // - 300ms dwell so momentum-scrolling through doesn't fire.
+  const endFiredForLenRef = useRef(-1)
+  useEffect(() => {
+    if (!onEndReached) return
+    if (flatTree.length === 0 || overflowCounts.below !== 0) return
+    if (endFiredForLenRef.current === flatTree.length) return
+    const el = scrollContainerRef.current
+    if (!el || el.scrollHeight <= el.clientHeight + 10) return
+    const t = setTimeout(() => {
+      endFiredForLenRef.current = flatTree.length
+      onEndReached()
+    }, 300)
+    return () => clearTimeout(t)
+  }, [onEndReached, overflowCounts.below, flatTree.length])
+
   const scrollToFlatIndex = useCallback((index: number, align: 'start' | 'end') => {
     if (index < 0 || index >= flatTree.length) return
     virtualizer.scrollToIndex(index, { align, behavior: 'smooth' })
@@ -971,7 +1004,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         "flex flex-col relative group/column transition-all duration-300 pointer-events-auto",
         isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1"
       )}
-      style={!isCollapsed ? { minWidth: customWidth ?? 320, maxWidth: customWidth ?? 480 } : undefined}
+      style={!isCollapsed ? { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 } : undefined}
       layout
     >
       {/* Subtle column separator line with gradient fade */}
@@ -986,18 +1019,35 @@ export const LayerColumn = React.memo(function LayerColumn({
           onPointerDown={(e) => {
             e.preventDefault()
             const startX = e.clientX
-            const startW = customWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            const startW = effectiveWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            let latest = startW
             const onMove = (ev: PointerEvent) => {
-              setCustomWidth(Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX))))
+              latest = Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX)))
+              setCustomWidthState(latest)  // live visual only — persisted once, on release
             }
             const onUp = () => {
               window.removeEventListener('pointermove', onMove)
               window.removeEventListener('pointerup', onUp)
+              const w = Math.round(latest)
+              if (onResizeLayer) {
+                // Draft: the width becomes part of the VIEW definition;
+                // drop any personal override so the editor sees what
+                // viewers will see.
+                persistPersonalWidth(null)
+                setCustomWidthState(null)
+                onResizeLayer(layer.id, w)
+              } else {
+                persistPersonalWidth(w)
+              }
             }
             window.addEventListener('pointermove', onMove)
             window.addEventListener('pointerup', onUp)
           }}
-          onDoubleClick={() => setCustomWidth(null)}
+          onDoubleClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
           title="Drag to resize this layer · double-click to reset"
           className="absolute -right-1 top-0 bottom-0 w-2 z-30 cursor-col-resize opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
@@ -1009,16 +1059,20 @@ export const LayerColumn = React.memo(function LayerColumn({
           layer has a resized width. Names the current width and offers
           the one-click reset, so the double-click gesture on the handle
           doesn't have to be discovered to get back to defaults. ── */}
-      {!isCollapsed && customWidth !== null && (
+      {!isCollapsed && effectiveWidth !== null && (
         <button
           type="button"
           data-canvas-interactive
-          onClick={() => setCustomWidth(null)}
-          title={`This layer has a custom width (${customWidth}px). Click to reset to the default width — or double-click the drag handle on the column edge.`}
+          onClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
+          title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
           className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 backdrop-blur-sm border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
           <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
-          Reset width · {customWidth}px
+          Reset width · {effectiveWidth}px
         </button>
       )}
 
@@ -1332,7 +1386,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               >
                 <button
                   onClick={() => handleBreadcrumbClick(null)}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-black/[0.04] hover:bg-black/[0.08] border border-black/[0.08] dark:bg-white/[0.06] dark:hover:bg-white/[0.12] dark:border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
                 >
                   <LucideIcons.Home className="w-3 h-3" />
                   <span className="text-[10px] font-medium">Root</span>
@@ -1342,7 +1396,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
                     <button
                       onClick={() => handleBreadcrumbClick(node)}
-                      className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
+                      className="px-2 py-1 rounded-lg bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.06] dark:bg-white/[0.04] dark:hover:bg-white/[0.08] dark:border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
                       title={node.name}
                     >
                       {node.name}
@@ -1420,7 +1474,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(0, 'start')}
-                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                     style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
                   >
                     <LucideIcons.ChevronUp className="w-3 h-3" />
@@ -1489,7 +1543,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
                     style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
                   >
                     <LucideIcons.ChevronDown className="w-3 h-3" />
@@ -1531,7 +1585,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
                   title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
                   style={{ borderLeft: `2px solid ${p.color}` }}
                 >
                   {p.direction === 'up'
@@ -1550,7 +1604,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
                   title="Every connection of the selected entity, grouped and searchable"
-                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
                   +{anchorProxies.moreCount} more · Open lens
@@ -1874,6 +1928,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
                         onLoadMore={() => handleLoadMore(item.node.id)}
+                        // One-page-ahead auto-load — OFF in Isolate/Hide
+                        // filter modes, where freshly-loaded children are
+                        // filtered out of the tree and the pinned row
+                        // would drain the parent (the historical pump).
+                        autoLoad={matchUrnSet.size === 0 || canvasFilterMode === 'highlight'}
                       />
                     </div>
                   )

@@ -116,6 +116,11 @@ interface PreferencesState {
    */
   showMissingConnectionIndicators: boolean
   toggleMissingConnectionIndicators: () => void
+  /** Feature flag: clicking the "outside this view" chip fetches a
+   *  bounded on-demand preview of the selected node's out-of-scope
+   *  partners into the Lineage Lens. Off by default. */
+  externalLineagePreview: boolean
+  toggleExternalLineagePreview: () => void
   /**
    * Flow ribbons: in Adaptive mode above the edge budget, draw one
    * Sankey-style band per (source layer → target layer) pair whose
@@ -136,6 +141,9 @@ interface PreferencesState {
   completeOnboardingStep: (step: string) => void
   dismissOnboarding: () => void
   resetOnboarding: () => void
+  /** Whether the user has hidden the Getting Started launcher from the sidebar. */
+  gettingStartedHidden: boolean
+  setGettingStartedHidden: (hidden: boolean) => void
 
   /**
    * Per-VIEW, per-layer node-sort overrides for read-only viewers, keyed
@@ -252,6 +260,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showMissingConnectionIndicators: true,
       toggleMissingConnectionIndicators: () =>
         set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
+      externalLineagePreview: false,
+      toggleExternalLineagePreview: () =>
+        set((state) => ({ externalLineagePreview: !state.externalLineagePreview })),
       showFlowRibbons: true,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
@@ -297,6 +308,8 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (state.onboardingCompletedSteps.includes(step)) return state
         return { onboardingCompletedSteps: [...state.onboardingCompletedSteps, step] }
       }),
+      gettingStartedHidden: false,
+      setGettingStartedHidden: (gettingStartedHidden) => set({ gettingStartedHidden }),
       dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
       resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
 

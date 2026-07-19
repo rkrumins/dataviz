@@ -81,9 +81,9 @@ export function DevLogin() {
   if (!enabled) {
     return (
       <div className="min-h-screen w-screen flex items-center justify-center bg-canvas">
-        <div className="max-w-md text-center p-8 rounded-lg border border-border bg-surface">
-          <h1 className="text-lg font-semibold mb-2">Dev Login disabled</h1>
-          <p className="text-sm text-text-muted">
+        <div className="max-w-md text-center p-8 rounded-2xl glass-panel">
+          <h1 className="text-lg font-semibold mb-2 text-ink">Dev Login disabled</h1>
+          <p className="text-sm text-ink-muted">
             Set <code>VITE_AUTH_CUSTOM_PROVIDER_ENABLED=true</code> and
             <code>AUTH_CUSTOM_PROVIDER_ENABLED=true</code> (backend) to
             enable the mock identity provider. Returning to login…
@@ -159,11 +159,11 @@ export function DevLogin() {
     <div className="min-h-screen w-screen flex items-center justify-center bg-canvas">
       <form
         onSubmit={onSubmit}
-        className="w-[480px] max-w-full p-8 rounded-lg border border-border bg-surface space-y-4"
+        className="glass-panel w-[480px] max-w-full p-8 rounded-2xl space-y-4"
       >
         <header className="space-y-1">
-          <h1 className="text-xl font-semibold">Dev Login (mock IdP)</h1>
-          <p className="text-xs text-text-muted">
+          <h1 className="text-xl font-semibold text-ink">Dev Login (mock IdP)</h1>
+          <p className="text-xs text-ink-muted">
             Simulates an AD-style identity returning email, names, claims,
             and groups. The payload is HMAC-signed into a short-lived
             cookie, then handed to ``/auth/custom/login`` which runs JIT
@@ -174,7 +174,7 @@ export function DevLogin() {
         <label className="block text-sm">
           External ID (SID / NameID / sub)
           <input
-            className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas font-mono text-xs"
+            className="input mt-1 font-mono text-xs"
             value={externalId}
             onChange={(e) => setExternalId(e.target.value)}
             required
@@ -185,7 +185,7 @@ export function DevLogin() {
           Email
           <input
             type="email"
-            className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas"
+            className="input mt-1"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
@@ -195,7 +195,7 @@ export function DevLogin() {
           <label className="block text-sm">
             First name
             <input
-              className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas"
+              className="input mt-1"
               value={firstName}
               onChange={(e) => setFirstName(e.target.value)}
             />
@@ -203,7 +203,7 @@ export function DevLogin() {
           <label className="block text-sm">
             Last name
             <input
-              className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas"
+              className="input mt-1"
               value={lastName}
               onChange={(e) => setLastName(e.target.value)}
             />
@@ -212,7 +212,7 @@ export function DevLogin() {
         <label className="block text-sm">
           Groups (comma-separated)
           <input
-            className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas font-mono text-xs"
+            className="input mt-1 font-mono text-xs"
             value={groupsText}
             onChange={(e) => setGroupsText(e.target.value)}
             placeholder="DataViz-Admins, Eng-All"
@@ -221,7 +221,7 @@ export function DevLogin() {
         <label className="block text-sm">
           Claims (JSON object)
           <textarea
-            className="mt-1 w-full px-3 py-2 rounded border border-border bg-canvas font-mono text-xs"
+            className="input mt-1 font-mono text-xs"
             rows={6}
             value={claimsText}
             onChange={(e) => setClaimsText(e.target.value)}
@@ -229,7 +229,7 @@ export function DevLogin() {
         </label>
 
         {error && (
-          <div className="text-sm rounded border border-danger/40 bg-danger/10 text-danger p-2">
+          <div className="text-sm rounded-lg border border-accent-warning/40 bg-accent-warning/10 text-accent-warning p-2">
             {error}
           </div>
         )}
@@ -237,11 +237,11 @@ export function DevLogin() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full py-2 rounded bg-accent-lineage text-on-accent font-medium disabled:opacity-50"
+          className="btn btn-primary btn-md w-full"
         >
           {submitting ? 'Signing in…' : 'Sign in as mock user'}
         </button>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-[11px] text-ink-muted">
           next=<code>{nextPath}</code> · dev-only · refuses to load when
           AUTH_CUSTOM_PROVIDER_ENABLED is off.
         </p>

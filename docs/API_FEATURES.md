@@ -1,6 +1,17 @@
 # Features API Contract
 
+> **At a glance:** The full HTTP contract for the admin feature-flag system — reading and updating flag values, managing feature definitions, and the authoritative flag set. Written for engineers building against or extending the Features admin surface.
+
+**This doc covers:**
+
+- The **read/write endpoints** (`GET`/`PATCH /features`, definition CRUD, deprecate)
+- **Optimistic concurrency** — how `version` prevents lost updates
+- The **authoritative flag set** and each flag's server-side enforcement
+- **Backend data sources**, migrations, and **frontend** fallback behaviour
+
 Admin feature flags: schema and categories come from the database; values are stored in `feature_flags`; page-level experimental notice is stored in `feature_registry_meta`. Base path: **`/api/v1/admin/features`**.
+
+> **Important:** Every flag in the authoritative set is enforced **server-side** — each has a real backend gate, not a UI-only toggle. A `capability` flag **fails open** when it cannot be resolved; a `security` flag **fails closed**.
 
 ---
 
@@ -72,6 +83,8 @@ Returns the current feature flag schema, categories, values, experimental notice
 Updates feature flag values, experimental notice copy, and/or per-feature “implemented” (not-yet-wired) status. Feature keys are validated against DB definitions and merged with defaults.
 
 ### Request body
+
+> **Warning:** An empty body `{}` resets **all** feature values to their schema defaults (equivalent to "Reset to defaults"). To update a subset without touching the rest, send those keys explicitly — omitted keys keep their current value only when at least one key is present.
 
 JSON object with **`version`** (required, integer from last GET), any subset of feature keys, and optionally **`experimentalNotice`** and **`implemented`**:
 
@@ -211,19 +224,40 @@ Same shape as GET. 404 if key not found.
 - **Why “patching an old version” happens**: Users don’t do it on purpose. It happens when the client’s view is **stale**: e.g. two admins both load (both see version 5), one saves (version becomes 6), the other saves without reloading (sends version 5). Without OCC the second save would overwrite the first. With OCC the server returns 409 so the second client can reload and retry instead of silently overwriting.
 - **Ensuring correctness**: The server performs an **atomic** update: `UPDATE feature_flags SET ... WHERE id = 1 AND version = :expected_version`. Only one concurrent PATCH can match; the other gets 0 rows updated and receives 409. So the version check is enforced in the database, not in application code, and is safe under concurrent requests.
 
+> **Tip:** On a `409 Conflict`, re-`GET` to pick up the new `version`, re-apply the user's edits, then re-`PATCH`. Never blindly retry with the old `version` — it will conflict again.
+
 ---
 
-## Notable Feature Flags
+## Feature Flags (authoritative set)
 
-The following feature flags are seeded at startup via `backend/app/db/seed_feature_registry.py`:
+The authoritative flag set lives in `backend/app/config/feature_wiring.py`; definitions are seeded at
+startup via `backend/app/db/seed_feature_registry.py`. **Every flag below is enforced server-side and
+wired** — each has a real backend gate (not a UI-only toggle). A `capability` flag **fails open** if it
+cannot be resolved; a `security` flag **fails closed**.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `editModeEnabled` | boolean | `true` | Enable inline node editing on the canvas |
-| `traceEnabled` | boolean | `true` | Enable lineage trace operations |
-| `signupEnabled` | boolean | `false` | Allow self-service user registration |
-| `announcementsEnabled` | boolean | `true` | Show global announcement banners. When disabled, banners are hidden even if active announcements exist. Toggle off to instantly hide all banners without deactivating individual announcements. |
-| `allowedViewModes` | string[] | `["graph", "hierarchy", "reference", "layered-lineage"]` | Available canvas view modes |
+**Lifecycle stages** (`stage`): `experimental` (half-built, must default OFF), `active` (fully wired,
+the steady state), `deprecated` (on its way out; gates being removed). All flags below are `active`.
+
+| Key | Type | Posture | Depends on | Server-side enforcement |
+|-----|------|---------|-----------|-------------------------|
+| `versioningEnabled` | boolean | capability | — | `versioning_gate.py` — every `/graph` write (drafts, commits, merges, reverts) and the enable-VC bootstrap job |
+| `traceEnabled` | boolean | capability | — | `POST /graph/trace` — upstream/downstream lineage traversal |
+| `editModeEnabled` | boolean | capability | — | Graph mutation routes — node/edge create, update, delete |
+| `allowedViewModes` | string[] | capability | — | `POST/PUT /views` — refuses a view whose type is not in the list |
+| `signupEnabled` | boolean | **security** (default OFF) | — | `POST /auth/register` — refuses strangers without an invite |
+| `announcementsEnabled` | boolean | capability | — | `GET /announcements` — serves an empty list when off |
+| `graphExportEnabled` | boolean | capability | — | Graph export routes |
+| `blankModelsEnabled` | boolean | capability | `versioningEnabled` | `POST /blank-graphs` — provision a lineage model with no data source |
+| `semanticLayerEditMode` | boolean | capability | — | Semantic-layer (ontology) edit routes |
+| `semanticLayerImportEnabled` | boolean | capability | `semanticLayerEditMode` | Ontology import routes |
+| `semanticLayerExportEnabled` | boolean | capability | — | `GET /admin/ontologies/{id}/export` — download the definition as JSON |
+| `semanticLayerAutoSuggest` | boolean | capability | — | `POST /admin/ontologies/suggest` — score layers against a graph |
+| `semanticLayerVersionHistory` | boolean | capability | — | Ontology version-history routes |
+| `semanticLayerNonAdminEditing` | boolean | **security** | `semanticLayerEditMode` | Allows non-admins to edit the semantic layer (fails closed) |
+
+> A `depends_on` flag is only effective when its parent is also on (e.g. `blankModelsEnabled` requires
+> `versioningEnabled`; `semanticLayerImportEnabled` and `semanticLayerNonAdminEditing` require
+> `semanticLayerEditMode`).
 
 > The `announcementsEnabled` flag gates the public `/api/v1/announcements` endpoint — when `false`, the endpoint returns an empty list regardless of active announcements in the database.
 
@@ -262,3 +296,12 @@ The Admin Features stack is designed for full lifecycle management with a single
 - **Values** returned by GET (and used in validation) only include non-deprecated keys. Deprecating a feature removes it from `feature_flags` config and from the response.
 - **Categories** are still seed-only; definition CRUD validates that `category` exists. Adding category CRUD would follow the same pattern (repo + routes + service).
 - **Frontend** components are schema-driven: they render from `schema` and `categories`; new or updated definitions appear after reload or after calling `createDefinition` / `updateDefinition` / `deprecateDefinition` and refreshing state from the returned response.
+
+---
+
+## Related
+
+- [Backend guide](/docs/backend) — where these routes live and how they are wired
+- [Frontend & UX](/docs/frontend) — the schema-driven Admin Features UI
+- [Developer Setup](/docs/setup) — env vars and the feature-registry seed/migration scripts
+- [Platform Services overview](/docs/services-overview) · [RBAC](/docs/rbac)

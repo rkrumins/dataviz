@@ -1,18 +1,22 @@
 # FalkorDB DR Runbook
 
-Companion to [INFRASTRUCTURE_LAUNCH_SCALE.md](./INFRASTRUCTURE_LAUNCH_SCALE.md) §8.
-The backup mechanism itself is
-`deploy/k8s/overlays/production/resources/falkordb-dr-backup.yaml`.
+> **At a glance.** The on-call procedure for backing up and recovering the FalkorDB graph
+> layer — verifying the backup CronJob, restoring an RDB snapshot (single-instance and
+> cluster), reseeding from Cloud SQL, and surviving region loss. Read the invariant below
+> first; it changes what "recovery" even means here.
+
+Companion to [INFRASTRUCTURE_LAUNCH_SCALE.md](./INFRASTRUCTURE_LAUNCH_SCALE.md) §8 and the
+architecture spec in [FalkorDB Deployment](/docs/falkordb-deployment). The backup mechanism
+itself is `deploy/k8s/overlays/production/resources/falkordb-dr-backup.yaml`.
 
 ## The invariant (read this before restoring anything)
 
-**DR never treats FalkorDB as data.** Every graph is a projection that rebuilds from
-Cloud SQL. If a snapshot and Cloud SQL disagree, **Cloud SQL wins and the graph is
-reseeded.** The RDB snapshots exist only to *shorten* a rebuild (RTO), which is why a
-6-hourly cadence is enough — the effective RPO is Cloud SQL's, not the snapshot's.
-
-Practical consequence: if you are ever unsure whether a snapshot is consistent,
-**don't restore it — reseed.** Restoring is an optimization, never a correctness step.
+> **Important:** **DR never treats FalkorDB as data.** Every graph is a projection that
+> rebuilds from Cloud SQL. If a snapshot and Cloud SQL disagree, **Cloud SQL wins and the
+> graph is reseeded.** RDB snapshots exist only to *shorten* a rebuild (RTO) — the
+> effective RPO is Cloud SQL's, not the snapshot's. If you are ever unsure a snapshot is
+> consistent, **don't restore it — reseed.** Restoring is an optimization, never a
+> correctness step.
 
 ## What the CronJob does
 
@@ -48,6 +52,19 @@ uploads successfully is worse than a missing one).
 
 > Restore only shortens a rebuild. The safe default is **reseed from Cloud SQL**.
 > Restore when the corpus is large enough that a full reseed's RTO is unacceptable.
+
+```mermaid
+flowchart TD
+    START(["Graph lost / corrupt"]) --> Q{"Corpus large AND<br/>snapshot trusted?"}
+    Q -->|"no"| RESEED["Reseed from Cloud SQL<br/>(drop graph → projector rebuilds)<br/>always correct"]
+    Q -->|"yes"| F1["1 · fetch + gunzip snapshot from GCS"]
+    F1 --> F2["2 · scale target to 0 · copy dump.rdb to PVC<br/>rm stale appendonlydir"]
+    F2 --> F3["3 · boot with --appendonly no · verify GRAPH.LIST"]
+    F3 --> F4["4 · CONFIG SET appendonly yes (rewrites AOF)"]
+    F4 --> F5["5 · revert manifest to --appendonly yes"]
+    F5 --> DONE(["Serving"])
+    RESEED --> DONE
+```
 
 FalkorDB loads `dump.rdb` at boot **only when AOF is off** — with `appendonly yes` it
 loads the AOF and ignores the RDB entirely. So a restore is: place the RDB, boot once
@@ -129,4 +146,4 @@ the projector rebuild it from Cloud SQL. This is always correct by the invariant
 Snapshots are in a **multi-region** bucket, so they survive a regional outage. Recovery
 is: promote the Cloud SQL cross-region replica, stand up the cluster in the secondary
 region, then either restore the RDBs (fast path) or reseed the hot graphs directly.
-`FALKORDB_DEPLOYMENT.md` §DR covers the cold-standby manifests.
+[FalkorDB Deployment §6](/docs/falkordb-deployment) covers the cold-standby manifests.

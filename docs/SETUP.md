@@ -3,6 +3,13 @@
 > Step-by-step instructions for getting {brand} running locally, whether
 > you're actively iterating on source code or just want the platform up.
 
+**This guide covers:**
+
+- The **mental model** — the `dev.sh` (source-iteration) vs `deploy.sh` (self-host) workflows
+- **Prerequisites**, **first-time setup**, and the **daily three-terminal** workflow
+- The `dev.sh` **subcommand reference**, persistence model, and **troubleshooting**
+- The full **environment-variable reference** and a **production checklist**
+
 For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 
 > **Working on the auth / SSO surface?** Read
@@ -28,7 +35,9 @@ For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 └───────────────────────────┴────────────────────────────┘
 ```
 
-The two stacks use **different compose project names** and **different volume names**, so they can coexist without data collisions. Mixing them (running `deploy.sh` while `dev.sh infra` is up, or vice versa) causes port conflicts — pick one.
+The two stacks use **different compose project names** and **different volume names**, so they can coexist without data collisions.
+
+> **Warning:** Don't run both stacks at once. Starting `deploy.sh` while `dev.sh infra` is up (or vice versa) causes **port conflicts** — pick one workflow per machine.
 
 ### Three capabilities you care about
 
@@ -86,7 +95,9 @@ Access:
 | Backend API docs | http://localhost:8000/docs |
 | FalkorDB browser UI | http://localhost:3000 |
 
-Default admin: `admin@nexuslineage.local` / `admin123` (change after first login).
+Default admin: `admin@nexuslineage.local` / `admin123`.
+
+> **Caution:** The default admin password is only for local dev. Change it after first login, and never carry these bootstrap credentials into a shared or production deployment — see the [Production Environment Checklist](#production-environment-checklist).
 
 ### Seed demo graph data (optional)
 
@@ -203,7 +214,7 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
 | `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |
-| `ADMIN_PASSWORD` | `changeme` | Bootstrap admin password |
+| `ADMIN_PASSWORD` | `admin123` | Bootstrap admin password (from `.env.example`) |
 
 ### Security
 
@@ -222,7 +233,7 @@ Before deploying to production, ensure these **mandatory** settings are configur
 |-------------|-----|-----|
 | **A real `MANAGEMENT_DB_URL`** | The dev fallback points at `docker-compose.dev.yml`'s local Postgres — fine for dev, not for production | Set `MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic` to your production database |
 | **Credential encryption key** | Without it, provider credentials (passwords, API tokens) are stored in **plaintext** | Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` → set as `CREDENTIAL_ENCRYPTION_KEY` |
-| **Change admin password** | Default bootstrap password is `changeme` / `admin123` | Set `ADMIN_PASSWORD` env var to a strong password, or change via the admin UI after first login |
+| **Change admin password** | Default bootstrap password is `admin123` | Set `ADMIN_PASSWORD` env var to a strong password, or change via the admin UI after first login |
 | **Specific CORS origins** | The dev default only allows `http://localhost:5173`; a production deployment must allow-list its real frontend domain(s), not `*` | Set `CORS_ALLOWED_ORIGINS` to your actual frontend domain(s) |
 | **JWT secret key** | Auto-generated key changes on restart, invalidating all tokens | Set a stable `JWT_SECRET_KEY` value |
 
@@ -284,4 +295,10 @@ synodic/
 
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VM / self-host guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system overview
-- [superpowers/specs/2026-04-18-resilient-dev-environments-design.md](superpowers/specs/2026-04-18-resilient-dev-environments-design.md) — design rationale for the current dev-env resilience model
+
+### Related in-app docs
+
+- [Backend guide](/docs/backend) — services, API surface, and startup lifecycle
+- [Frontend & UX](/docs/frontend) — the Vite SPA you run with `./dev.sh frontend`
+- [Platform Services overview](/docs/services-overview) — process roles (`SYNODIC_ROLE`) and topology
+- [Local integration testing](/docs/integration-testing) — the draft/branch graph journey

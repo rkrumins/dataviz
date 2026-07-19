@@ -445,6 +445,30 @@
         "Announcements are hidden, not deactivated \u2014 turning this back on restores them"
       ],
       "dependsOn": []
+    },
+    {
+      "key": "toursEnabled",
+      "name": "Guided product tours",
+      "description": "Offer new users an interactive, in-product walkthrough of the workspace \u2014 a spotlight tour of search, navigation, personas, and help \u2014 and let anyone replay it from Help.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn on to greet first-time users with a short guided tour. It's client-side only and safe to toggle at any time; users can always skip or replay it.",
+      "impactWhenOff": "No tour is ever shown or offered, and the 'Take the tour' action is hidden. Nothing else changes \u2014 the Help panel and every guide stay available. This is a preview; it ships off until you switch it on.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": false,
+      "enforcedServerSide": false,
+      "posture": "capability",
+      "serverGates": [],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "The Help panel and every guide stay available whether tours are on or off"
+      ],
+      "dependsOn": []
     }
   ],
   "categories": [
@@ -608,7 +632,8 @@
     "semanticLayerExportEnabled": true,
     "semanticLayerAutoSuggest": true,
     "semanticLayerVersionHistory": true,
-    "announcementsEnabled": true
+    "announcementsEnabled": true,
+    "toursEnabled": false
   },
   "experimentalNotice": {
     "title": "Early access",

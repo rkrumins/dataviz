@@ -1,18 +1,20 @@
 # RBAC
 
-> Phase 7 enterprise hardening folded into Phase 5/6 taxonomy.
-> Last updated: 2026-06-04 (Phase 7 — session-kill on revoke,
-> time-bound bindings, audit log, custom-role picker filter,
-> workspace deletion cascade). The Phase-5 migration
-> `20260603_1100_rbac_uplift` is unchanged.
+> **At a glance.** The authorization reference for {brand} — for operators granting
+> access and engineers writing permission checks. It covers the **eight built-in roles**,
+> the namespaced **permission catalogue**, the central **resolver** that folds role
+> bindings into per-request claims, the typed **403 contract**, and the surrounding
+> machinery: custom roles, invites, time-bound bindings, session revocation, and the
+> audit log.
 
-> **Note on "Phase N" numbering.** The phase numbers in this document
-> (Phase 5 / 6 / 7 …) track *RBAC role-taxonomy* evolution only. A
-> separate document — `docs/audits/rbac-sso-audit-2026-06-05.md` —
-> references a migration it calls "Phase 18"
-> (`20260605_1200_phase18_ws_reads.py`), which belongs to an unrelated
-> workspace-reads scaling work-stream. The two counters are
-> independent; don't read them as one sequence.
+The authorization model: eight built-in roles, a namespaced permission
+catalogue, and a central resolver that folds a user's role bindings into
+per-request permission claims. A failed check returns a typed 403 body.
+Custom roles extend the built-in set within the same rules.
+
+> **Caution:** `super_admin` carries `system:admin`, which short-circuits **every**
+> permission check platform-wide. Bind it sparingly (platform owner / SRE break-glass)
+> and prefer `org_admin` for cross-workspace operators who shouldn't own users or SSO.
 
 ## TL;DR
 
@@ -74,6 +76,23 @@ filter.
 resolver's auto-implication rule — see *Auto-implication* below.
 
 ## Resolver behaviour
+
+A permission check resolves through a fixed short-circuit ladder — the two global
+shortcuts win before any per-workspace bucket is consulted:
+
+```mermaid
+flowchart TD
+    Q["has_permission(claims, perm, workspace_id?)"] --> A{"system:admin ∈<br/>global_perms?"}
+    A -->|"yes"| ALLOW["✅ allow (unconditional)"]
+    A -->|"no"| B{"perm is workspace-scoped<br/>AND system:org-admin ∈ global_perms?"}
+    B -->|"yes"| ALLOW
+    B -->|"no"| C{"perm in the matching<br/>bucket?<br/>(global_perms or ws_perms[ws])"}
+    C -->|"yes"| ALLOW
+    C -->|"no"| DENY["⛔ typed 403<br/>missing_permission"]
+```
+
+The buckets themselves are built by the resolver from a user's bindings, applying the
+category × scope filter and `workspace:admin` auto-implication described below.
 
 ### 1. Category × scope filter
 
@@ -195,481 +214,181 @@ roles; bundling `system:users:manage` into a workspace-scoped custom
 role will silently emit nothing when bound at workspace scope. Bundle
 permissions whose category matches the role's scope.
 
-## Phase 6 hardening — global role assignment
+The create-role permission picker filters by the role's selected
+scope: workspace roles see `workspace:*` + `resource:*` only, global
+roles see `system:*` + `resource:*` only. Switching scope mid-edit
+clears any now-invalid selections, so an operator can't accidentally
+bundle a cross-category permission the resolver would drop.
 
-The admin "Change role" flow had a dual-store footgun: it wrote to
-`user_roles` only, leaving `role_bindings` empty. The user's display
-role flipped but the resolver returned empty claims, so the freshly
-promoted "super_admin" 403'd on every permission check.
+## Assigning and revoking access
 
-Phase 6 fix: `user_repo.set_global_role(session, user_id, role_name)`
-writes both tables in one transaction. The endpoint at
-`PUT /admin/users/{user_id}/role` and the bootstrap admin path in
-`main.py` both go through it. Backed by a regression test
-(`test_change_role_writes_both_user_roles_and_role_bindings`).
+### Global role assignment writes both stores
 
-The `ChangeRoleRequest` DTO now restricts `role` to the **globally
-assignable** set:
+`user_repo.set_global_role(session, user_id, role_name)` writes
+`user_roles` and `role_bindings` in one transaction, so a promoted
+user's display role and resolved claims always agree. `PUT
+/admin/users/{user_id}/role` and the bootstrap admin path in
+`main.py` both go through it.
 
-* `super_admin`
-* `org_admin`
+`ChangeRoleRequest` restricts `role` to the **globally assignable**
+set — `super_admin` and `org_admin`. Workspace-tier roles
+(`workspace_admin` / `workspace_member` / `workspace_viewer`) are
+bound via the workspace-members endpoint, which supplies the
+workspace context they need; binding them globally would be dropped
+by the resolver's category filter anyway. The AdminUsers UI dropdown
+enforces the same restriction and hides `super_admin` when the caller
+lacks `system:admin`.
 
-Workspace-tier roles (`workspace_admin` / `workspace_member` /
-`workspace_viewer`) are bound via the workspace-members endpoint,
-not here — they need a workspace context, and the resolver's category
-filter would drop them anyway. The AdminUsers UI dropdown enforces
-the same restriction and hides `super_admin` when the caller lacks
-`system:admin`.
+### View-grants gating
 
-## Phase 6 hardening — view-grants router gate
-
-`/views/{view_id}/grants` previously enforced its "creator or
-workspace admin" rule inline. A regression that deleted the inline
-`_ensure_can_manage_grants()` call would silently open the endpoint;
-the grep-coverage tests in `test_rbac_endpoint_coverage.py` wouldn't
-catch it because they look for router-level `requires(...)`.
-
-Phase 6 promotes the check to a router-level FastAPI dependency
-`can_manage_view_grants` that:
+`/views/{view_id}/grants` is gated by the router-level FastAPI
+dependency `can_manage_view_grants`, which:
 
 1. Loads the view (404 on miss).
 2. Allows the creator.
 3. Allows a workspace admin of the view's workspace.
 4. Allows `system:admin`.
-5. Otherwise 403s with the structured Phase-5 body.
+5. Otherwise 403s with the structured body above.
 
-The dep returns the loaded view so handlers don't re-query. The
-inline helper `_ensure_can_manage_grants` stays as a pure function
-so the rule lives in one place.
+The dependency returns the loaded view so handlers don't re-query; the
+pure helper `_ensure_can_manage_grants` keeps the rule in one place.
 
-## Phase 6 hardening — denial audit
+### Session revocation on access narrowing
 
-Every `requires()` 403 emits a `user.access_denied` outbox event,
-sampled hourly per `(user, permission, scope)` to avoid drowning
-the audit signal under a hostile scripted scan. The sampling uses
-the existing revocation backend (Redis in prod, in-memory in tests).
-Emission is wrapped in try/except so the 403 is never blocked by an
-outbox or Redis failure — the audit is best-effort.
+Every mutation that narrows access wires
+`revocation_service.revoke_all_user_sessions` so a stale JWT can't
+outlive the change (the JWT TTL, default 5 min, is the fallback):
 
-Payload shape:
-
-```json
-{
-  "event_type": "user.access_denied",
-  "payload": {
-    "user_id": "usr_alice",
-    "permission": "workspace:datasource:read",
-    "scope": {"type": "workspace", "id": "ws_finance"},
-    "hour_bucket": 484321
-  }
-}
-```
-
-Operators wire this into their SIEM or log aggregator to drive
-"access-denied spikes" alerts.
-
-## Phase 7 hardening — session-kill on demote
-
-Pre-Phase-7, an admin who fired a contractor and revoked their
-workspace binding left the contractor's JWT valid for up to
-`JWT_EXPIRY_MINUTES` (default 5 min). For enterprise security
-postures that's too slow.
-
-Phase 7 wires `revocation_service.revoke_all_user_sessions` into
-every mutation that narrows access:
-
-* `DELETE /admin/workspaces/{ws}/members/{binding}` — user binding
-  → revoke that user's sessions; group binding → revoke every group
+* `DELETE /admin/workspaces/{ws}/members/{binding}` — a user binding
+  revokes that user's sessions; a group binding revokes every group
   member's sessions.
-* `PUT /admin/users/{id}/role` — revoke target user's sessions.
-* `PUT /admin/roles/{name}` — revoke every user bound to that role
-  (direct + via group). Emits `rbac.role.cascade_revoked` with the
+* `PUT /admin/users/{id}/role` — revokes the target user's sessions.
+* `PUT /admin/roles/{name}` — revokes every user bound to that role
+  (direct + via group) and emits `rbac.role.cascade_revoked` with the
   affected user count.
 
-Every kill is best-effort: a Redis outage logs and continues — the
-JWT TTL is still the safety net.
+Every kill is best-effort: a Redis outage logs and continues.
 
-## Phase 7 hardening — time-bound bindings
+Revocation is consulted in `get_current_user`, so **every**
+authenticated request checks the revoked-session set — not just
+`requires(...)` routes. A revoked session returns 401, the frontend
+silently refreshes, and the reissued JWT carries re-resolved claims;
+`RequirePermission` guards and the TopBar admin cog react to the new
+claims without a manual reload. This is what lets a just-promoted
+admin reach the admin UI mid-session. Revocation fails open on a Redis
+outage (an incident must not lock every user out); `requires(...)`
+keeps a fail-closed probe for sensitive permissions like `system:admin`
+/ `workspace:admin`.
 
-Contractor / temp access / on-call rotations need bindings that
-auto-expire. The `RoleBindingORM.expires_at` column has always
-existed and the resolver always honoured it; Phase 7 surfaces it
-through the admin API and UI.
+> **Important:** Revocation is deliberately asymmetric under a Redis outage — it
+> **fails open** for ordinary checks (a Redis incident must not lock every user out)
+> but **fails closed** for the sensitive-permission probe. A revoked JWT is otherwise
+> caught on the very next request because `get_current_user` consults the revoked-session
+> set on **every** authenticated call, not only `requires(...)` routes.
 
-* `POST /admin/workspaces/{ws}/members` accepts:
-  * `expiresAt` (ISO timestamp) OR
-  * `expiresIn` (duration shortcut: `"24h"` / `"7d"` / `"2w"` —
-    accepts `h`/`d`/`w` units, capped at 365 days).
-  Setting both is a 422.
+### Time-bound bindings
+
+`RoleBindingORM.expires_at` auto-expires a binding — contractor, temp,
+or on-call access. The resolver always honours it, and the admin API
+surfaces it:
+
+* `POST /admin/workspaces/{ws}/members` accepts `expiresAt` (ISO
+  timestamp) **or** `expiresIn` (`"24h"` / `"7d"` / `"2w"` —
+  `h`/`d`/`w` units, capped at 365 days). Setting both is a 422.
 * `PUT /admin/workspaces/{ws}/members/{binding}/expiry` — extend,
-  change, or clear (empty body → permanent) the expiry without
-  re-creating the binding.
-* `WorkspaceMembers` UI gains an "Access duration" picker
-  (Permanent / 24h / 7d / 30d / 90d) on the add-member modal and a
-  countdown badge on the member list.
+  change, or clear (empty body → permanent) the expiry in place.
+* The `WorkspaceMembers` UI has an "Access duration" picker
+  (Permanent / 24h / 7d / 30d / 90d) and a countdown badge on the
+  member list.
 
-Recipe: "Give a contractor 30-day access" → bind workspace_member
-with `expiresIn: "30d"`. Audit log shows the bind + the expiry.
+Recipe: "Give a contractor 30-day access" → bind `workspace_member`
+with `expiresIn: "30d"`.
 
-## Phase 7 hardening — audit log lens
+### Workspace deletion cascade
 
-Every Phase 5+ RBAC mutation already wrote to the outbox. Phase 7
-gives operators + compliance a UI:
+Deleting a workspace cascades both the `RoleBindingORM` rows pointing
+at it (`delete_scope_bindings`) and the custom `RoleORM` rows scoped
+to it (`role_repo.delete_workspace_scoped_roles`), which couldn't be
+bound anywhere else. A `rbac.workspace.roles_cascaded` outbox event
+lists the removed bindings + roles.
 
-* `GET /api/v1/admin/audit` (gated `system:admin`) — filter by
-  event type prefix (`rbac.role.*`), actor, target user / role,
-  workspace, timestamp window. Cursor pagination (50/page default,
-  500 max).
-* `GET /api/v1/admin/audit/event-types` — distinct event types
-  for the FE filter dropdown.
-* `/admin/audit` — admin page with KPI strip by category
-  (workspace bindings / role lifecycle / permissions / user
-  lifecycle) and a click-to-expand JSON payload table.
+## Invites
 
-Compliance recipe: "Who promoted Alice last week?" → filter
-`targetUserId=alice`, `eventType=user.role_changed`,
-`fromTs=<7-days-ago>`.
-
-## Phase 7 hardening — custom-role permission picker
-
-The resolver silently drops cross-category permissions
-(`system:*` perms in a workspace-scoped role's bundle, vice versa
-— see the category × scope filter). Pre-Phase-7 the create-role
-modal showed all perms; operators got confused when "I bundled
-system:users:manage into this workspace role" did nothing.
-
-Phase 7: the picker filters by the role's selected scope.
-Workspace roles see `workspace:*` + `resource:*` only; global
-roles see `system:*` + `resource:*` only. Switching scope mid-edit
-clears any silently-invalid selections.
-
-## Phase 14 — Two-column invite modal + shareable-group override
-
-* **Modal layout.** The Phase-13 invite modal stacked every
-  section vertically and used the default `max-w-md` shell, so
-  with No-role + Standard Roles + Workspace + Groups + Recipient +
-  Expiry + Summary present it overflowed the viewport and the
-  Generate Link button scrolled off-screen.
-
-  Phase 14 widens the shell to `max-w-3xl` only for the invite
-  modal, caps it at `90vh`, splits the body into a responsive
-  two-column grid (LEFT = role catalogue, RIGHT = Workspace +
-  Groups + Recipient), and pins the Cancel / Generate Link
-  buttons in a sticky footer. The summary preview spans full
-  width below the grid. The page now fits comfortably in a
-  standard laptop viewport, with the role list scrolling
-  internally if there are many custom roles.
-
-* **Shareable-group override.** Phase 13's rule "groups attached
-  → email required" treats every group invite the same. Real
-  enterprise workflows include things like "everyone on the
-  Design Slack click this link to join the Designers group" —
-  there's no per-person email to pin.
-
-  Phase 14 adds an opt-in escape hatch:
-
-  * `CreateInviteRequest.allow_shareable_with_groups` (alias
-    `allowShareableWithGroups`). Default `False` — the safe rule
-    stands.
-  * The frontend exposes the override as a small inline
-    "→ Make this a shareable group invite" link inside the
-    amber email-required callout. Clicking it opens an inline
-    confirmation panel with the exact group names being
-    granted, an "I understand this link can be shared and
-    reused" checkbox, and Cancel / Make-it-shareable buttons.
-  * Once confirmed, the amber callout flips to a softer slate
-    "Shareable group invite" notice with a clear ✕ to revert.
-    Email becomes truly optional; Generate Link enables.
-  * The override is automatically revoked if conditions change
-    (a privileged role gets added, all groups get removed).
-
-* **What the override does NOT bypass.**
-
-  * **Privileged roles** (`workspace:admin`, any `system:*`)
-    still require an email pin even with the override on. A
-    workspace-admin grant is a per-identity escalation; the
-    override only relaxes the groups-cross-workspace rule.
-  * **Protected groups** (IdP-managed) are still refused.
-
-* **Audit trail.** Override invites emit a distinct event type
-  `user.invite_created_shareable_with_groups` (vs the standard
-  `user.invite_created`), so an auditor can review who used the
-  override. The payload includes the role, group ids, and
-  `shareable_groups_override: true` for filtering.
-
-## Phase 13 — Standard vs Custom roles + Groups in invites
-
-The Phase-11 invite modal had two rough edges in the wild:
-
-* **Legacy system roles got mis-classified as Custom.** The
-  classifier used a hardcoded name list (`super_admin / org_admin /
-  workspace_admin / workspace_member / workspace_viewer`) — but a
-  dev DB where the Phase-5 migration never ran still has rows for
-  `admin / user / viewer` with `is_system=true`. Those legacy rows
-  fell into "Custom Roles" with the generic Sparkles icon.
-* **No way to add the new user to Groups.** Workspaces were
-  reachable via workspace-tier roles, but operators couldn't onboard
-  a user into `Engineering` + `Data Platform` in one step.
-
-Phase 13:
-
-* **Classify by `isSystem`, not by name.** Any role with
-  `is_system=true` lands in "Standard Roles" — the legacy ones and
-  any future system additions. Operator-created roles stay in
-  "Custom Roles". Smart icon/colour fallback (`getRoleVisual`) picks
-  a sensible visual for any role without a curated entry:
-  privileged → Shield/amber, workspace-scoped → UserCog/sky, global
-  system → Globe/slate, else Sparkles/emerald.
-
-* **Groups multi-select on invite.** Admin picks zero or more
-  groups from the live catalogue; on signup, the new user is added
-  to each via `group_repo.add_member`. Group memberships span every
-  workspace the group is bound to.
-
-* **Security rule:** any invite that attaches groups is
-  email-bound. Group bindings can reach across workspaces in ways
-  the inviter doesn't see at mint time — we won't let a forwarded
-  shareable link grant that. Protected groups (IdP-managed) are
-  refused at the create step.
-
-* **Live invite summary.** Above the Generate Link button, a small
-  receipt narrates the invite in plain English ("Activate a new
-  account, grant Workspace Admin in Finance, add to groups
-  Engineering, Data Platform. Email-bound to ada@x.com. Link
-  expires in 30d.") — adapts live as the form changes.
-
-* **No-role hero card** sits above the role catalogue as a clear
-  "skip this step" affordance rather than a stray role in the list.
-
-* **Signup banner** mentions groups: "You'll join the Engineering
-  and Data Platform groups."
-
-## Phase 11 — Invite By Link supports all roles (tiered)
-
-Invites are no longer limited to the global admin tiers. An admin can
-now mint an invite for **any** role — workspace tiers
-(`workspace_member`, `workspace_viewer`, `workspace_admin`) and
-custom roles — with the workspace bound on signup.
-
-**Two link classes, by privilege:**
+An admin can mint an invite for **any** role — global tiers, workspace
+tiers, or custom roles — with the workspace bound on signup. Two link
+classes, split by privilege:
 
 * **Shareable link** (no email pin, reusable until expiry) — for
   **non-privileged** roles: `workspace_member`, `workspace_viewer`,
   custom roles with no admin/manage perm, or **no role** (a plain
-  activated account). "Everyone on the team use this link to join
-  Finance as Viewer."
-* **Email-bound link** (token pins a target email, reusable until
+  activated account).
+* **Email-bound link** (token pins a target email; reusable until
   expiry but only that address can accept) — **required** for
-  **privileged** roles: `super_admin`, `org_admin`,
-  `workspace_admin`, and any custom role carrying `workspace:admin`
-  or a `system:*` perm. A forwarded link can't escalate an
-  unintended identity. (This tightens Phase 6 — admin invites now
-  need a target email.)
+  **privileged** roles: `super_admin`, `org_admin`, `workspace_admin`,
+  and any custom role carrying `workspace:admin` or a `system:*` perm.
+  A forwarded link can't escalate an unintended identity.
 
-**Privileged** = the role's permission bundle includes
-`workspace:admin` or any `system:*`. Computed from
-`role_permissions`, so custom roles classify automatically.
+**Privileged** is computed from `role_permissions` (includes
+`workspace:admin` or any `system:*`), so custom roles classify
+automatically. The invite token (`create_invite_token`) carries
+optional `workspace_id` and `email`; signup (`auth.py`) honours every
+role — global tiers via `set_global_role`, everything else via a
+`role_binding` at the right scope, re-validated for bindability at
+signup time. Email-bound invites reject a mismatched signup email.
 
-**Token** (`create_invite_token`) carries optional `workspace_id`
-and `email`. **Signup** (`auth.py`) honours every role: global tiers
-via `set_global_role`; everything else via a `role_binding` at the
-right scope, re-validated for bindability at signup time. Email-bound
-invites reject a mismatched signup email.
+**Groups on invite.** An invite can attach zero or more internal
+groups from the live catalogue; on signup the new user is added to each
+via `group_repo.add_member`. Any invite that attaches groups is
+email-bound by default (a group binding can reach across workspaces the
+inviter doesn't see at mint time). Protected (IdP-managed) groups are
+refused at the create step. An opt-in **shareable-group override**
+(`allow_shareable_with_groups`) relaxes the email requirement for the
+groups-cross-workspace rule only — it never bypasses the privileged-role
+email pin or the protected-group refusal, and it is auto-revoked if a
+privileged role is added or all groups are removed. Override invites
+emit `user.invite_created_shareable_with_groups` (vs the standard
+`user.invite_created`) with `shareable_groups_override: true` for
+auditing.
 
-### The access model invites respect
+The invite modal classifies roles by `isSystem` (built-in → "Standard
+Roles", operator-created → "Custom Roles") and a live summary narrates
+the invite in plain English as the form changes.
 
-> **A user has no access to any workspace unless explicitly granted
-> a binding in that workspace.** Invites don't change this.
+> **The access model invites respect.** A user has no access to any
+> workspace unless explicitly granted a binding in that workspace.
+> A plain invite (no role) → activated account, zero bindings, no
+> workspace access. A non-privileged **global** custom role → a global
+> binding whose workspace perms the resolver drops → still no workspace
+> access. Only an explicit **workspace** binding grants access to that
+> one workspace; only `super_admin` and `org_admin` cross workspaces,
+> via the resolver short-circuits.
 
-* A **plain invite** (no role) → activated account, zero bindings →
-  no workspace access at all.
-* A **non-privileged global** custom role → shareable, gets a
-  global binding, but the resolver's category × scope filter drops
-  any workspace perms bundled in it → still no workspace access.
-* Only an explicit **workspace binding** (`workspace_member` /
-  `viewer` / `admin` / custom workspace role) grants access to that
-  one workspace.
-* Only `super_admin` (`system:admin`) and `org_admin`
-  (`system:org-admin`) cross workspaces — via the resolver
-  short-circuits, not via per-workspace bindings.
+## Audit log
 
-Regression coverage:
-`test_invite_roles.py::test_plain_invite_user_has_no_workspace_access`
-and `::test_custom_global_role_grants_no_workspace_access` prove it.
+Every state-changing RBAC/auth mutation emits an outbox event; the
+relay lands it in `auth_audit_log`. Operators read it through:
 
-## Phase 10 — promoted admin sees admin UI without re-login
+* `GET /api/v1/admin/audit` (gated `system:admin`) — filter by event
+  type prefix (`rbac.role.*`), actor, target user / role, workspace,
+  and timestamp window. Cursor pagination (50/page default, 500 max).
+  Every row carries a `severity` (`info` / `warning` / `critical`) and
+  a one-line human `summary` computed from the event-type catalogue;
+  unknown events fall back to `info` + the raw type.
+* `GET /api/v1/admin/audit/event-types` — distinct event types for the
+  filter dropdown.
+* `/admin/audit` — the admin page: a three-mode scope filter
+  (**Security** default / **Activity** / **Everything**), time-range
+  chips, a KPI strip by category, click-to-expand JSON payloads, and
+  clickable actor / target / workspace links.
 
-Pre-Phase-10 a real bug: an admin promoted to `super_admin` while
-logged in had to manually log out and log back in before the admin
-UI worked. Two compounding root causes:
+Every `requires()` 403 also emits a `user.access_denied` event,
+sampled hourly per `(user, permission, scope)` so a hostile scan
+can't drown the signal. Emission is best-effort (wrapped in
+try/except) so an outbox or Redis failure never blocks the 403.
 
-1. **Revocation only fired on `requires(...)` routes.**
-   `get_current_user` — the base auth dep used by every other
-   protected endpoint, including those gated by `require_admin` —
-   never consulted the revoked-sid set. So a stale JWT survived
-   indefinitely on `require_admin` routes (`auth/dependencies.py`
-   carried an explicit "does NOT consult revocation" docstring).
-
-2. **`require_admin` had a legacy DTO-role fallback.** The
-   `user.role` field on the User DTO is re-read from `user_roles`
-   on every `validate_session`, so post-promotion it correctly
-   showed `super_admin`. `require_admin` accepted the DTO role
-   AND let the user in even when the JWT's `system:admin` claim
-   was missing — but every endpoint gated by `requires(...)` then
-   403'd because the claim wasn't there. The user saw a half-
-   functional admin page.
-
-**Phase 10 fix:**
-
-* Revocation moves into `get_current_user`. Every authenticated
-  request now consults the set. A revoked session → 401 → silent
-  refresh → fresh JWT with re-resolved claims → request retried
-  → admin works. Fail-open on Redis outage (an incident must
-  not lock every authenticated user out); `requires(...)` keeps
-  its fail-closed probe for sensitive permissions.
-* `require_admin` is simplified to require the `system:admin`
-  claim. The legacy DTO-role path is gone — Phase 6's
-  `set_global_role` made the two stores agree by construction,
-  so any state where DTO says admin but claim doesn't is a
-  stale-JWT state that should silent-refresh, not be accepted.
-* `requires(...)` drops its duplicate revocation block (now done
-  upstream in `get_current_user`); keeps the fail-closed probe
-  for sensitive permissions like `system:admin` /
-  `workspace:admin`.
-* Frontend `tryRefresh` calls `useAuthStore.refreshPermissions()`
-  after a successful silent refresh. The route guards
-  (`RequirePermission`) and TopBar admin cog react to the new
-  claims without an explicit page reload.
-
-End-to-end: admin promotes user U mid-session. U's next request
-401's (revoked sid), silent-refresh runs, new JWT minted with
-`system:admin`, FE permissions re-hydrate, admin nav appears,
-admin functions work. No manual re-login.
-
-## Phase 9 — audit log first-class on a quiet system
-
-The Phase-8 default filter hid login/logout as "noise", which made
-the audit page look blank on fresh systems. Phase 9 also found
-several events that **weren't being emitted at all** — failed
-logins, session revocations, workspace lifecycle.
-
-**New events emitted:**
-
-| Event | Severity | Fired by |
-|-------|----------|----------|
-| `user.login_failed` | warning | both raise paths in `auth_service.service.login` (best-effort, rollback-safe via `_emit_audit`) |
-| `user.session_revoked` | critical | `revoke_subject_sessions` / `revoke_role_sessions` — one per affected user, carries `reason` (workspace_binding_revoked / role_changed / role_permissions_updated) |
-| `rbac.workspace.created` | info | `POST /admin/workspaces` |
-| `rbac.workspace.updated` | info | `PUT /admin/workspaces/{id}` |
-| `rbac.workspace.deleted` | critical | `DELETE /admin/workspaces/{id}` (fires before the cascade event so the timeline reads in order) |
-
-**Three-mode scope filter** (replacing the two-mode Phase-8 toggle):
-
-| Mode | Surfaces | Hides |
-|------|----------|-------|
-| **Security** (default) | logins, logouts, failed logins, session revocations, every RBAC mutation, SSO config changes | password chrome, signup chrome, access-denied noise |
-| **Activity** | the above PLUS signup / password / access-request chrome | per-request access-denied spam only |
-| **Everything** | the unfiltered firehose | nothing |
-
-`user.logged_in` / `user.logged_out` moved off the noise list —
-they're first-class security signal now.
-
-**Operator recipes:**
-
-* "Who tried to brute-force Alice's account?" — set scope to
-  Security, filter `eventType=user.login_failed`. The email + reason
-  appear in the summary.
-* "Did Bob's revoked binding kill his session?" — Security mode,
-  filter `targetUserId=bob`. Two rows appear:
-  `rbac.workspace.member_revoked` and `user.session_revoked`
-  with `reason=workspace_binding_revoked`.
-* "Why is the new workspace missing?" — Security mode, filter
-  `eventType=rbac.workspace.*`. Created / updated / deleted events
-  show with actor + workspace name.
-
-## Phase 8 hardening — audit-log usability
-
-The Phase-7 audit endpoint worked but the page was operationally
-useless: 30+ `user.logged_in` rows dominated the view, every cell
-showed opaque slugs, the layout escaped the admin sidebar, and the
-`/admin/users/search` typeahead crashed (500 on real query, 422 on
-empty). Phase 8 closes those gaps.
-
-* **Default filter is now `category=security`** — operationally noisy
-  events (`user.logged_in`, `user.access_denied`,
-  `user.created`, `user.password_reset_*`,
-  `user.reset_token_generated`, `user.invite_created`,
-  `rbac.access_request.created`) are excluded. Toggle to
-  `category=all` for the full firehose when debugging.
-
-* **Severity + human summary** — every audit row now carries
-  `severity` (`info` / `warning` / `critical`) and `summary` (a
-  one-line sentence) computed from the `event_type` catalogue. The
-  FE renders a coloured dot + the sentence; the raw `event_type`
-  stays visible underneath as a small monospace caption. Unknown
-  events fall back to `info` + the raw type so a new backend event
-  still renders without a catalogue entry.
-
-* **Time range chips** — `Last 24h / 7d / 30d / All time`. Defaults
-  to 7d (wide enough for incident review, narrow enough to scan).
-
-* **Layout fix** — `AdminAudit.tsx` swapped its
-  `absolute inset-0` wrapper for the standard
-  `max-w-6xl mx-auto p-8` pattern so it sits inside the admin
-  sidebar layout like every other admin page.
-
-* **Clickable entities** — `actorId` / `targetUserId` /
-  `workspaceId` cells are now hyperlinks (`/admin/users#<id>` and
-  `/workspaces/<id>`) so an operator can drill from "who did this?"
-  to the affected user / workspace in one click.
-
-* **SSO search fixes** — `/admin/users/search` accepts empty `q`
-  (returns `[]` instead of 422) and runs the four underlying scans
-  sequentially (a single AsyncSession can't service concurrent
-  `execute(...)` calls; the `asyncio.gather` crashed the SSO admin
-  page).
-
-## Phase 7 hardening — workspace deletion cascade
-
-Deleting a workspace used to leave behind:
-
-* `RoleBindingORM` rows pointing at the dead workspace (covered
-  by `delete_scope_bindings`).
-* Custom `RoleORM` rows scoped to the dead workspace, which
-  couldn't be bound anywhere else. Phase 7 cascades these too via
-  `role_repo.delete_workspace_scoped_roles`.
-
-A `rbac.workspace.roles_cascaded` outbox event lists the removed
-bindings + roles so the audit log shows the cascade.
-
-## Migration map (Phase 5)
-
-Renames:
-
-| Old              | New                                              |
-|------------------|--------------------------------------------------|
-| `admin` (global) | `super_admin`                                    |
-| `admin` (ws)     | `workspace_admin`                                |
-| `user`           | `workspace_member`                               |
-| `viewer`         | `workspace_viewer`                               |
-| `users:manage`   | `system:users:manage`                            |
-| `groups:manage`  | `system:groups:manage`                           |
-| `workspaces:create` | `system:workspaces:create`                    |
-
-Net adds:
-
-* Role `org_admin` (global)
-* Permission `system:org-admin` (category=system)
-
-Net drops:
-
-* Legacy `(role='user', scope='global')` rows from Phase 1's backfill
-  are deleted with a WARNING log per row (those rows were always
-  malformed — `user` is a workspace-scoped role).
-
-The migration is reversible: `downgrade()` renames everything back and
-drops the new permission + role, but the dropped legacy `user@global`
-bindings stay gone (best-effort restore).
+Compliance recipe: "Who promoted Alice last week?" → filter
+`targetUserId=alice`, `eventType=user.role_changed`,
+`fromTs=<7-days-ago>`.
 
 ## Where to look in the code
 
@@ -687,8 +406,31 @@ bindings stay gone (best-effort restore).
 
 ## Related docs
 
-* [SSO_INTEGRATION.md](./SSO_INTEGRATION.md) — IdP → role-binding
-  reconciliation pulls roles from this taxonomy. The Phase-5 rename
-  is reflected in section §11.5.
-* [SSO.md](./SSO.md) — operator-facing SSO posture; cross-references
+* [SSO Integration Guide](/docs/sso-integration) — IdP → role-binding
+  reconciliation pulls roles from this taxonomy.
+* [SSO operator reference](/docs/sso) — operator-facing SSO posture; cross-references
   the role names here.
+
+## History
+
+The current eight-role taxonomy was introduced by the
+`20260603_1100_rbac_uplift` migration, which renamed the earlier
+three-role set (`admin`/`user`/`viewer`) and added the `org_admin`
+role plus the `system:org-admin` permission:
+
+| Old              | New                                              |
+|------------------|--------------------------------------------------|
+| `admin` (global) | `super_admin`                                    |
+| `admin` (ws)     | `workspace_admin`                                |
+| `user`           | `workspace_member`                               |
+| `viewer`         | `workspace_viewer`                               |
+| `users:manage`   | `system:users:manage`                            |
+| `groups:manage`  | `system:groups:manage`                           |
+| `workspaces:create` | `system:workspaces:create`                    |
+
+The migration is reversible; its `downgrade()` renames everything back
+and drops the added permission + role. Legacy malformed
+`(role='user', scope='global')` rows from an earlier backfill are
+dropped on upgrade (with a per-row WARNING) and stay dropped on
+downgrade — `user` is a workspace-scoped tier, so those rows were never
+valid.

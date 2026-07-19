@@ -27,7 +27,7 @@ export function HeaderSearch({ searchQuery, onSearchChange, onOpenAdvancedSearch
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   return (
-    <div className="justify-self-center w-full max-w-md">
+    <div data-tour="canvas-search" className="justify-self-center w-full max-w-md">
       <div className="relative group">
         {/* Accent halo on focus — soft glow behind the input that
             lifts it off the header gradient. Pure decoration; sits

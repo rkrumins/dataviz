@@ -34,7 +34,7 @@ async def _seed_active_user(
 
 # ── POST /signup ──────────────────────────────────────────────────────
 
-async def test_signup_valid(test_client: AsyncClient, db_session: AsyncSession):
+async def test_signup_valid(test_client: AsyncClient, db_session: AsyncSession, signup_enabled):
     """Valid signup returns 201 with a confirmation message."""
     resp = await test_client.post(
         "/api/v1/auth/signup",
@@ -65,7 +65,7 @@ async def test_signup_weak_password(test_client: AsyncClient):
     assert resp.status_code == 422
 
 
-async def test_signup_duplicate_email(test_client: AsyncClient, db_session: AsyncSession):
+async def test_signup_duplicate_email(test_client: AsyncClient, db_session: AsyncSession, signup_enabled):
     """Signup with an existing email still returns 201 (anti-enumeration)."""
     await _seed_active_user(db_session, email="dup@example.com")
     resp = await test_client.post(

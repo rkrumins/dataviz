@@ -332,6 +332,12 @@
     font-size: 0.9375rem;
   }
 
+  /* Anchor jumps and copy-link scrolls land with a comfortable top gap
+     instead of flush against the scroll container's edge. */
+  .prose-synodic :is(h1, h2, h3, h4) {
+    scroll-margin-top: 1.5rem;
+  }
+
   .prose-synodic h1 {
     @apply text-3xl font-bold text-ink mt-0 mb-6 tracking-tight;
     font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;

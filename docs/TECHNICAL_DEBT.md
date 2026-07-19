@@ -2,7 +2,14 @@
 
 > **Audience:** Developers and architects assessing risk. New users should start with [OVERVIEW.md](OVERVIEW.md) and [SETUP.md](SETUP.md).
 
-This document provides a critical analysis of the Synodic platform, identifying technical debt, security concerns, scalability issues, and prioritized recommendations.
+This document provides a critical analysis of the {brand} platform, identifying technical debt, security concerns, scalability issues, and prioritized recommendations.
+
+**What you'll find here:**
+- A risk matrix and category-by-category debt inventory (security, data, architecture, testing, frontend, infrastructure)
+- Honest **resolved vs. open** status on every item — shipped fixes are marked, real debt is kept
+- A phased remediation plan with priorities and effort estimates
+
+> **Important:** Items are labelled by severity and status. **RESOLVED** entries are retained for history, not open work — check the status line before acting. Live risk is summarized in [§8 Summary](#8-summary).
 
 ---
 
@@ -118,22 +125,26 @@ SQLite is the default if `MANAGEMENT_DB_URL` is not set. SQLite cannot handle:
 
 Schema versioning now runs through **Alembic** (`backend/alembic/versions/`) as the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head at startup; it never mutates the schema itself. See [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) for the full migration strategy.
 
-### 2.3 Versioning merge field-loss + draft read model (MOSTLY RESOLVED)
+### 2.3 Versioning merge field-loss + draft read model (RESOLVED — change control shipped)
 
-A draft `update` op was applied as a **wholesale replace**, so a partial edit (the canvas sends only
-the edited fields) truncated the entity on `main` at publish/merge — nodes lost `displayName`
-(rendered their URN) and `properties`. Fixed by making `update` a field-level patch
+The original bug: a draft `update` op was applied as a **wholesale replace**, so a partial edit (the
+canvas sends only the edited fields) truncated the entity on `main` at publish/merge — nodes lost
+`displayName` (rendered their URN) and `properties`. Fixed by making `update` a field-level patch
 (`changeset.py::materialize` + `service.py::_apply_ops_once`, commit `4dd7df4`). Draft lineage now
-renders via a sparse read-overlay (`draft_overlay_provider.py`, commit `84a467f`). A repair CLI reverts
-the offending commit + re-projects (`backend/scripts/repair_revert_commit.py`, commit `540d390`).
+renders via a sparse read-overlay (`draft_overlay_provider.py`, commit `84a467f`).
 
-**Still open:** a `{ "id": "{}", "confidence": "<name> <name>" }` properties leak on some nodes was
+Graph **change control is now shipped**, so the recovery paths are first-class product features rather
+than a repair CLI: in-app **revert** ("Undo this change") and **restore** ("Restore to this point",
+`.../commits/{cid}/restore` + `/restore-preview`), the **version-control admin master switch**, and a
+**resumable async enable-VC bootstrap job** that copies a whole source graph into the versioned store as
+an integrity-checked `import` commit (verified on a 7.7M-entity graph). The offline repair CLI
+(`backend/scripts/repair_revert_commit.py`) remains as a break-glass tool.
+
+**Residual (low):** a `{ "id": "{}", "confidence": "<name> <name>" }` properties leak on some nodes was
 **not reproduced** and may predate the corrupting commit (so `revert` won't clear it). After a repair,
-confirm whether it persists and reproduce-first before fixing. Also: the code fix must be deployed
-*with* any repair, or corruption recurs on the next edit; already-damaged data only heals via the
-repair tool.
+confirm whether it persists and reproduce-first before fixing.
 
-> Full engineering memory: [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md)
+> Full engineering memory: [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md)
 > (requirements, design decisions, gaps, verification, repair runbook).
 
 ---
@@ -164,8 +175,6 @@ graph LR
     Bridge["_migrate_connection_to_workspace()"]
     Legacy -.-> Bridge -.-> New
 
-    style Legacy fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style New fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 **Risks:**
@@ -413,9 +422,19 @@ gantt
 | **Infrastructure** | - | 1 (outbox consumer) | 3 (no monitoring, no rate limits, per-worker cache isolation) | 3 (no API docs, no pagination cap, poller shutdown) |
 | **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~, ~~CORS wildcard~~, ~~no Alembic~~, ~~inline migration growth~~ |
 
-**Highest priority blockers for production deployment:**
-1. Force credential encryption (prevent plaintext leaks)
-2. Move JWT to HttpOnly cookies (prevent XSS token theft)
-3. Require PostgreSQL in production (prevent SQLite corruption)
-4. Strong default admin password (prevent trivial compromise)
-5. CI/CD pipeline (prevent unvalidated deployments)
+> **Warning: highest-priority blockers for production deployment.**
+> 1. Force credential encryption (prevent plaintext leaks)
+> 2. Move JWT to HttpOnly cookies (prevent XSS token theft)
+> 3. Require PostgreSQL in production (prevent SQLite corruption)
+> 4. Strong default admin password (prevent trivial compromise)
+> 5. CI/CD pipeline (prevent unvalidated deployments)
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — the security controls and deployment model these risks apply to
+- [Data Architecture](/docs/data-architecture) — credential encryption, migrations, and outbox details
+- [Decisions](/docs/decisions) — ADRs that resolved several items here (Alembic, Redis roles, graph-service retirement)
+- [Architecture When Scaling](/docs/scaling-architecture) — the deferred multi-tier design behind the cache-isolation and scaling gaps
+- [Overview](/docs/overview) — platform vision, maturity assessment, and roadmap

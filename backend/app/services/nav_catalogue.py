@@ -63,21 +63,24 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
 
 # Admin sub-nav. Keyed by the route segment (matches
 # ``AdminPage.adminGroups[].items[].path`` + the ``/admin`` route
-# children). Every entry except ``groups`` requires ``system:admin``;
-# ``groups`` has its own ``system:groups:manage`` so a delegated groups
-# admin can land there without being a full super-admin.
+# children). Most entries require ``system:admin``; the exceptions mirror
+# the delegated permission their backend surface actually enforces so a
+# non-super-admin who holds that perm can reach the page:
+#   ``groups`` — ``system:groups:manage`` (delegated groups admin)
+#   ``audit``  — ``system:audit:read``   (the ``org_auditor`` role)
 _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "overview":      ("Global Overview", NavSpecPerm(perm="system:admin")),
     "infrastructure": ("Infrastructure", NavSpecPerm(perm="system:admin")),
     "redis":         ("Redis & Graph Store", NavSpecPerm(perm="system:admin")),
     "branding":      ("Branding",        NavSpecPerm(perm="system:admin")),
     "features":      ("Features",        NavSpecPerm(perm="system:admin")),
+    "telemetry":     ("Telemetry",       NavSpecPerm(perm="system:audit:read")),
     "announcements": ("Announcements",   NavSpecPerm(perm="system:admin")),
     "users":         ("User Management", NavSpecPerm(perm="system:admin")),
     "groups":        ("Groups",          NavSpecPerm(perm="system:groups:manage")),
     "permissions":   ("Permissions",     NavSpecPerm(perm="system:admin")),
     "sso":           ("SSO",             NavSpecPerm(perm="system:admin")),
-    "audit":         ("Audit Log",       NavSpecPerm(perm="system:admin")),
+    "audit":         ("Audit Log",       NavSpecPerm(perm="system:audit:read")),
 }
 
 

@@ -741,6 +741,14 @@ class ContextEngine:
         """Get distinct values for a node property."""
         return await self.provider.get_distinct_values(property_name)
 
+    async def get_node_degrees(self, urns, edge_types=None):
+        """Total lineage degree per URN (see provider docstring). Providers
+        without the capability degrade to {} — absent means unknown."""
+        fn = getattr(self.provider, "get_node_degrees", None)
+        if fn is None:
+            return {}
+        return await fn(urns, edge_types)
+
     async def save_custom_graph(
         self, nodes: List[GraphNode], edges: List[GraphEdge],
     ) -> bool:

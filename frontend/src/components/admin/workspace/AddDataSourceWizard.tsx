@@ -245,6 +245,7 @@ export function AddDataSourceWizard({
             }
             hideClose={phase === 'adding'}
             wide={step === 'source'}
+            helpSlug="admin-setup"
             footer={
                 phase === 'success' ? (
                     <div className="flex items-center justify-end w-full">

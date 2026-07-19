@@ -1,8 +1,19 @@
 # Backend Technical Documentation
 
+> **At a glance:** How the {brand} backend fits together — its services, the HTTP API surface, the graph-provider abstraction, and the request/startup machinery that ties them together. Written for backend and full-stack engineers working in `backend/`.
+
+**This doc covers:**
+
+- The **API reference** — auth, admin infrastructure, ontology, graph operations, versioning, views, features, announcements
+- **Core services** — ContextEngine, ProviderRegistry, Ontology Service
+- The **Graph Data Provider** system and in-process connectivity adapters
+- **Repositories**, the **middleware stack**, and the **startup lifecycle**
+
+> **Tip:** Reading the codebase alongside this doc? Every section lists the concrete `backend/…` file paths so you can jump straight to source.
+
 ## Overview
 
-The Synodic backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
+The {brand} backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
 
 | Service | Port | Entry Point | Responsibility |
 |---------|------|-------------|----------------|
@@ -11,6 +22,8 @@ The Synodic backend is a single FastAPI application (the **Visualization Service
 | **Insights Service** | -- | `backend/insights_service/__main__.py` | Background collection of schema/stats and cache warming |
 
 > A standalone `graph-service` (`:8001`, `backend/graph/main.py`) once handled provider connectivity testing. It was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) -- it was built and deployed but never invoked. Its Neo4j/DataHub/Spanner adapters survive in `backend/graph/adapters/` and are now imported **in-process** by the Visualization Service.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the current service topology and process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV).
 
 ---
 
@@ -142,10 +155,6 @@ graph LR
         Allowed["POST /nodes/{urn}/allowed-children"]
     end
 
-    style Queries fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Hierarchy fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Mutations fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style Advanced fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Key Graph Endpoints:**
@@ -163,6 +172,31 @@ graph LR
 | `/{ws_id}/graph/commands/batch` | POST | Batch mutations (fail-fast by default) |
 | `/{ws_id}/graph/edges/aggregated` | POST | Aggregated edges between containers |
 | `/{ws_id}/graph/edges/aggregated/materialize` | POST | Batch-create AGGREGATED edges |
+| `/{ws_id}/graph/nodes/degree` | POST | Total lineage degree (in/out) per URN over the full graph — powers the curated-view "lineage outside this view" chip. Response-cached; a URN absent from the result is UNKNOWN (never zero). Body: `{ urns[], edge_types? }` |
+
+### Graph Versioning & Change Control
+
+> **Note:** The `versioningEnabled` gate is enforced **server-side** on every `/graph` write (drafts, commits, merges, reverts) via `versioning_gate.py` — it is not a UI-only toggle. See the [Features API contract](/docs/api-features#feature-flags-authoritative-set).
+
+Graph versioning (drafts, review & merge, publish, revert, restore) is **shipped** and gated by the `versioningEnabled` feature flag. Enabling version control on a data source is a resumable **async bootstrap job**: it copies the whole source graph into the versioned store as an auditable `import` commit, integrity-checks it against the source, and only then makes it live. Verified on a 7.7M-entity graph.
+
+**Enable-VC bootstrap job** (workspace-scoped, `?dataSourceId=` required):
+
+| Endpoint | Method | Status | Purpose |
+|----------|--------|--------|---------|
+| `/{ws_id}/graph/bootstrap` | POST | **202** (or 200 `alreadyEnabled`) | Start "enable version control" for a data source. Runs on the versioning worker in resumable windows; returns `{ jobId, graphId, status }`. Idempotent — an in-flight job returns itself |
+| `/{ws_id}/graph/bootstrap/status` | GET | 200 | Live progress (phase, counts, percent) and, on a terminal job, the integrity report. Not flag-gated so a job started before versioning was disabled stays observable |
+| `/{ws_id}/graph/bootstrap/retry` | POST | 202 | Resume a failed copy from its last committed window (`mode=resume`) or restart it (`mode=restart`) |
+| `/{ws_id}/graph/bootstrap/abandon` | POST | 200 | Discard everything the job imported; the data source reads exactly as before. Refused (409) once version control is live |
+
+**Draft & restore** (versioning router, prefix `/api/v1/{ws_id}/versioning`):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore` | POST | Restore the graph to a historical commit ("Restore to this point") as a new commit on `main`. Flag-gated |
+| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore-preview` | GET | Preview the diff a restore would apply, without mutating anything |
+
+> Draft lifecycle (open draft, stage/checkpoint, review/merge PR-style, publish, revert "Undo this change") lives on the versioning router; the draft *editing* surface is the normal `/graph` API plus a `?branchId=` query param. See the [draft lineage & merge engineering notes](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md) and [local-integration-testing.md](local-integration-testing.md).
 
 ### Views & Features
 
@@ -173,6 +207,7 @@ graph LR
 | `/api/v1/views/{id}/favourite` | POST | Toggle favourite |
 | `/api/v1/views/popular` | GET | Most-favourited views |
 | `/api/v1/admin/features` | GET, PATCH | Feature flag management (optimistic concurrency) |
+| `/api/v1/features/values` | GET | **Public**, read-only flag values (no auth, no schema/categories overhead) for client bootstrapping |
 
 ### Announcements
 
@@ -236,9 +271,6 @@ graph TB
     RP --> Operations
     RO --> Operations
 
-    style Factory fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Resolution fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Operations fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 **Key behaviors:**
@@ -271,7 +303,6 @@ graph TB
     Instantiate --> Store
     Store --> Return
 
-    style Cache fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Cache structure:**
@@ -297,10 +328,6 @@ graph LR
     AO --> RO
     IT --> RO
 
-    style SD fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style AO fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style IT fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style RO fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Entity Type Definition (per type ID):**
@@ -339,7 +366,6 @@ Abstract base class defining the contract for all graph backends:
 
 ```mermaid
 classDiagram
-    class GraphDataProvider {
         <<abstract>>
         +get_node(urn) GraphNode
         +get_nodes(query) List~GraphNode~
@@ -361,24 +387,20 @@ classDiagram
         +delete_edge(edge_id) bool
     }
 
-    class FalkorDBProvider {
         -pool: BlockingConnectionPool
         -graph_name: str
         +materialize_aggregated_edges_batch(...)
         +ensure_indices(entity_types)
     }
 
-    class Neo4jProvider {
         -driver: AsyncDriver
         -database: str
     }
 
-    class DataHubGraphQLProvider {
         -client: httpx.AsyncClient
         -base_url: str
     }
 
-    class MockGraphProvider {
         -nodes: Dict
         -edges: List
     }
@@ -500,7 +522,7 @@ All database operations are abstracted into repositories under `backend/app/db/r
 
 ---
 
-## 5. Middleware Stack
+## 7. Middleware Stack
 
 ```mermaid
 graph TB
@@ -511,7 +533,6 @@ graph TB
     Log[Request Logger<br/>Structured JSON] --> Route
     Route[FastAPI Router<br/>+ Auth Dependency]
 
-    style Req fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Security headers applied to every response:**
@@ -527,7 +548,7 @@ Strict-Transport-Security: max-age=31536000 (HTTPS only)
 
 ---
 
-## 6. Startup Lifecycle
+## 8. Startup Lifecycle
 
 ```mermaid
 graph TB
@@ -544,9 +565,6 @@ graph TB
     Start --> InitDB --> SeedOnt --> SeedFeat --> BootAdmin --> ResolvePrimary --> Ready
     Shutdown --> Evict
 
-    style Start fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Ready fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Shutdown fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
 ```
 
 ### Environment Variables
@@ -559,10 +577,22 @@ graph TB
 | `JWT_SECRET_KEY` | _(random)_ | Prod | HS256 signing key |
 | `JWT_EXPIRY_MINUTES` | `60` | No | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
-| `ADMIN_PASSWORD` | `changeme` | No | Bootstrap admin password |
+| `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3000,5173` | No | Comma-separated origins |
 | `FALKORDB_HOST` | `localhost` | No | FalkorDB/Redis hostname |
 | `FALKORDB_PORT` | `6379` | No | FalkorDB/Redis port |
 | `FALKORDB_GRAPH_NAME` | `nexus_lineage` | No | Default graph name |
 | `FALKORDB_SEED_FILE` | _(none)_ | No | JSON path for seeding graph data |
 | `DB_ECHO` | `false` | No | SQLAlchemy SQL logging |
+
+> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and a stable `JWT_SECRET_KEY`, and override the bootstrap `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in plaintext; an auto-generated JWT key rotates on every restart and invalidates all tokens. See the [Developer Setup — Production Environment Checklist](/docs/setup).
+
+---
+
+## Related
+
+- [Developer Setup](/docs/setup) — running the backend locally and env-var reference
+- [Frontend & UX](/docs/frontend) — the SPA that consumes this API
+- [Features API contract](/docs/api-features) — the feature-flag endpoints in depth
+- [Platform Services overview](/docs/services-overview) — process roles and runtime topology
+- [Aggregation pipeline](/docs/aggregation-pipeline) · [RBAC](/docs/rbac)

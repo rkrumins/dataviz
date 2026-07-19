@@ -4,9 +4,9 @@
 asset. This page walks through the **View Wizard** end to end, plus the choices
 that make a View genuinely useful to others.
 
-> 💡 **What makes a good View?** It answers *one* question clearly. Resist the
-> urge to cram everything in — a focused View that loads fast and reads cleanly
-> beats a sprawling one every time.
+> **Tip:** *What makes a good View?* It answers *one* question clearly. Resist
+> the urge to cram everything in — a focused View that loads fast and reads
+> cleanly beats a sprawling one every time.
 
 ---
 

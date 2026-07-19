@@ -31,6 +31,7 @@ const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions'
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
 const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
+const AdminTelemetry = lazy(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazy(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
@@ -132,7 +133,7 @@ export const router = createBrowserRouter([
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
       // Reviews are a versioning surface — the whole route disappears (redirects
       // to the workspace) when the admin turns version control off.
-      { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" redirectTo="/workspaces/:wsId"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
+      { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
@@ -244,6 +245,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="permissions">
                 <Lazy><AdminPermissions /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'telemetry',
+            element: (
+              <RequireNav group="admin" sectionKey="telemetry">
+                <Lazy><AdminTelemetry /></Lazy>
               </RequireNav>
             ),
           },

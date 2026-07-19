@@ -23,7 +23,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
-  'border border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
+  'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
 
@@ -47,6 +47,11 @@ export function CanvasStatusChips({
   focusShown,
   focusTotal,
   onOpenFocusLens,
+  rootsLoaded,
+  rootsHaveMore,
+  onLoadMoreRoots,
+  selectedExternal,
+  onPreviewExternal,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -72,6 +77,16 @@ export function CanvasStatusChips({
   focusShown?: number
   focusTotal?: number
   onOpenFocusLens?: () => void
+  /** Root pagination: top-level entities loaded so far; `rootsHaveMore`
+   *  = the last page was full, so more likely exist beyond it. */
+  rootsLoaded?: number
+  rootsHaveMore?: boolean
+  onLoadMoreRoots?: () => void
+  /** Selected node's lineage OUTSIDE the curated view's scope (total
+   *  degree − loaded degree). null = none or unknown — no chip. */
+  selectedExternal?: { in: number; out: number } | null
+  /** Feature-flagged: fetch + show the out-of-view partners in the Lens. */
+  onPreviewExternal?: () => void
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -80,8 +95,10 @@ export function CanvasStatusChips({
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
   const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
+  const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
+  const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal) return null
 
   return (
     // Bottom-RIGHT, beneath the Edge Legend — the bottom-left corner
@@ -92,6 +109,74 @@ export function CanvasStatusChips({
       style={{ bottom: 'calc(1rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
+      {showExternal && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">This entity has lineage beyond this view</p>
+              <p className="text-ink-muted">
+                {selectedExternal!.in.toLocaleString()} upstream and{' '}
+                {selectedExternal!.out.toLocaleString()} downstream connection
+                {selectedExternal!.in + selectedExternal!.out === 1 ? '' : 's'} exist in the
+                data source but lead to entities outside this view&apos;s scope.
+                That&apos;s expected for a curated view — it is NOT missing data.
+                Add those entities to the view, or run a Trace, to see them.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <Unlink className="w-3 h-3 text-sky-400/80" />
+            <span>
+              Selected: <span className="tabular-nums">{selectedExternal!.in.toLocaleString()}</span>↑{' '}
+              <span className="tabular-nums">{selectedExternal!.out.toLocaleString()}</span>↓ outside this view
+            </span>
+            {onPreviewExternal && (
+              <button
+                type="button"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                onClick={onPreviewExternal}
+              >
+                Preview
+              </button>
+            )}
+          </div>
+        </InfoTooltip>
+      )}
+
+      {showRoots && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">More top-level entities exist</p>
+              <p className="text-ink-muted">
+                {rootsLoaded!.toLocaleString()} top-level entities are loaded so far
+                and the last page came back full — the source likely has more.
+                Loading is additive: nothing on the canvas is replaced.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <ListPlus className="w-3 h-3 text-sky-500/80" />
+            <span>
+              <span className="tabular-nums">{rootsLoaded!.toLocaleString()}</span> top-level loaded
+            </span>
+            {onLoadMoreRoots && (
+              <button
+                type="button"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                onClick={onLoadMoreRoots}
+              >
+                Load more
+              </button>
+            )}
+          </div>
+        </InfoTooltip>
+      )}
+
       {showAdaptive && (
         <InfoTooltip
           side="right"
@@ -116,7 +201,7 @@ export function CanvasStatusChips({
             {onShowAllEdges && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onShowAllEdges}
               >
                 Show all
@@ -149,7 +234,7 @@ export function CanvasStatusChips({
             {onOpenFocusLens && (
               <button
                 type="button"
-                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                 onClick={onOpenFocusLens}
               >
                 Open lens
@@ -251,7 +336,7 @@ export function CanvasStatusChips({
           {onLoadMoreDetail && (
             <button
               type="button"
-              className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+              className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               onClick={onLoadMoreDetail}
             >
               Load more

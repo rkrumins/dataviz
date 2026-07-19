@@ -14,6 +14,8 @@ import { TopBar } from './TopBar'
 import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
+import { HelpPanel } from '@/components/help/HelpPanel'
+import { useHelpPanelStore } from '@/store/helpPanel'
 import { ViewWizard } from '@/components/views/ViewWizard'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useAuthStore } from '@/store/auth'
@@ -26,6 +28,10 @@ import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { ToastContainer } from '@/components/ui/toast'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
+import { useFeature } from '@/store/features'
+import { TourOverlay } from '@/features/tour/TourOverlay'
+import { TourLauncher } from '@/features/tour/TourLauncher'
+import { useTourDeepLink } from '@/features/tour/useTourDeepLink'
 
 export { useViewEditorModal }
 
@@ -36,6 +42,10 @@ export function AppLayout() {
   // only re-renders when these specific fields change, not on every
   // unrelated preference write (sidebar collapse, pinned views, …).
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+  const toursEnabled = useFeature('toursEnabled')
+
+  // Launch a tour from ?tour=<id> (deep-links from docs / announcements).
+  useTourDeepLink()
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -90,6 +100,28 @@ export function AppLayout() {
     document.documentElement.classList.toggle('reduce-motion', reducedMotion)
   }, [reducedMotion])
 
+  // Global "?" shortcut toggles the Help drawer — ignored while typing in a
+  // field so it never steals a literal question mark.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== '?') return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        el?.isContentEditable
+      ) {
+        return
+      }
+      e.preventDefault()
+      useHelpPanelStore.getState().toggleHelp()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   // While the cookie is being validated against the server, render a
   // neutral loader. This prevents a flash of /login on cold reload when
   // the user is in fact authenticated.
@@ -139,8 +171,13 @@ export function AppLayout() {
           initialDataSourceId={initialScope.dataSourceId}
         />
 
+        <HelpPanel />
         <ToastContainer />
         <AccessDeniedModal />
+
+        {/* Guided tours — experimental, gated by the toursEnabled feature flag */}
+        {toursEnabled && <TourOverlay />}
+        {toursEnabled && <TourLauncher />}
       </div>
     </ViewEditorContext.Provider>
   )

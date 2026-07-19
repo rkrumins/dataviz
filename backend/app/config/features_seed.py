@@ -517,4 +517,29 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 0,
         "deprecated": False,
     },
+    # ── Experimental ───────────────────────────────────────────────────────────
+    {
+        "key": "toursEnabled",
+        "name": "Guided product tours",
+        "description": (
+            "Offer new users an interactive, in-product walkthrough of the workspace — a spotlight "
+            "tour of search, navigation, personas, and help — and let anyone replay it from Help."
+        ),
+        "impact_when_off": (
+            "No tour is ever shown or offered, and the 'Take the tour' action is hidden. Nothing "
+            "else changes — the Help panel and every guide stay available. This is a preview; it "
+            "ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn on to greet first-time users with a short guided tour. It's client-side only and "
+            "safe to toggle at any time; users can always skip or replay it."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
 ]

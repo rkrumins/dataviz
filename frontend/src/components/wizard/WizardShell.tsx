@@ -18,10 +18,12 @@
  *     last step of the wizard rather than a detached dialog that appears after it.
  *   • Framer-motion step transitions instead of an instant content swap.
  */
+import { useEffect, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, Loader2, X, ArrowLeft, ArrowRight, Save } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { DocsLink } from '@/components/help/DocsLink'
 
 export interface WizardStepDef {
     id: string
@@ -58,6 +60,8 @@ export interface WizardShellProps {
     hideClose?: boolean
     /** Some steps need the room (a picker grid, an assignment tree). */
     wide?: boolean
+    /** When set, renders a contextual Guide link in the shell header. */
+    helpSlug?: string
     children: React.ReactNode
 }
 
@@ -81,33 +85,47 @@ export function WizardShell({
     footer,
     hideClose,
     wide,
+    helpSlug,
     children,
 }: WizardShellProps) {
     const isTerminal = !!terminalPhase
     const isWide = !isTerminal && !!wide
+    const titleId = useId()
+    const dialogRef = useRef<HTMLDivElement>(null)
+
+    // Move focus into the dialog on mount so keyboard + screen-reader users
+    // land inside the wizard rather than back on the page behind the backdrop.
+    useEffect(() => {
+        dialogRef.current?.focus()
+    }, [])
 
     return (
         <>
             <Backdrop open={true} zClassName="z-50" className="bg-black/60" />
             <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
             <motion.div
+                ref={dialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
+                tabIndex={-1}
                 initial={{ scale: 0.95, opacity: 0, y: 20 }}
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.95, opacity: 0, y: 20 }}
                 transition={{ duration: 0.12 }}
                 className={cn(
-                    'pointer-events-auto relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col',
+                    'pointer-events-auto relative w-full max-h-[90vh] bg-canvas-elevated rounded-2xl shadow-lg overflow-hidden flex flex-col focus:outline-none',
                     isWide ? 'max-w-[1180px]' : 'max-w-5xl',
                 )}
             >
                 {/* Header */}
-                <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
+                <div className="flex items-center justify-between px-8 py-5 border-b border-glass-border bg-gradient-to-r from-black/[0.02] to-transparent dark:from-white/[0.02]">
                     <div className="flex items-center gap-4">
                         <div className={cn(
                             'w-12 h-12 rounded-xl flex items-center justify-center text-white shadow-md',
                             terminalPhase === 'success'
                                 ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
-                                : 'bg-gradient-to-br from-blue-500 to-indigo-600',
+                                : 'bg-gradient-to-br from-indigo-500 to-violet-600',
                         )}>
                             {terminalPhase === 'success'
                                 ? <Check className="w-6 h-6" />
@@ -116,25 +134,28 @@ export function WizardShell({
                                     : activeSteps[currentStepIndex]?.icon}
                         </div>
                         <div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
+                            <h2 id={titleId} className="text-xl font-bold text-ink">
                                 {title}
                             </h2>
-                            <p className="text-sm text-slate-500">
+                            <p className="text-sm text-ink-muted">
                                 {isTerminal
                                     ? terminalSubtitle
                                     : `Step ${currentStepIndex + 1} of ${activeSteps.length}: ${activeSteps[currentStepIndex]?.label}`}
                             </p>
                         </div>
                     </div>
-                    {!hideClose && (
-                        <button
-                            onClick={onClose}
-                            aria-label="Close"
-                            className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                        >
-                            <X className="w-5 h-5 text-slate-500" />
-                        </button>
-                    )}
+                    <div className="flex items-center gap-1">
+                        {helpSlug && <DocsLink slug={helpSlug} variant="icon" />}
+                        {!hideClose && (
+                            <button
+                                onClick={onClose}
+                                aria-label="Close"
+                                className="p-2 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                            >
+                                <X className="w-5 h-5 text-ink-muted" />
+                            </button>
+                        )}
+                    </div>
                 </div>
 
                 {/* Progress Steps — overflow-proof: connectors flex instead of fixed
@@ -142,7 +163,7 @@ export function WizardShell({
                     labels drop out below lg so all six steps always fit the modal.
                     In the terminal phase every step reads complete and a final pill
                     shows the create itself. */}
-                <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
+                <div className="px-8 py-4 bg-black/[0.02] dark:bg-white/[0.02] border-b border-glass-border">
                     <div className="flex items-center min-w-0">
                         {activeSteps.map((step, index) => {
                             const isActive = !isTerminal && step.id === currentStep
@@ -155,13 +176,14 @@ export function WizardShell({
                                         onClick={() => isClickable && onStepClick(step.id)}
                                         disabled={!isClickable}
                                         title={step.label}
+                                        aria-current={isActive ? 'step' : undefined}
                                         className={cn(
                                             'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150 min-w-0 shrink',
                                             isActive
-                                                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
+                                                ? 'bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900'
                                                 : isCompleted
                                                     ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
-                                                    : 'text-slate-400 cursor-not-allowed',
+                                                    : 'text-ink-muted cursor-not-allowed',
                                         )}
                                     >
                                         {isCompleted
@@ -169,7 +191,7 @@ export function WizardShell({
                                             : (
                                                 <span className={cn(
                                                     'w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border',
-                                                    isActive ? 'border-transparent bg-white/20' : 'border-slate-300',
+                                                    isActive ? 'border-transparent bg-white/20' : 'border-glass-border',
                                                 )}>
                                                     {index + 1}
                                                 </span>
@@ -181,7 +203,7 @@ export function WizardShell({
                                     {showConnector && (
                                         <div className={cn(
                                             'flex-1 min-w-2 h-px mx-2',
-                                            isCompleted ? 'bg-emerald-300 dark:bg-emerald-700' : 'bg-slate-200 dark:bg-slate-700',
+                                            isCompleted ? 'bg-emerald-300 dark:bg-emerald-700' : 'bg-glass-border',
                                         )} />
                                     )}
                                 </div>
@@ -196,7 +218,7 @@ export function WizardShell({
                                     'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium min-w-0 shrink',
                                     terminalPhase === 'success'
                                         ? 'bg-emerald-500 text-white shadow-md'
-                                        : 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900',
+                                        : 'bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900',
                                 )}
                             >
                                 {terminalPhase === 'success'
@@ -225,7 +247,7 @@ export function WizardShell({
                 </div>
 
                 {/* Footer */}
-                <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
+                <div className="flex items-center justify-between px-8 py-5 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
                     {footer ?? (
                         <>
                             <button
@@ -234,8 +256,8 @@ export function WizardShell({
                                 className={cn(
                                     'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                     currentStepIndex > 0
-                                        ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                                        : 'text-slate-400 cursor-not-allowed',
+                                        ? 'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5'
+                                        : 'text-ink-muted cursor-not-allowed',
                                 )}
                             >
                                 <ArrowLeft className="w-4 h-4" />
@@ -245,7 +267,7 @@ export function WizardShell({
                             <div className="flex items-center gap-3">
                                 <button
                                     onClick={onClose}
-                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+                                    className="px-5 py-2.5 rounded-xl font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
                                 >
                                     Cancel
                                 </button>
@@ -257,8 +279,8 @@ export function WizardShell({
                                         className={cn(
                                             'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                             canProceed && !isSubmitting
-                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
+                                                : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                                         )}
                                     >
                                         {isSubmitting ? (
@@ -274,8 +296,8 @@ export function WizardShell({
                                         className={cn(
                                             'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                             canProceed
-                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
+                                                : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                                         )}
                                     >
                                         Next

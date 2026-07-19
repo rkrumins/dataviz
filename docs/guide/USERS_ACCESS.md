@@ -1,12 +1,12 @@
 # Users & Access
 
-*For Administrators.* Synodic's access model is layered but predictable. This
+*For Administrators.* {brand}'s access model is layered but predictable. This
 page explains how people get in, what roles mean, and how to grant exactly the
 right access — no more, no less.
 
-> 💡 **Mental model:** *People* (and **groups** of people) are given **roles**,
-> roles carry **permissions**, and individual resources like Views can be
-> **shared** on top. Three layers, working together.
+> **Note:** *Mental model* — *People* (and **groups** of people) are given
+> **roles**, roles carry **permissions**, and individual resources like Views
+> can be **shared** on top. Three layers, working together.
 
 ```mermaid
 flowchart LR
@@ -29,9 +29,21 @@ Access is **approval-based**, so no one reaches your data by simply registering.
 3. An admin **approves** them in **Admin → Users** → status becomes **active**.
 4. They can now **log in**; a session token is issued.
 
+```mermaid
+flowchart LR
+  S[Sign up] --> P[Pending]
+  P -->|admin approves| A[Active]
+  A --> L[Log in · token issued]
+```
+
 You can also **suspend/reactivate** accounts and **reset passwords** from the
 same screen. Filter the list by status (**pending / active / suspended**) to find
 who needs attention.
+
+> **Tip:** *Prefer central identity?* Administrators can configure **single
+> sign-on** via **OIDC** or **SAML**, so people log in through your
+> organisation's identity provider instead of a local password. Approvals and
+> roles still apply on top.
 
 ---
 
@@ -91,8 +103,8 @@ to *many* people at once:
 Now every member inherits that access, and you manage it in one place. Groups may
 be **local** or, where configured, synced from an identity provider (SCIM/SSO).
 
-> 💡 **Prefer groups over individuals** for anything beyond a handful of people.
-> It keeps access auditable and easy to change.
+> **Tip:** Prefer groups over individuals for anything beyond a handful of
+> people. It keeps access auditable and easy to change.
 
 ---
 

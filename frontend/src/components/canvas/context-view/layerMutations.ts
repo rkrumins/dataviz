@@ -24,6 +24,11 @@ export function renameLayer(layers: ViewLayerConfig[], id: string, name: string)
   return layers.map((l) => (l.id === id ? { ...l, name } : l))
 }
 
+/** Set (or clear, with undefined) a layer's authored column width. */
+export function setLayerWidth(layers: ViewLayerConfig[], id: string, width: number | undefined): ViewLayerConfig[] {
+  return layers.map((l) => (l.id === id ? { ...l, width } : l))
+}
+
 /** Remove one layer by id and re-normalize order; no-op if not found. */
 export function removeLayer(layers: ViewLayerConfig[], id: string): ViewLayerConfig[] {
   if (!layers.some((l) => l.id === id)) return layers
