@@ -51,6 +51,7 @@ export function CanvasStatusChips({
   rootsHaveMore,
   onLoadMoreRoots,
   selectedExternal,
+  onPreviewExternal,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -84,6 +85,8 @@ export function CanvasStatusChips({
   /** Selected node's lineage OUTSIDE the curated view's scope (total
    *  degree − loaded degree). null = none or unknown — no chip. */
   selectedExternal?: { in: number; out: number } | null
+  /** Feature-flagged: fetch + show the out-of-view partners in the Lens. */
+  onPreviewExternal?: () => void
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -129,6 +132,15 @@ export function CanvasStatusChips({
               Selected: <span className="tabular-nums">{selectedExternal!.in.toLocaleString()}</span>↑{' '}
               <span className="tabular-nums">{selectedExternal!.out.toLocaleString()}</span>↓ outside this view
             </span>
+            {onPreviewExternal && (
+              <button
+                type="button"
+                className="ml-1 text-accent-lineage hover:underline cursor-pointer"
+                onClick={onPreviewExternal}
+              >
+                Preview
+              </button>
+            )}
           </div>
         </InfoTooltip>
       )}

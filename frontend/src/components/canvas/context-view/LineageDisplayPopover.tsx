@@ -361,6 +361,65 @@ export function LineageDisplaySections({
           curated view legitimately excludes upstream/downstream partners.
           This switch shows/hides the "connections not on canvas" alerts. */}
       <MissingConnectionsToggle disabled={disabled} />
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <ExternalPreviewToggle disabled={disabled} />
+    </div>
+  )
+}
+
+/** Feature flag for the out-of-view lineage PREVIEW — the guided
+ *  click-through from the "outside this view" chip into the Lens.
+ *  Self-contained store access, mirroring MissingConnectionsToggle. */
+function ExternalPreviewToggle({ disabled }: { disabled: boolean }) {
+  const on = usePreferencesStore((s) => s.externalLineagePreview)
+  const toggle = usePreferencesStore((s) => s.toggleExternalLineagePreview)
+  return (
+    <div className="px-3 pt-2.5 pb-3">
+      <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Eye className="w-3 h-3" />
+        <span>External Preview</span>
+      </div>
+      <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+        Adds a Preview action when a selected entity has lineage outside
+        this view — see those partners in the Lens without adding
+        anything to the canvas.
+      </p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        disabled={disabled}
+        onClick={toggle}
+        className={cn(
+          'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+          disabled && 'cursor-not-allowed',
+          on
+            ? 'bg-sky-500/12 border-sky-500/35 shadow-sm shadow-sky-500/10 dark:bg-sky-400/15 dark:border-sky-400/30'
+            : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+        )}
+      >
+        <div
+          className={cn(
+            'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+            on ? 'bg-sky-500/85 dark:bg-sky-400/80' : 'bg-ink-muted/25 dark:bg-white/15',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+              on ? 'left-[15px]' : 'left-[2px]',
+            )}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12px] font-medium leading-tight text-ink">Preview outside-view lineage</div>
+          <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+            {on ? 'On — chip offers Preview' : 'Off'}
+          </div>
+        </div>
+      </button>
     </div>
   )
 }

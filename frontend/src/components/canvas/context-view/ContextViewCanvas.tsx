@@ -2667,6 +2667,59 @@ export function ContextViewCanvas({
     return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
   }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
 
+  // ── External lineage PREVIEW (feature-flagged) — the guided
+  // click-through: fetch ONE node's out-of-scope partners on demand
+  // (bounded: two edge queries + one name lookup) and show them in the
+  // Lens, badged. Nothing enters the canvas store — a preview must
+  // never mutate a curated view's scope.
+  const externalLineagePreview = usePreferencesStore((s) => s.externalLineagePreview)
+  const [externalPreview, setExternalPreview] = useState<{
+    nodeId: string
+    loading: boolean
+    records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
+  } | null>(null)
+  const handlePreviewExternal = useCallback(async () => {
+    const urn = selectedNodeId
+    if (!urn) return
+    setExternalPreview({ nodeId: urn, loading: true, records: [] })
+    openLens(urn)
+    try {
+      const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
+      const [outEdges, inEdges] = await Promise.all([
+        provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
+        provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
+      ])
+      const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+      const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
+      for (const e of outEdges) {
+        const p = e.targetUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
+      }
+      for (const e of inEdges) {
+        const p = e.sourceUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+      }
+      const partnerUrns = [...partners.keys()].slice(0, 100)
+      const named = partnerUrns.length > 0
+        ? await provider.getNodes({ urns: partnerUrns, limit: partnerUrns.length })
+        : []
+      const labelByUrn = new Map(named.map(n => [n.urn, n.displayName]))
+      setExternalPreview({
+        nodeId: urn,
+        loading: false,
+        records: partnerUrns.map(p => ({
+          urn: p,
+          label: labelByUrn.get(p) || p.split(':').pop() || p,
+          direction: partners.get(p)!.direction,
+          edgeType: partners.get(p)!.edgeType,
+        })),
+      })
+    } catch {
+      // Preview is advisory — fail closed to "no preview", never block the lens.
+      setExternalPreview({ nodeId: urn, loading: false, records: [] })
+    }
+  }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+
   const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
   const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
     setAnchorProxyGroups(groups)
@@ -3176,6 +3229,7 @@ export function ContextViewCanvas({
           rootsHaveMore={rootsHaveMore}
           onLoadMoreRoots={() => { void loadMoreRoots() }}
           selectedExternal={selectedExternalLineage}
+          onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
           unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}
@@ -3291,6 +3345,7 @@ export function ContextViewCanvas({
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
           lensStack={lensStack}
+          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
           onClose={lensClose}

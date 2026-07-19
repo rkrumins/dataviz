@@ -47,6 +47,13 @@ export interface LineageLensProps {
   onLocateAll?: (nodeIds: string[]) => void | Promise<void>
   /** Escalate to a full server trace from the focal node (closes the lens). */
   onTrace?: (nodeId: string) => void
+  /** Feature-flagged out-of-view preview for the focal node: partners
+   *  that exist in the data source but are outside this view's scope.
+   *  Advisory only — never part of the canvas. */
+  externalPreview?: {
+    loading: boolean
+    records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
+  } | null
 }
 
 export function LineageLens({
@@ -58,6 +65,7 @@ export function LineageLens({
   onOpenDetails,
   onLocateAll,
   onTrace,
+  externalPreview,
 }: LineageLensProps) {
   const nodeId = lensStack[lensStack.length - 1] ?? null
 
@@ -238,6 +246,57 @@ export function LineageLens({
               onOpenDetails={onOpenDetails}
             />
           </div>
+
+          {/* ── Outside this view (feature-flagged preview) — partners
+              that exist in the data source but are beyond this view's
+              scope. The story is told explicitly: expected, not missing
+              data, and NOT part of the canvas. Per-row CTA escalates to
+              a Trace, the sanctioned way to pull external lineage in. ── */}
+          {externalPreview && (externalPreview.loading || externalPreview.records.length > 0) && (
+            <div className="px-4 py-2.5 border-t border-dashed border-sky-400/40 bg-sky-500/[0.05]">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-sky-600 dark:text-sky-300">
+                <LucideIcons.Unlink className="w-3 h-3" />
+                <span>Outside this view</span>
+                {externalPreview.loading ? (
+                  <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <span className="tabular-nums normal-case tracking-normal text-sky-600/80 dark:text-sky-300/80">
+                    {externalPreview.records.length} entit{externalPreview.records.length === 1 ? 'y' : 'ies'}
+                  </span>
+                )}
+              </div>
+              {!externalPreview.loading && (
+                <div className="mt-1.5 grid grid-cols-2 gap-x-5 gap-y-1 max-h-36 overflow-y-auto custom-scrollbar">
+                  {externalPreview.records.map(r => (
+                    <div key={`${r.direction}-${r.urn}`} className="flex items-center gap-1.5 min-w-0 text-[11.5px]">
+                      {r.direction === 'in'
+                        ? <LucideIcons.ArrowDownLeft className="w-3 h-3 flex-shrink-0 text-sky-500/80" />
+                        : <LucideIcons.ArrowUpRight className="w-3 h-3 flex-shrink-0 text-sky-500/80" />}
+                      <span className="truncate text-ink">{r.label}</span>
+                      {r.edgeType && (
+                        <span className="flex-shrink-0 text-[9px] uppercase tracking-wider text-ink-muted/50">{r.edgeType}</span>
+                      )}
+                      {onTrace && (
+                        <button
+                          type="button"
+                          onClick={() => { onClose(); onTrace(r.urn) }}
+                          title={`Trace lineage from ${r.label} — brings its lineage onto the canvas`}
+                          className="ml-auto flex-shrink-0 text-[10px] font-semibold text-accent-lineage hover:underline"
+                        >
+                          Trace
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="mt-1.5 text-[10px] text-ink-muted/60 italic leading-snug">
+                These connections exist in the data source but their entities aren&apos;t part of this
+                view — expected for a curated subset, not missing data. This is a preview; nothing has
+                been added to the canvas.
+              </p>
+            </div>
+          )}
 
           {/* Footer */}
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
