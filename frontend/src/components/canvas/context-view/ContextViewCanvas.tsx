@@ -2663,6 +2663,33 @@ export function ContextViewCanvas({
   const externalDegrees = useExternalDegrees(
     activeEntityScope === 'curated' && showMissingConnectionIndicators,
   )
+  // Ambient per-node cue: external = total − internal(loaded), for every
+  // loaded node with a KNOWN total. One O(E) pass builds internal
+  // degrees; nodes absent from externalDegrees stay absent here
+  // (unknown ≠ zero). Empty map when the feature is off — the overlay
+  // renders nothing.
+  const externalCueByNode = useMemo(() => {
+    const cue = new Map<string, { in: number; out: number }>()
+    if (externalDegrees.size === 0) return cue
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    const internal = new Map<string, { in: number; out: number }>()
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      const s = internal.get(e.source) ?? { in: 0, out: 0 }
+      s.out++; internal.set(e.source, s)
+      const tg = internal.get(e.target) ?? { in: 0, out: 0 }
+      tg.in++; internal.set(e.target, tg)
+    }
+    externalDegrees.forEach((total, urn) => {
+      const loc = internal.get(urn) ?? { in: 0, out: 0 }
+      const exIn = Math.max(0, total.in - loc.in)
+      const exOut = Math.max(0, total.out - loc.out)
+      if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
+    })
+    return cue
+  }, [externalDegrees, edges, lineageEdgeTypes])
+
   const selectedExternalLineage = useMemo(() => {
     if (!selectedNodeId) return null
     const total = externalDegrees.get(selectedNodeId)
@@ -3453,6 +3480,7 @@ export function ContextViewCanvas({
               flowRibbons={flowRibbons}
               focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
+              externalCue={externalCueByNode}
             />
           )}
 
