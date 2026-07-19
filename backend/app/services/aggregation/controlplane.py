@@ -251,9 +251,12 @@ from .schemas import (  # noqa: E402
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
+    FreshnessDoc,
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    RefreshRequestInternal,
+    RefreshResponse,
     ResumeOverrides,
     SourceChangedRequest,
     SourceChangedResponse,
@@ -624,6 +627,54 @@ async def source_changed(
     return await svc.signal_source_changed(
         ds_id, session, reason=body.reason, force=body.force,
     )
+
+
+# ── POST /aggregation/data-sources/{ds_id}/refresh ───────────────────
+
+@app.post(
+    "/aggregation/data-sources/{ds_id}/refresh",
+    response_model=RefreshResponse,
+    summary="Unified refresh verb (auto | read-caches | rollups | full)",
+)
+async def refresh_source(
+    ds_id: str,
+    body: RefreshRequestInternal = Body(default=RefreshRequestInternal()),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    """Twin of the viz-service refresh route. ``origin`` is caller-asserted
+    (script | connector | api); the web proxy leaves it ``api`` and the
+    loader script sends ``script``. Actor is ``internal`` here — the web
+    tier owns user attribution in direct mode."""
+    try:
+        return await svc.refresh_source(
+            ds_id, session,
+            scope=body.scope, force=body.force, reason=body.reason,
+            actor="internal", origin=body.origin, wait=body.wait,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── GET /aggregation/data-sources/{ds_id}/freshness ──────────────────
+
+@app.get(
+    "/aggregation/data-sources/{ds_id}/freshness",
+    response_model=FreshnessDoc,
+    summary="Per-source freshness detail",
+)
+async def source_freshness(
+    ds_id: str,
+    probe: bool = Query(False),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    """Per-source freshness assembly — runs HERE so the probe uses the
+    Control Plane's short-timeout provider registry. 404 when unknown."""
+    doc = await svc.assemble_source_freshness(ds_id, session, probe=probe)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Data source {ds_id!r} not found")
+    return doc
 
 
 # ── CLI entry point ─────────────────────────────────────────────────

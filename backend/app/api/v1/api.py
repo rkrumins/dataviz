@@ -5,7 +5,7 @@ from .versioning_gate import versioning_write_gate
 from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
-    auth, users, announcements, aggregation, stats_admin,
+    auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
@@ -225,6 +225,13 @@ api_router.include_router(
 # GETs, system:admin only for genuinely cross-workspace operations).
 api_router.include_router(
     aggregation.router, prefix="/admin", tags=["admin:aggregation"],
+)
+# Freshness Cockpit: /api/v1/admin/freshness + /api/v1/admin/data-sources/
+# {id}/freshness + .../refresh. Per-endpoint gates inside the router
+# (ingestion-read for the views, _REQUIRE_DS_MANAGE for the refresh verb),
+# same pattern as the aggregation router above.
+api_router.include_router(
+    freshness.router, prefix="/admin", tags=["admin:freshness"],
 )
 # Stats service: /api/v1/admin/stats-polling
 api_router.include_router(

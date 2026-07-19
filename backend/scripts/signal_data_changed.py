@@ -3,14 +3,17 @@
 Every direct write to FalkorDB (seed scripts, import scripts, external
 connectors) bypasses the app's write paths, so read caches and the
 :AGGREGATED overlay go stale silently. Run this at the end of such a load
-to converge: it POSTs the change-gated ``source-changed`` signal to the
-aggregation control plane, which marks the source stale, clears content +
-hierarchy read caches, nudges stats, and queues an aggregation rebuild.
+to converge: it POSTs the unified ``refresh`` verb to the aggregation
+control plane with ``origin="script"``. The default ``--scope auto`` is
+the change-gated signal (marks the source stale, clears content +
+hierarchy read caches, nudges stats, and queues a rebuild) — identical to
+the legacy source-changed call. ``read-caches`` / ``rollups`` / ``full``
+act unconditionally for operators who want to force part or all of it.
 
 Usage:
     python -m backend.scripts.signal_data_changed --graph <falkordb_graph>
     python -m backend.scripts.signal_data_changed --data-source-id <ds_id>
-        [--reason external_load] [--force]
+        [--scope auto|read-caches|rollups|full] [--reason external_load] [--force]
 
 Environment:
     AGGREGATION_SERVICE_URL   Control plane base URL (default http://localhost:8091)
@@ -59,6 +62,15 @@ async def main() -> int:
         "--force", action="store_true",
         help="Invalidate + rebuild even if the fingerprint is unchanged",
     )
+    parser.add_argument(
+        "--scope", default="auto",
+        choices=["auto", "read-caches", "rollups", "full"],
+        help=(
+            "What to converge (default: auto — the change-gated signal, "
+            "equivalent to the legacy source-changed call). read-caches / "
+            "rollups / full act unconditionally."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.data_source_id and not args.graph:
@@ -75,8 +87,13 @@ async def main() -> int:
             return 2
 
     base = os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
-    url = f"{base}/aggregation/data-sources/{ds_id}/source-changed"
-    payload = {"reason": args.reason, "force": args.force}
+    url = f"{base}/aggregation/data-sources/{ds_id}/refresh"
+    payload = {
+        "scope": args.scope,
+        "reason": args.reason,
+        "force": args.force,
+        "origin": "script",
+    }
     try:
         async with httpx.AsyncClient(headers=internal_auth_headers()) as client:
             resp = await client.post(url, json=payload, timeout=60.0)

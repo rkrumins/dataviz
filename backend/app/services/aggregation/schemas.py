@@ -430,6 +430,19 @@ class RefreshRequest(BaseModel):
         populate_by_name = True
 
 
+class RefreshRequestInternal(RefreshRequest):
+    """Body for the Control Plane's ``refresh`` twin. Extends the public
+    ``RefreshRequest`` with an ``origin`` the caller asserts for the audit
+    trail: the loader script sends ``script``, external connectors
+    ``connector``; the viz proxy leaves it ``api``. Restricted to the
+    non-system origins (``drift``/``reconcile`` are emitted internally, never
+    via this route)."""
+    origin: Literal["script", "connector", "api"] = "api"
+
+    class Config:
+        populate_by_name = True
+
+
 class RefreshResponse(BaseModel):
     """Result of one ``refresh_source`` invocation.
 
@@ -448,6 +461,77 @@ class RefreshResponse(BaseModel):
     job_id: Optional[str] = Field(None, alias="jobId")
     deferred: bool = False
     event_id: Optional[str] = Field(None, alias="eventId")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Freshness cockpit (operator-facing read models) ──────────────────
+
+
+class RefreshEventSummary(BaseModel):
+    """One row of the refresh_events audit trail, trimmed to what the
+    freshness views render. Populated from ``RefreshEventORM``."""
+    origin: str
+    outcome: str
+    ts: str
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessRow(BaseModel):
+    """One data source's freshness signals for the fleet view. Assembled
+    from ONE SQL pass (workspace_data_sources ⋈ providers) plus ONE Redis
+    pipeline (generation / cache-as-of / stale marker) — never a provider
+    or FalkorDB call. Optional-heavy: every Redis-sourced field degrades to
+    ``None`` when the cache is unreachable or the key is absent."""
+    data_source_id: str = Field(alias="dataSourceId")
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    name: Optional[str] = None
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
+    last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
+    cache_as_of: Optional[str] = Field(None, alias="cacheAsOf")
+    generation: Optional[int] = None
+    stale_reason: Optional[str] = Field(None, alias="staleReason")
+    # The marker carries no reliable "since": its TTL is a 7-day backstop
+    # that is refreshed on every re-signal, so a TTL-derived timestamp
+    # would misreport when the source first went stale. Left None until a
+    # marker set-time is durably recorded.
+    stale_since: Optional[str] = Field(None, alias="staleSince")
+    cooldown_until: Optional[str] = Field(None, alias="cooldownUntil")
+    stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
+    # Only ever set under an explicit probe (fleet never probes → None).
+    drifted: Optional[bool] = None
+    running_job_id: Optional[str] = Field(None, alias="runningJobId")
+    last_event: Optional[RefreshEventSummary] = Field(None, alias="lastEvent")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessDoc(FreshnessRow):
+    """A single source's full freshness detail — the fleet row plus the
+    per-source extras that cost one bounded LKG SCAN and (only under
+    ``probe=true``) one provider ``get_schema_stats`` call."""
+    lkg_count: Optional[int] = Field(None, alias="lkgCount")
+    lkg_oldest_age_secs: Optional[int] = Field(None, alias="lkgOldestAgeSecs")
+    live_fingerprint: Optional[str] = Field(None, alias="liveFingerprint")
+    live_node_count: Optional[int] = Field(None, alias="liveNodeCount")
+    live_edge_count: Optional[int] = Field(None, alias="liveEdgeCount")
+    events: List[RefreshEventSummary] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessFleetResponse(BaseModel):
+    """Paged fleet freshness response — ``total`` is the filtered count."""
+    rows: List[FreshnessRow] = Field(default_factory=list)
+    total: int = 0
 
     class Config:
         populate_by_name = True

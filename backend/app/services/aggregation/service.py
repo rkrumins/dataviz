@@ -28,7 +28,11 @@ from .schemas import (
     AggregationTuning,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    FreshnessDoc,
+    FreshnessFleetResponse,
+    FreshnessRow,
     PaginatedJobsResponse,
+    RefreshEventSummary,
     RefreshResponse,
     ResumeOverrides,
     SourceChangedResponse,
@@ -1762,6 +1766,110 @@ class AggregationService:
             )
             return None
 
+    # ── Freshness cockpit: per-source detail ────────────────────────
+
+    async def assemble_source_freshness(
+        self, ds_id: str, session: AsyncSession, *, probe: bool = False,
+    ) -> Optional[FreshnessDoc]:
+        """Full freshness detail for one source. Reads the same SQL row +
+        cache signals as a fleet row, plus a bounded LKG SCAN and the last
+        five refresh events. Only when ``probe`` is True does it make ONE
+        ``get_schema_stats`` call (bounded by ``SCHEDULER_DRIFT_CHECK_TIMEOUT``)
+        to derive the live fingerprint / node+edge counts and the drift
+        verdict. Returns ``None`` when the data source does not exist (the
+        route maps that to 404). Never raises for a cache/provider hiccup —
+        those degrade the affected fields to ``None``."""
+        from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+        from backend.app.services import graph_cache as _gc
+        from backend.app.db.repositories.refresh_events_repo import (
+            list_refresh_events,
+        )
+
+        row = (await session.execute(
+            select(WorkspaceDataSourceORM, ProviderORM.name)
+            .join(
+                ProviderORM,
+                ProviderORM.id == WorkspaceDataSourceORM.provider_id,
+                isouter=True,
+            )
+            .where(WorkspaceDataSourceORM.id == ds_id)
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        )).first()
+        if row is None:
+            return None
+        ds, provider_name = row[0], row[1]
+
+        signals = (await _gc.read_freshness_signals(
+            [(ds.workspace_id, ds.id)]
+        )).get((str(ds.workspace_id), str(ds.id)), (None, None, None))
+        running = await _running_job_map(session, [ds.id])
+        events = await list_refresh_events(session, ds.id, limit=5)
+        last_event = events[0] if events else None
+        lkg_count, lkg_oldest_age = await _gc.read_lkg_stats(
+            ds.workspace_id, ds.id,
+        )
+
+        live_fingerprint = live_node_count = live_edge_count = None
+        drifted = None
+        if probe:
+            live_fingerprint, live_node_count, live_edge_count = (
+                await self._probe_live_stats(ds.workspace_id, ds.id, session)
+            )
+            # Drift is only meaningful against a stored baseline; without
+            # one (never aggregated) the verdict stays unknown (None).
+            if live_fingerprint and ds.graph_fingerprint:
+                drifted = not fingerprints_match(
+                    ds.graph_fingerprint, live_fingerprint,
+                )
+
+        return FreshnessDoc(
+            **_freshness_row_kwargs(
+                ds, provider_name=provider_name, signals=signals,
+                running_job_id=running.get(ds.id), last_event=last_event,
+                drifted=drifted,
+            ),
+            lkg_count=lkg_count,
+            lkg_oldest_age_secs=lkg_oldest_age,
+            live_fingerprint=live_fingerprint,
+            live_node_count=live_node_count,
+            live_edge_count=live_edge_count,
+            events=[_event_summary(e) for e in events],
+        )
+
+    async def _probe_live_stats(
+        self, workspace_id, ds_id, session: AsyncSession,
+    ) -> tuple[Optional[str], Optional[int], Optional[int]]:
+        """ONE ``get_schema_stats`` probe → ``(live_fingerprint,
+        node_count, edge_count)``. Bounded by ``SCHEDULER_DRIFT_CHECK_TIMEOUT``;
+        any failure or timeout degrades to ``(None, None, None)`` — the
+        freshness read must never fail because a provider is slow or down."""
+        from .fingerprint import fingerprint_from_stats
+
+        timeout = float(
+            __import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5")
+        )
+        try:
+            provider = await asyncio.wait_for(
+                self._registry.get_provider_for_workspace(
+                    workspace_id, session, data_source_id=ds_id,
+                ),
+                timeout=timeout,
+            )
+            stats = await asyncio.wait_for(
+                provider.get_schema_stats(), timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "assemble_source_freshness: probe failed for %s: %s",
+                ds_id, exc,
+            )
+            return (None, None, None)
+        return (
+            fingerprint_from_stats(stats),
+            getattr(stats, "total_nodes", None),
+            getattr(stats, "total_edges", None),
+        )
+
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 
     async def recover_interrupted_jobs(self) -> int:
@@ -2050,6 +2158,183 @@ class AggregationService:
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
         )
+
+
+# ── Freshness cockpit: fleet assembly + shared row builder ──────────
+#
+# These are module-level (not AggregationService methods) on purpose: the
+# fleet view is a pure read of the web tier's own synced state
+# (public.workspace_data_sources) + the cache Redis, so it must work in
+# proxy mode too, where the web tier holds no AggregationService instance.
+# The per-source doc, which needs the provider registry for its probe,
+# lives on the service (see ``assemble_source_freshness``).
+
+
+def _event_summary(row) -> Optional[RefreshEventSummary]:
+    """RefreshEventORM → the trimmed summary the freshness views render."""
+    if row is None:
+        return None
+    return RefreshEventSummary(origin=row.origin, outcome=row.outcome, ts=row.ts)
+
+
+def _rebuild_cooldown_until(last_aggregated_at: Optional[str]) -> Optional[str]:
+    """``cooldown_until = last_aggregated_at + rebuild-min-interval``, but
+    only while that instant is still in the future — once the window has
+    elapsed there is no cooldown to report, so return ``None``."""
+    if not last_aggregated_at or AGGREGATION_REBUILD_MIN_INTERVAL_SECS <= 0:
+        return None
+    try:
+        ref = datetime.fromisoformat(last_aggregated_at)
+    except (TypeError, ValueError):
+        return None
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    until = ref + timedelta(seconds=AGGREGATION_REBUILD_MIN_INTERVAL_SECS)
+    if until <= datetime.now(timezone.utc):
+        return None
+    return until.isoformat()
+
+
+def _freshness_row_kwargs(
+    ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
+) -> dict:
+    """Map one workspace_data_sources row + its cache signals into the
+    snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
+    ``signals`` is ``(generation, cache_as_of, stale_reason)`` from
+    :func:`graph_cache.read_freshness_signals`."""
+    generation, cache_as_of, stale_reason = signals
+    return dict(
+        data_source_id=ds.id,
+        workspace_id=ds.workspace_id,
+        provider_id=ds.provider_id,
+        name=ds.label,
+        provider_name=provider_name,
+        aggregation_status=ds.aggregation_status,
+        last_aggregated_at=ds.last_aggregated_at,
+        # Sourced from the provider's cache namespace (requires provider
+        # resolution) — deliberately left None on the no-provider-work
+        # freshness paths.
+        last_materialized_at=None,
+        cache_as_of=cache_as_of,
+        generation=generation,
+        stale_reason=stale_reason,
+        stale_since=None,
+        cooldown_until=_rebuild_cooldown_until(ds.last_aggregated_at),
+        stored_fingerprint=ds.graph_fingerprint,
+        drifted=drifted,
+        running_job_id=running_job_id,
+        last_event=_event_summary(last_event),
+    )
+
+
+async def _running_job_map(
+    session: AsyncSession, ds_ids: List[str],
+) -> dict[str, str]:
+    """Newest pending/running aggregation job id per data source, in ONE
+    query (no per-row lookups). Empty dict for sources with no active job."""
+    if not ds_ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            AggregationJobORM.data_source_id,
+            AggregationJobORM.id,
+        )
+        .where(AggregationJobORM.data_source_id.in_(ds_ids))
+        .where(AggregationJobORM.status.in_(["pending", "running"]))
+        .order_by(
+            AggregationJobORM.data_source_id,
+            AggregationJobORM.created_at.desc(),
+        )
+    )).all()
+    out: dict[str, str] = {}
+    for ds_id, job_id in rows:
+        out.setdefault(ds_id, job_id)  # first per ds = newest (ordered)
+    return out
+
+
+async def assemble_fleet_freshness(
+    session: AsyncSession,
+    *,
+    workspace_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    stale_only: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+) -> FreshnessFleetResponse:
+    """Fleet freshness: ONE SQL pass (workspace_data_sources ⋈ providers,
+    filtered + paged) then ONE Redis pipeline for the cache signals, plus
+    batched refresh-event and running-job lookups. Never touches a provider
+    or FalkorDB. ``stale_only`` filters on the Redis stale marker via a
+    bounded SCAN of stale sources applied as a SQL id filter, so paging and
+    ``total`` stay exact."""
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.services import graph_cache as _gc
+    from backend.app.db.repositories.refresh_events_repo import (
+        latest_refresh_event_map,
+    )
+
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
+
+    stale_ids: Optional[set[str]] = None
+    if stale_only:
+        stale_ids = {ds for _ws, ds in await _gc.list_stale_sources()}
+        if not stale_ids:
+            return FreshnessFleetResponse(rows=[], total=0)
+
+    base = (
+        select(WorkspaceDataSourceORM, ProviderORM.name)
+        .join(
+            ProviderORM,
+            ProviderORM.id == WorkspaceDataSourceORM.provider_id,
+            isouter=True,
+        )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    )
+    if workspace_id:
+        base = base.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+    if provider_id:
+        base = base.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    if stale_ids is not None:
+        base = base.where(WorkspaceDataSourceORM.id.in_(stale_ids))
+
+    total = (await session.execute(
+        select(func.count()).select_from(base.subquery())
+    )).scalar() or 0
+
+    ds_rows = (await session.execute(
+        base
+        .order_by(
+            WorkspaceDataSourceORM.updated_at.desc(),
+            WorkspaceDataSourceORM.id,
+        )
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    )).all()
+
+    ds_list = [row[0] for row in ds_rows]
+    provider_names = {row[0].id: row[1] for row in ds_rows}
+    ds_ids = [ds.id for ds in ds_list]
+
+    signals = await _gc.read_freshness_signals(
+        [(ds.workspace_id, ds.id) for ds in ds_list]
+    )
+    events = await latest_refresh_event_map(session, ds_ids)
+    running = await _running_job_map(session, ds_ids)
+
+    rows = [
+        FreshnessRow(**_freshness_row_kwargs(
+            ds,
+            provider_name=provider_names.get(ds.id),
+            signals=signals.get(
+                (str(ds.workspace_id), str(ds.id)), (None, None, None),
+            ),
+            running_job_id=running.get(ds.id),
+            last_event=events.get(ds.id),
+        ))
+        for ds in ds_list
+    ]
+    return FreshnessFleetResponse(rows=rows, total=total)
 
 
 # ── Custom Exception Classes ────────────────────────────────────────

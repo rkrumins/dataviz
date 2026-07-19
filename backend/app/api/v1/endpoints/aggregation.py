@@ -1107,7 +1107,12 @@ async def source_changed(
     """Confirm-and-converge after a direct write to the source's graph:
     marks the source stale, clears content + hierarchy read caches, nudges
     stats, and queues an aggregation rebuild (change-gated + idempotent).
-    Called by the loader script and external connectors."""
+    Called by external connectors.
+
+    Equivalent to the unified refresh verb at ``scope=auto`` (see
+    ``freshness.py`` / ``AggregationService.refresh_source``) — the loader
+    script now calls ``refresh`` with ``origin="script"`` instead of this
+    route. This endpoint stays for connectors already wired to it."""
     if _PROXY_ENABLED:
         body = await request.body()
         return await _proxy(

@@ -861,6 +861,98 @@ async def get_cache_as_of(
         return None
 
 
+async def read_freshness_signals(
+    pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]]:
+    """Batch-read the freshness signals for many ``(workspace_id,
+    data_source_id)`` pairs in ONE Redis pipeline — the fleet freshness
+    view's only cache round-trip. For each pair it reads the cache
+    generation counter, the cache-as-of stamp, and the stale-source
+    marker reason.
+
+    Returns a dict keyed by ``(str(ws), str(ds))`` → ``(generation,
+    cache_as_of, stale_reason)``; any missing/unparseable value is
+    ``None``. Best-effort: on any Redis error every requested pair maps to
+    ``(None, None, None)`` so callers degrade to "freshness unknown"
+    rather than failing. Follows graph_cache conventions: ``str()``
+    coercion, empty-id guards, never raises."""
+    clean = [(str(ws), str(ds)) for ws, ds in pairs if ws and ds]
+    result: dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]] = {
+        pair: (None, None, None) for pair in clean
+    }
+    if not clean:
+        return result
+    try:
+        cache = get_graph_cache()
+        pipe = cache._redis.pipeline(transaction=False)
+        for ws, ds in clean:
+            scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id="")
+            pipe.get(_gen_key(scope))
+            pipe.get(_genat_key(scope))
+            pipe.get(_stale_key(ws, ds))
+        raw = await pipe.execute()
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_freshness_signals failed for %d pairs: %s",
+            len(clean), exc,
+        )
+        return result
+    for idx, pair in enumerate(clean):
+        gen_raw, genat_raw, stale_raw = raw[idx * 3: idx * 3 + 3]
+        try:
+            gen = int(gen_raw) if gen_raw is not None else None
+        except (TypeError, ValueError):
+            gen = None
+        result[pair] = (gen, genat_raw, stale_raw)
+    return result
+
+
+async def read_lkg_stats(
+    workspace_id: str, data_source_id: str,
+) -> tuple[Optional[int], Optional[int]]:
+    """Count the last-known-good cache entries for one source and the age
+    of the oldest, via ONE bounded SCAN over
+    ``graphcache:lkg:v1:{ws}:{ds}:*`` then ONE pipelined TTL read.
+
+    Returns ``(lkg_count, oldest_age_secs)``; either is ``None`` on empty
+    ids or any Redis error, and ``lkg_count`` is 0 (with ``None`` age)
+    when the source has no LKG entries. Per-source only — never called on
+    the fleet path. Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return (None, None)
+    try:
+        cache = get_graph_cache()
+        pattern = f"{_LKG_PREFIX}:{ws}:{ds}:*"
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await cache._redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            keys.extend(batch)
+            if not cursor:
+                break
+        if not keys:
+            return (0, None)
+        pipe = cache._redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.ttl(key)
+        ttls = await pipe.execute()
+        # age(oldest) = LKG_TTL − min(remaining TTL); keys without a TTL
+        # (-1) or already gone (-2) are ignored for the age computation.
+        remaining = [int(t) for t in ttls if t is not None and int(t) >= 0]
+        oldest_age: Optional[int] = None
+        if remaining and _LKG_TTL > 0:
+            oldest_age = max(0, _LKG_TTL - min(remaining))
+        return (len(keys), oldest_age)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_lkg_stats failed for %s/%s: %s", ws, ds, exc,
+        )
+        return (None, None)
+
+
 async def list_stale_sources() -> list[tuple[str, str]]:
     """List every ``(workspace_id, data_source_id)`` pair currently
     marked stale — read by the scheduler reconciler to re-signal sources
