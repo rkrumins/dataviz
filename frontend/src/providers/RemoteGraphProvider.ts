@@ -331,6 +331,16 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
+        // Total lineage degree per URN over the FULL graph. A URN absent
+        // from the response is UNKNOWN (its provider bucket failed) —
+        // callers must never treat absence as zero.
+        return await this.fetch<Record<string, { in: number; out: number }>>('/nodes/degree', {
+            method: 'POST',
+            body: JSON.stringify({ urns, edgeTypes }),
+        })
+    }
+
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>('/search', {
             method: 'POST',

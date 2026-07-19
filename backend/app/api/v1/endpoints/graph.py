@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 import hashlib
 import json
 import logging
@@ -1629,6 +1629,45 @@ async def get_edges_between(
         },
         compute=_bounded_compute(engine, compute),
         model_cls=_EdgeListResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
+    return result.root
+
+
+class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
+    """RootModel wrapper so GraphCache can serialize /nodes/degree."""
+
+
+@router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
+async def get_node_degrees(
+    response: Response,
+    query: InternalEdgeQuery = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """TOTAL lineage degree (in/out) per URN over the full graph.
+
+    Powers the curated-view "lineage outside this view" cue: the canvas
+    subtracts its loaded (internal) degree from these totals. A URN
+    absent from the response is UNKNOWN (never zero) — the provider
+    omits URNs whose bucket query failed. Response-cached (gen-bump
+    invalidated) and slot-bounded like /edges/between; degree totals
+    tolerate cache staleness because they are advisory cues.
+    """
+    async def compute() -> _DegreesResult:
+        return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return (await _bounded_compute(engine, compute)()).root
+    result = await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint="nodes_degree",
+        params={
+            "urns": sorted(query.urns),
+            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+        },
+        compute=_bounded_compute(engine, compute),
+        model_cls=_DegreesResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
     return result.root
