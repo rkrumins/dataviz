@@ -1,7 +1,8 @@
 import { Children, isValidElement } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
-import { Hash } from 'lucide-react'
+import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, type LucideIcon } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
 
 // Map the actual filenames from docs/ to route slugs. Adding a new doc to
@@ -45,6 +46,39 @@ const filenameMap: Record<string, string> = {
   'SEARCH.md': 'services-search',
   'CONTEXT_ENGINE.md': 'services-context-engine',
   'ASSIGNMENTS.md': 'services-assignments',
+}
+
+// ── Callouts ────────────────────────────────────────────────────────
+// A blockquote whose first line begins with a recognised label renders as
+// an accented callout box. Authors write either GitHub-alert syntax
+// (`> [!NOTE]`) or a bold label (`> **Note:** …`); anything else stays a
+// plain blockquote. One place, so docs and guide share the treatment.
+
+const CALLOUTS: Record<string, { icon: LucideIcon; box: string; icon_cls: string }> = {
+  note: { icon: Info, box: 'border-sky-500/30 bg-sky-500/[0.06]', icon_cls: 'text-sky-500' },
+  tip: { icon: Lightbulb, box: 'border-emerald-500/30 bg-emerald-500/[0.06]', icon_cls: 'text-emerald-500' },
+  important: { icon: AlertCircle, box: 'border-violet-500/30 bg-violet-500/[0.06]', icon_cls: 'text-violet-500' },
+  warning: { icon: AlertTriangle, box: 'border-amber-500/30 bg-amber-500/[0.08]', icon_cls: 'text-amber-500' },
+  caution: { icon: AlertTriangle, box: 'border-red-500/30 bg-red-500/[0.06]', icon_cls: 'text-red-500' },
+}
+
+/** Recursively pull the plain text out of react-markdown children. */
+function nodeText(node: React.ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeText).join('')
+  if (isValidElement(node)) {
+    return nodeText((node.props as { children?: React.ReactNode }).children)
+  }
+  return ''
+}
+
+/** Detect a leading callout label, tolerant of `[!NOTE]` or `**Note:**`. */
+function calloutKind(children: React.ReactNode): keyof typeof CALLOUTS | null {
+  const text = nodeText(children).trimStart()
+  const m = /^\[!(\w+)\]|^(note|tip|important|warning|caution)\b\s*:/i.exec(text)
+  const raw = (m?.[1] ?? m?.[2] ?? '').toLowerCase()
+  return raw in CALLOUTS ? (raw as keyof typeof CALLOUTS) : null
 }
 
 function rewriteDocLink(href: string): string {
@@ -125,6 +159,26 @@ export const markdownComponents: Components = {
       <table {...props}>{children}</table>
     </div>
   ),
+
+  // Blockquotes: render a labelled callout box, else a plain quote
+  blockquote: ({ children }) => {
+    const kind = calloutKind(children)
+    if (!kind) return <blockquote>{children}</blockquote>
+    const { icon: Icon, box, icon_cls } = CALLOUTS[kind]
+    return (
+      <div
+        className={cn(
+          'my-4 flex gap-3 rounded-xl border px-4 py-3',
+          '[&>p]:m-0 [&>p+p]:mt-2 [&_code]:text-[0.85em]',
+          box,
+        )}
+        role="note"
+      >
+        <Icon className={cn('w-5 h-5 shrink-0 mt-0.5', icon_cls)} aria-hidden />
+        <div className="min-w-0 flex-1 text-sm leading-relaxed">{children}</div>
+      </div>
+    )
+  },
 
   // Links: rewrite .md links to SPA routes
   a: ({ href, children, ...props }) => {
