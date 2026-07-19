@@ -2,19 +2,24 @@
  * LoadMoreItem — the "there are more children here" row at the bottom of an
  * expanded container's child list.
  *
- * Deliberately click-driven. This used to be an `AutoLoadSentinel` that paged
- * on an IntersectionObserver, which turned into an unattended request pump:
- * its one-shot latch was reset on every re-render (the `onLoadMore` prop was a
- * fresh closure each time), and in the search panel's Isolate/Hide modes the
- * freshly-loaded children were filtered straight back out of the tree — so the
- * column never grew, the sentinel never scrolled out of the observer's root
- * margin, and it re-fired until the parent's entire childCount was drained.
+ * Hybrid paging: click always works, and when `autoLoad` is on the row is
+ * ALSO a one-page-ahead sentinel — scrolling it into the column's viewport
+ * fetches the next page after a short dwell. A previous auto-sentinel here
+ * became an unattended request pump; this version closes each of its
+ * failure modes structurally:
  *
- * Expanding a node already loads its first page (ContextViewCanvas's toggle
- * handler calls `loadChildren`), so the observer only ever served pages 2+.
- * Making those pages explicit costs the user one click and makes a runaway
- * structurally impossible — there is no observer left to mis-latch.
+ * - LATCH ON PROGRESS, NOT RENDERS: the sentinel fires at most once per
+ *   `count` value, held in a ref — prop-identity churn can never re-arm it.
+ *   It only re-fires after a page actually LANDS (count changed).
+ * - DWELL BEFORE FIRING (300ms): scrubbing past the row never pages; only
+ *   pausing on it does.
+ * - CALLER-GATED: LayerColumn passes `autoLoad=false` in Isolate/Hide
+ *   filter modes, where loaded children are filtered out of the tree and
+ *   the row would otherwise stay pinned in view and drain the parent.
+ * - COLUMN-SCOPED: the observer's root is the column scroller, so only
+ *   genuine scrolling in THIS column arms it.
  */
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -26,6 +31,7 @@ export function LoadMoreItem({
   count,
   isLoading = false,
   onLoadMore,
+  autoLoad = false,
 }: {
   parentId?: string
   depth: number
@@ -34,12 +40,44 @@ export function LoadMoreItem({
   count: number
   isLoading?: boolean
   onLoadMore: () => void
+  /** One-page-ahead auto-load when the row scrolls into view. */
+  autoLoad?: boolean
 }) {
   const indentWidth = depth * 16
   const nextPage = Math.min(CHILDREN_PAGE_SIZE, count)
 
+  const rowRef = useRef<HTMLDivElement>(null)
+  const lastFiredCountRef = useRef<number | null>(null)
+  const onLoadMoreRef = useRef(onLoadMore)
+  useEffect(() => { onLoadMoreRef.current = onLoadMore }, [onLoadMore])
+
+  useEffect(() => {
+    if (!autoLoad || isLoading) return
+    const el = rowRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    let dwell: ReturnType<typeof setTimeout> | null = null
+    const io = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) {
+        if (dwell !== null) { clearTimeout(dwell); dwell = null }
+        return
+      }
+      if (lastFiredCountRef.current === count) return
+      dwell = setTimeout(() => {
+        dwell = null
+        lastFiredCountRef.current = count
+        onLoadMoreRef.current()
+      }, 300)
+    }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
+    io.observe(el)
+    return () => {
+      io.disconnect()
+      if (dwell !== null) clearTimeout(dwell)
+    }
+  }, [autoLoad, count, isLoading])
+
   return (
     <motion.div
+      ref={rowRef}
       initial={{ opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
       data-canvas-interactive

@@ -110,6 +110,10 @@ interface LayerColumnProps {
   onProxyReveal?: (nodeId: string) => void
   /** "+N more" overflow — open the Lineage Lens for the full list. */
   onProxyMore?: () => void
+  /** The user scrolled this column to its true end (only fires on
+   *  columns that actually scroll) — the canvas uses it to auto-load
+   *  the next page of ROOTS one page ahead. */
+  onEndReached?: () => void
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -165,6 +169,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   anchorProxies,
   onProxyReveal,
   onProxyMore,
+  onEndReached,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -781,6 +786,27 @@ export const LayerColumn = React.memo(function LayerColumn({
   // labeled statement ("↑ 97 rows · 306 connections") instead of two
   // unlabeled numbers in different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
+
+  // ── End-reached sentinel (roots auto-paging) ─────────────────────────
+  // Fires when the user scrolls this column to its true end. Guards, in
+  // the order that killed the historical auto-load pump:
+  // - only on columns that ACTUALLY scroll (a short column is always "at
+  //   its end" and would otherwise drain every root page on load);
+  // - latched per flatTree.length, re-armed only when content grows;
+  // - 300ms dwell so momentum-scrolling through doesn't fire.
+  const endFiredForLenRef = useRef(-1)
+  useEffect(() => {
+    if (!onEndReached) return
+    if (flatTree.length === 0 || overflowCounts.below !== 0) return
+    if (endFiredForLenRef.current === flatTree.length) return
+    const el = scrollContainerRef.current
+    if (!el || el.scrollHeight <= el.clientHeight + 10) return
+    const t = setTimeout(() => {
+      endFiredForLenRef.current = flatTree.length
+      onEndReached()
+    }, 300)
+    return () => clearTimeout(t)
+  }, [onEndReached, overflowCounts.below, flatTree.length])
 
   const scrollToFlatIndex = useCallback((index: number, align: 'start' | 'end') => {
     if (index < 0 || index >= flatTree.length) return
@@ -1706,6 +1732,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
                         onLoadMore={() => handleLoadMore(item.node.id)}
+                        // One-page-ahead auto-load — OFF in Isolate/Hide
+                        // filter modes, where freshly-loaded children are
+                        // filtered out of the tree and the pinned row
+                        // would drain the parent (the historical pump).
+                        autoLoad={matchUrnSet.size === 0 || canvasFilterMode === 'highlight'}
                       />
                     </div>
                   )

@@ -3485,6 +3485,7 @@ export function ContextViewCanvas({
                 anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
+                onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
