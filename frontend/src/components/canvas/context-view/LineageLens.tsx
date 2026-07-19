@@ -40,6 +40,8 @@ export interface LineageLensProps {
   onBack: () => void
   /** Jump the walk back to stack index i (truncates the trail there). */
   onJumpTo?: (index: number) => void
+  /** Frame the walked path on the canvas (closes the lens). */
+  onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
   /** Reveal the node on the canvas (expand ancestors + scroll) without closing the lens. */
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
@@ -63,6 +65,7 @@ export function LineageLens({
   onRecenter,
   onBack,
   onJumpTo,
+  onShowPathOnCanvas,
   onClose,
   onRevealOnCanvas,
   onOpenDetails,
@@ -228,6 +231,34 @@ export function LineageLens({
                   </div>
                 )
               })}
+              {/* The walk as a deliverable: present it on the canvas, or
+                  copy it as text for a ticket/finding. */}
+              <div className="ml-auto flex items-center gap-1 pl-2 flex-shrink-0">
+                {onShowPathOnCanvas && (
+                  <button
+                    type="button"
+                    onClick={() => { onClose(); onShowPathOnCanvas(lensStack) }}
+                    title="Frame this walked path on the canvas"
+                    className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+                  >
+                    <LucideIcons.Frame className="w-3 h-3" />
+                    Show on canvas
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(
+                      lensStack.map(id => labelOf(id, nodeMap.get(id))).join(' → '),
+                    )
+                  }}
+                  title="Copy this path as text (acct_num → System A → …)"
+                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                >
+                  <LucideIcons.Copy className="w-3 h-3" />
+                  Copy path
+                </button>
+              </div>
             </div>
           )}
 

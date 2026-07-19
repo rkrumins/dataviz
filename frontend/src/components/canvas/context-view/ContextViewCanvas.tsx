@@ -3351,6 +3351,16 @@ export function ContextViewCanvas({
           onRecenter={lensRecenter}
           onBack={lensBack}
           onJumpTo={lensJumpTo}
+          onShowPathOnCanvas={(ids) => {
+            // Presenting a walk IS a frame action — same chrome, same exit.
+            const focal = ids[ids.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length - 1 })
+            }
+            void locateManyOnCanvas(ids)
+          }}
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}
