@@ -216,8 +216,17 @@ export function AdminBranding() {
 
     if (isLoading || !form) {
         return (
-            <div className="flex items-center justify-center h-full text-ink-muted">
-                <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading branding…
+            <div className="max-w-2xl mx-auto p-8 space-y-6">
+                <div className="space-y-2">
+                    <div className="h-7 w-40 rounded-lg bg-black/5 dark:bg-white/10 animate-pulse" />
+                    <div className="h-4 w-64 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                </div>
+                {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="space-y-2">
+                        <div className="h-4 w-28 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                        <div className="h-10 w-full rounded-lg border border-glass-border bg-black/5 dark:bg-white/10 animate-pulse" />
+                    </div>
+                ))}
             </div>
         )
     }

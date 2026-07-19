@@ -211,6 +211,7 @@ export function CreateWorkspaceWizard({
             }
             hideClose={phase === 'creating'}
             wide={step === 'data'}
+            helpSlug="workspace-admin"
             footer={
                 phase === 'success' ? (
                     <div className="flex items-center justify-end gap-3 w-full">
