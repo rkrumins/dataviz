@@ -97,7 +97,13 @@ function getUnhealthyInterval(consecutiveFailures: number): number {
   return Math.min(backoff, POLL_UNHEALTHY_CAP_MS)
 }
 
-export function BackendHealthBanner() {
+export function BackendHealthBanner({
+  hideProviderBanner = false,
+}: {
+  /** Suppress the provider-status banner (e.g. on the /docs and /guide pages,
+   *  where a reader has no reason to see or act on a provider outage). */
+  hideProviderBanner?: boolean
+} = {}) {
   const status = useHealthStore((s) => s.status)
   const reason = useHealthStore((s) => s.reason)
   const detail = useHealthStore((s) => s.detail)
@@ -199,7 +205,7 @@ export function BackendHealthBanner() {
   const visible = status === 'unreachable' || status === 'recovered'
 
   const content = visible ? getBannerContent(status, reason, detail) : null
-  const providerContent = unavailableProviders.length > 0 && !providerBannerDismissed && !providerSnoozed
+  const providerContent = unavailableProviders.length > 0 && !providerBannerDismissed && !providerSnoozed && !hideProviderBanner
     ? {
         Icon: AlertTriangle,
         title: unavailableProviders.length === 1

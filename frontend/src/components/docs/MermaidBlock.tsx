@@ -140,7 +140,15 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
             dangerouslySetInnerHTML={{ __html: svgHtml }}
           />
           <Lightbox open={zoom} onClose={() => setZoom(false)} label="Diagram">
-            <div dangerouslySetInnerHTML={{ __html: svgHtml }} />
+            {/* Claim a real width budget and override Mermaid's inline
+                style="max-width:Npx" (important beats inline) so the diagram
+                scales up to fill the modal instead of sitting at its small
+                natural size; h-auto + the SVG's preserveAspectRatio keep it
+                undistorted, max-h caps very tall diagrams. */}
+            <div
+              className="w-[88vw] max-w-[1600px] [&_svg]:!max-w-none [&_svg]:w-full [&_svg]:h-auto [&_svg]:max-h-[85vh]"
+              dangerouslySetInnerHTML={{ __html: svgHtml }}
+            />
           </Lightbox>
         </>
       ) : (
