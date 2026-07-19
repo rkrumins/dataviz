@@ -248,6 +248,39 @@ describe('LineageLens on-demand fetch merge', () => {
     }
   })
 
+  it('collapses parent groups by default at 3+ groups; chevron expands', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
+    } as never)
+    try {
+      useCanvasStore.setState({ nodes: [node('ds')], edges: [], visibleEdges: [] } as never)
+      renderLens(['ds'], {}, {
+        supplementalEdges: [
+          edge('f1', 'kid1', 'ds'),
+          edge('f2', 'kid2', 'ds'),
+          edge('f3', 'kid3', 'ds'),
+          { id: 'c1', source: 'p1', target: 'kid1', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+          { id: 'c2', source: 'p2', target: 'kid2', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+          { id: 'c3', source: 'p3', target: 'kid3', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
+        ],
+        supplementalNodes: new Map([
+          ['kid1', node('kid1')], ['kid2', node('kid2')], ['kid3', node('kid3')],
+          ['p1', node('p1')], ['p2', node('p2')], ['p3', node('p3')],
+        ]),
+      })
+      // Three parent groups → collapsed by default: headers with counts
+      // visible, member rows hidden.
+      expect(screen.getByText('label-p1')).toBeTruthy()
+      expect(screen.queryByText('label-kid1')).toBeNull()
+      // Chevron expands the group (header click would re-center instead).
+      fireEvent.click(screen.getAllByTitle('Expand 1 connection')[0])
+      expect(screen.getByText('label-kid1')).toBeTruthy()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('walk frontier groups partners under their parent; header walks into the parent', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({

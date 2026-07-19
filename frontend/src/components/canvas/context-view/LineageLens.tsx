@@ -334,6 +334,20 @@ export function LineageLens({
     return { nodeId, types: next }
   })
 
+  // Parent-group collapse — per-group TOGGLES against a per-column
+  // default (3+ parent groups → start collapsed: dataset-level overview
+  // first), stored as XOR so the default can vary without migrating
+  // state. Keyed to the focal like the other lens-local state.
+  const [collapseState, setCollapseState] = useState<{ nodeId: string | null; keys: ReadonlySet<string> }>({ nodeId: null, keys: EMPTY_TYPE_SET })
+  const collapseToggles = collapseState.nodeId === nodeId ? collapseState.keys : EMPTY_TYPE_SET
+  const toggleCollapse = (k: string) => setCollapseState(prev => {
+    const base = prev.nodeId === nodeId ? prev.keys : EMPTY_TYPE_SET
+    const next = new Set(base)
+    if (next.has(k)) next.delete(k)
+    else next.add(k)
+    return { nodeId, keys: next }
+  })
+
   // ── Containment drill — refine an aggregated row to its constituent
   // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
   // up (`data.sourceEdges`). Honest by construction: constituents that
@@ -744,7 +758,9 @@ export function LineageLens({
                           missing = Math.max(0, Math.max(aggData?.sourceEdgeCount ?? 0, all.length) - constituents.length)
                         }
                         return (
-                          <div key={rid}>
+                          // content-visibility: offscreen walk rows skip
+                          // layout+paint (frontiers can reach 200 rows).
+                          <div key={rid} className="[content-visibility:auto] [contain-intrinsic-size:auto_30px]">
                             <div className="flex items-stretch">
                               <button
                                 type="button"
@@ -869,27 +885,47 @@ export function LineageLens({
                               const pLabel = labelOf(g.key, nodeMap.get(g.key))
                               const pColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
                               const headerActive = g.key === walkedInto
+                              // Same collapse rule as the classic columns:
+                              // 3+ parent groups start collapsed, searching
+                              // (frontier filter) force-expands, and the
+                              // group holding the hop you walked into stays
+                              // open so the trail never hides itself.
+                              const defaultCollapsed = hopGroups.filter(gr => gr.kind === 'parent').length >= 3
+                              const collapseKey = `w${i}:p:${g.key}`
+                              const holdsWalkedInto = !!walkedInto && g.rows.some(it => it.rec.neighborId === walkedInto)
+                              const collapsed = !(isLast && q !== '') && !holdsWalkedInto
+                                && (defaultCollapsed !== collapseToggles.has(collapseKey))
                               return (
                                 <div key={`pg-${g.key}`} className="mb-0.5">
-                                  {/* Parent-dataset header — clickable: walking
-                                      into the parent itself is a valid hop. */}
-                                  <button
-                                    type="button"
-                                    onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
-                                    title={`Walk into ${pLabel}`}
-                                    className={cn(
-                                      'w-full min-w-0 flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 text-left transition-colors',
-                                      headerActive ? 'text-accent-lineage' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
-                                    )}
-                                  >
-                                    <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
-                                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
-                                    <span className={cn('min-w-0 truncate text-[10px] font-bold tracking-wide', headerActive ? 'text-accent-lineage' : 'text-ink-muted/90')}>
-                                      {pLabel}
-                                    </span>
-                                    <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
-                                  </button>
-                                  {g.rows.map(it => renderWalkRow(it, false))}
+                                  {/* Chevron collapses; the name walks into
+                                      the parent itself — distinct targets. */}
+                                  <div className="flex items-center min-w-0 pl-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleCollapse(collapseKey)}
+                                      title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
+                                      className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded text-ink-muted/60 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                                    >
+                                      <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', collapsed && '-rotate-90')} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
+                                      title={`Walk into ${pLabel}`}
+                                      className={cn(
+                                        'flex-1 min-w-0 flex items-center gap-1.5 pr-3 pl-0.5 pt-1.5 pb-0.5 text-left transition-colors',
+                                        headerActive ? 'text-accent-lineage' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
+                                      )}
+                                    >
+                                      <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
+                                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
+                                      <span className={cn('min-w-0 truncate text-[10px] font-bold tracking-wide', headerActive ? 'text-accent-lineage' : 'text-ink-muted/90')}>
+                                        {pLabel}
+                                      </span>
+                                      <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
+                                    </button>
+                                  </div>
+                                  {!collapsed && g.rows.map(it => renderWalkRow(it, false))}
                                 </div>
                               )
                             }
@@ -947,8 +983,8 @@ export function LineageLens({
                                 title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
                                 className={
                                   active
-                                    ? 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
-                                    : 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
+                                    ? 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
+                                    : 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
                                 }
                               >
                                 <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
@@ -1006,6 +1042,9 @@ export function LineageLens({
               isCoarser={(t) => isCoarserThan(t, focalType)}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
+              collapseToggles={collapseToggles}
+              onToggleCollapse={toggleCollapse}
+              searching={q !== ''}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1091,6 +1130,9 @@ export function LineageLens({
               isCoarser={(t) => isCoarserThan(t, focalType)}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
+              collapseToggles={collapseToggles}
+              onToggleCollapse={toggleCollapse}
+              searching={q !== ''}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1283,7 +1325,11 @@ function NeighborRow({
   return (
     <div
       className={cn(
-        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-all border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0',
+        // content-visibility skips layout+paint for offscreen rows —
+        // lightweight virtualization; columns can hold 200 cards.
+        // transition-colors (not -all): animating every property makes
+        // hover sweeps during scroll recompute layout per row.
+        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0',
         rollup && 'opacity-75 hover:opacity-100',
       )}
       style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
@@ -1361,6 +1407,9 @@ function NeighborColumn({
   isCoarser,
   hiddenTypes,
   onToggleType,
+  collapseToggles,
+  onToggleCollapse,
+  searching,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -1382,6 +1431,12 @@ function NeighborColumn({
   isCoarser: (type: string | undefined) => boolean
   hiddenTypes: ReadonlySet<string>
   onToggleType: (type: string) => void
+  /** Per-group collapse toggles (XOR against the column default). */
+  collapseToggles: ReadonlySet<string>
+  onToggleCollapse: (key: string) => void
+  /** Text filter active — auto-expand every group so matches can't
+   *  hide inside a collapsed one (that would be silent loss). */
+  searching: boolean
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -1491,39 +1546,57 @@ function NeighborColumn({
             </div>
           )
         )}
-        {groups.map((g) => {
+        {groups.map((g, _gi, allGroups) => {
           if (g.kind === 'parent') {
             const parentLabel = labelOf(g.key, nodeMap.get(g.key))
             const parentColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
+            // 3+ parent groups → start collapsed (dataset-level overview
+            // first); toggles XOR the default. Searching expands all.
+            const defaultCollapsed = allGroups.filter(gr => gr.kind === 'parent').length >= 3
+            const collapseKey = `${direction}:p:${g.key}`
+            const collapsed = !searching && (defaultCollapsed !== collapseToggles.has(collapseKey))
             return (
               <div key={`p-${g.key}`} className="mb-2.5">
                 {/* Parent-dataset header — the structural story ("which
-                    datasets feed me, via which fields"). Clicking steps
-                    the walk into the parent itself. */}
-                <button
-                  type="button"
-                  onClick={() => onRecenter(g.key)}
-                  title={`Re-center on ${parentLabel}`}
-                  className="w-full min-w-0 flex items-center gap-1.5 px-1.5 py-1 rounded-md text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
-                >
-                  <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/60" />
-                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
-                  <span className="min-w-0 truncate text-[10px] font-bold tracking-wide text-ink-muted/90">{parentLabel}</span>
-                  <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
-                </button>
-                <div className="flex flex-col gap-1">
-                  {g.rows.map((r, i) => (
-                    <NeighborRow
-                      key={`${r.edge.id}-${i}`}
-                      r={r}
-                      isIn={isIn}
-                      accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
-                      onRecenter={onRecenter}
-                      onRevealOnCanvas={onRevealOnCanvas}
-                      onOpenDetails={onOpenDetails}
-                    />
-                  ))}
+                    datasets feed me, via which fields"). The chevron
+                    collapses/expands the group; the name steps the walk
+                    into the parent itself. */}
+                <div className="flex items-center min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => onToggleCollapse(collapseKey)}
+                    title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
+                    className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded text-ink-muted/60 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                  >
+                    <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', collapsed && '-rotate-90')} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRecenter(g.key)}
+                    title={`Re-center on ${parentLabel}`}
+                    className="flex-1 min-w-0 flex items-center gap-1.5 px-1 py-1 rounded-md text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
+                  >
+                    <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/60" />
+                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
+                    <span className="min-w-0 truncate text-[10px] font-bold tracking-wide text-ink-muted/90">{parentLabel}</span>
+                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
+                  </button>
                 </div>
+                {!collapsed && (
+                  <div className="flex flex-col gap-1">
+                    {g.rows.map((r, i) => (
+                      <NeighborRow
+                        key={`${r.edge.id}-${i}`}
+                        r={r}
+                        isIn={isIn}
+                        accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
+                        onRecenter={onRecenter}
+                        onRevealOnCanvas={onRevealOnCanvas}
+                        onOpenDetails={onOpenDetails}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             )
           }
