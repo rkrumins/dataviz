@@ -282,6 +282,10 @@ export interface ViewLayerConfig {
   entityTypes: string[];
   order: number;
   sequence?: number; // Visual order (left-to-right)
+  /** Authored column width (px, 260–560). Part of the view definition:
+   *  draft-mode resizes persist here and ship to every viewer. Viewers
+   *  may still hold a personal (local) override on top. */
+  width?: number;
 
   // Logical Hierarchy (New)
   logicalNodes?: LogicalNodeConfig[];
