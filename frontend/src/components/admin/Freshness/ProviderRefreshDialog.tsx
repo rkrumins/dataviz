@@ -8,7 +8,7 @@
  */
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Loader2, XCircle, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -24,10 +24,9 @@ const SCOPES: { scope: RefreshScope; label: string; desc: string }[] = [
     { scope: 'full', label: 'Full refresh', desc: 'Refresh caches and rebuild lineage for every source.' },
 ]
 
-export function ProviderRefreshDialog({ providerId, providerName, sourceCount, isOpen, onClose }: {
+export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClose }: {
     providerId: string | null
     providerName: string
-    sourceCount: number
     isOpen: boolean
     onClose: () => void
 }) {
@@ -50,8 +49,10 @@ export function ProviderRefreshDialog({ providerId, providerName, sourceCount, i
     if (!isOpen || !providerId) return null
 
     const rebuilds = scope === 'rollups' || scope === 'full' || (scope === 'auto' && force)
-    const running = batchId != null && !done
-    const total = batch?.total ?? sourceCount
+    // The batch enumerates ALL live sources under the provider fleet-wide — a
+    // count derived from the (possibly filtered) table would understate it, so
+    // we only show the authoritative total once the batch reports it.
+    const total = batch?.total ?? 0
     const completed = batch?.done ?? 0
     const pct = total > 0 ? (completed / total) * 100 : 0
 
@@ -64,13 +65,14 @@ export function ProviderRefreshDialog({ providerId, providerName, sourceCount, i
 
     return createPortal(
         <>
-            <Backdrop open={isOpen} onClick={() => !running && onClose()} zClassName="z-50" className="bg-black/50" />
+            {/* Closing never cancels the batch — the runner is server-side — so
+                the backdrop always dismisses, even mid-run. */}
+            <Backdrop open={isOpen} onClick={onClose} zClassName="z-50" className="bg-black/50" />
+            {/* No AnimatePresence: this portaled popover unmounts instantly on close so an interrupted exit can't strand an invisible click-blocker over the page. It still animates in. */}
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-                <AnimatePresence>
                     <motion.div
                         initial={{ scale: 0.96, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.96, opacity: 0 }}
                         transition={{ duration: 0.12 }}
                         onClick={(e) => e.stopPropagation()}
                         className="pointer-events-auto w-full max-w-lg rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden"
@@ -83,7 +85,7 @@ export function ProviderRefreshDialog({ providerId, providerName, sourceCount, i
                                 <h3 className="text-lg font-bold text-ink">Refresh {providerName}</h3>
                             </div>
                             <p className="text-sm text-ink-muted mb-5">
-                                Runs across {sourceCount} {sourceCount === 1 ? 'data source' : 'data sources'} using this provider.
+                                Runs across every live data source using this provider.
                             </p>
 
                             {batchId == null ? (
@@ -151,7 +153,12 @@ export function ProviderRefreshDialog({ providerId, providerName, sourceCount, i
                                         </span>
                                         <span className="text-ink-muted tabular-nums">{completed} / {total}</span>
                                     </div>
-                                    <ProgressBar value={pct} label="Provider refresh progress" className="mb-4" />
+                                    <ProgressBar value={pct} label="Provider refresh progress" className="mb-2" />
+                                    {!done && (
+                                        <p className="text-[11px] text-ink-muted mb-4">
+                                            The refresh continues in the background if you close this.
+                                        </p>
+                                    )}
 
                                     {batch && batch.results.length > 0 && (
                                         <ul className="max-h-48 overflow-y-auto space-y-1 mb-4">
@@ -168,19 +175,20 @@ export function ProviderRefreshDialog({ providerId, providerName, sourceCount, i
                                     )}
 
                                     <div className="flex justify-end">
+                                        {/* Never disabled: closing dismisses the view, it does not
+                                            cancel the server-side batch, so a stranded "running"
+                                            batch must still be dismissable. */}
                                         <button
                                             onClick={onClose}
-                                            disabled={running}
-                                            className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                            className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                                         >
-                                            {done ? 'Close' : 'Running…'}
+                                            Close
                                         </button>
                                     </div>
                                 </>
                             )}
                         </div>
                     </motion.div>
-                </AnimatePresence>
             </div>
         </>,
         document.body,
