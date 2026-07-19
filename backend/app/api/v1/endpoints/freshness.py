@@ -171,10 +171,14 @@ async def refresh_data_source(
     if _PROXY_ENABLED:
         # Inject the authenticated user id so the Control Plane audits the
         # refresh as the user, not "internal" — production runs proxy mode,
-        # so without this every UI refresh would lose its actor.
+        # so without this every UI refresh would lose its actor. Force
+        # origin="api" too (the direct branch hard-codes it): a ds:manage
+        # caller must not be able to label their UI refresh as
+        # connector/script in the audit trail.
         raw = await request.body()
         forwarded = _json.loads(raw) if raw else {}
         forwarded["actor"] = user.id
+        forwarded["origin"] = "api"
         return await _proxy(
             "POST", f"/aggregation/data-sources/{ds_id}/refresh", request,
             body=_json.dumps(forwarded).encode(),

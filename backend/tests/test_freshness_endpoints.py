@@ -464,6 +464,26 @@ def test_refresh_route_proxy_forwards_actor(monkeypatch):
     assert body["scope"] == "rollups"
 
 
+def test_refresh_route_proxy_overrides_client_origin(monkeypatch):
+    # A ds:manage caller must not be able to forge the audit origin: the
+    # proxy branch forces origin="api" regardless of the client body.
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", True)
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-42")
+    _run(fresh_mod.refresh_data_source(
+        "ds-1", _FakeRequest(b'{"scope":"auto","origin":"connector"}'),
+        user=user, svc=None, session=object(),
+    ))
+    body = json.loads(captured["body"])
+    assert body["origin"] == "api"  # client's "connector" overridden
+
+
 def test_cp_refresh_twin_passes_actor_through():
     # The Control Plane twin forwards the proxied actor to refresh_source.
     from backend.app.services.aggregation import controlplane as cp
