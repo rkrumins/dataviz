@@ -54,8 +54,8 @@ Key decisions:
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` | `900` | Min interval between signal-triggered rebuilds per source; `0` disables throttling. Invalidation/marking is never throttled. |
-| `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` | Scheduler acts on drift + reconciles markers. `false` restores notify-only. |
+| `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` | `900` | Min interval between signal-triggered rebuilds per source; `0` disables throttling. Invalidation/marking is never throttled. **Env is the fallback only**: a persisted global (`PUT /aggregation/settings`, or the Freshness tab's Cadence settings) and a per-source override (`PATCH /admin/data-sources/{id}/freshness-settings`, or the source drawer) take precedence — resolution is override → global → env, shared by the cooldown gate, the reconciler, and the UI badge. |
+| `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` | Scheduler acts on drift + reconciles markers. `false` restores notify-only. Same persisted-global override applies. |
 | `GRAPH_CACHE_MAX_PAYLOAD_BYTES` | `1048576` | Cache-entry cap. Raise (e.g. 8388608) for large-model aggregated payloads; oversized results now *delete* the stale entry rather than stranding it. |
 
 ## Operating it
