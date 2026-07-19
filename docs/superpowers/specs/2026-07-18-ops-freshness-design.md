@@ -66,3 +66,13 @@ Fleet = one SQL query + pipelined Redis reads; per-source probe explicit and 5s-
 ## Out of scope (explicitly)
 
 Connector convergence webhooks, SSE freshness stream, Prometheus metrics (Approach C follow-ons); fixing the Redis DB0-vs-CACHE_REDIS_URL keyspace split; CP/worker stdout log visibility; per-view freshness (exists elsewhere).
+
+## 7. UI/UX uplift (user addition 2026-07-19, screenshot-driven)
+
+Problems: flat ~59-row scroll dominated by NOT BUILT noise; no fleet summary; filters minimal; "Up to date" shown for never-built sources (misleading).
+Decisions (user-approved): triage-first default (severity sort failed→recomputing→drifted→cooldown→ready→not built; provider groups with nothing actionable collapsed to a one-line rollup); "Build lineage" CTA on never-built rows via the rollups scope (also closes the never-aggregated gap through the UI).
+Design:
+- **Fleet summary (server-side)**: `summary` object on the fleet response — {total, ready, pending, failed, notBuilt, recomputing, needsAttention, cacheStamped} — computed over the workspace/provider-filtered set BEFORE staleOnly/pagination, in the same assembly pass; omitted (null) when the filtered set exceeds 1000 sources (FE hides tiles gracefully). "recomputing" = stale marker present; "needsAttention" = marker OR failed; "cacheStamped" = cacheAsOf non-null.
+- **Stat-tile band = filters**: KPI tiles (Total/Ready/Rebuilding/Needs attention/Not built/Cache coverage) that toggle the corresponding table filter on click.
+- **Sticky faceted filter bar**: Provider + Workspace multi-select (with counts), status segmented control, name search, removable filter chips, URL-synced state (repo convention: state derives from URL).
+- **Table**: severity-sorted, collapsible provider groups with mini-rollups, sticky headers, denser rows. Never-built rows: freshness cell "Never built" (+ CTA), no fake "Up to date", collapsed em-dashes.
