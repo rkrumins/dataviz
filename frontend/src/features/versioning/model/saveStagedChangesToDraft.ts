@@ -40,7 +40,7 @@ export async function saveStagedChangesToDraft(
   target: DraftSaveTarget,
 ): Promise<{ commitId?: string | null }> {
   // ── Build ONE op batch ──────────────────────────────────────────────────────────────────────
-  // Layer placement (assign_layer / move_to_layer) is VIEW config, not graph data — it produces
+  // Layer placement (assign_layer / move_to_layer / reorder_nodes) is VIEW config, not graph data — it produces
   // ZERO graph ops. It persists to the view's referenceLayout.assignments via persistReferenceLayout;
   // on save, `remapEntityId` re-keys a created entity's assignment temp→real (see the canvas caller).
   const ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes

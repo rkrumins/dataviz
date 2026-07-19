@@ -46,6 +46,11 @@ interface FlatTreeItemProps {
   isSearchVisible?: boolean
   /** When set (draft/authoring mode), show the hover connection handle. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+  /** Custom-order mode (draft + layer.nodeSortMode === 'custom'): root rows expose
+   *  before/after drop bands (top/bottom 30%) with an indicator line; the middle
+   *  band keeps the existing reparent drop. */
+  reorderEnabled?: boolean
+  onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
 }
 
 // Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
@@ -87,6 +92,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onToggleSearch,
   isSearchVisible = false,
   onBeginConnect,
+  reorderEnabled = false,
+  onReorderDrop,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -240,6 +247,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
   const { reparent } = useReparentNode()
   const [dropHover, setDropHover] = useState(false)
+  // Custom-order drop bands: 'before'/'after' when a drag hovers the row's
+  // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
+  // band keeps the reparent drop, so one gesture serves both without a mode.
+  const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
+  const reorderBandsActive = reorderEnabled && depth === 0 && !isLogical && !!onReorderDrop
 
   return (
     <div
@@ -248,21 +260,40 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       onDragOver={(e) => {
-        // Accept a node drag (reparent). The id can't be read during dragover, so we
-        // can't exclude self here — `reparent` guards self/cycles on drop.
+        // Accept a node drag (reparent / reorder). The id can't be read during
+        // dragover, so we can't exclude self here — drop handlers guard that.
         if (!e.dataTransfer.types.includes('text/x-entity-id')) return
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
+        if (reorderBandsActive) {
+          const rect = e.currentTarget.getBoundingClientRect()
+          const y = e.clientY - rect.top
+          const band = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
+          if (band !== dropIndicator) setDropIndicator(band)
+          if (band) {
+            if (dropHover) setDropHover(false)
+            return
+          }
+        }
         if (!dropHover) setDropHover(true)
       }}
-      onDragLeave={() => { if (dropHover) setDropHover(false) }}
+      onDragLeave={() => {
+        if (dropHover) setDropHover(false)
+        if (dropIndicator) setDropIndicator(null)
+      }}
       onDrop={(e) => {
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
         if (!draggedId) return
         e.preventDefault()
         e.stopPropagation()   // take precedence over the layer-column drop (move-to-layer)
+        const indicator = dropIndicator
         setDropHover(false)
+        setDropIndicator(null)
+        if (indicator && reorderBandsActive) {
+          if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
+          return
+        }
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
@@ -342,6 +373,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
+      {/* Custom-order drop indicator — a glowing accent line at the row edge
+          the drop will land on (before/after), with a dot cap so the insertion
+          point reads instantly even between visually-dense rows. */}
+      {dropIndicator && (
+        <div
+          className={cn(
+            'pointer-events-none absolute inset-x-0 z-20 flex items-center gap-0',
+            dropIndicator === 'before' ? '-top-[2px]' : '-bottom-[2px]',
+          )}
+        >
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)]" />
+          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
+        </div>
+      )}
+
       {/* Edge authoring: hover-reveal handle on the card's right edge. */}
       {onBeginConnect && (
         <NodeConnectionHandle

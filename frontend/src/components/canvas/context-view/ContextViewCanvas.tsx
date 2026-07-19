@@ -97,6 +97,7 @@ import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
 import * as assignmentOps from './assignmentMutations'
+import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
@@ -912,7 +913,15 @@ export function ContextViewCanvas({
 
     // Descendants with their own explicit entries are cleared so they inherit the parent's new layer.
     const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
-    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants })
+    // A drop into a custom-sorted layer lands at the BOTTOM of the manual
+    // arrangement (append key after the layer's largest).
+    let orderKey: string | undefined
+    if (before.layers.find(l => l.id === layerId)?.nodeSortMode === 'custom') {
+      try {
+        orderKey = generateKeyBetween(assignmentOps.lastOrderKeyInLayer(before, layerId), null)
+      } catch { /* malformed keys — fall back to the unkeyed alpha tail */ }
+    }
+    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants, orderKey })
     persistReferenceLayout(after)
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
@@ -1661,7 +1670,7 @@ export function ContextViewCanvas({
       entityTypes: [],
       order: before.layers.length,
     })
-    const after = { layers, assignments: before.assignments }
+    const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1671,7 +1680,7 @@ export function ContextViewCanvas({
     const before = currentLayout()
     const old = before.layers.find((l) => l.id === id)
     if (!trimmed || !old || old.name === trimmed) return
-    const after = { layers: layerOps.renameLayer(before.layers, id, trimmed), assignments: before.assignments }
+    const after = { ...before, layers: layerOps.renameLayer(before.layers, id, trimmed) }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1689,7 +1698,7 @@ export function ContextViewCanvas({
       if (entry.layerId !== id) assignments[urn] = entry
       else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
     }
-    const after = { layers, assignments }
+    const after = { ...before, layers, assignments }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'delete', `Deleted layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1701,7 +1710,7 @@ export function ContextViewCanvas({
     const dragged = before.layers.find((l) => l.id === draggedId)
     const layers = layerOps.reorderLayer(before.layers, draggedId, targetId)
     if (!dragged || layers === before.layers) return
-    const after = { layers, assignments: before.assignments }
+    const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1757,6 +1766,71 @@ export function ContextViewCanvas({
     persistReferenceLayout(after)
     stageLayerChange('view-sort', before, after, 'sort', `Default sort: ${sortModeLabel(effective)} (all layers)`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Drag-reorder within a custom-sorted column: mint a fractional key between the
+  // drop position's neighbors. All assignment-backed roots are lazily seeded from
+  // the column's current visual order first, so neighbor keys always exist and
+  // key order equals visual order (seeding appends after the largest existing
+  // key, and unkeyed roots already render in the post-keyed alpha tail).
+  const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    if (draggedId === targetId) return
+    const before = currentLayout()
+    const layerId = before.assignments[targetId]?.layerId
+      ?? sortDirectionCtxRef.current.nodeLayerMap.get(targetId)
+    if (!layerId) return
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer || layer.nodeSortMode !== 'custom') return
+
+    // The column's current visual roots (logical wrappers can't be reordered).
+    const roots = (nodesByLayerRef.current.get(layerId) ?? [])
+      .map(n => n.id)
+      .filter(id => !id.startsWith('logical:'))
+    let layout = layerOps.setLayerNodeSortMode(before, layerId, 'custom', roots)
+
+    // A rule-assigned root has no explicit entry to carry an orderKey — reordering
+    // it is an explicit placement, so create its entry in its current layer.
+    const draggedLayerId = layout.assignments[draggedId]?.layerId
+    if (!draggedLayerId) {
+      layout = assignmentOps.assignEntities(layout, [draggedId], layerId)
+    } else if (draggedLayerId !== layerId) {
+      // Cross-layer drops go through the assign flow (header / middle band), not the reorder bands.
+      return
+    }
+
+    const order = roots.filter(id => id !== draggedId)
+    const targetIdx = order.indexOf(targetId)
+    if (targetIdx < 0) return
+    const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
+    const prevId = insertIdx > 0 ? order[insertIdx - 1] : null
+    const nextId = insertIdx < order.length ? order[insertIdx] : null
+    const prevKey = prevId ? layout.assignments[prevId]?.orderKey ?? null : null
+    const nextKey = nextId ? layout.assignments[nextId]?.orderKey ?? null : null
+    let newKey: string
+    try {
+      newKey = generateKeyBetween(prevKey, nextKey)
+    } catch {
+      return // malformed neighbor keys — refuse rather than corrupt the arrangement
+    }
+    const after = assignmentOps.setAssignmentOrderKey(layout, draggedId, newKey)
+    if (after === layout && layout === before) return
+    persistReferenceLayout(after)
+
+    const node = nodes.find(n => n.id === draggedId || (n.data?.urn as string) === draggedId)
+    const name = (node?.data?.label as string) ?? draggedId
+    useStagedChangesStore.getState().stageOrReplace(
+      (c) => c.type === 'reorder_nodes' && c.targetId === draggedId,
+      {
+        type: 'reorder_nodes',
+        targetId: draggedId,
+        targetUrn: (node?.data?.urn as string) ?? draggedId,
+        before: { orderKey: before.assignments[draggedId]?.orderKey ?? null },
+        after: { orderKey: newKey, layerId },
+        summary: `Reordered '${name}' in ${layer.name}`,
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
+      },
+    )
+  }, [currentLayout, persistReferenceLayout, nodes])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -3611,6 +3685,8 @@ export function ContextViewCanvas({
                 canPersistSort={isDraft}
                 onSetSortMode={handleSetLayerSortMode}
                 onApplySortToView={handleApplySortToView}
+                reorderEnabled={isDraft && layer.nodeSortMode === 'custom'}
+                onReorderDrop={handleReorderNode}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}

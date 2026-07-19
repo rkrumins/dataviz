@@ -94,6 +94,10 @@ interface LayerColumnProps {
   /** Presence mounts the header sort menu. `mode === null` clears the layer override. */
   onSetSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
   onApplySortToView?: (layerId: string) => void
+  /** Custom-order drag-reorder (draft + custom sort mode): root rows show
+   *  before/after drop bands; drops land in handleReorderNode on the canvas. */
+  reorderEnabled?: boolean
+  onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -174,6 +178,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   canPersistSort = false,
   onSetSortMode,
   onApplySortToView,
+  reorderEnabled = false,
+  onReorderDrop,
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
@@ -1512,6 +1518,22 @@ export const LayerColumn = React.memo(function LayerColumn({
             ref={scrollContainerRef}
             onScroll={handleScroll}
             onKeyDown={handleKeyDown}
+            onDragOver={(e) => {
+              // Auto-scroll while an entity drag hovers near the column's
+              // vertical edges, so long virtualized lists can be reordered /
+              // reparented beyond the visible window. Deliberately does NOT
+              // preventDefault — drop acceptance stays with the row targets.
+              if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+              const el = scrollContainerRef.current
+              if (!el) return
+              const rect = el.getBoundingClientRect()
+              const zone = 48
+              if (e.clientY < rect.top + zone) {
+                el.scrollTop -= 14
+              } else if (e.clientY > rect.bottom - zone) {
+                el.scrollTop += 14
+              }
+            }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
               // Clicks landing on a node card are handled by the card's own
@@ -1779,6 +1801,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
+                        reorderEnabled={reorderEnabled}
+                        onReorderDrop={onReorderDrop}
                       />
                     </div>
                   </div>

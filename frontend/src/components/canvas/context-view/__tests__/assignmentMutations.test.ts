@@ -6,6 +6,8 @@ import {
   checkAssignmentConflict,
   pruneTempAssignments,
   isTempUrn,
+  setAssignmentOrderKey,
+  lastOrderKeyInLayer,
 } from '../assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
@@ -199,5 +201,65 @@ describe('assignmentMutations — pruneTempAssignments', () => {
     expect(next.layers).toBe(before.layers)
     expect(before.assignments['urn:staged:X:1']).toBeDefined() // input untouched
     expect(next.assignments['urn:staged:X:1']).toBeUndefined()
+  })
+})
+
+describe('assignmentMutations — orderKey (custom node ordering)', () => {
+  const entry = (layerId: string, orderKey?: string): LayerAssignmentEntry => ({
+    layerId,
+    inheritsChildren: true,
+    ...(orderKey ? { orderKey } : {}),
+  })
+
+  it('stamps an explicit opts.orderKey', () => {
+    const next = assignEntities(layout(), ['urn:a'], 'l1', { orderKey: 'a1' })
+    expect(next.assignments['urn:a'].orderKey).toBe('a1')
+  })
+
+  it('carries the existing orderKey forward on a SAME-layer re-assign', () => {
+    const next = assignEntities(layout({ 'urn:a': entry('l1', 'a3') }), ['urn:a'], 'l1', {
+      logicalNodeId: 'ln1',
+    })
+    expect(next.assignments['urn:a'].orderKey).toBe('a3')
+  })
+
+  it('drops the orderKey on a CROSS-layer move (keys order within one layer only)', () => {
+    const next = assignEntities(layout({ 'urn:a': entry('l2', 'a3') }), ['urn:a'], 'l1')
+    expect(next.assignments['urn:a'].orderKey).toBeUndefined()
+  })
+
+  it('orderKey survives temp→real urn remap (created node keeps its slot after Save)', () => {
+    const before = layout({ 'urn:staged:table:x': entry('l1', 'a2') })
+    const next = remapAssignmentUrn(before, 'urn:staged:table:x', 'urn:real:table:x')
+    expect(next.assignments['urn:real:table:x'].orderKey).toBe('a2')
+    expect(next.assignments['urn:staged:table:x']).toBeUndefined()
+  })
+
+  it('setAssignmentOrderKey sets, clears, and no-ops on missing entries', () => {
+    const base = layout({ 'urn:a': entry('l1') })
+    const withKey = setAssignmentOrderKey(base, 'urn:a', 'a5')
+    expect(withKey.assignments['urn:a'].orderKey).toBe('a5')
+    const cleared = setAssignmentOrderKey(withKey, 'urn:a', null)
+    expect(cleared.assignments['urn:a'].orderKey).toBeUndefined()
+    expect(setAssignmentOrderKey(base, 'urn:missing', 'a1')).toBe(base)
+  })
+
+  it('lastOrderKeyInLayer returns the layer-scoped ordinal max (null when unkeyed)', () => {
+    const l = layout({
+      'urn:a': entry('l1', 'a1'),
+      'urn:b': entry('l1', 'a3'),
+      'urn:c': entry('l2', 'a9'),
+      'urn:d': entry('l1'),
+    })
+    expect(lastOrderKeyInLayer(l, 'l1')).toBe('a3')
+    expect(lastOrderKeyInLayer(l, 'l3')).toBe(null)
+  })
+
+  it('mutations preserve the defaultNodeSortMode side-field', () => {
+    const withDefault: NormalizedReferenceLayout = { ...layout(), defaultNodeSortMode: 'alpha-desc' }
+    expect(assignEntities(withDefault, ['urn:a'], 'l1').defaultNodeSortMode).toBe('alpha-desc')
+    expect(unassignEntities(assignEntities(withDefault, ['urn:a'], 'l1'), ['urn:a']).defaultNodeSortMode).toBe('alpha-desc')
+    const staged = assignEntities(withDefault, ['urn:staged:t:x'], 'l1')
+    expect(pruneTempAssignments(staged).defaultNodeSortMode).toBe('alpha-desc')
   })
 })
