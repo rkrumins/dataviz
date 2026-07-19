@@ -31,6 +31,7 @@ import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
 import { TourLauncher } from '@/features/tour/TourLauncher'
+import { useTourDeepLink } from '@/features/tour/useTourDeepLink'
 
 export { useViewEditorModal }
 
@@ -42,6 +43,9 @@ export function AppLayout() {
   // unrelated preference write (sidebar collapse, pinned views, …).
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
   const toursEnabled = useFeature('toursEnabled')
+
+  // Launch a tour from ?tour=<id> (deep-links from docs / announcements).
+  useTourDeepLink()
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)

@@ -1,5 +1,8 @@
 # Workspace Admin
 
+```tour-workspaces
+```
+
 *For Administrators.* [Admin Setup](/guide/admin-setup) gets your *first*
 workspace running. This page covers what you'll actually do most days after
 that: creating new workspaces, managing their data sources, moving things

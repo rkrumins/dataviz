@@ -1,5 +1,8 @@
 # Exploring the Graph
 
+```tour-explore-lineage
+```
+
 *For Viewers (and anyone curious).* The **Explorer** is the open canvas where you
 ask your own questions of the data — searching, tracing, expanding, and
 filtering freely. Unlike opening a saved View, here *you* drive.

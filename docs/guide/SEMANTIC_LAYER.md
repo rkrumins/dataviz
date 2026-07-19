@@ -1,5 +1,8 @@
 # The Semantic Layer (Ontology)
 
+```tour-semantic-layers
+```
+
 *For Builders and curious Viewers.* The **ontology** is what turns a raw graph of
 anonymous nodes into a *readable* picture with meaning, colour, and structure.
 This page explains it without the jargon — what it is, why it's versioned, and

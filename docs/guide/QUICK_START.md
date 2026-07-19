@@ -1,5 +1,8 @@
 # Quick Start — Your First 10 Minutes
 
+```tour-getting-started
+```
+
 This is the fastest path from "logged in" to "I get it." Follow the five steps
 below and you'll have traced real lineage and saved your first View. No prior
 graph knowledge required.

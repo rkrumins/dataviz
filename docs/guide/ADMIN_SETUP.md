@@ -1,5 +1,8 @@
 # Admin Setup
 
+```tour-admin-setup
+```
+
 *For Administrators.* This is the end-to-end path from a fresh platform to a
 workspace your team can actually explore. Do these steps in order — each one
 unlocks the next.

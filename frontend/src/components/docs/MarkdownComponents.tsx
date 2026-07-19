@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
 import { ZoomableImage } from './reading/ZoomableImage'
 import { LineageTraceDemo } from '../guide/demo/LineageTraceDemo'
+import { MarkdownTourButton } from './MarkdownTourButton'
 
 // Map the actual filenames from docs/ to route slugs. Adding a new doc to
 // docsConfig.ts? Add its filename here too, or its relative .md links from
@@ -209,6 +210,11 @@ export const markdownComponents: Components = {
     // the widget is fully self-contained.
     if (info?.lang === 'lineage-demo') {
       return <LineageTraceDemo />
+    }
+    // ```tour-<id>``` embeds a "Take the tour" CTA. The id rides in the fence
+    // language (not the body) so highlighting never garbles it.
+    if (info?.lang?.startsWith('tour-')) {
+      return <MarkdownTourButton tourId={info.lang.slice('tour-'.length)} />
     }
     return (
       <div className="group relative">

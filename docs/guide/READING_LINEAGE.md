@@ -1,5 +1,8 @@
 # Reading Lineage
 
+```tour-explore-lineage
+```
+
 *For Viewers.* A lineage graph can look busy at first. This page teaches you to
 read it fluently — what the shapes, colours, and lines mean, and how to change
 the level of detail until the picture answers your question.
