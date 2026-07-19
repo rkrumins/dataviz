@@ -28,18 +28,24 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "feature_flag_changes",
-        sa.Column("id", sa.Text(), primary_key=True),
-        sa.Column("feature_key", sa.Text(), nullable=False),
-        sa.Column("old_value", sa.Text(), nullable=True),
-        sa.Column("new_value", sa.Text(), nullable=False),
-        sa.Column("actor_id", sa.Text(), nullable=True),
-        sa.Column("actor_name", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.Text(), nullable=False),
-    )
-    op.create_index("idx_ffc_key_created", "feature_flag_changes", ["feature_key", "created_at"])
-    op.create_index("idx_ffc_created", "feature_flag_changes", ["created_at"])
+    # Existence-guarded: the feature-flags service may have created this
+    # table at current model shape on boot before historical replay
+    # reaches this revision (bootstrap-then-replay wedge — see
+    # 20260713_1200_restore_kind).
+    bind = op.get_bind()
+    if not sa.inspect(bind).has_table("feature_flag_changes"):
+        op.create_table(
+            "feature_flag_changes",
+            sa.Column("id", sa.Text(), primary_key=True),
+            sa.Column("feature_key", sa.Text(), nullable=False),
+            sa.Column("old_value", sa.Text(), nullable=True),
+            sa.Column("new_value", sa.Text(), nullable=False),
+            sa.Column("actor_id", sa.Text(), nullable=True),
+            sa.Column("actor_name", sa.Text(), nullable=True),
+            sa.Column("created_at", sa.Text(), nullable=False),
+        )
+    op.execute("CREATE INDEX IF NOT EXISTS idx_ffc_key_created ON feature_flag_changes (feature_key, created_at)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_ffc_created ON feature_flag_changes (created_at)")
 
 
 def downgrade() -> None:
