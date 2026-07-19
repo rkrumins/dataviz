@@ -4,9 +4,9 @@
 the conventions and habits that make {brand} genuinely useful for a *team*,
 rather than a pile of personal bookmarks. Adopt what fits; agree on it together.
 
-> 💡 **The north star:** a newcomer should be able to open your workspace and
-> understand your data landscape *without asking anyone*. Everything below serves
-> that goal.
+> **Note:** *The north star* — a newcomer should be able to open your workspace
+> and understand your data landscape *without asking anyone*. Everything below
+> serves that goal.
 
 ---
 

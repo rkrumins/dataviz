@@ -25,8 +25,8 @@ the provider (roughly every 30 seconds) and the chip clears itself automatically
 once the connection is back. Only step in if the "updated" time keeps climbing,
 which signals the provider has been down long enough to look at.
 
-> 💡 Make provider health a quick part of your routine. A red provider is the
-> root cause behind most "the graph looks wrong" reports.
+> **Tip:** Make provider health a quick part of your routine. A red provider is
+> the root cause behind most "the graph looks wrong" reports.
 
 ---
 

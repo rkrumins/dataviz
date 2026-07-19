@@ -4,8 +4,8 @@
 workspace your team can actually explore. Do these steps in order — each one
 unlocks the next.
 
-> 💡 **The goal:** get from "nothing connected" to "a user can open a View and
-> trace lineage." That requires a **Provider**, a **Catalog Item**, a
+> **Note:** *The goal* — get from "nothing connected" to "a user can open a View
+> and trace lineage." That requires a **Provider**, a **Catalog Item**, a
 > **Workspace**, a **Data Source**, and an **Ontology**. This page connects all
 > five.
 
@@ -35,7 +35,7 @@ A **Provider** is a connection to a graph database where lineage data lives
 3. **Test connectivity** — {brand} verifies it can reach the database.
 4. Save. Credentials are stored encrypted.
 
-> 💡 On first boot, the platform may **bootstrap a default Provider** from
+> **Note:** On first boot, the platform may **bootstrap a default Provider** from
 > environment variables, so you might already have one to work with.
 
 ---
@@ -69,8 +69,8 @@ Define your entity types, relationships, hierarchy, and visuals, then
 [The Semantic Layer](/guide/semantic-layer) — it's worth reading before you
 publish, because published versions are immutable by design.
 
-> 💡 You can assign the same ontology across multiple workspaces to give your
-> whole organisation one consistent visual language.
+> **Tip:** You can assign the same ontology across multiple workspaces to give
+> your whole organisation one consistent visual language.
 
 ---
 
@@ -100,8 +100,8 @@ Catalog Item (the graph) to an Ontology (the meaning) inside the workspace.
 Once a data source exists, users in that workspace can open the Explorer and
 Views against real data.
 
-> ⚠️ **"No data source for workspace"** is the classic symptom of skipping this
-> step. If users report it, finish the binding here. See
+> **Warning:** "No data source for workspace" is the classic symptom of skipping
+> this step. If users report it, finish the binding here. See
 > [Troubleshooting](/guide/troubleshooting).
 
 ---

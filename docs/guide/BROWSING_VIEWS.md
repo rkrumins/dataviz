@@ -4,8 +4,8 @@
 the time, the fastest way to find an answer is to open a View someone has already
 built. This page covers finding, opening, and keeping track of them.
 
-> 💡 **Why start with Views?** Views are curated. Someone has already chosen the
-> right nodes, layout, and filters to tell a clear story. Browsing is the
+> **Tip:** *Why start with Views?* Views are curated. Someone has already chosen
+> the right nodes, layout, and filters to tell a clear story. Browsing is the
 > low-effort, high-signal way to learn your data landscape.
 
 ![The View gallery, with stats and a "Continue where you left off" strip](/docs-assets/guide/browsing-views-hero.png)
@@ -33,7 +33,7 @@ Each **View card** shows:
 | See what changed recently | Browse the **Recent** section |
 | Narrow the field | Filter by **workspace**, **creator**, or **tags** |
 
-> 💡 **Tip:** If your team uses consistent tags (e.g. `finance`, `daily-load`),
+> **Tip:** If your team uses consistent tags (e.g. `finance`, `daily-load`),
 > filtering by tag is the quickest way to the right View. See
 > [Ways of Working](/guide/ways-of-working) for tagging conventions.
 
@@ -58,7 +58,7 @@ From here you can:
 
 Learn to interpret what you see in [Reading Lineage](/guide/reading-lineage).
 
-> 💡 **Looking never breaks anything.** Exploring inside a View is completely
+> **Note:** Looking never breaks anything. Exploring inside a View is completely
 > safe. To change the saved View itself, you must be its owner (or have edit
 > access) and explicitly save.
 

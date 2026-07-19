@@ -4,9 +4,9 @@
 hits them. Most issues come down to **wrong workspace, missing access, or an
 unhealthy provider** — start there.
 
-> 💡 **First three checks, every time:** (1) Am I in the right **workspace**?
-> (2) Do I have **access** to this thing? (3) Is the **provider healthy**? These
-> resolve the majority of problems.
+> **Tip:** *First three checks, every time* — (1) Am I in the right
+> **workspace**? (2) Do I have **access** to this thing? (3) Is the **provider
+> healthy**? These resolve the majority of problems.
 
 ---
 

@@ -5,7 +5,7 @@ anonymous nodes into a *readable* picture with meaning, colour, and structure.
 This page explains it without the jargon — what it is, why it's versioned, and
 how to evolve it safely.
 
-> 💡 **In one line:** the ontology is your data's **shared dictionary** — it
+> **Note:** *In one line* — the ontology is your data's **shared dictionary**: it
 > defines what each type of thing *is*, how things relate, and how they *look*.
 
 ---
@@ -81,8 +81,8 @@ intact.
 
 ### This is ontology versioning — not data versioning
 
-> 💡 **Two different things share the word "versioning."** This page is about
-> versioning the **ontology** — the *meaning* layer (what entity types and colours
+> **Important:** Two different things share the word "versioning." This page is
+> about versioning the **ontology** — the *meaning* layer (what entity types and colours
 > stand for), where publishing freezes a version so your Views keep rendering
 > correctly. That's separate from versioning the **graph data itself** — opening a
 > draft branch on the actual nodes and edges, editing them, and going through a

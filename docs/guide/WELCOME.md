@@ -47,8 +47,8 @@ each path is self-contained.
 | Build, organise, and share graphs and views | **Builder** | [Creating Views](/guide/creating-views) |
 | Connect data sources, manage users and access | **Administrator** | [Admin Setup](/guide/admin-setup) |
 
-> 💡 **Not sure?** Read [Key Concepts](/guide/key-concepts) first — ten minutes
-> there will make everything else click.
+> **Tip:** Not sure where to begin? Read [Key Concepts](/guide/key-concepts)
+> first — ten minutes there will make everything else click.
 
 ---
 

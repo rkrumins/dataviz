@@ -3,7 +3,7 @@
 {brand} has a small vocabulary. Learn these ten words and the whole platform
 becomes predictable. Read top to bottom — each concept builds on the one before.
 
-> 💡 **The one-sentence model:** A **Provider** holds graphs, which become
+> **Note:** *The one-sentence model* — A **Provider** holds graphs, which become
 > **Catalog Items**, which are bound into a **Workspace** as a **Data Source**,
 > interpreted through an **Ontology**, explored on a **canvas**, and saved as a
 > **View**.

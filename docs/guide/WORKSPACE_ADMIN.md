@@ -42,8 +42,8 @@ Teams reorganize, and data sources sometimes need to move with them. The same
 Add Data Source wizard handles this: pick a source that already belongs to
 another workspace, and the wizard switches into **move mode**.
 
-> ⚠️ **A data source can only move if nothing is built on it.** If any Views
-> exist against it in its current workspace, it isn't offered as movable —
+> **Warning:** A data source can only move if nothing is built on it. If any
+> Views exist against it in its current workspace, it isn't offered as movable —
 > you'll see it listed but disabled, with a note showing how many Views
 > depend on it. This protects those Views from breaking out from under
 > their owners.

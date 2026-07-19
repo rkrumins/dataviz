@@ -4,7 +4,7 @@
 ask your own questions of the data — searching, tracing, expanding, and
 filtering freely. Unlike opening a saved View, here *you* drive.
 
-> 💡 **Explorer vs Views:** A **View** is a curated, saved snapshot. The
+> **Note:** *Explorer vs Views* — A **View** is a curated, saved snapshot. The
 > **Explorer** is a blank-canvas investigation. Start in a View to learn the
 > landscape; come to the Explorer to answer a new question.
 
@@ -61,7 +61,7 @@ datasets). **Click to expand** a node and reveal its children, then collapse it
 again to tidy up. This lets you drill into detail only where you need it, keeping
 the rest of the canvas calm.
 
-> 💡 Expanding follows **containment**; tracing follows **lineage**. See
+> **Note:** Expanding follows **containment**; tracing follows **lineage**. See
 > [Reading Lineage](/guide/reading-lineage) for the difference.
 
 ---
@@ -109,8 +109,8 @@ The canvas itself has a control cluster (usually bottom-corner):
 | **Layout** | Re-arrange nodes using an automatic layout algorithm |
 | **Grid / Snap** | Align nodes neatly |
 
-> 💡 **Lost in a big graph?** Hit *Fit* to recenter, then open the **minimap** to
-> navigate the overall shape.
+> **Tip:** *Lost in a big graph?* Hit *Fit* to recenter, then open the
+> **minimap** to navigate the overall shape.
 
 ---
 

@@ -8,6 +8,14 @@ and everything that touches it — clear, grouped, and searchable — no matter 
 large or zoomed-out the canvas is. Think of it as the Context View for a node:
 click, and the picture is laid out for you.
 
+Here you'll learn to:
+
+- **Open the Lens** from a dense node, the Anchor Rail, or a curated View.
+- **Read its layout** — sources on the left, consumers on the right, the focused
+  entity in the middle.
+- **Walk a chain** of connections without ever touching the canvas.
+- **See lineage beyond a View's boundary** and preview what sits outside it.
+
 ## What the Lens shows
 
 The Lens opens as a centered panel over the canvas. The entity you focused sits
@@ -24,6 +32,22 @@ dashboards, and so on) with a count per group, and the focal card shows a quick
 tally — how many connections come *in* and how many go *out*. Numbers here
 always match the canvas, because the Lens reads the same connections you see on
 screen.
+
+```mermaid
+flowchart LR
+  subgraph Sources
+    s1[Table]
+    s2[Column]
+  end
+  subgraph Consumers
+    c1[Dashboard]
+    c2[Report]
+  end
+  s1 --> F(((Focused entity)))
+  s2 --> F
+  F --> c1
+  F --> c2
+```
 
 ## Opening the Lens
 
@@ -111,10 +135,10 @@ answers "am I seeing the whole story?" honestly, then leaves the choice to
 widen the picture in your hands. When you're ready to include those partners for
 real, add them to the View or run a Trace from the row.
 
-> 💡 The external-lineage chip and the "Outside this view" preview are only
-> shown when it makes sense — for curated Views where an out-of-scope boundary
-> actually exists. On the open Explorer, where you're pulling in whatever you
-> like, there's no boundary to report against.
+> **Note:** The external-lineage chip and the "Outside this view" preview are
+> only shown when it makes sense — for curated Views where an out-of-scope
+> boundary actually exists. On the open Explorer, where you're pulling in
+> whatever you like, there's no boundary to report against.
 
 ## Where to next
 

@@ -8,6 +8,14 @@ layered canvas easy to move around: the Layer Strip, resizable columns,
 load-more paging, and the Anchor Rail. None of them change your data — they're
 all about finding your way.
 
+This page covers how to:
+
+- **Orient yourself** with the Layer Strip's live "you-are-here" indicator.
+- **Resize and collapse** columns so the layers you care about get the room.
+- **Load more** roots, children, and connection detail as you go — always
+  additively.
+- **Reach off-screen partners** of a focused entity with the Anchor Rail.
+
 ## The layered canvas
 
 Each **column** is one layer, and each column lists its entities as an
@@ -76,9 +84,9 @@ replaced or lost.
   and its underlying links are truncated, a **"Showing X of Y connections"** chip
   offers a **Load more** to page in the rest.
 
-> 💡 These chips live in the bottom-right cluster and each explains itself on
-> hover. They only appear when there's genuinely more to load — a quiet, honest
-> signal that the picture isn't yet complete.
+> **Note:** These chips live in the bottom-right cluster and each explains itself
+> on hover. They only appear when there's genuinely more to load — a quiet,
+> honest signal that the picture isn't yet complete.
 
 ## The Anchor Rail
 

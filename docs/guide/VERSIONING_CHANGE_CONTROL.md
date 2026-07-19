@@ -5,8 +5,8 @@ Every edit to a graph's data goes through a **draft**, gets **reviewed**, and is
 **published** — with a full history you can always undo or roll back. This page
 covers the whole loop.
 
-> 💡 **The one-sentence model:** editing a graph works like editing a shared
-> document with track changes — you draft privately, someone reviews, it
+> **Note:** *The one-sentence model* — editing a graph works like editing a
+> shared document with track changes: you draft privately, someone reviews, it
 > publishes, and nothing is ever silently lost.
 
 ---
@@ -42,7 +42,7 @@ glance: solid means committed to your draft, a dashed halo means staged but
 not yet saved, and the colour says what happened — green for new, orange for
 edited, rose for deleted.
 
-> 💡 **Nothing is lost if you navigate away.** If you leave mid-edit, {brand}
+> **Note:** Nothing is lost if you navigate away. If you leave mid-edit, {brand}
 > restores your unsaved changes next time you return, with the option to
 > discard them instead.
 
@@ -103,7 +103,7 @@ require the same review permissions as merging a change, and both are visible
 afterward in the history — an undo or a restore is just another recorded step,
 never a rewrite of what came before.
 
-> 💡 **If in doubt, Undo first.** It's the narrower, safer tool. Reach for
+> **Tip:** If in doubt, Undo first. It's the narrower, safer tool. Reach for
 > Restore only when you need to reset everything back to a specific point,
 > or when Undo tells you it can't apply cleanly.
 

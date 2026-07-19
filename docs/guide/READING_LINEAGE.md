@@ -26,8 +26,8 @@ Every lineage graph is made of just two things:
   things contain one another. An arrow points in the direction of flow —
   *from* source *to* consumer.
 
-> 💡 **Direction is everything.** Follow arrows *backwards* to find where data
-> came from (**upstream**); follow them *forwards* to find what it affects
+> **Important:** Direction is everything. Follow arrows *backwards* to find where
+> data came from (**upstream**); follow them *forwards* to find what it affects
 > (**downstream**).
 
 ---
@@ -63,7 +63,7 @@ Edges come in two flavours, and telling them apart is key to reading the graph:
 When you click to *expand* a node, you're following containment. When you *trace*,
 you're following lineage.
 
-> 💡 **Too busy to read?** Turn on the **Lineage Lens** (the **Context View**)
+> **Tip:** *Too busy to read?* Turn on the **Lineage Lens** (the **Context View**)
 > to spotlight just the lineage around one node and dim the rest, or step
 > through the **Layer Strip** to read the graph one tier at a time. See
 > [The Lineage Lens](/guide/lineage-lens) and

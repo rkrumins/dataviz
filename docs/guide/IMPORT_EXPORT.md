@@ -4,8 +4,8 @@
 full backup out — both go through the same **draft-and-review** safety net as
 any other change, so a bad import can never silently corrupt your graph.
 
-> 💡 **The one-sentence model:** Import stages changes on a draft for you to
-> review before anything publishes; Export gives you a complete,
+> **Note:** *The one-sentence model* — Import stages changes on a draft for you
+> to review before anything publishes; Export gives you a complete,
 > re-importable copy of the graph whenever you need one.
 
 ---
@@ -45,7 +45,7 @@ editing dozens of nodes on the canvas.
 | **Add & update** | Creates new items and updates the ones that match. Never deletes anything. | The safe default — you're adding or correcting data. |
 | **Replace (authoritative)** | Treats the file as the *complete* picture — anything in the graph but missing from the file gets deleted. | You're re-uploading a full, canonical export and want the graph to match it exactly. |
 
-> ⚠️ **Replace mode can delete data.** {brand} always shows you the exact
+> **Warning:** Replace mode can delete data. {brand} always shows you the exact
 > count before you confirm, but double-check your file is complete before
 > choosing it.
 

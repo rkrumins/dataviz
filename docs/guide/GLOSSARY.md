@@ -3,7 +3,7 @@
 Every term and acronym you'll meet in {brand}, in plain language. Skim it once;
 return whenever a word trips you up.
 
-> 💡 New to the platform? Pair this with [Key Concepts](/guide/key-concepts),
+> **Tip:** New to the platform? Pair this with [Key Concepts](/guide/key-concepts),
 > which explains how the core terms fit together.
 
 ---
