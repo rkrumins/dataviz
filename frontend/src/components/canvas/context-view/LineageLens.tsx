@@ -40,6 +40,9 @@ export interface LineageLensProps {
   onBack: () => void
   /** Jump the walk back to stack index i (truncates the trail there). */
   onJumpTo?: (index: number) => void
+  /** Branch the walk: truncate to hop i, then step into nodeId — lets
+   *  any earlier column change route without restarting the walk. */
+  onWalkTo?: (index: number, nodeId: string) => void
   /** Frame the walked path on the canvas (closes the lens). */
   onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
@@ -65,6 +68,7 @@ export function LineageLens({
   onRecenter,
   onBack,
   onJumpTo,
+  onWalkTo,
   onShowPathOnCanvas,
   onClose,
   onRevealOnCanvas,
@@ -150,6 +154,21 @@ export function LineageLens({
   const [showFullTrail, setShowFullTrail] = useState(false)
   const TRAIL_CAP = 6
   const collapseTrail = lensStack.length > TRAIL_CAP && !showFullTrail
+
+  // ── Miller-walk state ──────────────────────────────────────────────
+  // Direction LOCK: a walk follows one flow direction (mixing
+  // directions mid-path makes the trail ambiguous). Locked to the
+  // first hop's direction, overridable via the flip control.
+  const [directionOverride, setDirectionOverride] = useState<'incoming' | 'outgoing' | null>(null)
+  const walkDirection: 'incoming' | 'outgoing' =
+    directionOverride ?? (hopMeta[0] ? (hopMeta[0].downstream ? 'outgoing' : 'incoming') : 'outgoing')
+
+  // Frontier records per hop — the columns' contents. Walk length is
+  // short and this recomputes only when the walk or edge set changes.
+  const hopRecords = useMemo(
+    () => lensStack.map(id => deriveNeighborRecords(id, edges, nodeMap, containmentEdgeTypes)),
+    [lensStack, edges, nodeMap, containmentEdgeTypes],
+  )
 
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
@@ -314,6 +333,17 @@ export function LineageLens({
               {/* The walk as a deliverable: present it on the canvas, or
                   copy it as text for a ticket/finding. */}
               <div className="ml-auto flex items-center gap-1 pl-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setDirectionOverride(walkDirection === 'outgoing' ? 'incoming' : 'outgoing')}
+                  title={`Walking ${walkDirection === 'outgoing' ? 'downstream (data consumers)' : 'upstream (data sources)'} — click to flip the walk direction`}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold border transition-colors border-black/10 dark:border-white/10 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                >
+                  {walkDirection === 'outgoing'
+                    ? <LucideIcons.MoveRight className="w-3 h-3 text-accent-lineage" />
+                    : <LucideIcons.MoveLeft className="w-3 h-3 text-amber-500" />}
+                  {walkDirection === 'outgoing' ? 'Downstream' : 'Upstream'}
+                </button>
                 {onShowPathOnCanvas && (
                   <button
                     type="button"
@@ -342,7 +372,84 @@ export function LineageLens({
             </div>
           )}
 
-          {/* Body: upstream | focal | downstream — data flows left → right */}
+          {/* ── Walk body (Miller columns) — one column per hop, oldest
+              on the left, the current frontier widest on the right. Each
+              column lists its hop's frontier in the LOCKED direction;
+              the row you walked into is highlighted, and clicking a row
+              in an earlier column BRANCHES the walk from that hop.
+              Complexity stays constant: path + frontier, never a tree. ── */}
+          {lensStack.length > 1 && onWalkTo ? (
+            <div className="flex-1 flex min-h-0 overflow-x-auto custom-scrollbar divide-x divide-black/[0.06] dark:divide-white/[0.06]">
+              {lensStack.map((hopId, i) => {
+                const recsAll = walkDirection === 'outgoing'
+                  ? hopRecords[i].outgoingRecords
+                  : hopRecords[i].incomingRecords
+                // Dedupe per neighbor (multiple edge types bundle to ×N).
+                const byNeighbor = new Map<string, { rec: NeighborRecord; n: number }>()
+                for (const r of recsAll) {
+                  const cur = byNeighbor.get(r.neighborId)
+                  if (cur) cur.n += 1
+                  else byNeighbor.set(r.neighborId, { rec: r, n: 1 })
+                }
+                const isLast = i === lensStack.length - 1
+                const walkedInto = !isLast ? lensStack[i + 1] : null
+                const rows = [...byNeighbor.values()]
+                  .filter(({ rec }) => !isLast || filterFn(rec))
+                  .slice(0, 200)
+                const hopLabel = labelOf(hopId, nodeMap.get(hopId))
+                const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
+                return (
+                  <div
+                    key={`walk-col-${hopId}-${i}`}
+                    className={isLast
+                      ? 'flex-1 min-w-[300px] flex flex-col min-h-0 bg-accent-lineage/[0.03]'
+                      : 'w-[230px] flex-shrink-0 flex flex-col min-h-0'}
+                  >
+                    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.06]">
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: hopColor }} />
+                      <span className="truncate text-[11.5px] font-semibold text-ink">{hopLabel}</span>
+                      <span className="ml-auto flex-shrink-0 text-[10px] tabular-nums text-ink-muted/70">
+                        {byNeighbor.size}
+                      </span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
+                      {rows.map(({ rec, n }) => {
+                        const rid = rec.neighborId
+                        const active = rid === walkedInto
+                        const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
+                        return (
+                          <button
+                            key={rid}
+                            type="button"
+                            onClick={() => (isLast ? onRecenter(rid) : onWalkTo(i, rid))}
+                            title={isLast
+                              ? `Walk into ${labelOf(rid, rec.neighborNode)}`
+                              : `Branch the walk here — continue from ${labelOf(rid, rec.neighborNode)}`}
+                            className={
+                              active
+                                ? 'w-full flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
+                                : 'w-full flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors'
+                            }
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
+                            <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
+                            {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
+                            <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
+                          </button>
+                        )
+                      })}
+                      {byNeighbor.size === 0 && (
+                        <p className="px-3 py-3 text-[11px] text-ink-muted/70 italic leading-snug">
+                          No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections loaded here —
+                          the walk ends, or flip the direction.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
           <div className="flex-1 grid grid-cols-[1fr_auto_1fr] min-h-0">
             <NeighborColumn
               title="Data Sources"
@@ -397,6 +504,7 @@ export function LineageLens({
               onOpenDetails={onOpenDetails}
             />
           </div>
+          )}
 
           {/* ── Outside this view (feature-flagged preview) — partners
               that exist in the data source but are beyond this view's

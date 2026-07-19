@@ -2640,6 +2640,9 @@ export function ContextViewCanvas({
   const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
   // Walk-trail jump: truncate the walk back to hop i (spatial Back).
   const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
+  // Miller-column branch: truncate to hop i, then step into nodeId.
+  const lensWalkTo = useCallback((index: number, nodeId: string) =>
+    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
   const lensClose = useCallback(() => setLensStack([]), [])
   useEffect(() => {
     focusLensRef.current = () => {
@@ -3390,6 +3393,7 @@ export function ContextViewCanvas({
           onRecenter={lensRecenter}
           onBack={lensBack}
           onJumpTo={lensJumpTo}
+          onWalkTo={lensWalkTo}
           onShowPathOnCanvas={(ids) => {
             // Presenting a walk IS a frame action — same chrome, same exit.
             const focal = ids[ids.length - 1]
