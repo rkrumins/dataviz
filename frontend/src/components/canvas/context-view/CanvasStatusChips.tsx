@@ -50,6 +50,7 @@ export function CanvasStatusChips({
   rootsLoaded,
   rootsHaveMore,
   onLoadMoreRoots,
+  selectedExternal,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -80,6 +81,9 @@ export function CanvasStatusChips({
   rootsLoaded?: number
   rootsHaveMore?: boolean
   onLoadMoreRoots?: () => void
+  /** Selected node's lineage OUTSIDE the curated view's scope (total
+   *  degree − loaded degree). null = none or unknown — no chip. */
+  selectedExternal?: { in: number; out: number } | null
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -89,8 +93,9 @@ export function CanvasStatusChips({
   const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
+  const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal) return null
 
   return (
     // Bottom-RIGHT, beneath the Edge Legend — the bottom-left corner
@@ -101,6 +106,33 @@ export function CanvasStatusChips({
       style={{ bottom: 'calc(1rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
+      {showExternal && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">This entity has lineage beyond this view</p>
+              <p className="text-ink-muted">
+                {selectedExternal!.in.toLocaleString()} upstream and{' '}
+                {selectedExternal!.out.toLocaleString()} downstream connection
+                {selectedExternal!.in + selectedExternal!.out === 1 ? '' : 's'} exist in the
+                data source but lead to entities outside this view&apos;s scope.
+                That&apos;s expected for a curated view — it is NOT missing data.
+                Add those entities to the view, or run a Trace, to see them.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <Unlink className="w-3 h-3 text-sky-400/80" />
+            <span>
+              Selected: <span className="tabular-nums">{selectedExternal!.in.toLocaleString()}</span>↑{' '}
+              <span className="tabular-nums">{selectedExternal!.out.toLocaleString()}</span>↓ outside this view
+            </span>
+          </div>
+        </InfoTooltip>
+      )}
+
       {showRoots && (
         <InfoTooltip
           side="right"

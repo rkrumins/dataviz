@@ -45,6 +45,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
@@ -2640,6 +2641,32 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
+  // ── External lineage (curated views) — "no lineage" vs "outside this
+  // view". Total degrees fetched per hydration settle; external =
+  // total − internal(loaded). Selection-scoped surface: a status chip
+  // for the selected node. Absent totals mean UNKNOWN → no chip, never
+  // a false "no lineage" claim.
+  const externalDegrees = useExternalDegrees(
+    activeEntityScope === 'curated' && showMissingConnectionIndicators,
+  )
+  const selectedExternalLineage = useMemo(() => {
+    if (!selectedNodeId) return null
+    const total = externalDegrees.get(selectedNodeId)
+    if (!total) return null
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    let inLoaded = 0
+    let outLoaded = 0
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      if (e.source === selectedNodeId) outLoaded++
+      else if (e.target === selectedNodeId) inLoaded++
+    }
+    const exIn = Math.max(0, total.in - inLoaded)
+    const exOut = Math.max(0, total.out - outLoaded)
+    return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
+  }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+
   const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
   const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
     setAnchorProxyGroups(groups)
@@ -3148,6 +3175,7 @@ export function ContextViewCanvas({
           rootsLoaded={rootsLoaded}
           rootsHaveMore={rootsHaveMore}
           onLoadMoreRoots={() => { void loadMoreRoots() }}
+          selectedExternal={selectedExternalLineage}
           unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}

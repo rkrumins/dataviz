@@ -630,6 +630,14 @@ export interface GraphDataProvider {
     getNodes(query: NodeQuery): Promise<GraphNode[]>
 
     /**
+     * TOTAL lineage degree (in/out) per URN over the full graph —
+     * optional capability. Absent URNs in the result are UNKNOWN, never
+     * zero. The canvas derives "lineage outside this view" as
+     * total − internal(loaded).
+     */
+    getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
+
+    /**
      * Search nodes by text query
      */
     searchNodes(query: string, limit?: number): Promise<GraphNode[]>
