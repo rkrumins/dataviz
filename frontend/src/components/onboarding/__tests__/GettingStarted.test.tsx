@@ -1,26 +1,16 @@
 /**
- * The product tour is a persistent, always-replayable action in the hub — not a
- * one-off checklist step that vanishes once taken. These cover the replay path
- * the launcher relies on, including the "everything done" state.
+ * The hub renders role-aware tracks, and the product tour is a persistent,
+ * always-replayable action (not a checklist step that vanishes once taken) —
+ * including the "everything done" state the launcher relies on.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
+import { Boxes, Compass } from 'lucide-react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { progress } = vi.hoisted(() => ({
-  progress: {
-    value: {
-      steps: [
-        { id: 'connect-provider', label: 'Connect a provider', description: 'x', done: true, href: '/ingestion' },
-        { id: 'create-view', label: 'Create a view', description: 'x', done: false, href: '/workspaces' },
-      ],
-      completedCount: 1,
-      total: 2,
-      allDone: false,
-      isLoading: false,
-    },
-  },
+  progress: { value: {} as Record<string, unknown> },
 }))
 
 vi.mock('@/hooks/useOnboardingProgress', () => ({
@@ -34,13 +24,42 @@ vi.mock('@/store/features', () => ({ useFeature: () => toursOn }))
 import { GettingStarted } from '../GettingStarted'
 import { useTourStore } from '@/features/tour/tourStore'
 
+type TStep = { id: string; label: string; description: string; icon: typeof Compass; done: boolean; href: string }
+type TTrack = { id: string; title: string; subtitle: string; accent: string; icon: typeof Boxes; steps: TStep[]; completedCount: number; total: number; allDone: boolean }
+
+const step = (id: string, done: boolean): TStep => ({ id, label: id, description: 'd', icon: Compass, done, href: '/x' })
+const track = (id: string, title: string, icon: typeof Boxes, steps: TStep[]): TTrack => ({
+  id, title, subtitle: 's', accent: id === 'setup' ? 'setup' : 'explore', icon, steps,
+  completedCount: steps.filter((s) => s.done).length, total: steps.length, allDone: steps.every((s) => s.done),
+})
+
+const setTracks = (tracks: TTrack[], allDone = false) => {
+  const all = tracks.flatMap((t) => t.steps)
+  progress.value = {
+    tracks,
+    completedCount: all.filter((s) => s.done).length,
+    total: all.length,
+    allDone,
+    isLoading: false,
+  }
+}
+
 const renderHub = () => render(<MemoryRouter><GettingStarted /></MemoryRouter>)
 
-describe('GettingStarted — product tour access', () => {
+describe('GettingStarted — tracks + tour access', () => {
   beforeEach(() => {
     useTourStore.setState({ activeTourId: null, stepIndex: 0, completed: [] })
     toursOn = true
-    progress.value = { ...progress.value, allDone: false, completedCount: 1 }
+    setTracks([
+      track('setup', 'Set up the platform', Boxes, [step('connect-provider', true), step('discover-assets', false)]),
+      track('explore', 'Explore your data', Compass, [step('create-view', false)]),
+    ])
+  })
+
+  it('renders each visible track', () => {
+    renderHub()
+    expect(screen.getByText('Set up the platform')).toBeInTheDocument()
+    expect(screen.getByText('Explore your data')).toBeInTheDocument()
   })
 
   it('offers the tour and starts it on click', async () => {
@@ -56,12 +75,11 @@ describe('GettingStarted — product tour access', () => {
     expect(screen.getByRole('button', { name: /replay/i })).toBeInTheDocument()
   })
 
-  it('still offers replay when every onboarding step is complete', () => {
-    progress.value = { ...progress.value, allDone: true, completedCount: 2 }
+  it('still offers replay when everything is complete', () => {
+    setTracks([track('explore', 'Explore your data', Compass, [step('create-view', true)])], true)
     useTourStore.setState({ completed: ['getting-started'] })
     renderHub()
-    expect(screen.getByText('All set 🎉')).toBeInTheDocument()
-    // The fix: the tour does not disappear with the checklist.
+    expect(screen.getByText("You're all set 🎉")).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /replay/i })).toBeInTheDocument()
   })
 
