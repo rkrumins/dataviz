@@ -1149,6 +1149,170 @@ def test_scheduler_reconciler_skips_in_cooldown_marked_source(monkeypatch):
     assert [c[0] for c in fake_svc.calls] == ["ds-3"]
 
 
+class _JobRowSession:
+    """Fake session for ``_recently_failed`` unit tests — returns a single
+    canned (status, updated_at) row (or None) from ``execute()``."""
+
+    def __init__(self, row):
+        self._row = row
+
+    async def execute(self, stmt):
+        return types.SimpleNamespace(first=lambda: self._row)
+
+
+def _job_state(ds_id="ds-1", status="failed"):
+    return types.SimpleNamespace(data_source_id=ds_id, aggregation_status=status)
+
+
+# ── R1: reconciler backoff for recently-failed sources (Task H2) ────────
+
+
+def test_recently_failed_within_window_is_true():
+    session = _JobRowSession(("failed", _secs_ago(30)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is True
+
+
+def test_recently_failed_past_window_is_false():
+    session = _JobRowSession(("failed", _secs_ago(1000)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is False
+
+
+def test_recently_failed_latest_job_not_failed_is_false():
+    # The latest job for this ds succeeded (or is some other status) —
+    # the state row's "failed" must not be trusted alone.
+    session = _JobRowSession(("completed", _secs_ago(30)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is False
+
+
+def test_recently_failed_no_job_row_is_false():
+    session = _JobRowSession(None)
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is False
+
+
+def test_recently_failed_interval_disabled_is_false():
+    session = _JobRowSession(("failed", _secs_ago(1)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 0)
+    ) is False
+
+
+def test_recently_failed_naive_timestamp_handled_defensively():
+    naive = (
+        datetime.now(timezone.utc) - timedelta(seconds=30)
+    ).replace(tzinfo=None).isoformat()
+    session = _JobRowSession(("failed", naive))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is True
+
+
+def test_recently_failed_unparseable_timestamp_is_false():
+    session = _JobRowSession(("failed", "not-a-timestamp"))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is False
+
+
+def test_scheduler_reconciler_backs_off_recently_failed_source(monkeypatch):
+    # R2.1: marked source, status "failed", within its cadence window →
+    # the reconciler must NOT signal it (marker is kept, not cleared).
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    async def _fake_recently_failed(session, state, interval_secs):
+        return state.data_source_id == "ds-2"
+
+    monkeypatch.setattr(scheduler_mod, "_recently_failed", _fake_recently_failed)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory(
+        [_sched_state(ds_id="ds-1")], status_by_ds={"ds-2": "failed"},
+    )
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert fake_svc.calls == []
+
+
+def test_scheduler_reconciler_retries_failed_source_past_window(monkeypatch):
+    # R2.2: marked source, status "failed", but past the cadence window →
+    # signaled (retry allowed after the backoff window elapses).
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    async def _fake_recently_failed(session, state, interval_secs):
+        return False  # window elapsed
+
+    monkeypatch.setattr(scheduler_mod, "_recently_failed", _fake_recently_failed)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory(
+        [_sched_state(ds_id="ds-1")], status_by_ds={"ds-2": "failed"},
+    )
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-2"]
+
+
+def test_scheduler_reconciler_ready_source_unaffected_by_failure_backoff(monkeypatch):
+    # R2.3: a normal ("ready") stale source signals as before — the
+    # failure-backoff check must not even run for a non-failed state.
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+
+    calls = []
+
+    async def _fake_recently_failed(session, state, interval_secs):
+        calls.append(state.data_source_id)
+        return True  # would wrongly back off if ever invoked
+
+    monkeypatch.setattr(scheduler_mod, "_recently_failed", _fake_recently_failed)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])  # ds-2 → "ready"
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-2"]
+    assert calls == []
+
+
 def test_scheduler_reconciler_skips_in_flight_rebuild(monkeypatch):
     # Marked sources whose rebuild is already IN FLIGHT — queued ("pending")
     # or actively "running" — must NOT be re-signaled every tick even once

@@ -39,6 +39,40 @@ logger = logging.getLogger(__name__)
 from .service import AGGREGATION_DRIFT_AUTO_REBUILD as _DRIFT_AUTO_REBUILD
 
 
+async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool:
+    """True when ``state``'s most recent aggregation job is 'failed' and
+    landed within ``interval_secs`` ago (H2 reconciler backoff, spec §9b).
+
+    The state row itself carries no failure timestamp — aggregation_status
+    flips to "failed" with no companion write (worker._update_ds_state),
+    and last_aggregated_at only ever moves on success — so this reads the
+    latest job row instead, the same lookup ``assemble_source_freshness``
+    uses for failure surfacing. Migration-free: reuses
+    ``AggregationJobORM.updated_at``, set in the worker's ``finally`` block
+    on every terminal status including failure.
+    """
+    if interval_secs <= 0 or state is None:
+        return False
+    from .models import AggregationJobORM
+
+    row = (await session.execute(
+        select(AggregationJobORM.status, AggregationJobORM.updated_at)
+        .where(AggregationJobORM.data_source_id == state.data_source_id)
+        .order_by(AggregationJobORM.updated_at.desc())
+        .limit(1)
+    )).first()
+    if row is None or row[0] != "failed" or not row[1]:
+        return False
+    try:
+        failed_at = datetime.fromisoformat(row[1])
+    except (TypeError, ValueError):
+        return False
+    if failed_at.tzinfo is None:
+        failed_at = failed_at.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - failed_at).total_seconds()
+    return elapsed < interval_secs
+
+
 class AggregationScheduler:
     """Runs periodic change detection checks for data sources with configured schedules.
 
@@ -230,7 +264,13 @@ class AggregationScheduler:
                                 #     worker itself consumes) and then hits
                                 #     ConflictError, every tick for the whole job
                                 #     duration; OR
-                                #   * we're inside the rebuild cooldown window.
+                                #   * we're inside the rebuild cooldown window; OR
+                                #   * H2: the last rebuild attempt FAILED within
+                                #     this same cadence window — without this a
+                                #     permanently-failing source (e.g. OOMing a
+                                #     strained store) gets re-signaled every tick
+                                #     forever. The marker is kept either way, so
+                                #     the source still surfaces as needs-attention.
                                 state = await s2.get(
                                     AggregationDataSourceStateORM, ds,
                                 )
@@ -245,6 +285,17 @@ class AggregationScheduler:
                                     logger.debug(
                                         "stale-marker reconcile: %s in-flight/"
                                         "cooldown — deferring", ds,
+                                    )
+                                    continue
+                                if (
+                                    state is not None
+                                    and state.aggregation_status == "failed"
+                                    and await _recently_failed(s2, state, interval_secs)
+                                ):
+                                    logger.debug(
+                                        "stale-marker reconcile: %s failed "
+                                        "recently (< %ds cadence) — backing off",
+                                        ds, interval_secs,
                                     )
                                     continue
                                 resp = await svc.signal_source_changed(
