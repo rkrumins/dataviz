@@ -413,6 +413,56 @@ async def _run_holdback_on_content_drift() -> None:
     await db.dispose_engine()
 
 
+# --------------------------------------------------------------------------- #
+# 9. A rebuild invalidates the reader's ontology→observed alias cache so raw    #
+#    lineage edges render against the reseeded graph immediately (not after the #
+#    TTL). Bumped on full-seed/heal publish; NOT on a noop or a held-back seed. #
+# --------------------------------------------------------------------------- #
+async def _run_rebuild_bumps_ontology_cache() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+
+    import backend.app.services.resolved_ontology_cache as roc
+    calls: list = []
+    orig_bump = roc.bump_ontology_generation
+
+    async def _spy(ws, ds):
+        calls.append((ws, ds))
+
+    roc.bump_ontology_generation = _spy
+    try:
+        gid, proj, name = await _seed(svc, fake)          # first projection == full seed → bump
+        assert calls and calls[-1][0] == "ws1" and calls[-1][1].startswith("ds_"), calls
+
+        calls.clear()
+        await proj.project_graph(gid)                     # already fresh → noop → NO bump
+        assert calls == [], calls
+
+        assert await svc.request_projection_rebuild(gid) is True
+        await proj.project_graph(gid)                     # explicit full-seed rebuild → bump again
+        assert calls and calls[-1][0] == "ws1", calls
+
+        # A held-back (unfaithful) reseed must NOT bump — reads stay on Postgres, no cache churn.
+        calls.clear()
+        real_counts = proj._falkor_counts
+        async def _short(client):
+            n, e = await real_counts(client)
+            return max(0, n - 1), e
+        proj._falkor_counts = _short
+        assert await svc.request_projection_rebuild(gid) is True
+        r = await proj.project_graph(gid)
+        assert r["verify_error"] and calls == [], (r, calls)
+    finally:
+        roc.bump_ontology_generation = orig_bump
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_rebuild_bumps_ontology_cache_e2e():
+    asyncio.run(_run_rebuild_bumps_ontology_cache())
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_holdback_on_count_shortfall_e2e():
     asyncio.run(_run_holdback_on_count_shortfall())
@@ -461,6 +511,7 @@ def test_projection_progress_writer_e2e():
 if __name__ == "__main__":
     for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id,
                 _run_failure_honesty, _run_progress_writer,
-                _run_holdback_on_count_shortfall, _run_holdback_on_content_drift):
+                _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
+                _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

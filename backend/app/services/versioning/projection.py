@@ -304,6 +304,7 @@ class FalkorProjector:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             data_source_id = graph.data_source_id
+            workspace_id = graph.workspace_id
             from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
@@ -496,6 +497,21 @@ class FalkorProjector:
                 await self._on_projected(data_source_id)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
+
+        # A full-seed / heal reseed can change the graph's stored relationship-type spelling, but the
+        # reader's ontology→observed alias map is cached (resolved_ontology_cache) and is NOT
+        # invalidated by a projection rebuild — so reads keep matching the PRE-rebuild spelling and
+        # raw lineage edges (whose declared types are often mixed-case) silently stop rendering until
+        # the TTL lapses. Bump the ontology generation so every pod re-introspects the reseeded graph
+        # and rebuilds a correct alias (and drop this pod's L1 entry immediately). Best-effort;
+        # scoped to full-seed/heal so incremental publishes don't re-incur the resolve/DDL tax.
+        if published and (from_seq <= 0 or heal_reseeded) and workspace_id and data_source_id:
+            try:
+                from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+                await bump_ontology_generation(workspace_id, data_source_id)
+            except Exception as exc:                   # pragma: no cover - infra
+                logger.warning("ontology-generation bump after rebuild failed for %s: %s",
+                               graph_id, exc)
 
         applied = sum(len(c) for c in changes)
         # Report the seq actually PUBLISHED: to_seq when verified, else the held-back from_seq

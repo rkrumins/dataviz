@@ -3333,8 +3333,19 @@ class FalkorDBProvider(GraphDataProvider):
             ]
             lineage_params: Dict[str, Any] = {"pageUrns": page_urns}
             if effective_lineage:
-                l_alt = "|".join(_sanitize_label(t) for t in effective_lineage)
-                lr_pattern, lineage_where = f"[lr:{l_alt}]", ""
+                # Case-INSENSITIVE match. A rebuild reseeds edges with the type spelling stored in
+                # the Postgres payload, and the reader's ontology→observed alias map can be stale
+                # (a projection rebuild does NOT invalidate resolved_ontology_cache), so a
+                # case-sensitive `[lr:Type]` alternation silently misses a differently-cased stored
+                # spelling → raw lineage edges vanish from the canvas. Matching on
+                # `toUpper(type(lr))` renders them regardless of stored casing / alias freshness.
+                # This lineage step is already page-scoped (a.urn IN $bucketUrns AND b.urn IN
+                # $pageUrns), so the untyped scan is over a tiny neighborhood. (Containment step 1
+                # keeps its typed alternation — a deliberate hub-node index optimization, and its
+                # canonical-uppercase types already match.)
+                lr_pattern = "[lr]"
+                lineage_where = "AND toUpper(type(lr)) IN $lineageUpper "
+                lineage_params["lineageUpper"] = [_sanitize_label(t).upper() for t in effective_lineage]
             else:
                 lr_pattern, lineage_where = "[lr]", "AND NOT type(lr) IN $excludeTypes "
                 lineage_params["excludeTypes"] = exclude_types
