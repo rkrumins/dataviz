@@ -19,7 +19,8 @@ import { FRESHNESS_KEYS, useRefreshBatch, useRefreshProvider } from './useFreshn
 
 const SCOPES: { scope: RefreshScope; label: string; desc: string }[] = [
     { scope: 'auto', label: 'Only changed sources', desc: 'Refresh sources whose data changed since their last run.' },
-    { scope: 'read-caches', label: 'Refresh caches', desc: 'Clear cached figures for every source. No lineage rebuild.' },
+    { scope: 'read-caches', label: 'Refresh caches', desc: 'Re-read cached figures for every source. No lineage rebuild.' },
+    { scope: 'clear', label: 'Clear cache', desc: 'Reset cached data for every source, no rebuild (safe).' },
     { scope: 'rollups', label: 'Rebuild lineage', desc: 'Rebuild aggregated lineage for every source.' },
     { scope: 'full', label: 'Full refresh', desc: 'Refresh caches and rebuild lineage for every source.' },
 ]

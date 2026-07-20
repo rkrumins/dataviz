@@ -53,7 +53,7 @@ beforeAll(() => {
 
 import { Freshness } from './index'
 import { FreshnessDrawer } from './FreshnessDrawer'
-import { compareSeverity, severityRank } from './freshnessTriage'
+import { compareSeverity, freshnessState, severityRank } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 const recent = new Date(Date.now() - 5 * 60_000).toISOString()
@@ -110,7 +110,7 @@ describe('Freshness cockpit', () => {
         permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
     })
 
-    it('renders fleet rows with cache age and the Recomputing badge', async () => {
+    it('renders fleet rows with cache age and an honest Queued badge', async () => {
         renderTab()
 
         await waitFor(() => {
@@ -119,8 +119,10 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
         // "as of Xm ago" cache chips are present.
         expect(screen.getAllByText(/as of/i).length).toBeGreaterThan(0)
-        // Only the source_changed row shows the Recomputing badge.
-        expect(screen.getByText('Recomputing')).toBeInTheDocument()
+        // The source_changed row has a marker but NO running job → "Queued",
+        // not "Recomputing" (which now means a job is genuinely in flight).
+        expect(screen.getByText('Queued')).toBeInTheDocument()
+        expect(screen.queryByText('Recomputing')).not.toBeInTheDocument()
     })
 
     it('fires read-caches immediately from the row action menu', async () => {
@@ -230,6 +232,57 @@ describe('Freshness cockpit', () => {
         const older = mk({ name: 'aardvark', aggregationStatus: 'ready', lastAggregatedAt: '2020-01-01T00:00:00Z' })
         const newer = mk({ name: 'zulu', aggregationStatus: 'ready', lastAggregatedAt: '2024-01-01T00:00:00Z' })
         expect([older, newer].sort(compareSeverity).map(r => r.name)).toEqual(['zulu', 'aardvark'])
+    })
+
+    // ── H3.R1 — honest freshnessState helper ─────────────────────────
+    it('derives an honest freshness state from real signals', () => {
+        const mk = (p: Partial<FreshnessRowData>): FreshnessRowData =>
+            ({ dataSourceId: 'x', ...p } as FreshnessRowData)
+
+        // A failed run wins even when the stale marker is still set — the exact
+        // stuck-forever case (marker present, no job, but the rebuild failed).
+        expect(freshnessState(mk({ aggregationStatus: 'failed', staleReason: 'source_changed' }))).toBe('failed')
+        // A genuinely running job → recomputing (beats the marker).
+        expect(freshnessState(mk({ aggregationStatus: 'ready', runningJobId: 'job-1', staleReason: 'source_changed' }))).toBe('recomputing')
+        // Marker set, no job, not failed → queued (a deferred rebuild).
+        expect(freshnessState(mk({ aggregationStatus: 'ready', staleReason: 'source_changed' }))).toBe('queued')
+        // Ready with nothing pending → up to date.
+        expect(freshnessState(mk({ aggregationStatus: 'ready' }))).toBe('upToDate')
+        // Never aggregated → never built.
+        expect(freshnessState(mk({ aggregationStatus: 'none' }))).toBe('neverBuilt')
+    })
+
+    // ── H3.R1 — a failed row reads "Rebuild failed", never "Recomputing" ─
+    it('renders "Rebuild failed" for a failed source even with the marker set', async () => {
+        listFleet.mockResolvedValue({
+            total: 1,
+            rows: [
+                { dataSourceId: 'f1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Broken Source', providerName: 'Warehouse', aggregationStatus: 'failed', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+            ],
+        })
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Broken Source')).toBeInTheDocument())
+        expect(screen.getByText('Rebuild failed')).toBeInTheDocument()
+        expect(screen.queryByText('Recomputing')).not.toBeInTheDocument()
+        expect(screen.queryByText('Queued')).not.toBeInTheDocument()
+    })
+
+    // ── H3.R3 — Clear cache is a first-class, immediate row action ────
+    it('fires the clear scope immediately from the row action menu, without a confirm', async () => {
+        const user = userEvent.setup()
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
+
+        await user.click(screen.getByRole('button', { name: /refresh actions for orders graph/i }))
+        await user.click(await screen.findByText('Clear cache'))
+
+        // No confirm dialog — clear is non-destructive, it runs at once.
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'clear' }))
+        })
     })
 
     // ── R5.3 — healthy group collapses to a rollup; attention expands ─
@@ -424,6 +477,65 @@ describe('Freshness cockpit', () => {
         getSourceDoc.mockResolvedValue({ ...baseDoc, cacheKeyCount: 0, cacheKeyCountByEndpoint: {} })
         renderDrawer()
         expect(await screen.findByText(/nothing cached yet/i)).toBeInTheDocument()
+    })
+
+    // ── H3.R2 — drawer resolution guidance for an OOM failure ────────
+    const oomDoc = {
+        ...baseDoc,
+        aggregationStatus: 'failed',
+        lastFailureCategory: 'out_of_memory',
+        lastFailureReason: 'FalkorDB OutOfMemoryError: used memory > \'maxmemory\'',
+        retryCount: 4,
+    }
+
+    it('renders OOM resolution guidance with the why/how copy, CTAs, and a retry warning', async () => {
+        getSourceDoc.mockResolvedValue(oomDoc)
+        renderDrawer()
+
+        // What: honest headline + attempt count.
+        expect(await screen.findByText('Lineage rebuild failed')).toBeInTheDocument()
+        expect(screen.getByText(/failed after 4 attempts/i)).toBeInTheDocument()
+        // Why: the OOM cause in plain language.
+        expect(screen.getByText(/ran out of memory/i)).toBeInTheDocument()
+        // How: the OOM remediation + a labelled section.
+        expect(screen.getByText('How to resolve')).toBeInTheDocument()
+        expect(screen.getByText(/free up memory in the graph store/i)).toBeInTheDocument()
+        // CTAs: Clear cache (safe) + Retry rebuild, with the retry caution.
+        expect(screen.getByRole('button', { name: /clear cache/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /retry rebuild/i })).toBeInTheDocument()
+        expect(screen.getByText(/may fail again until memory is freed/i)).toBeInTheDocument()
+        // Details: the verbatim error is available for operators.
+        expect(screen.getByText(/OutOfMemoryError/)).toBeInTheDocument()
+    })
+
+    it('fires the clear scope from the drawer Clear-cache CTA', async () => {
+        const user = userEvent.setup()
+        getSourceDoc.mockResolvedValue(oomDoc)
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /clear cache/i }))
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'clear' }))
+        })
+    })
+
+    it('confirms before the drawer Retry rebuild, then fires the rollups scope', async () => {
+        const user = userEvent.setup()
+        getSourceDoc.mockResolvedValue(oomDoc)
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /retry rebuild/i }))
+        // A confirm gates the retry (esp. for OOM) — no mutation yet. Scope to
+        // the confirm dialog by its message (the drawer is also role=dialog).
+        expect(refreshSource).not.toHaveBeenCalled()
+        const confirmMsg = await screen.findByText(/retries the aggregated-lineage rebuild/i)
+        const dialog = confirmMsg.closest('[role="dialog"]') as HTMLElement
+        expect(within(dialog).getByText(/may fail again until memory is freed/i)).toBeInTheDocument()
+        await user.click(within(dialog).getByRole('button', { name: /retry rebuild/i }))
+
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
+        })
     })
 
     // ── G3.R3 — fleet "Refresh all sources" (admin-gated) ────────────

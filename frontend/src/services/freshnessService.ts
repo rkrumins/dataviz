@@ -13,7 +13,17 @@
  */
 import { authFetch } from './apiClient'
 
-export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full'
+export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
+
+/** Coarse, UI-facing classification of a failed rebuild — drives the drawer's
+ *  resolution guidance. Mirrors the backend ``classify_failure`` categories. */
+export type FailureCategory =
+    | 'out_of_memory'
+    | 'provider_unavailable'
+    | 'ontology'
+    | 'timeout'
+    | 'conflict'
+    | 'unknown'
 
 export interface RefreshEventSummary {
     origin: string
@@ -62,6 +72,12 @@ export interface FreshnessDoc extends FreshnessRow {
     resolvedRebuildIntervalSecs?: number | null
     /** Where the resolved interval came from. */
     rebuildIntervalSource?: 'custom' | 'global' | 'default' | null
+    /** Failure surfacing (doc-only, populated only when the latest job failed):
+     *  the raw error, a coarse category for resolution guidance, and how many
+     *  attempts have been made. All null on a healthy source. */
+    lastFailureReason?: string | null
+    lastFailureCategory?: FailureCategory | null
+    retryCount?: number | null
 }
 
 /** Echo of the stored per-source override after a freshness-settings PATCH. */

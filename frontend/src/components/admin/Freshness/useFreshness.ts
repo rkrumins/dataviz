@@ -89,8 +89,11 @@ export function useRefreshSource(): UseMutationResult<RefreshResponse, Error, Re
     return useMutation<RefreshResponse, Error, RefreshSourceVars>({
         mutationFn: ({ dsId, scope, force }) =>
             freshnessService.refreshSource(dsId, { scope, force }),
-        onSuccess: () => {
+        onSuccess: (_res, { dsId }) => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+            // The drawer's resolution guidance reads this source's doc — refetch
+            // it so a Clear-cache/Retry from the drawer reflects immediately.
+            void qc.invalidateQueries({ queryKey: ['freshness', 'doc', dsId] })
         },
     })
 }

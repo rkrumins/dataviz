@@ -73,6 +73,37 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
     }
 }
 
+// ── Freshness state (the honest freshness-column badge) ───────────────
+
+/**
+ * The single honest state for a row's freshness badge. Derived from real
+ * signals in strict precedence — a failed run wins over a stale MARKER, so a
+ * source that failed with the marker still set never reads "Recomputing":
+ *
+ *   failed (last run failed) → recomputing (a job is genuinely running)
+ *   → queued (marker set, no job, not failed) → stale (other marker reasons)
+ *   → neverBuilt → upToDate.
+ *
+ * This is the fix for the marker-only badge that showed "Recomputing" forever
+ * on a source whose rebuild had actually failed with no job running.
+ */
+export type FreshnessState =
+    | 'failed'
+    | 'recomputing'
+    | 'queued'
+    | 'stale'
+    | 'neverBuilt'
+    | 'upToDate'
+
+export function freshnessState(row: FreshnessRow): FreshnessState {
+    if (row.aggregationStatus === 'failed') return 'failed'
+    if (isRebuilding(row)) return 'recomputing'
+    if (row.staleReason === 'source_changed') return 'queued'
+    if (row.staleReason) return 'stale'
+    if (isNeverBuilt(row)) return 'neverBuilt'
+    return 'upToDate'
+}
+
 // ── Severity ordering (triage-first sort) ─────────────────────────────
 
 /**

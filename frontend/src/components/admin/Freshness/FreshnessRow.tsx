@@ -9,7 +9,7 @@
  */
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
-    Activity, AlertTriangle, CheckCircle2, Clock, Database, Hammer, Loader2,
+    Activity, AlertTriangle, CheckCircle2, Clock, Database, Eraser, Hammer, Loader2,
     Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -17,7 +17,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { usePermission } from '@/store/auth'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
-import { isNeverBuilt } from './freshnessTriage'
+import { freshnessState, isNeverBuilt } from './freshnessTriage'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -90,25 +90,45 @@ function Badge({ tone, Icon, spin, label, title }: {
     )
 }
 
-/** The Freshness column: "Recomputing", "Drift detected", "Next rebuild in
- *  Xm", plus a plain "stale" badge for structural reasons. */
+/** The Freshness column: an honest primary state ("Rebuild failed",
+ *  "Recomputing", "Queued", or a structural "stale" reason) derived from real
+ *  signals, plus additive "Drift detected" / "Next rebuild in Xm" badges. The
+ *  primary state comes from ``freshnessState`` so a source that FAILED with the
+ *  stale marker still set never masquerades as "Recomputing". */
 export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
     const badges: React.ReactNode[] = []
+    const state = freshnessState(row)
 
-    if (row.staleReason === 'source_changed') {
-        const since = deriveStaleSince(row)
+    if (state === 'failed') {
+        badges.push(
+            <Badge key="failed"
+                tone="bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20"
+                Icon={AlertTriangle} label="Rebuild failed"
+                title="The last lineage rebuild failed. Open this source for what happened and how to resolve it."
+            />,
+        )
+    } else if (state === 'recomputing') {
         badges.push(
             <Badge key="recomputing"
                 tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
                 Icon={Loader2} spin label="Recomputing"
+                title="A lineage rebuild is running now."
+            />,
+        )
+    } else if (state === 'queued') {
+        const since = deriveStaleSince(row)
+        badges.push(
+            <Badge key="queued"
+                tone="bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+                Icon={Clock} label="Queued"
                 title={`Source data changed${since ? ` · detected ${timeAgo(since)}` : ''} — a lineage rebuild is queued.`}
             />,
         )
-    } else if (row.staleReason) {
+    } else if (state === 'stale') {
         badges.push(
             <Badge key="stale"
                 tone="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
-                Icon={AlertTriangle} label={humanizeReason(row.staleReason)}
+                Icon={AlertTriangle} label={humanizeReason(row.staleReason as string)}
                 title="This source's lineage is out of date and needs a rebuild."
             />,
         )
@@ -138,7 +158,7 @@ export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
     if (badges.length === 0) {
         // "Up to date" is an assertion — only make it for a source that has
         // actually been built. Never-built sources say so plainly.
-        if (isNeverBuilt(row)) {
+        if (state === 'neverBuilt') {
             return <span className="text-[11px] text-ink-muted/70">Never built</span>
         }
         return <span className="text-[11px] text-ink-muted">Up to date</span>
@@ -156,10 +176,11 @@ interface Props {
     busy?: boolean
 }
 
-type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean }
+type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean; hint?: string }
 
 const BUILT_ACTIONS: RowAction[] = [
-    { scope: 'read-caches', label: 'Refresh caches', Icon: RefreshCw, iconClass: 'text-sky-500' },
+    { scope: 'read-caches', label: 'Refresh caches', Icon: RefreshCw, iconClass: 'text-sky-500', hint: 'Re-reads cached figures. Keeps any queued rebuild.' },
+    { scope: 'clear', label: 'Clear cache', Icon: Eraser, iconClass: 'text-rose-400', hint: 'Resets cached data — also clears a stuck "recomputing" state. No rebuild, safe to run.' },
     { scope: 'rollups', label: 'Rebuild lineage', Icon: RotateCcw, iconClass: 'text-indigo-500' },
     { scope: 'full', label: 'Full refresh', Icon: Sparkles, iconClass: 'text-emerald-500' },
 ]
@@ -253,9 +274,10 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
                             sideOffset={4}
                             className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
                         >
-                            {actions.map(({ scope, label, Icon, iconClass, firstBuild }) => (
+                            {actions.map(({ scope, label, Icon, iconClass, firstBuild, hint }) => (
                                 <DropdownMenu.Item
                                     key={label}
+                                    title={hint}
                                     onSelect={() => onRefresh(row.dataSourceId, scope, firstBuild ? { firstBuild: true } : undefined)}
                                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
                                 >

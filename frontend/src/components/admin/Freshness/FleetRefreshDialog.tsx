@@ -100,6 +100,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                         <div className="space-y-2 mb-4">
                                             {([
                                                 { s: 'auto' as RefreshScope, label: 'Refresh (recommended)', desc: 'Refresh each source that has changed since its last run. Skips sources already up to date.' },
+                                                { s: 'clear' as RefreshScope, label: 'Clear cache', desc: 'Reset cached data for every source, no rebuild (safe).' },
                                                 { s: 'full' as RefreshScope, label: 'Full refresh', desc: 'Refresh caches and rebuild aggregated lineage for every source, changed or not.' },
                                             ]).map(({ s, label, desc }) => (
                                                 <label key={s} className={cn(

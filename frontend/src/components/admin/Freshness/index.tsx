@@ -39,6 +39,7 @@ import {
 const SCOPE_LABEL: Record<RefreshScope, string> = {
     auto: 'Refresh',
     'read-caches': 'Refresh caches',
+    clear: 'Clear cache',
     rollups: 'Rebuild lineage',
     full: 'Full refresh',
 }
@@ -229,18 +230,21 @@ export function Freshness() {
             onSuccess: () => {
                 const msg = scope === 'read-caches'
                     ? `Caches refreshed for ${name}.`
-                    : scope === 'rollups'
-                        ? `Lineage ${firstBuild ? 'build' : 'rebuild'} queued for ${name}.`
-                        : `Full refresh started for ${name}.`
+                    : scope === 'clear'
+                        ? `Cache cleared for ${name}.`
+                        : scope === 'rollups'
+                            ? `Lineage ${firstBuild ? 'build' : 'rebuild'} queued for ${name}.`
+                            : `Full refresh started for ${name}.`
                 showToast('success', msg)
             },
             onError: (e) => showToast('error', e.message || 'Refresh failed.'),
         })
     }
 
-    // read-caches is non-destructive → run immediately; rebuilds confirm first.
+    // read-caches and clear are non-destructive (no rebuild) → run immediately;
+    // rebuilds confirm first.
     const onRefresh = (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => {
-        if (scope === 'read-caches') doRefresh(dsId, scope)
+        if (scope === 'read-caches' || scope === 'clear') doRefresh(dsId, scope)
         else setConfirm({ dsId, scope, firstBuild: opts?.firstBuild })
     }
 
