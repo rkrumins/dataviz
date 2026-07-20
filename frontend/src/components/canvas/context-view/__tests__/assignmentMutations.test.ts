@@ -12,6 +12,7 @@ import {
   keysForInsertion,
   ensureSiblingOrderKeys,
 } from '../assignmentMutations'
+import { setLayerNodeSortMode } from '../layerMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
 
@@ -379,5 +380,37 @@ describe('assignmentMutations — ensureSiblingOrderKeys (hierarchical seeding)'
     const input = layoutWith({ root: entry('l1', 'a9'), childA: entry('l1'), childB: entry('l1') })
     const out = ensureSiblingOrderKeys(input, 'l1', ['childA', 'childB'])
     expect((out.assignments['childA'].orderKey ?? 'z') < 'a9').toBe(true)
+  })
+})
+
+describe('auto-adopt custom order on manual reorder (handleReorderNode composition)', () => {
+  // Mirrors the pure pipeline handleReorderNode runs when a user drags in a
+  // NON-custom layer: flip to custom (seed roots from visual order) → seed the
+  // sibling set → mint a key at the drop position. Proves reorder works
+  // without the user first picking a sort mode.
+  const assignE = (layerId: string, orderKey?: string): LayerAssignmentEntry => ({
+    layerId, inheritsChildren: true, ...(orderKey ? { orderKey } : {}),
+  })
+
+  it('flips an alpha layer to custom and places B before A', () => {
+    // Alpha layer: visual order A, B (both keyless).
+    let layout: NormalizedReferenceLayout = {
+      layers: [{ id: 'l1', name: 'L1', order: 0, entityTypes: [] }], // no nodeSortMode
+      assignments: { A: assignE('l1'), B: assignE('l1') },
+    }
+    const visualRoots = ['A', 'B']
+
+    // 1. auto-adopt custom, seeding roots in visual order
+    layout = setLayerNodeSortMode(layout, 'l1', 'custom', visualRoots)
+    expect(layout.layers[0].nodeSortMode).toBe('custom')
+    // 2. seed the sibling set (already keyed here — no-op) + mint B before A
+    layout = ensureSiblingOrderKeys(layout, 'l1', visualRoots)
+    const order = ['A'] // siblings minus the dragged B
+    const keys = keysForInsertion(layout, 'l1', order, 0, 1) // insert before A
+    expect(keys).not.toBeNull()
+    layout = setAssignmentOrderKey(layout, 'B', keys![0])
+
+    // B now sorts before A.
+    expect(layout.assignments['B'].orderKey! < layout.assignments['A'].orderKey!).toBe(true)
   })
 })
