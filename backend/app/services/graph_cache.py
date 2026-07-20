@@ -254,10 +254,22 @@ class CacheScope:
     empty string so the key is stable across requests that omit it.
     branch_id scopes the entry to a draft so a draft read can never be
     served to main (or vice-versa); empty string = main.
+
+    graph_ns identifies the PHYSICAL FalkorDB graph (host:port:graph_name,
+    hashed — see ``graph_ns_hash``) behind this data source, mirroring the
+    provider content caches' own ``_cache_ns`` (falkordb_provider.py). A
+    data source id is stable even when re-pointed to a different physical
+    graph; without graph_ns, a re-point could serve a stale response cached
+    under the old graph until the next write's generation bump. Optional
+    and defaulted to "" (unknown/unresolvable) so the many call sites that
+    build a CacheScope with no live engine/provider (service-layer
+    invalidation, tests) stay valid — see ``_build_key``/``_build_lkg_key``
+    for how "" degrades to today's ds-only key shape.
     """
     workspace_id: str
     data_source_id: str = ""
     branch_id: str = ""
+    graph_ns: str = ""
 
 
 class GraphCache:
@@ -640,32 +652,68 @@ class GraphCache:
 # ─── Module-level helpers ──────────────────────────────────────────────
 
 def _gen_key(scope: CacheScope) -> str:
+    # Deliberately NOT graph_ns-scoped: invalidation is by gen-bump (this
+    # key) + prefix SCAN (purge_lkg), both of which must cover every
+    # physical-graph variant of a (ws, ds) — a re-point's stale entries
+    # under the OLD graph_ns still need to die on the next write. Only the
+    # exact read/write key (_build_key/_build_lkg_key) needs graph_ns, to
+    # stop a re-point from serving the wrong graph's cached response
+    # before the next gen-bump.
     return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
 
 
 def _genat_key(scope: CacheScope) -> str:
+    # (ws, ds)-scoped coordination, same rationale as _gen_key above.
     return f"{_GENAT_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
+
+
+def graph_ns_hash(physical_graph_id: str) -> str:
+    """Hash a physical-graph identity (``host:port:graph_name``) into a
+    bounded cache-key segment for ``CacheScope.graph_ns``. Mirrors the
+    provider content caches' ``_cache_ns`` identity triple
+    (falkordb_provider.py) but hashed + truncated to keep the key bounded,
+    same rationale as the params digest below. The ONE place this hashing
+    happens — callers that resolve the (host, port, graph_name) triple
+    (e.g. the endpoint layer's ``_cache_scope``) pass the raw string here
+    rather than hashing it themselves."""
+    return hashlib.sha1(physical_graph_id.encode("utf-8")).hexdigest()[:16]
 
 
 def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any]) -> str:
     """Build a cache key. We hash params (not raw-include them) so the
     key length is bounded — `params` for /edges/aggregated can carry
-    thousands of source URNs."""
+    thousands of source URNs.
+
+    ``graph_ns`` (when resolved) is appended as a trailing segment so the
+    same (workspace, data_source, branch, gen) can never collide across
+    two distinct physical FalkorDB graphs — see CacheScope's docstring.
+    Appending after the digest (rather than inserting earlier) keeps
+    ``count_cache_keys_by_endpoint``'s fixed-index endpoint parse intact,
+    and means graph_ns="" (unresolved/legacy callers) produces EXACTLY
+    today's key — full back-compat.
+    """
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
+    key = f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
+    if scope.graph_ns:
+        key = f"{key}:{scope.graph_ns}"
+    return key
 
 
 def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> str:
     """Last-known-good key: identical to the primary key shape minus
     the generation component, so the LKG survives ``bump_generation``
     invalidations. Same params hash so a write to the primary cache
-    always has a matching LKG slot."""
+    always has a matching LKG slot. ``graph_ns`` handling mirrors
+    ``_build_key`` (trailing segment, "" = today's exact shape)."""
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
+    key = f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
+    if scope.graph_ns:
+        key = f"{key}:{scope.graph_ns}"
+    return key
 
 
 def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:

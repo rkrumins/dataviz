@@ -7,6 +7,8 @@ which are trivial to mock.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,6 +27,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_TRACE_EXPAND,
     GraphCache,
     _build_key,
+    graph_ns_hash,
 )
 
 
@@ -1160,3 +1163,130 @@ async def test_top_level_count_respects_feature_flag(monkeypatch) -> None:
     await cache.set_top_level_count(scope, {}, 1)
     redis.get.assert_not_awaited()
     redis.set.assert_not_awaited()
+
+
+# ─── H4: physical-graph namespacing (graph_ns) ──────────────────────────
+#
+# The response cache key was keyed by (workspace, data_source, branch) —
+# stable as long as a data source's underlying FalkorDB graph never
+# changes, but NOT robust to a re-point (same data_source_id, new
+# host:port:graph_name): old cached responses could serve for the new
+# graph until the next generation bump. `graph_ns` closes that hole by
+# hashing the provider's live physical identity into the exact
+# read/write key, while leaving gen-bump/purge (which must invalidate
+# every physical-graph variant of a data source) untouched.
+
+def test_graph_ns_differentiates_primary_keys() -> None:
+    """The headline collision/re-point proof: two scopes that agree on
+    (ws, ds, branch) but point at different physical graphs must never
+    produce the same primary cache key."""
+    scope_a = CacheScope("ws1", "ds1", graph_ns="aaa111")
+    scope_b = CacheScope("ws1", "ds1", graph_ns="bbb222")
+    key_a = _build_key(scope_a, 0, ENDPOINT_CHILDREN, {})
+    key_b = _build_key(scope_b, 0, ENDPOINT_CHILDREN, {})
+    assert key_a != key_b
+
+
+def test_graph_ns_differentiates_lkg_keys() -> None:
+    """Same proof for the last-known-good key shape."""
+    scope_a = CacheScope("ws1", "ds1", graph_ns="aaa111")
+    scope_b = CacheScope("ws1", "ds1", graph_ns="bbb222")
+    key_a = graph_cache._build_lkg_key(scope_a, ENDPOINT_AGGREGATED, {})
+    key_b = graph_cache._build_lkg_key(scope_b, ENDPOINT_AGGREGATED, {})
+    assert key_a != key_b
+
+
+def test_graph_ns_same_scope_yields_stable_key() -> None:
+    """Same (ws, ds, branch, graph_ns) always produces the same key —
+    graph_ns isn't a source of nondeterminism."""
+    scope = CacheScope("ws1", "ds1", graph_ns="aaa111")
+    assert _build_key(scope, 0, ENDPOINT_CHILDREN, {}) == _build_key(scope, 0, ENDPOINT_CHILDREN, {})
+    assert graph_cache._build_lkg_key(scope, ENDPOINT_AGGREGATED, {}) == graph_cache._build_lkg_key(
+        scope, ENDPOINT_AGGREGATED, {},
+    )
+
+
+def test_graph_ns_default_empty_is_fully_backward_compatible() -> None:
+    """Every existing CacheScope construction (service-layer invalidation
+    paths, tests) has no engine to resolve a graph_ns from and relies on
+    the default "". That must produce EXACTLY the pre-H4 key shape — no
+    trailing segment — so already-running deployments don't orphan their
+    warm cache on upgrade."""
+    scope = CacheScope("ws1", "ds1")
+    assert scope.graph_ns == ""
+
+    params = {"a": 1}
+    digest = hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    assert _build_key(scope, 3, ENDPOINT_CHILDREN, params) == (
+        f"graphcache:v1:ws1:ds1::3:{ENDPOINT_CHILDREN}:{digest}"
+    )
+
+    empty_digest = hashlib.sha1(json.dumps({}, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    assert graph_cache._build_lkg_key(scope, ENDPOINT_AGGREGATED, {}) == (
+        f"graphcache:lkg:v1:ws1:ds1::{ENDPOINT_AGGREGATED}:{empty_digest}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_purge_lkg_invalidates_across_graph_ns() -> None:
+    """purge_lkg's SCAN pattern (`...:{ws}:{ds}:*:{endpoint}:*`) is
+    graph_ns-agnostic by construction — the trailing wildcard covers the
+    digest AND any graph_ns suffix — so ONE purge for (ws, ds, endpoint)
+    removes LKG entries for every physical-graph variant."""
+    redis = _make_redis()
+    matching = [
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::aggregated:digestA:nsOLD",
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::aggregated:digestB:nsNEW",
+    ]
+    redis.scan = AsyncMock(return_value=(0, matching))
+    redis.delete = AsyncMock(return_value=len(matching))
+    cache = GraphCache(redis)
+
+    removed = await cache.purge_lkg(CacheScope("ws1", "ds1"), ENDPOINT_AGGREGATED)
+
+    assert removed == 2
+    deleted: set[str] = set()
+    for call in redis.delete.await_args_list:
+        deleted.update(call.args)
+    assert deleted == set(matching)
+
+
+@pytest.mark.asyncio
+async def test_bump_generation_invalidates_every_graph_ns_variant() -> None:
+    """The generation counter key deliberately ignores graph_ns (see
+    `_gen_key`'s docstring): bumping generation via one graph_ns value
+    makes every OTHER graph_ns sharing the same (ws, ds, branch) compute
+    a fresh, unreachable-for-the-old-key generation too — a re-point's
+    stale entries still die on the next write."""
+    scope_old = CacheScope("ws1", "ds1", graph_ns="ns_old")
+    scope_new = CacheScope("ws1", "ds1", graph_ns="ns_new")
+    assert graph_cache._gen_key(scope_old) == graph_cache._gen_key(scope_new)
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    gen0 = await cache._get_generation(scope_old)
+    key_before = _build_key(scope_old, gen0, ENDPOINT_CHILDREN, {})
+
+    await cache.bump_generation(scope_new)  # bump observed via a DIFFERENT graph_ns
+    redis.get.return_value = "1"
+    gen1 = await cache._get_generation(scope_old)
+    key_after = _build_key(scope_old, gen1, ENDPOINT_CHILDREN, {})
+
+    assert key_before != key_after
+
+
+def test_graph_ns_hash_deterministic_bounded_and_distinct() -> None:
+    h1 = graph_ns_hash("localhost:6379:nexus_lineage")
+    h2 = graph_ns_hash("localhost:6379:nexus_lineage")
+    assert h1 == h2  # deterministic
+
+    assert len(h1) == 16  # bounded — a truncated sha1 hex digest
+
+    distinct_ids = [
+        "host-a:6379:graph1",
+        "host-b:6379:graph1",  # different host
+        "host-a:6380:graph1",  # different port
+        "host-a:6379:graph2",  # different graph name
+    ]
+    hashes = {graph_ns_hash(pid) for pid in distinct_ids}
+    assert len(hashes) == len(distinct_ids)

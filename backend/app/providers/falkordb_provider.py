@@ -2480,6 +2480,15 @@ class FalkorDBProvider(GraphDataProvider):
         port = getattr(self, "_port", "") or ""
         return f"{host}:{port}:{self._graph_name}"
 
+    def physical_graph_id(self) -> str:
+        """Public read-only accessor for this provider's physical-graph
+        identity — the same (host, port, graph_name) triple ``_cache_ns``
+        uses. Exposed so callers OUTSIDE this module (the response cache's
+        ``CacheScope.graph_ns`` in graph_cache.py) can namespace their own
+        cache keys by physical graph without duplicating the host/port/
+        graph_name plumbing here."""
+        return self._cache_ns
+
     def _urn_label_key(self) -> str:
         return f"{self._cache_ns}:urn_labels"
 

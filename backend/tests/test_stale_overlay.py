@@ -159,3 +159,74 @@ async def test_canvas_expand_overlay_flags_composed_freshness(monkeypatch):
     assert result.freshness.stale_reason == "source_changed"
     assert result.aggregated_delta.stale is True
     assert result.aggregated_delta.stale_reason == "source_changed"
+
+
+# ── H4: graph_ns resolution (physical-graph cache namespacing) ──────────
+#
+# `_cache_scope` best-effort resolves the engine's live provider identity
+# (host:port:graph_name, hashed) into CacheScope.graph_ns. These fakes
+# stand in for the provider shapes `_resolve_physical_graph_id` has to
+# handle: a raw provider exposing `physical_graph_id()`, a provider that
+# wraps another one via `_base` (DraftOverlayProvider's shape — no
+# `__getattr__`, so it needs the explicit unwrap), a provider with
+# neither (VersionedBranchProvider's shape — no physical identity at
+# all), and a provider whose accessor raises.
+
+
+class _FakePhysicalProvider:
+    """Stand-in for FalkorDBProvider — exposes physical_graph_id()."""
+
+    def __init__(self, physical_id: str):
+        self._physical_id = physical_id
+
+    def physical_graph_id(self) -> str:
+        return self._physical_id
+
+
+class _FakeOverlayProvider:
+    """Stand-in for DraftOverlayProvider — wraps `_base`, no __getattr__."""
+
+    def __init__(self, base):
+        self._base = base
+
+
+class _FakeRaisingProvider:
+    def physical_graph_id(self):
+        raise RuntimeError("boom")
+
+
+class _ScopeOnlyEngine:
+    """Minimal engine stand-in exposing just enough for `_cache_scope`."""
+
+    def __init__(self, provider):
+        self._workspace_id = "ws1"
+        self._data_source_id = "ds1"
+        self._branch_id = ""
+        self.provider = provider
+
+
+def test_cache_scope_resolves_graph_ns_from_provider():
+    scope = graph_module._cache_scope(
+        _ScopeOnlyEngine(_FakePhysicalProvider("host-a:6379:graphA")),
+    )
+    assert scope.graph_ns != ""
+    assert scope.graph_ns == graph_module.graph_ns_hash("host-a:6379:graphA")
+
+
+def test_cache_scope_resolves_graph_ns_through_base_unwrap():
+    inner = _FakePhysicalProvider("host-b:6379:graphB")
+    scope = graph_module._cache_scope(_ScopeOnlyEngine(_FakeOverlayProvider(inner)))
+    assert scope.graph_ns == graph_module.graph_ns_hash("host-b:6379:graphB")
+
+
+def test_cache_scope_graph_ns_empty_when_unresolvable():
+    """Providers with no physical identity (e.g. VersionedBranchProvider,
+    which wraps a GraphVersioningService, not a live graph adapter)
+    degrade to graph_ns="" — still correct, just not re-point-hardened."""
+    scope = graph_module._cache_scope(_ScopeOnlyEngine(object()))
+    assert scope.graph_ns == ""
+
+
+def test_cache_scope_graph_ns_never_raises_on_resolution_error():
+    scope = graph_module._cache_scope(_ScopeOnlyEngine(_FakeRaisingProvider()))
+    assert scope.graph_ns == ""

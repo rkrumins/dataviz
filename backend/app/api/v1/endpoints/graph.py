@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import hashlib
 import json
 import logging
@@ -39,6 +39,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
     get_source_stale_reason,
+    graph_ns_hash,
 )
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
@@ -581,6 +582,37 @@ async def confirm_vocab_variant(
 # Helper: resolve data source ID from workspace (DB-only, no provider)#
 # ------------------------------------------------------------------ #
 
+def _resolve_physical_graph_id(provider: Any, _depth: int = 0) -> Optional[str]:
+    """Best-effort resolution of the live (host, port, graph_name) identity
+    behind a possibly-wrapped provider.
+
+    ``CircuitBreakerProxy`` and ``VersionedWriteProvider`` both delegate
+    unknown attribute access to their wrapped provider via ``__getattr__``,
+    so ``provider.physical_graph_id`` already resolves through those layers
+    for free. ``DraftOverlayProvider`` does not implement ``__getattr__``,
+    so it's unwrapped explicitly via its ``_base``.
+
+    Returns None when unresolvable — notably a ``VersionedBranchProvider``
+    (draft-on-stale-main / stale-main reads), which wraps a
+    ``GraphVersioningService`` rather than a live graph adapter, so there is
+    no physical graph to identify. Callers treat None as "no physical
+    identity available" and the cache scope falls back to today's ds-only
+    behavior. Never raises.
+    """
+    if provider is None or _depth > 5:
+        return None
+    try:
+        get_id = getattr(provider, "physical_graph_id", None)
+        if callable(get_id):
+            return get_id()
+        base = getattr(provider, "_base", None)
+        if base is not None and base is not provider:
+            return _resolve_physical_graph_id(base, _depth + 1)
+    except Exception:
+        return None
+    return None
+
+
 def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     """Derive the (workspace, data source) scope for cache keys.
 
@@ -588,13 +620,27 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     connection-scoped path). Connection-scoped reads bypass the cache —
     they're vanishingly rare in production and not worth the extra key
     plumbing.
+
+    ``graph_ns`` is populated best-effort from the engine's live provider
+    identity (host:port:graph_name, hashed) so a data source re-pointed to
+    a different physical graph can never be served the old graph's cached
+    response — see CacheScope's docstring. Resolution failure (or a
+    provider shape we can't unwrap) degrades to graph_ns="", i.e. today's
+    ds-only scoping; this never raises.
     """
     ws = getattr(engine, "_workspace_id", None)
     if not ws:
         return None
     ds = getattr(engine, "_data_source_id", None) or ""
     branch = getattr(engine, "_branch_id", None) or ""
-    return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch)
+    graph_ns = ""
+    try:
+        physical_id = _resolve_physical_graph_id(getattr(engine, "provider", None))
+        if physical_id:
+            graph_ns = graph_ns_hash(physical_id)
+    except Exception:
+        graph_ns = ""
+    return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch, graph_ns=graph_ns)
 
 
 def _provider_health_header(engine: ContextEngine) -> str:
