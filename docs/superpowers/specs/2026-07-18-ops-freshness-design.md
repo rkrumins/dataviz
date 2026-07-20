@@ -94,3 +94,18 @@ Goal: "see cache stats per provider and per data source, and trigger a full refr
 - Provider group header: cache-coverage chip (cacheStamped/total for that provider, from providerSummaries) + the existing state rollup; expanded groups get a compact per-provider stat strip.
 - Drawer "Cache contents" section: total cached entries + per-endpoint breakdown (cacheKeyCountByEndpoint) + the existing LKG count/age.
 - Tab header: "Refresh all sources" button (system:admin, confirm dialog naming the total + cost/SWR reassurance copy), wired to 8c + batch progress (reuse the ProviderRefreshDialog progress shape). White-label, plain-language, tsc 76→76.
+
+## 9. Force-clear + failed-rebuild resilience (user, 2026-07-20)
+
+Context: large graphs (Sol Xlarge Test 239k edges, Physical Lineage5 60k) fail aggregation with FalkorDB `OutOfMemoryError` (store pegged at its 12G ceiling). The failed job leaves the stale marker set, so the reconciler re-signals every 60s (generation climbed to 93) and the UI shows "Recomputing" forever — misleading, and wasteful load on an already-strained store. Three parts:
+
+### 9a. Force-clear scope (H1) — "clear the cache for any data source, no rebuild"
+New refresh scope `clear` on `refresh_source`: the `read-caches` steps (clear_content_caches + invalidate_hierarchy_reads + purge_lkg(aggregated) + mark_stats_changed) PLUS `clear_source_stale(ws, ds)` — the only scope that clears the marker, so it *un-sticks* a stuck source. No gate, no cooldown, no rebuild → safe even when the store is out of memory. Auto-propagates to per-source / provider batch / fleet batch (they take any scope). Response `actions` records `marker_cleared`. This is the realistic "clear everything for this source; hierarchy recomputes lazily on next page load" (the aggregated overlay still needs a rebuild — documented).
+
+### 9b. Reconciler failure backoff (H2) — stop the every-60s churn
+The scheduler reconciler additionally skips a marked source when `aggregation_status == "failed" AND (now - state.updated_at) < resolve_rebuild_interval(...)`. Migration-free (reuses existing status + updated_at + the cadence chain). Effect: a permanently-failing rebuild is retried at most once per cadence window (e.g. 1h) instead of every tick; the marker is KEPT so the source still reads "needs attention." Escalating backoff is a noted future enhancement.
+
+### 9c. Failure surfacing + honest badge + resolution guidance (H1 backend fields, H3 FE)
+- FreshnessDoc gains (doc-only, one bounded query on the latest job): `lastFailureReason` (raw error_message), `lastFailureCategory` (classified server-side: `out_of_memory | provider_unavailable | ontology | timeout | conflict | unknown`), `retryCount`.
+- **Honest badge** (FE): "Recomputing" shows ONLY when a job is genuinely running (`runningJobId`); `aggregationStatus === 'failed'` → a red "Rebuild failed" state; marker set but no running job and not failed → "Queued"; else the existing states. No more "Recomputing" on a dead/failed source.
+- **Resolution guidance (premium UX)** in the drawer for failed/attention sources: a rich panel stating **what** happened, **why** (category-specific, plain-language), and **how to resolve**, with **CTAs** — "Clear cache" (the safe 9a scope, primary), "Retry rebuild" (rollups; warns "may fail again until memory is freed" when category is out_of_memory), and category-specific guidance (e.g. OOM → free graph-store memory / raise its limit; ontology → assign an ontology; provider_unavailable → check the provider). Guidance is design-system-consistent, accessible, and calm (not alarmist).
