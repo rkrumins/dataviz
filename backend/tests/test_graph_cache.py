@@ -1290,3 +1290,240 @@ def test_graph_ns_hash_deterministic_bounded_and_distinct() -> None:
     ]
     hashes = {graph_ns_hash(pid) for pid in distinct_ids}
     assert len(hashes) == len(distinct_ids)
+
+
+# ─── CACHE-role routing (Task H5) ───────────────────────────────────────
+#
+# graph_cache holds TWO Redis clients: `_cache_redis` (response-cache
+# PAYLOADS + LKG snapshots, routed to the dedicated CACHE role when
+# configured) and `_coord_redis` (the generation counter, the genat stamp,
+# and the aggstale markers — ALWAYS the durable shared client, never the
+# lossy cache role — see the agg:members ledger-corruption lesson). When
+# `GraphCache` is constructed with a single client (every test above this
+# section), `_cache_redis` falls back to `_coord_redis` — single-client
+# behavior, byte-identical to before this task.
+
+@pytest.mark.asyncio
+async def test_single_client_construction_falls_back_cache_to_coord() -> None:
+    """No dedicated cache client supplied (CACHE role unconfigured, or a
+    caller that never resolved one) -> `_cache_redis` IS `_coord_redis`,
+    the exact single-client shape every other test in this file relies
+    on."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    assert cache._cache_redis is redis
+    assert cache._coord_redis is redis
+
+
+@pytest.mark.asyncio
+async def test_cache_configured_payload_and_lkg_use_cache_client() -> None:
+    """With a distinct CACHE-role client supplied, a cache miss + compute
+    reads/writes the primary entry AND the LKG mirror on `_cache_redis`;
+    the coordination client is only touched for the generation read, and
+    never written."""
+    coord = _make_redis()
+    cache_redis = _make_redis()
+    cache = GraphCache(coord, cache_redis)
+    compute = AsyncMock(return_value=_Result(value=1, children=[1]))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 1
+    # Generation lookup is the ONLY coordination-client call; it is never
+    # written to by a cache read/write.
+    coord.get.assert_awaited_once()
+    coord.set.assert_not_awaited()
+    coord.incr.assert_not_awaited()
+    # Primary GET (miss) + primary SET + LKG SET all land on the cache
+    # client, never the coordination client.
+    cache_redis.get.assert_awaited_once()
+    assert cache_redis.set.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_lkg_read_uses_cache_client_not_coord() -> None:
+    """The LKG stale-fallback GET (fired when `compute()` raises
+    ProviderUnavailable) must land on the cache client too — the
+    coordination client is only ever touched for the generation read."""
+    from backend.common.adapters import ProviderUnavailable
+
+    coord = _make_redis()
+    coord.get = AsyncMock(return_value="0")  # generation only
+    cache_redis = _make_redis()
+    cache_redis.get = AsyncMock(side_effect=[
+        None,  # primary miss
+        _Result(value=55).model_dump_json(by_alias=True),  # LKG hit
+    ])
+    cache = GraphCache(coord, cache_redis)
+    compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 55
+    assert cache_redis.get.await_count == 2
+    coord.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_configured_coordination_still_uses_coord_client() -> None:
+    """Even with a distinct CACHE-role client present, `bump_generation`
+    and the stale-marker helpers (coordination) must land exclusively on
+    the coordination client — never the cache role. This is the
+    eviction-safety invariant from the agg:members lesson."""
+    coord = _make_redis()
+    cache_redis = _make_redis()
+    cache = GraphCache(coord, cache_redis)
+
+    await cache.bump_generation(CacheScope("ws1", "ds1"))
+    coord.incr.assert_awaited_once()
+    coord.set.assert_awaited_once()
+    cache_redis.incr.assert_not_awaited()
+    cache_redis.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_source_stale_uses_coord_client_not_cache_client(monkeypatch) -> None:
+    """Module-level stale-marker helpers read `get_graph_cache()` and must
+    hit the coordination client even when a distinct cache client is
+    wired up."""
+    coord = _make_redis()
+    cache_redis = _make_redis()
+    cache = GraphCache(coord, cache_redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.mark_source_stale("ws1", "ds1", reason="source_changed")
+
+    coord.set.assert_awaited_once()
+    cache_redis.set.assert_not_awaited()
+    cache_redis.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cache_client_get_failure_degrades_to_compute() -> None:
+    """A CACHE-role client failure on the primary GET must degrade to
+    `compute()` exactly like the single-client fail-open path — the
+    coordination client is unaffected and unrelated to the failure."""
+    coord = _make_redis()
+    cache_redis = _make_redis()
+    cache_redis.get = AsyncMock(side_effect=RedisError("cache role down"))
+    cache = GraphCache(coord, cache_redis)
+    compute = AsyncMock(return_value=_Result(value=7))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 7
+    compute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_client_set_failure_does_not_fail_request_or_touch_coord() -> None:
+    """A CACHE-role client failure on the primary SET is swallowed (the
+    compute already succeeded) and never reaches the coordination
+    client."""
+    coord = _make_redis()
+    cache_redis = _make_redis()
+    cache_redis.set = AsyncMock(side_effect=RedisError("cache role down"))
+    cache = GraphCache(coord, cache_redis)
+    compute = AsyncMock(return_value=_Result(value=9))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 9
+    coord.set.assert_not_awaited()
+
+
+# ─── _resolve_cache_role_client (the CACHE-role resolver) ───────────────
+
+def test_resolve_cache_role_client_returns_none_when_unconfigured(monkeypatch) -> None:
+    fake_cfg = type("Cfg", (), {"is_configured": False})()
+    monkeypatch.setattr(
+        "backend.common.adapters.redis_endpoint.resolve_redis_config",
+        lambda role, **kw: fake_cfg,
+    )
+    assert graph_cache._resolve_cache_role_client() is None
+
+
+def test_resolve_cache_role_client_builds_client_when_configured(monkeypatch) -> None:
+    fake_cfg = type("Cfg", (), {"is_configured": True})()
+    sentinel_client = object()
+    monkeypatch.setattr(
+        "backend.common.adapters.redis_endpoint.resolve_redis_config",
+        lambda role, **kw: fake_cfg,
+    )
+    monkeypatch.setattr(
+        "backend.common.adapters.redis_endpoint.build_redis_client",
+        lambda cfg, **kw: sentinel_client,
+    )
+    assert graph_cache._resolve_cache_role_client() is sentinel_client
+
+
+def test_resolve_cache_role_client_swallows_resolution_errors(monkeypatch) -> None:
+    """Constraint: 'resolution failure of the CACHE cfg -> fall back to
+    shared, log once, never raise.'"""
+    def _boom(role, **kw):
+        raise RuntimeError("config store unreachable")
+
+    monkeypatch.setattr(
+        "backend.common.adapters.redis_endpoint.resolve_redis_config", _boom,
+    )
+    assert graph_cache._resolve_cache_role_client() is None
+
+
+# ─── get_graph_cache() singleton wiring ─────────────────────────────────
+
+def test_get_graph_cache_wires_cache_role_client(monkeypatch) -> None:
+    """The singleton passes the shared client as coordination AND wires
+    whatever `_resolve_cache_role_client` returns as the payload client."""
+    graph_cache.reset_graph_cache_for_tests()
+    shared = _make_redis()
+    dedicated_cache = _make_redis()
+    monkeypatch.setattr(graph_cache, "get_redis", lambda: shared)
+    monkeypatch.setattr(
+        graph_cache, "_resolve_cache_role_client", lambda: dedicated_cache,
+    )
+
+    cache = graph_cache.get_graph_cache()
+
+    assert cache._coord_redis is shared
+    assert cache._cache_redis is dedicated_cache
+    graph_cache.reset_graph_cache_for_tests()
+
+
+def test_get_graph_cache_falls_back_when_cache_role_unresolved(monkeypatch) -> None:
+    """When `_resolve_cache_role_client` returns None (unconfigured or a
+    resolution failure), the singleton's cache client falls back to the
+    same shared client used for coordination — single-client behavior."""
+    graph_cache.reset_graph_cache_for_tests()
+    shared = _make_redis()
+    monkeypatch.setattr(graph_cache, "get_redis", lambda: shared)
+    monkeypatch.setattr(graph_cache, "_resolve_cache_role_client", lambda: None)
+
+    cache = graph_cache.get_graph_cache()
+
+    assert cache._coord_redis is shared
+    assert cache._cache_redis is shared
+    graph_cache.reset_graph_cache_for_tests()

@@ -275,8 +275,22 @@ class CacheScope:
 class GraphCache:
     """Singleton cache wrapper. Get the instance via `get_graph_cache()`."""
 
-    def __init__(self, redis: aioredis.Redis) -> None:
-        self._redis = redis
+    def __init__(
+        self, redis: aioredis.Redis, cache_redis: Optional[aioredis.Redis] = None,
+    ) -> None:
+        # Durable, shared client — COORDINATION only: the generation
+        # counter, the genat cache-as-of stamp, and the aggstale markers.
+        # Never the CACHE role — this repo's agg:members ledger-corruption
+        # lesson: eviction of a lossy cache Redis must not lose
+        # coordination state (spec §10b).
+        self._coord_redis = redis
+        # Response-cache PAYLOADS + LKG snapshots. Resolved by the caller
+        # via the CACHE role (REDIS_CACHE_*) with a fallback to the shared
+        # client baked in — so when no dedicated client is supplied (every
+        # existing call site/test), this is the SAME client as
+        # ``_coord_redis`` and behavior is byte-identical to today's
+        # single-client cache.
+        self._cache_redis = cache_redis if cache_redis is not None else redis
         # In-process singleflight: key → Future holding the computed result.
         # Concurrent callers awaiting an in-flight future read the same
         # answer with no extra provider work.
@@ -327,7 +341,7 @@ class GraphCache:
 
         # ── 1. Redis cache lookup ─────────────────────────────────────
         try:
-            cached = await self._redis.get(cache_key)
+            cached = await self._cache_redis.get(cache_key)
         except RedisError as exc:
             logger.warning("graph_cache: GET failed (%s); bypassing cache", exc)
             return await compute()
@@ -416,7 +430,7 @@ class GraphCache:
             return None
         try:
             gen = await self._get_generation(scope)
-            raw = await self._redis.get(
+            raw = await self._cache_redis.get(
                 _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params)
             )
             return int(raw) if raw is not None else None
@@ -433,7 +447,7 @@ class GraphCache:
             return
         try:
             gen = await self._get_generation(scope)
-            await self._redis.set(
+            await self._cache_redis.set(
                 _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params),
                 str(int(value)),
                 ex=_DEFAULT_TOP_LEVEL_TTL,
@@ -450,8 +464,8 @@ class GraphCache:
         off; INCR on a non-existent key just starts it at 1.
         """
         try:
-            await self._redis.incr(_gen_key(scope))
-            await self._redis.set(
+            await self._coord_redis.incr(_gen_key(scope))
+            await self._coord_redis.set(
                 _genat_key(scope), datetime.now(timezone.utc).isoformat(),
             )
         except RedisError as exc:
@@ -469,7 +483,7 @@ class GraphCache:
         if not scopes:
             return
         try:
-            pipe = self._redis.pipeline(transaction=False)
+            pipe = self._coord_redis.pipeline(transaction=False)
             now_iso = datetime.now(timezone.utc).isoformat()
             for scope in scopes:
                 pipe.incr(_gen_key(scope))
@@ -498,11 +512,11 @@ class GraphCache:
         try:
             cursor = 0
             while True:
-                cursor, keys = await self._redis.scan(
+                cursor, keys = await self._cache_redis.scan(
                     cursor=cursor, match=pattern, count=500,
                 )
                 if keys:
-                    removed += int(await self._redis.delete(*keys) or 0)
+                    removed += int(await self._cache_redis.delete(*keys) or 0)
                 if not cursor:
                     break
         except RedisError as exc:
@@ -527,13 +541,13 @@ class GraphCache:
         try:
             cursor = 0
             while True:
-                cursor, keys = await self._redis.scan(
+                cursor, keys = await self._cache_redis.scan(
                     cursor=cursor, match=pattern, count=500,
                 )
                 if exclude_endpoint is not None:
                     keys = [k for k in keys if f":{exclude_endpoint}:" not in k]
                 if keys:
-                    removed += int(await self._redis.delete(*keys) or 0)
+                    removed += int(await self._cache_redis.delete(*keys) or 0)
                 if not cursor:
                     break
         except RedisError as exc:
@@ -549,7 +563,7 @@ class GraphCache:
     async def _get_generation(self, scope: CacheScope) -> int:
         """Read the current generation counter for `scope`. Returns 0
         when never set (which yields a stable initial key)."""
-        raw = await self._redis.get(_gen_key(scope))
+        raw = await self._coord_redis.get(_gen_key(scope))
         if raw is None:
             return 0
         try:
@@ -581,9 +595,9 @@ class GraphCache:
                     "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (dropping stale entry + skipping cache write)",
                     endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
                 )
-                await self._redis.delete(cache_key)
+                await self._cache_redis.delete(cache_key)
                 return
-            await self._redis.set(cache_key, payload, ex=ttl)
+            await self._cache_redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: SET failed (%s)", exc)
 
@@ -616,9 +630,9 @@ class GraphCache:
                 # the stale mirror is dropped here deliberately (log-silent
                 # to avoid double-noise) — an outage fallback that no
                 # longer matches reality is worse than none.
-                await self._redis.delete(_build_lkg_key(scope, endpoint, params))
+                await self._cache_redis.delete(_build_lkg_key(scope, endpoint, params))
                 return
-            await self._redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
+            await self._cache_redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: LKG SET failed (%s)", exc)
 
@@ -636,7 +650,7 @@ class GraphCache:
         if _LKG_TTL <= 0:
             return None
         try:
-            raw = await self._redis.get(_build_lkg_key(scope, endpoint, params))
+            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
         except RedisError as exc:
             logger.warning("graph_cache: LKG GET failed (%s)", exc)
             return None
@@ -885,7 +899,7 @@ async def mark_source_stale(
         return
     try:
         cache = get_graph_cache()
-        await cache._redis.set(_stale_key(ws, ds), reason, ex=_STALE_TTL_S)
+        await cache._coord_redis.set(_stale_key(ws, ds), reason, ex=_STALE_TTL_S)
     except Exception as exc:
         logger.warning(
             "graph_cache: mark_source_stale failed for %s/%s: %s", ws, ds, exc,
@@ -900,7 +914,7 @@ async def clear_source_stale(workspace_id: str, data_source_id: str) -> None:
         return
     try:
         cache = get_graph_cache()
-        await cache._redis.delete(_stale_key(ws, ds))
+        await cache._coord_redis.delete(_stale_key(ws, ds))
     except Exception as exc:
         logger.warning(
             "graph_cache: clear_source_stale failed for %s/%s: %s", ws, ds, exc,
@@ -920,7 +934,7 @@ async def get_source_stale_reason(
         return None
     try:
         cache = get_graph_cache()
-        return await cache._redis.get(_stale_key(ws, ds))
+        return await cache._coord_redis.get(_stale_key(ws, ds))
     except Exception as exc:
         logger.warning(
             "graph_cache: get_source_stale_reason failed for %s/%s: %s", ws, ds, exc,
@@ -942,7 +956,7 @@ async def get_cache_as_of(
     try:
         cache = get_graph_cache()
         scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id=str(branch_id))
-        return await cache._redis.get(_genat_key(scope))
+        return await cache._coord_redis.get(_genat_key(scope))
     except Exception as exc:
         logger.warning(
             "graph_cache: get_cache_as_of failed for %s/%s: %s", ws, ds, exc,
@@ -973,7 +987,7 @@ async def read_freshness_signals(
         return result
     try:
         cache = get_graph_cache()
-        pipe = cache._redis.pipeline(transaction=False)
+        pipe = cache._coord_redis.pipeline(transaction=False)
         for ws, ds in clean:
             scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id="")
             pipe.get(_gen_key(scope))
@@ -1016,7 +1030,7 @@ async def read_lkg_stats(
         keys: list[str] = []
         cursor = 0
         while True:
-            cursor, batch = await cache._redis.scan(
+            cursor, batch = await cache._cache_redis.scan(
                 cursor=cursor, match=pattern, count=500,
             )
             keys.extend(batch)
@@ -1024,7 +1038,7 @@ async def read_lkg_stats(
                 break
         if not keys:
             return (0, None)
-        pipe = cache._redis.pipeline(transaction=False)
+        pipe = cache._cache_redis.pipeline(transaction=False)
         for key in keys:
             pipe.ttl(key)
         ttls = await pipe.execute()
@@ -1066,7 +1080,7 @@ async def count_cache_keys_by_endpoint(
         tally: dict[str, int] = {}
         cursor = 0
         while True:
-            cursor, keys = await cache._redis.scan(
+            cursor, keys = await cache._cache_redis.scan(
                 cursor=cursor, match=pattern, count=500,
             )
             for key in keys:
@@ -1097,7 +1111,7 @@ async def list_stale_sources() -> list[tuple[str, str]]:
         pattern = f"{_STALE_PREFIX}:*"
         cursor = 0
         while True:
-            cursor, keys = await cache._redis.scan(
+            cursor, keys = await cache._coord_redis.scan(
                 cursor=cursor, match=pattern, count=500,
             )
             for key in keys:
@@ -1169,12 +1183,45 @@ async def purge_aggregated_lkg(scopes) -> None:
 _cache: Optional[GraphCache] = None
 
 
+def _resolve_cache_role_client() -> Optional[aioredis.Redis]:
+    """Resolve the global CACHE-role Redis client for response-cache
+    payloads + LKG snapshots (``REDIS_CACHE_*``, falling back to the
+    legacy ``CACHE_REDIS_URL`` — see ``resolve_redis_config``/
+    ``falkordb_connection.build_cache_client``).
+
+    No per-provider ``cacheConnection`` override here: this resolves the
+    fleet-wide default only, since graph_cache has no single provider to
+    key off of; routing a provider's own cache override into graph_cache
+    is a documented follow-up (spec §10a note).
+
+    Returns ``None`` when the role isn't configured, or when resolution
+    itself fails for any reason — best-effort, same as every other
+    contract in this module: the caller falls back to the shared/durable
+    client so dev and unconfigured deployments see no behavior change.
+    """
+    try:
+        from backend.common.adapters.redis_endpoint import (
+            RedisRole, build_redis_client, resolve_redis_config,
+        )
+        cfg = resolve_redis_config(RedisRole.CACHE)
+        if not cfg.is_configured:
+            return None
+        return build_redis_client(cfg)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: CACHE-role Redis resolution failed (%s); "
+            "response-cache payloads will use the shared Redis client",
+            exc,
+        )
+        return None
+
+
 def get_graph_cache() -> GraphCache:
     """Return the process-wide GraphCache. Lazy-initialised on first use
     so test code can patch `get_redis()` before this fires."""
     global _cache
     if _cache is None:
-        _cache = GraphCache(get_redis())
+        _cache = GraphCache(get_redis(), _resolve_cache_role_client())
     return _cache
 
 
