@@ -37,6 +37,7 @@ from backend.app.services.aggregation import service as svc_mod
 from backend.app.services.aggregation.schemas import (
     AggregationCadence,
     FreshnessDoc,
+    FreshnessRow,
     FreshnessSettingsRequest,
     FreshnessSettingsResponse,
     RefreshResponse,
@@ -254,7 +255,10 @@ def test_fleet_stale_only_consults_marker_set(monkeypatch):
         _FakeResult(rows=[(ds_a, "Prov A")]),
         # summary basis: the workspace/provider-filtered set BEFORE staleOnly
         # — here it happens to be the same single source.
-        _FakeResult(rows=[(ds_a.id, ds_a.workspace_id, ds_a.aggregation_status)]),
+        _FakeResult(rows=[
+            (ds_a.id, ds_a.workspace_id, ds_a.aggregation_status,
+             ds_a.provider_id, "Prov A"),
+        ]),
     ])
     resp = _run(assemble_fleet_freshness(session, stale_only=True))
     assert seen.get("called") is True
@@ -342,7 +346,7 @@ def test_fleet_summary_ignores_stale_only_facet(monkeypatch):
         _FakeResult(rows=[(ds_b, "Prov B")]),  # stale-filtered page
         # summary basis query: full workspace/provider-filtered set.
         _FakeResult(rows=[
-            (ds.id, ds.workspace_id, ds.aggregation_status)
+            (ds.id, ds.workspace_id, ds.aggregation_status, ds.provider_id, "Prov")
             for ds in (ds_a, ds_b, ds_c)
         ]),
     ])
@@ -381,7 +385,7 @@ def test_fleet_summary_full_set_on_page_2_of_small_page_size(monkeypatch):
         _FakeResult(scalar=3),
         _FakeResult(rows=[(ds_y, "Prov Y")]),  # page 2 of pageSize=1
         _FakeResult(rows=[
-            (ds.id, ds.workspace_id, ds.aggregation_status)
+            (ds.id, ds.workspace_id, ds.aggregation_status, ds.provider_id, "Prov")
             for ds in (ds_x, ds_y, ds_z)
         ]),
     ])
@@ -423,6 +427,144 @@ def test_fleet_takes_no_provider_registry():
     params = set(inspect.signature(assemble_fleet_freshness).parameters)
     assert "registry" not in params
     assert "provider" not in params
+
+
+# ── Per-provider summaries (Task G1, spec §8a) ───────────────────────────
+
+
+def test_provider_summaries_mixed_fixture(monkeypatch):
+    # Provider A: ds-a1 (ready + a live running job — proves the
+    # ready/pending overlap is honored per-provider too), ds-a2 (failed +
+    # a stale marker, so needs_attention counts once not twice). Provider
+    # B: ds-b1 (ready + cache-stamped). No-provider group: ds-n1 (never
+    # built). Groups must sort by provider_name with the no-provider
+    # group last.
+    ds_a1 = _ds(id="ds-a1", provider="prov-a", status="ready")
+    ds_a2 = _ds(id="ds-a2", provider="prov-a", status="failed")
+    ds_b1 = _ds(id="ds-b1", provider="prov-b", status="ready")
+    ds_n1 = _ds(id="ds-n1", provider=None, status="none")
+    all_ds = [ds_a1, ds_a2, ds_b1, ds_n1]
+    names = {"ds-a1": "Prov A", "ds-a2": "Prov A", "ds-b1": "Prov B", "ds-n1": None}
+    signals = {
+        ("ws-1", "ds-a2"): (1, None, "drift"),
+        ("ws-1", "ds-b1"): (2, "2026-07-19T00:00:00+00:00", None),
+    }
+    _patch_fleet_collaborators(
+        monkeypatch, signals=signals, running={"ds-a1": "job-1"},
+    )
+    session = _FakeSession([
+        _FakeResult(scalar=len(all_ds)),
+        _FakeResult(rows=[(ds, names[ds.id]) for ds in all_ds]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+
+    ps = resp.provider_summaries
+    assert ps is not None
+    assert [p.provider_id for p in ps] == ["prov-a", "prov-b", None]
+    a, b, none_group = ps
+    assert a.provider_name == "Prov A"
+    assert a.total == 2
+    assert a.ready == 1  # ds-a1 only (ds-a2 is failed)
+    assert a.pending == 1  # ds-a1's live running job
+    assert a.failed == 1  # ds-a2
+    assert a.needs_attention == 1  # ds-a2 (marker & failed, counted once)
+    assert a.cache_stamped == 0
+    assert b.provider_name == "Prov B"
+    assert b.total == 1 and b.ready == 1 and b.cache_stamped == 1
+    assert none_group.provider_id is None and none_group.provider_name is None
+    assert none_group.total == 1 and none_group.not_built == 1
+
+
+def test_provider_summaries_none_above_1000_sources(monkeypatch):
+    _patch_fleet_collaborators(monkeypatch)
+    ds_a = _ds(id="ds-a")
+    session = _FakeSession([
+        _FakeResult(scalar=1500),  # filtered set exceeds the 1000 cutoff
+        _FakeResult(rows=[(ds_a, "Prov A")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    assert resp.summary is None
+    assert resp.provider_summaries is None
+
+
+def test_fleet_row_schema_excludes_cache_key_fields():
+    # Fleet rows never carry the doc-only cache-key-count fields — they
+    # cost a per-source SCAN that must never run on the fleet path.
+    assert "cache_key_count" not in FreshnessRow.model_fields
+    assert "cache_key_count_by_endpoint" not in FreshnessRow.model_fields
+    assert "cache_key_count" in FreshnessDoc.model_fields
+    assert "cache_key_count_by_endpoint" in FreshnessDoc.model_fields
+
+
+# ── count_cache_keys_by_endpoint (Task G1, spec §8b) ─────────────────────
+
+
+class _ScanFakeRedis:
+    """Fake redis whose ``scan`` actually glob-matches against a fixed
+    keyspace (unlike the plain AsyncMock stand-ins used elsewhere, which
+    just return canned keys regardless of the pattern) — needed here to
+    prove the current-generation SCAN pattern genuinely excludes
+    stale-gen/LKG keys, not merely that the pattern string looks right."""
+
+    def __init__(self, keyspace, *, gen_value="0"):
+        self._keyspace = keyspace
+        self._gen_value = gen_value
+
+    async def get(self, key):
+        return self._gen_value
+
+    async def scan(self, cursor=0, match="*", count=500):
+        import fnmatch
+        matched = [k for k in self._keyspace if fnmatch.fnmatch(k, match)]
+        return (0, matched)
+
+
+def test_count_cache_keys_by_endpoint_tallies_current_gen_only(monkeypatch):
+    ws, ds = "ws-1", "ds-1"
+    keyspace = [
+        f"{gc_mod._KEY_PREFIX}:{ws}:{ds}::3:children:aaa",
+        f"{gc_mod._KEY_PREFIX}:{ws}:{ds}::3:children:bbb",
+        f"{gc_mod._KEY_PREFIX}:{ws}:{ds}::3:aggregated:ccc",
+        f"{gc_mod._KEY_PREFIX}:{ws}:{ds}::2:children:stale",  # stale gen
+        f"{gc_mod._LKG_PREFIX}:{ws}:{ds}::children:lkg",  # LKG, not primary
+    ]
+    cache = gc_mod.GraphCache(_ScanFakeRedis(keyspace, gen_value="3"))
+    monkeypatch.setattr(gc_mod, "get_graph_cache", lambda: cache)
+
+    result = _run(gc_mod.count_cache_keys_by_endpoint(ws, ds))
+    assert result == {"children": 2, "aggregated": 1}
+
+
+def test_count_cache_keys_by_endpoint_empty_when_nothing_cached(monkeypatch):
+    cache = gc_mod.GraphCache(_ScanFakeRedis([], gen_value="0"))
+    monkeypatch.setattr(gc_mod, "get_graph_cache", lambda: cache)
+    result = _run(gc_mod.count_cache_keys_by_endpoint("ws-1", "ds-1"))
+    assert result == {}
+
+
+def test_count_cache_keys_by_endpoint_none_on_redis_error(monkeypatch):
+    class _ErrorRedis:
+        async def get(self, key):
+            raise Exception("boom")
+
+    cache = gc_mod.GraphCache(_ErrorRedis())
+    monkeypatch.setattr(gc_mod, "get_graph_cache", lambda: cache)
+    result = _run(gc_mod.count_cache_keys_by_endpoint("ws-1", "ds-1"))
+    assert result is None
+
+
+def test_count_cache_keys_by_endpoint_none_on_empty_ids(monkeypatch):
+    class _AssertNoRedisCall:
+        async def get(self, key):
+            raise AssertionError("must not read generation for empty ids")
+
+        async def scan(self, **kwargs):
+            raise AssertionError("must not SCAN for empty ids")
+
+    cache = gc_mod.GraphCache(_AssertNoRedisCall())
+    monkeypatch.setattr(gc_mod, "get_graph_cache", lambda: cache)
+    assert _run(gc_mod.count_cache_keys_by_endpoint("", "ds-1")) is None
+    assert _run(gc_mod.count_cache_keys_by_endpoint("ws-1", "")) is None
 
 
 # ── F9: cooldownUntil derives from the resolved rebuild interval ────────
@@ -527,7 +669,7 @@ def test_source_doc_exposes_resolved_and_source(monkeypatch):
 
 
 def _patch_source_collaborators(monkeypatch, *, signals=None, lkg=(2, 120),
-                                events=None):
+                                events=None, cache_keys=None):
     async def _sig(pairs):
         return signals or {}
     monkeypatch.setattr(gc_mod, "read_freshness_signals", _sig)
@@ -535,6 +677,10 @@ def _patch_source_collaborators(monkeypatch, *, signals=None, lkg=(2, 120),
     async def _lkg(ws, ds):
         return lkg
     monkeypatch.setattr(gc_mod, "read_lkg_stats", _lkg)
+
+    async def _cache_keys(ws, ds, branch_id=""):
+        return {} if cache_keys is None else cache_keys
+    monkeypatch.setattr(gc_mod, "count_cache_keys_by_endpoint", _cache_keys)
 
     async def _list_events(session, ds_id, limit=5):
         return events or []
@@ -561,6 +707,34 @@ def test_source_probe_false_does_no_provider_work(monkeypatch):
     assert doc.drifted is None
     assert doc.lkg_count == 2
     assert doc.lkg_oldest_age_secs == 120
+
+
+# ── Doc: per-source cache-key counts (Task G1, spec §8b) ─────────────────
+
+
+def test_source_doc_exposes_cache_key_counts(monkeypatch):
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    by_endpoint = {"children": 5, "aggregated": 2}
+    _patch_source_collaborators(monkeypatch, cache_keys=by_endpoint)
+    session = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.cache_key_count_by_endpoint == by_endpoint
+    assert doc.cache_key_count == 7  # sum(byEndpoint)
+
+
+def test_source_doc_cache_key_count_none_on_error(monkeypatch):
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    _patch_source_collaborators(monkeypatch, cache_keys=None)
+
+    async def _count(ws, ds, branch_id=""):
+        return None  # simulates a Redis error / disabled cache
+    monkeypatch.setattr(gc_mod, "count_cache_keys_by_endpoint", _count)
+    session = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.cache_key_count_by_endpoint is None
+    assert doc.cache_key_count is None
 
 
 def test_source_probe_true_calls_schema_stats_once_under_wait_for(monkeypatch):

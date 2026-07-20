@@ -953,6 +953,48 @@ async def read_lkg_stats(
         return (None, None)
 
 
+async def count_cache_keys_by_endpoint(
+    workspace_id: str, data_source_id: str, branch_id: str = "",
+) -> Optional[dict[str, int]]:
+    """Bounded SCAN over the CURRENT-generation primary cache keys for a
+    source, tallied by endpoint segment (index 6 of
+    ``graphcache:v1:{ws}:{ds}:{branch}:{gen}:{endpoint}:{digest}``).
+    Reads the current generation first so the SCAN pattern locks to it —
+    stale-generation and LKG keys (a different prefix) never match.
+
+    Returns ``{}`` when nothing is cached (distinct from ``None`` = a
+    Redis error/disabled cache), ``None`` on empty ids (no SCAN issued).
+    Per-source only — never called on the fleet path. Best-effort: never
+    raises."""
+    ws, ds, branch = str(workspace_id), str(data_source_id), str(branch_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch)
+        gen = await cache._get_generation(scope)
+        pattern = f"{_KEY_PREFIX}:{ws}:{ds}:{branch}:{gen}:*"
+        tally: dict[str, int] = {}
+        cursor = 0
+        while True:
+            cursor, keys = await cache._redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            for key in keys:
+                parts = key.split(":")
+                if len(parts) > 6:
+                    tally[parts[6]] = tally.get(parts[6], 0) + 1
+            if not cursor:
+                break
+        return tally
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: count_cache_keys_by_endpoint failed for %s/%s: %s",
+            ws, ds, exc,
+        )
+        return None
+
+
 async def list_stale_sources() -> list[tuple[str, str]]:
     """List every ``(workspace_id, data_source_id)`` pair currently
     marked stale — read by the scheduler reconciler to re-signal sources

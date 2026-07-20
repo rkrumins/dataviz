@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -541,6 +541,14 @@ class FreshnessDoc(FreshnessRow):
     rebuild_interval_source: Optional[str] = Field(
         None, alias="rebuildIntervalSource",
     )
+    # Per-source cache footprint: a bounded SCAN of the CURRENT-generation
+    # primary cache keys, tallied by endpoint. Doc-only (never on the fleet
+    # path) — see ``count_cache_keys_by_endpoint``. ``None`` on a Redis
+    # error/disabled cache, distinct from ``{}``/0 (nothing cached).
+    cache_key_count: Optional[int] = Field(None, alias="cacheKeyCount")
+    cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
+        None, alias="cacheKeyCountByEndpoint",
+    )
 
     class Config:
         populate_by_name = True
@@ -565,11 +573,33 @@ class FreshnessSummary(BaseModel):
         populate_by_name = True
 
 
+class ProviderFreshnessSummary(BaseModel):
+    """Per-provider breakdown of the fleet ``summary`` — identical bucket
+    semantics, grouped by ``(provider_id, provider_name)``. ``provider_id``/
+    ``provider_name`` are ``None`` for the no-provider group. ``None`` on
+    the response whenever ``summary`` is (the same >1000-source cutoff)."""
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    total: int = 0
+    ready: int = Field(0)
+    pending: int = Field(0)
+    failed: int = Field(0)
+    not_built: int = Field(0, alias="notBuilt")
+    needs_attention: int = Field(0, alias="needsAttention")
+    cache_stamped: int = Field(0, alias="cacheStamped")
+
+    class Config:
+        populate_by_name = True
+
+
 class FreshnessFleetResponse(BaseModel):
     """Paged fleet freshness response — ``total`` is the filtered count."""
     rows: List[FreshnessRow] = Field(default_factory=list)
     total: int = 0
     summary: Optional[FreshnessSummary] = None
+    provider_summaries: Optional[List[ProviderFreshnessSummary]] = Field(
+        None, alias="providerSummaries",
+    )
 
     class Config:
         populate_by_name = True

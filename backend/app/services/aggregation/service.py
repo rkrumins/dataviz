@@ -34,6 +34,7 @@ from .schemas import (
     FreshnessRow,
     FreshnessSummary,
     PaginatedJobsResponse,
+    ProviderFreshnessSummary,
     RefreshEventSummary,
     RefreshResponse,
     ResumeOverrides,
@@ -1956,6 +1957,13 @@ class AggregationService:
         lkg_count, lkg_oldest_age = await _gc.read_lkg_stats(
             ds.workspace_id, ds.id,
         )
+        cache_key_count_by_endpoint = await _gc.count_cache_keys_by_endpoint(
+            ds.workspace_id, ds.id,
+        )
+        cache_key_count = (
+            sum(cache_key_count_by_endpoint.values())
+            if cache_key_count_by_endpoint is not None else None
+        )
 
         live_fingerprint = live_node_count = live_edge_count = None
         drifted = None
@@ -1979,6 +1987,8 @@ class AggregationService:
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
+            cache_key_count=cache_key_count,
+            cache_key_count_by_endpoint=cache_key_count_by_endpoint,
             live_fingerprint=live_fingerprint,
             live_node_count=live_node_count,
             live_edge_count=live_edge_count,
@@ -2539,7 +2549,7 @@ async def assemble_fleet_freshness(
         ))
         for ds in ds_list
     ]
-    summary = await _assemble_fleet_summary(
+    summary, provider_summaries = await _assemble_fleet_summary(
         session,
         workspace_id=workspace_id,
         provider_id=provider_id,
@@ -2548,8 +2558,12 @@ async def assemble_fleet_freshness(
         total=total,
         signals=signals,
         running=running,
+        provider_names=provider_names,
     )
-    return FreshnessFleetResponse(rows=rows, total=total, summary=summary)
+    return FreshnessFleetResponse(
+        rows=rows, total=total, summary=summary,
+        provider_summaries=provider_summaries,
+    )
 
 
 async def _assemble_fleet_summary(
@@ -2562,12 +2576,15 @@ async def _assemble_fleet_summary(
     total: int,
     signals: dict,
     running: dict,
-) -> Optional[FreshnessSummary]:
+    provider_names: dict,
+) -> tuple[Optional[FreshnessSummary], Optional[list[ProviderFreshnessSummary]]]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
-    the whole filtered fleet, not the visible page. ``None`` once that set
-    exceeds ``_SUMMARY_MAX_SOURCES`` (bounded work; zero provider/FalkorDB
-    access, same structural guarantee as the rest of fleet assembly).
+    the whole filtered fleet, not the visible page. ``(None, None)`` once
+    that set exceeds ``_SUMMARY_MAX_SOURCES`` (bounded work; zero
+    provider/FalkorDB access, same structural guarantee as the rest of
+    fleet assembly). The per-provider breakdown (spec §8a) is reduced from
+    the SAME rows in the SAME pass — no extra query.
 
     Reuses the page's already-fetched rows + the single Redis pipeline +
     running-job map already read for it when the page already IS the full
@@ -2582,12 +2599,16 @@ async def _assemble_fleet_summary(
     writes are dead code (nothing ever calls ``job_pending``/``job_started``),
     so that literal check would always read zero.
     """
-    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
     from backend.app.services import graph_cache as _gc
 
     page_is_full_set = (not stale_only) and (len(ds_list) == total)
     if page_is_full_set:
-        full_rows = [(ds.id, ds.workspace_id, ds.aggregation_status) for ds in ds_list]
+        full_rows = [
+            (ds.id, ds.workspace_id, ds.aggregation_status, ds.provider_id,
+             provider_names.get(ds.id))
+            for ds in ds_list
+        ]
         full_signals = signals
         full_running = running
     else:
@@ -2597,13 +2618,20 @@ async def _assemble_fleet_summary(
         # exact unfiltered-by-stale count (non-staleOnly requests), skip
         # even that query once it alone proves the set is over the cutoff.
         if not stale_only and total > _SUMMARY_MAX_SOURCES:
-            return None
+            return None, None
 
         query = (
             select(
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.workspace_id,
                 WorkspaceDataSourceORM.aggregation_status,
+                WorkspaceDataSourceORM.provider_id,
+                ProviderORM.name,
+            )
+            .join(
+                ProviderORM,
+                ProviderORM.id == WorkspaceDataSourceORM.provider_id,
+                isouter=True,
             )
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
@@ -2615,30 +2643,34 @@ async def _assemble_fleet_summary(
 
         full_rows = (await session.execute(query)).all()
         if len(full_rows) > _SUMMARY_MAX_SOURCES:
-            return None
+            return None, None
 
-        full_ids = [ds_id for ds_id, _ws, _status in full_rows]
+        full_ids = [row[0] for row in full_rows]
         page_ids = [ds.id for ds in ds_list]
         if set(full_ids) == set(page_ids):
             full_running = running
         else:
             full_running = await _running_job_map(session, full_ids)
 
-        full_pairs = [(str(ws), str(ds_id)) for ds_id, ws, _status in full_rows]
+        full_pairs = [(str(row[1]), str(row[0])) for row in full_rows]
         page_pairs = [(str(ds.workspace_id), str(ds.id)) for ds in ds_list]
         if set(full_pairs) == set(page_pairs):
             full_signals = signals
         else:
             full_signals = await _gc.read_freshness_signals(full_pairs)
 
-    return _summarize_freshness(full_rows, full_signals, full_running)
+    summary = _summarize_freshness(full_rows, full_signals, full_running)
+    provider_summaries = _summarize_by_provider(full_rows, full_signals, full_running)
+    return summary, provider_summaries
 
 
 def _summarize_freshness(
     full_rows: list, signals: dict, running: dict,
 ) -> FreshnessSummary:
-    """Reduce ``(ds_id, workspace_id, aggregation_status)`` rows + their
-    Redis signals + running-job map into the fleet summary counts.
+    """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
+    their Redis signals + running-job map into the fleet summary counts
+    (only the first 3 columns are read here; trailing provider columns,
+    when present, are for ``_summarize_by_provider``).
     ``needs_attention`` is a per-row OR (marker present or failed), not a
     sum of the two buckets — a row that is both failed and marked stale
     counts once. ``pending`` counts rows with a live job (see
@@ -2647,7 +2679,8 @@ def _summarize_freshness(
     completed run) and ``pending`` (a new rebuild already in flight)."""
     ready = pending = failed = not_built = 0
     recomputing = needs_attention = cache_stamped = 0
-    for ds_id, ws_id, status in full_rows:
+    for row in full_rows:
+        ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
             ready += 1
         elif status == "failed":
@@ -2676,6 +2709,32 @@ def _summarize_freshness(
         needs_attention=needs_attention,
         cache_stamped=cache_stamped,
     )
+
+
+def _summarize_by_provider(
+    full_rows: list, signals: dict, running: dict,
+) -> list[ProviderFreshnessSummary]:
+    """Per-provider breakdown of the SAME rows ``_summarize_freshness``
+    reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
+    and 5) — identical bucket semantics via the same reducer, zero extra
+    queries/Redis reads. Sorted by provider_name; the no-provider group
+    (``None``) sorts last."""
+    groups: dict[tuple, list] = {}
+    for row in full_rows:
+        groups.setdefault((row[3], row[4]), []).append(row)
+
+    result = []
+    for (provider_id, provider_name), rows in groups.items():
+        s = _summarize_freshness(rows, signals, running)
+        result.append(ProviderFreshnessSummary(
+            provider_id=provider_id,
+            provider_name=provider_name,
+            total=s.total, ready=s.ready, pending=s.pending, failed=s.failed,
+            not_built=s.not_built, needs_attention=s.needs_attention,
+            cache_stamped=s.cache_stamped,
+        ))
+    result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
+    return result
 
 
 # ── Custom Exception Classes ────────────────────────────────────────
