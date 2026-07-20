@@ -1245,15 +1245,16 @@ class FalkorProjector:
         try:
             from .reconcile import ProjectionReconciler
             rec = ProjectionReconciler(self._session, lambda name, provider_id=None: client)
-            mn, xn, me, xe, mm = await rec.content_drift(client, graph_id, main_id)
+            mn, xn, me, xe, mm, em = await rec.content_drift(client, graph_id, main_id)
         except Exception:                                # pragma: no cover - infra
             logger.debug("full-seed content verify skipped for %s (diff failed)",
                          graph_id, exc_info=True)
             return None
-        if mn or xn or me or xe or mm:
+        if mn or xn or me or xe or mm or em:
             msg = (f"content drift after full seed: {len(mn)} missing node(s), "
                    f"{len(xn)} extra node(s), {len(me)} missing edge(s), {len(xe)} extra edge(s), "
-                   f"{len(mm)} field mismatch(es) (bounded sample) — cache NOT published")
+                   f"{len(mm)} node field mismatch(es), {len(em)} edge attr mismatch(es) "
+                   f"(bounded sample) — cache NOT published")
             logger.error("%s for %s", msg, graph_id)
             return msg
         return None

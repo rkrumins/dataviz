@@ -388,6 +388,24 @@ class _FieldDriftFalkor(ReconcileFakeFalkor):
         return self.graphs.setdefault(name, _FieldDriftGraph())
 
 
+class _EdgeAttrDriftGraph(ReconcileFakeGraph):
+    """Writes every edge with its confidence + properties DROPPED — exactly the pre-fix flattening
+    corruption. Counts, id-sets AND node fields all still match (same edge ids, same nodes), so ONLY
+    the deep EDGE attribute check can catch it: proof the verify is no longer edge-attribute-blind."""
+
+    async def query(self, cypher: str, params: dict = None):
+        if (cypher.startswith("UNWIND $batch AS item MATCH (a:") and "MERGE (a)-[r:" in cypher
+                and params):
+            params = {**params, "batch": [{**it, "conf": None, "props": "{}"}
+                                          for it in params["batch"]]}
+        return await super().query(cypher, params)
+
+
+class _EdgeAttrDriftFalkor(ReconcileFakeFalkor):
+    def __call__(self, name: str, provider_id=None) -> _EdgeAttrDriftGraph:
+        return self.graphs.setdefault(name, _EdgeAttrDriftGraph())
+
+
 async def _run_holdback_on_content_drift() -> None:
     """A reseed whose COUNTS match but whose field content drifted (here every displayName) must
     still be held back — the count-only verify was blind to exactly this class."""
@@ -407,6 +425,35 @@ async def _run_holdback_on_content_drift() -> None:
 
     r = await proj.project_graph(gid)                    # first projection == full seed
     assert r["verify_error"] and "content drift" in r["verify_error"], r
+    assert r["projected"] == 0, r                        # held back — never published
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is False and "content drift" in (wm["last_error"] or ""), wm
+    await db.dispose_engine()
+
+
+async def _run_holdback_on_edge_attr_drift() -> None:
+    """A reseed that drops each edge's confidence + properties (the exact pre-fix flattening bug)
+    keeps counts, id-sets and node fields identical — only the deep EDGE attribute check sees it.
+    The watermark must be held back so reads stay on Postgres rather than serve attribute-blanked
+    edges. This is the safety net that makes the S1 contract enforceable, not just tested."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = _EdgeAttrDriftFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        {"op": "create", "entity_kind": "edge", "entity_id": "E1",
+         "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "A", "targetEntityId": "B",
+                     "confidence": 0.9, "properties": {"sql": "select 1"}}},
+    ], "seed")
+
+    r = await proj.project_graph(gid)                    # first projection == full seed
+    assert r["verify_error"] and "edge attr mismatch" in r["verify_error"], r
     assert r["projected"] == 0, r                        # held back — never published
     wm = await svc.projection_watermark(gid)
     assert wm["fresh"] is False and "content drift" in (wm["last_error"] or ""), wm
@@ -474,6 +521,11 @@ def test_projection_holdback_on_content_drift_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_holdback_on_edge_attr_drift_e2e():
+    asyncio.run(_run_holdback_on_edge_attr_drift())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
 
@@ -512,6 +564,6 @@ if __name__ == "__main__":
     for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id,
                 _run_failure_honesty, _run_progress_writer,
                 _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
-                _run_rebuild_bumps_ontology_cache):
+                _run_holdback_on_edge_attr_drift, _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

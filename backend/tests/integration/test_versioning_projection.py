@@ -22,6 +22,7 @@ from backend.app.services.versioning.projection import (
 )
 from backend.app.services.versioning.reconcile import (
     _DEEP_FETCH,
+    _DEEP_FETCH_EDGES,
     _SCAN_EDGES,
     _SCAN_NODES,
 )
@@ -73,6 +74,13 @@ class FakeGraph:
                 n = self.nodes.get(u)
                 if n is not None:
                     out.append([n["urn"], n["entityId"], n.get("displayName"), [n.get("_label")]])
+            return _Result(out)
+        if cypher == _DEEP_FETCH_EDGES:
+            out = []
+            for i in params["ids"]:                       # edges are keyed by entity-id (== r.id)
+                e = self.edges.get(i)
+                if e is not None:
+                    out.append([i, e.get("type"), e.get("conf"), e.get("props")])
             return _Result(out)
         # Node upsert: UNWIND $batch AS item MERGE (n:{label} {urn: item.urn}) SET ... REMOVE ...
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):

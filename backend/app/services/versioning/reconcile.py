@@ -24,6 +24,7 @@ is a ``main``-only, non-fork concern — matching the projector's own count sema
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ def _bounded_query(client, cypher: str, params=None):
 
 from .models import (
     BranchORM,
+    EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
     NodeVersionORM,
@@ -113,6 +115,12 @@ _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT N
                "RETURN r.id ORDER BY r.id SKIP $s LIMIT $l")
 _DEEP_FETCH = ("UNWIND $urns AS u MATCH (n {urn: u}) "
                "RETURN n.urn, n.entityId, n.displayName, labels(n)")
+# Deep edge fetch: by the stable r.id (== entity_id), returning the three attributes the id-set
+# diff is blind to (a present edge can still be written with a wrong type, a dropped confidence,
+# or blanked properties). type(r) is the relationship type the projector wrote as the sanitised
+# edgeType; r.properties is the JSON string it serialised the nested properties into.
+_DEEP_FETCH_EDGES = ("UNWIND $ids AS i MATCH ()-[r {id: i}]->() "
+                     "RETURN r.id, type(r), r.confidence, r.properties")
 
 _PG_BATCH = 5000      # keyset page size for the Postgres entity_heads stream
 _DEEP_BATCH = 500     # UNWIND fan-in per deep FalkorDB fetch
@@ -134,7 +142,8 @@ class DriftReport:
     extra_nodes: List[dict]                               # bounded samples {entityId, urn}
     missing_edges: List[str]                              # bounded entity-id samples
     extra_edges: List[str]                                # bounded entity-id samples
-    mismatched: List[dict]                                # deep only: {entityId, field, pg, falkor}
+    mismatched: List[dict]                                # deep only: node {entityId, field, pg, falkor}
+    edge_mismatched: List[dict]                           # deep only: edge {entityId, field, pg, falkor}
     truncated: bool                                       # drift exceeded sample_limit somewhere
     in_sync: bool
     checked_at: str
@@ -220,7 +229,7 @@ class ProjectionReconciler:
                 pg_nodes=pg_nodes, pg_edges=pg_edges,
                 falkor_nodes=0, falkor_edges=0,
                 missing_nodes=[], extra_nodes=[], missing_edges=[], extra_edges=[],
-                mismatched=[], truncated=False, in_sync=False,
+                mismatched=[], edge_mismatched=[], truncated=False, in_sync=False,
                 checked_at=checked_at, duration_ms=int((time.monotonic() - started) * 1000),
                 skipped_reason=None,
             )
@@ -253,28 +262,34 @@ class ProjectionReconciler:
         truncated = trunc_n or trunc_e
 
         mismatched: List[dict] = []
+        edge_mismatched: List[dict] = []
         if deep:
             mismatched, trunc_d = await self._deep_check(client, graph_id, main_id, sample_limit)
-            truncated = truncated or trunc_d
+            edge_mismatched, trunc_ed = await self._deep_check_edges(
+                client, graph_id, main_id, sample_limit)
+            truncated = truncated or trunc_d or trunc_ed
 
         in_sync = (
             not missing_nodes and not extra_nodes and not missing_edges and not extra_edges
-            and not mismatched and pg_nodes == falkor_nodes and pg_edges == falkor_edges
+            and not mismatched and not edge_mismatched
+            and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
         return _report(
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
             missing_edges=missing_edges, extra_edges=extra_edges,
-            mismatched=mismatched, truncated=truncated, in_sync=in_sync,
+            mismatched=mismatched, edge_mismatched=edge_mismatched,
+            truncated=truncated, in_sync=in_sync,
         )
 
     async def content_drift(
         self, client, graph_id: str, main_id: str, *, deep: bool = True, sample_limit: int = 5
-    ) -> Tuple[List[dict], List[dict], List[str], List[str], List[dict]]:
+    ) -> Tuple[List[dict], List[dict], List[str], List[str], List[dict], List[dict]]:
         """Guard-free content diff of committed ``main`` against an ALREADY-RESOLVED cache client:
         the id-set diff (nodes + edges) plus, when ``deep``, the per-node field check
-        (entityId / displayName / entityType-label). Returns
-        ``(missing_nodes, extra_nodes, missing_edges, extra_edges, mismatched)``.
+        (entityId / displayName / entityType-label) AND the per-edge attribute check
+        (edgeType / confidence / properties). Returns ``(missing_nodes, extra_nodes,
+        missing_edges, extra_edges, node_mismatched, edge_mismatched)``.
 
         Unlike :meth:`reconcile`, this takes the client directly and skips the watermark /
         in-flight guards — the projector's inline full-seed verify calls it while it still holds
@@ -284,9 +299,12 @@ class ProjectionReconciler:
         missing_n, extra_n, _ = await self._diff_nodes(client, graph_id, main_id, sample_limit)
         missing_e, extra_e, _ = await self._diff_edges(client, graph_id, main_id, sample_limit)
         mismatched: List[dict] = []
+        edge_mismatched: List[dict] = []
         if deep:
             mismatched, _ = await self._deep_check(client, graph_id, main_id, sample_limit)
-        return missing_n, extra_n, missing_e, extra_e, mismatched
+            edge_mismatched, _ = await self._deep_check_edges(
+                client, graph_id, main_id, sample_limit)
+        return missing_n, extra_n, missing_e, extra_e, mismatched, edge_mismatched
 
     # ------------------------------------------------------------------ #
     # Streams                                                            #
@@ -351,6 +369,38 @@ class ProjectionReconciler:
             if len(rows) < _PG_BATCH:
                 return
             cursor = rows[-1]
+
+    async def _stream_pg_edges(self, graph_id: str, branch_id: str):
+        """Ascending (``COLLATE "C"``) stream of live ``main`` edges as
+        ``{entityId, edgeType, confidence, properties}``, read from the head ``edge_versions``
+        payload the ``entity_heads`` pointer names — the SAME source the projector serialised into
+        the cache, so the deep check compares the cache against exactly what SHOULD have been
+        written. Confidence/edgeType/properties are taken from the payload (not the denormalised
+        columns) because ``_edge_item`` writes ``r.confidence = payload['confidence']`` and
+        ``r.properties = json.dumps(payload['properties'] or {})``."""
+        cursor = ""
+        while True:
+            async with self._session() as s:
+                rows = (await s.execute(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.payload).join(
+                        EdgeVersionORM,
+                        (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                        & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+                    ).where(
+                        EntityHeadORM.graph_id == graph_id,
+                        EntityHeadORM.branch_id == branch_id,
+                        EntityHeadORM.entity_kind == "edge",
+                        EntityHeadORM.is_tombstone.is_(False),
+                        EntityHeadORM.entity_id.collate("C") > cursor,
+                    ).order_by(EntityHeadORM.entity_id.collate("C")).limit(_PG_BATCH)
+                )).all()
+            for eid, payload in rows:
+                p = payload or {}
+                yield {"entityId": eid, "edgeType": p.get("edgeType"),
+                       "confidence": p.get("confidence"), "properties": p.get("properties") or {}}
+            if len(rows) < _PG_BATCH:
+                return
+            cursor = rows[-1][0]
 
     async def _scan_falkor(self, client, cypher: str):
         """Ascending stream of a FalkorDB scan's rows via SKIP/LIMIT paging (O(batch) memory)."""
@@ -443,6 +493,46 @@ class ProjectionReconciler:
         await flush()
         return mismatched, truncated
 
+    async def _deep_check_edges(self, client, graph_id, branch_id, sample_limit):
+        """Full edge-attribute scan: ride the edge stream, batch-fetch each batch from the cache by
+        ``r.id``, and compare ``edgeType`` (relationship-type label) / ``confidence`` / ``properties``.
+        This is the coverage the id-set diff CANNOT give — a present edge (matching ``r.id``) written
+        with a wrong type, a dropped confidence, or blanked properties leaves the id-set identical.
+        An edge absent from the cache is a *missing* (the id-diff owns it), not a mismatch, so it is
+        skipped here."""
+        mismatched: List[dict] = []
+        truncated = False
+        batch: List[dict] = []
+
+        async def flush() -> bool:
+            nonlocal truncated
+            if not batch:
+                return truncated
+            res = await _bounded_query(
+                client, _DEEP_FETCH_EDGES, params={"ids": [e["entityId"] for e in batch]})
+            fk_by_id: Dict[str, tuple] = {}
+            for eid, etype, conf, props in (getattr(res, "result_set", None) or []):
+                fk_by_id[eid] = (etype, conf, props)
+            for e in batch:
+                got = fk_by_id.get(e["entityId"])
+                if got is None:
+                    continue
+                for fname, pg_val, fk_val in _edge_field_mismatches(e, *got):
+                    if len(mismatched) < sample_limit:
+                        mismatched.append({"entityId": e["entityId"], "field": fname,
+                                           "pg": pg_val, "falkor": fk_val})
+                    else:
+                        truncated = True
+            batch.clear()
+            return truncated
+
+        async for edge in self._stream_pg_edges(graph_id, branch_id):
+            batch.append(edge)
+            if len(batch) >= _DEEP_BATCH:
+                await flush()
+        await flush()
+        return mismatched, truncated
+
 
 def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
     """The ``(field, pg_value, falkor_value)`` triples where a cached node disagrees with its
@@ -457,3 +547,44 @@ def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
     if pg_label not in f_labels:
         out.append(("entityType", pg_label, f_labels))
     return out
+
+
+def _edge_field_mismatches(pg_edge: dict, f_type, f_conf, f_props) -> List[tuple]:
+    """The ``(field, pg_value, falkor_value)`` triples where a cached edge disagrees with its
+    committed-``main`` payload — comparing the SAME derivations the projector wrote: the sanitised
+    ``edgeType`` label (``_sanitize_label(edgeType or "REL")``), the top-level ``confidence`` scalar,
+    and the JSON-serialised nested ``properties``."""
+    out: List[tuple] = []
+    pg_type = _sanitize_label(pg_edge["edgeType"] or "REL")
+    if pg_type != f_type:
+        out.append(("edgeType", pg_type, f_type))
+    if not _conf_equal(pg_edge["confidence"], f_conf):
+        out.append(("confidence", pg_edge["confidence"], f_conf))
+    if (pg_edge["properties"] or {}) != _parse_props(f_props):
+        out.append(("properties", pg_edge["properties"], f_props))
+    return out
+
+
+def _conf_equal(a, b) -> bool:
+    """Confidence equality tolerant of float representation. ``None`` (edge carries no confidence)
+    equals only ``None``; two numbers compare within a tiny epsilon (the cache round-trips a double,
+    so a drift is a real value change, not a rounding artefact)."""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) <= 1e-9
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _parse_props(f_props) -> dict:
+    """The cache stores edge ``properties`` as a JSON string (``json.dumps(... or {})``); parse it
+    back to a dict for comparison, tolerating a legacy native value or an unparseable residual."""
+    if isinstance(f_props, str):
+        try:
+            return json.loads(f_props or "{}")
+        except (ValueError, TypeError):
+            return {}
+    return f_props or {}

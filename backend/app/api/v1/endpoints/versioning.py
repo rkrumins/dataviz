@@ -810,6 +810,7 @@ class DriftReportModel(_ApiModel):
     missing_edges: List[str] = Field(default_factory=list, alias="missingEdges")
     extra_edges: List[str] = Field(default_factory=list, alias="extraEdges")
     mismatched: List[DriftMismatch] = Field(default_factory=list)
+    edge_mismatched: List[DriftMismatch] = Field(default_factory=list, alias="edgeMismatched")
     truncated: bool = False
     in_sync: bool = Field(alias="inSync")
     checked_at: str = Field(alias="checkedAt")
