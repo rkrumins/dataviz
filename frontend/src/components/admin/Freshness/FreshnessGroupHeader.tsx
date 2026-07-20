@@ -1,20 +1,24 @@
 /**
  * FreshnessGroupHeader — one provider group's header row. Collapsed, it is a
- * self-contained rollup ("«provider» · N sources · n ready · n not built ·
- * n attention") with a compact cache-coverage chip; expanded, it names the
- * provider and its size and adds a small typographic stat strip (ready ·
- * rebuilding · needs-attention · cached%). Either way it carries the collapse
- * affordance (``aria-expanded``) and the admin-gated Refresh-provider action.
+ * self-contained rollup ("«provider» · N sources · n ready · n rebuilding ·
+ * n not built · n attention") with a compact cache-coverage chip; expanded, it
+ * names the provider and its size and adds a small typographic stat strip
+ * (ready · rebuilding · attention · cached%). Either way it carries the
+ * collapse affordance (``aria-expanded``) and the admin-gated Refresh-provider
+ * action.
  *
- * Coverage/strip figures come from the server ``ProviderFreshnessSummary``
- * (provider-wide, so a filtered page never understates coverage); when the
- * fleet is too large to summarise (``providerSummaries`` null) they degrade to
- * a client count over this group's fetched rows.
+ * All state + coverage figures come from one resolver — the server
+ * ``ProviderFreshnessSummary`` (provider-wide, so a filtered page never
+ * understates them), falling back to a client count over this group's fetched
+ * rows when the fleet is too large to summarise (``summary`` null). Because
+ * collapsed and expanded read from the same resolver, toggling a group never
+ * changes a number. "Attention" is the server-aligned marker-OR-failed set;
+ * a rebuilding source is healthy in-progress, counted on its own.
  */
 import { ChevronDown, ChevronRight, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
-import { isGroupAttention, isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
+import { isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
 
 interface Props {
     providerId: string
@@ -34,27 +38,27 @@ export function FreshnessGroupHeader({
     providerId, name, rows, summary, expanded, onToggle, isSystemAdmin, onRefreshProvider, colSpan,
 }: Props) {
     const total = rows.length
-    const ready = rows.filter(r => r.aggregationStatus === 'ready').length
-    const notBuilt = rows.filter(isNeverBuilt).length
-    const attention = rows.filter(isGroupAttention).length
     const Chevron = expanded ? ChevronDown : ChevronRight
 
-    // Coverage + strip counts: provider-wide summary when present, else a
-    // client count over this group's rows so it degrades gracefully. Each
-    // fallback mirrors the summary field it stands in for.
+    // One resolver for every count the header shows, so collapsed and expanded
+    // agree. Provider-wide summary when present, else a client count over this
+    // group's rows; each fallback mirrors the summary field it stands in for.
+    // "attention" = marker-OR-failed (never rebuilding, which stands alone).
     const cov = summary
         ? {
             total: summary.total,
             cached: summary.cacheStamped,
             ready: summary.ready,
             rebuilding: summary.pending,
+            notBuilt: summary.notBuilt,
             attention: summary.needsAttention,
         }
         : {
             total,
             cached: rows.filter(r => r.cacheAsOf != null).length,
-            ready,
+            ready: rows.filter(r => r.aggregationStatus === 'ready').length,
             rebuilding: rows.filter(isRebuilding).length,
+            notBuilt: rows.filter(isNeverBuilt).length,
             attention: rows.filter(needsAttention).length,
         }
     const coverage = cov.total > 0 ? Math.round((cov.cached / cov.total) * 100) : 0
@@ -62,7 +66,7 @@ export function FreshnessGroupHeader({
     return (
         <tr className={cn(
             'border-t border-glass-border',
-            attention > 0
+            cov.attention > 0
                 ? 'bg-amber-500/[0.04]'
                 : 'bg-black/[0.02] dark:bg-white/[0.02]',
         )}>
@@ -80,8 +84,9 @@ export function FreshnessGroupHeader({
                             · {total} {total === 1 ? 'source' : 'sources'}
                             {!expanded ? (
                                 <>
-                                    {ready > 0 && <> · {ready} ready</>}
-                                    {notBuilt > 0 && <> · {notBuilt} not built</>}
+                                    {cov.ready > 0 && <> · {cov.ready} ready</>}
+                                    {cov.rebuilding > 0 && <> · {cov.rebuilding} rebuilding</>}
+                                    {cov.notBuilt > 0 && <> · {cov.notBuilt} not built</>}
                                 </>
                             ) : (
                                 <>
@@ -91,21 +96,18 @@ export function FreshnessGroupHeader({
                                 </>
                             )}
                         </span>
-                        {expanded && cov.attention > 0 && (
+                        {cov.attention > 0 && (
                             <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
                                 · {cov.attention} attention
-                            </span>
-                        )}
-                        {!expanded && attention > 0 && (
-                            <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
-                                · {attention} attention
                             </span>
                         )}
                     </button>
 
                     {/* Cache-coverage chip: the collapsed group's at-a-glance
-                        coverage meter. Expanded, the strip above carries the %,
-                        so the chip stands down to keep the row quiet. */}
+                        coverage. Shows the raw counts too, not only the aria
+                        label, so a sighted admin sees the cached-source count.
+                        Expanded, the strip above carries the %, so the chip
+                        stands down to keep the row quiet. */}
                     {!expanded && (
                         <span
                             className="ml-auto inline-flex items-center gap-1.5 shrink-0"
@@ -115,7 +117,8 @@ export function FreshnessGroupHeader({
                                 <span className="block h-full rounded-full bg-violet-500" style={{ width: `${coverage}%` }} />
                             </span>
                             <span className="text-[11px] tabular-nums text-ink-muted">
-                                <span className="font-semibold text-violet-600 dark:text-violet-400">{coverage}%</span> cached
+                                {cov.cached}/{cov.total} cached (
+                                <span className="font-semibold text-violet-600 dark:text-violet-400">{coverage}%</span>)
                             </span>
                         </span>
                     )}

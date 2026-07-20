@@ -336,6 +336,8 @@ describe('Freshness cockpit', () => {
         const { unmount } = renderTab()
 
         const chip = await screen.findByLabelText(/cache coverage/i)
+        // Raw counts are visible, not just in the aria-label.
+        expect(chip).toHaveTextContent('8/10 cached')
         expect(chip).toHaveTextContent('80%')
         expect(chip).toHaveAttribute('aria-label', expect.stringContaining('8 of 10'))
         unmount()
@@ -351,7 +353,29 @@ describe('Freshness cockpit', () => {
         })
         renderTab()
         const chip2 = await screen.findByLabelText(/cache coverage/i)
+        expect(chip2).toHaveTextContent('1/2 cached')
         expect(chip2).toHaveTextContent('50%')
+    })
+
+    it('counts a rebuilding source on its own, not as "attention" (consistent across toggle)', async () => {
+        // One rebuilding row (healthy in-progress) + one stale row (attention).
+        // isGroupAttention would lump both as attention; the header must use
+        // needs-attention (marker-OR-failed) → attention 1, rebuilding 1.
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                healthyRow({ dataSourceId: 'r1', name: 'Rebuilder', runningJobId: 'job-1' }),
+                healthyRow({ dataSourceId: 'r2', name: 'Staler', staleReason: 'source_changed' }),
+            ],
+        })
+        renderTab()
+
+        // The group has a marker/rebuild → auto-expands; the strip lives in the
+        // toggle button's accessible name.
+        const header = await screen.findByRole('button', { name: /warehouse/i, expanded: true })
+        expect(header).toHaveTextContent('1 rebuilding')
+        expect(header).toHaveTextContent('1 attention')
+        expect(header).not.toHaveTextContent('2 attention')
     })
 
     // ── G3.R2 — drawer "Cache contents" section ──────────────────────
