@@ -110,7 +110,7 @@ export function GuideContent() {
             </ReactMarkdown>
           </article>
 
-          <PageFeedback path={guideMeta[entry.slug]?.path} pageKey={`guide:${entry.slug}`} />
+          <PageFeedback pageKey={`guide:${entry.slug}`} />
 
           <Pager
             basePath="/guide"

@@ -1,7 +1,5 @@
 import { useState } from 'react'
-import { Pencil, ThumbsUp, ThumbsDown, Check } from 'lucide-react'
-import { cn } from '@/lib/utils'
-import { GITHUB_REPO } from './docMeta.generated'
+import { ThumbsUp, ThumbsDown, Check } from 'lucide-react'
 import { recordEvent } from '@/services/telemetryService'
 
 type Vote = 'yes' | 'no'
@@ -37,10 +35,9 @@ function priorVote(pageKey: string): Vote | null {
 }
 
 /**
- * Foot-of-page block: "Edit on GitHub" + a "Was this helpful?" widget. `path`
- * is the repo-relative source file; `pageKey` scopes the remembered vote.
+ * Foot-of-page "Was this helpful?" widget. `pageKey` scopes the remembered vote.
  */
-export function PageFeedback({ path, pageKey }: { path?: string; pageKey: string }) {
+export function PageFeedback({ pageKey }: { pageKey: string }) {
   const [vote, setVote] = useState<Vote | null>(() => priorVote(pageKey))
   const [note, setNote] = useState('')
   const [sent, setSent] = useState(false)
@@ -103,21 +100,6 @@ export function PageFeedback({ path, pageKey }: { path?: string; pageKey: string
           </div>
         )}
       </div>
-
-      {/* Edit on GitHub */}
-      {path && (
-        <a
-          href={`https://github.com/${GITHUB_REPO}/edit/main/${path}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={cn(
-            'inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-ink-muted',
-            'hover:text-ink transition-colors',
-          )}
-        >
-          <Pencil className="w-3.5 h-3.5" /> Edit this page on GitHub
-        </a>
-      )}
     </div>
   )
 }
