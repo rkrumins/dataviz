@@ -951,11 +951,17 @@ export function LineageLens({
                                 </div>
                               )
                             }
+                            const tgUnloaded = g.key === 'not loaded'
                             return (
                               <div key={`tg-${g.key}`} className="mb-0.5">
-                                <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5">
-                                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: g.key === 'not loaded' ? '#94a3b8' : generateColorFromType(g.key) }} />
-                                  <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">{g.key}</span>
+                                <div
+                                  className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5"
+                                  title={tgUnloaded ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.' : undefined}
+                                >
+                                  {tgUnloaded
+                                    ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
+                                    : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: generateColorFromType(g.key) }} />}
+                                  <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">{tgUnloaded ? 'Unresolved' : g.key}</span>
                                   <span className="text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
                                 </div>
                                 {g.rows.map(it => renderWalkRow(it, true))}
@@ -1051,7 +1057,11 @@ export function LineageLens({
               })}
             </div>
           ) : (
-          <div className="flex-1 grid grid-cols-[1fr_auto_1fr] min-h-0">
+          // minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so a
+          // long unbroken field name blows the track past the dialog edge
+          // (no scroll → unusable). minmax(0,…) lets the track shrink and
+          // the rows' `truncate` take over.
+          <div className="flex-1 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-h-0">
             <NeighborColumn
               title="Data Sources"
               subtitle="Upstream"
@@ -1093,7 +1103,10 @@ export function LineageLens({
                   <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] mb-1" style={{ color: focalColor }}>
                     {focalType}
                   </p>
-                  <p className="text-[15px] font-semibold text-ink break-words leading-snug">{focalLabel}</p>
+                  {/* overflow-wrap:anywhere — `break-words` won't break an
+                      unbroken run like a long snake_case field name, so it
+                      would overflow the fixed-width card. */}
+                  <p className="text-[15px] font-semibold text-ink [overflow-wrap:anywhere] leading-snug">{focalLabel}</p>
                   {/* Parent breadcrumb — where this entity LIVES; click
                       steps the lens up into the parent. */}
                   {focalParentId && (
@@ -1293,8 +1306,11 @@ function labelOf(id: string, node: LineageNode | undefined): string {
   const data = node?.data as Record<string, unknown> | undefined
   return (data?.label as string)
     ?? (data?.businessLabel as string)
-    // URN-derived fallback for neighbors not loaded on the canvas.
-    ?? id.split(/[:/.]/).filter(Boolean).pop()
+    // URN-derived fallback for an as-yet-unresolved neighbor. Split on
+    // structural punctuation too (`,` `(` `)`) so nested URNs like
+    // `urn:…:(…,field_name)` yield `field_name`, never a stray `)` or a
+    // comma-joined blob.
+    ?? id.split(/[:/.,()]/).filter(Boolean).pop()
     ?? id
 }
 
@@ -1389,7 +1405,7 @@ function NeighborRow({
     ?? aggCount
   const unloaded = !r.neighborNode
   return (
-    <div>
+    <div className="min-w-0">
     <div
       className={cn(
         // content-visibility skips layout+paint for offscreen rows —
@@ -1668,7 +1684,9 @@ function NeighborColumn({
 
   return (
     <div className={cn(
-      'flex flex-col min-h-0',
+      // min-w-0: allow the grid track to shrink so long labels truncate
+      // instead of forcing the column (and dialog) wider than the viewport.
+      'flex flex-col min-h-0 min-w-0',
       isIn
         ? 'border-r border-black/[0.07] dark:border-white/[0.07]'
         : 'border-l border-black/[0.07] dark:border-white/[0.07]',
@@ -1785,9 +1803,18 @@ function NeighborColumn({
           const typeColor = unloaded ? '#94a3b8' : generateColorFromType(g.key)
           return (
             <div key={`t-${g.key}`} className="mb-2.5">
-              <div className="flex items-center gap-1.5 px-1.5 py-1">
-                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: typeColor }} />
-                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">{g.key}</span>
+              <div
+                className="flex items-center gap-1.5 px-1.5 py-1"
+                title={unloaded
+                  ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.'
+                  : undefined}
+              >
+                {unloaded
+                  ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
+                  : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: typeColor }} />}
+                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">
+                  {unloaded ? 'Unresolved' : g.key}
+                </span>
                 <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
               </div>
               <div className="flex flex-col gap-1">
