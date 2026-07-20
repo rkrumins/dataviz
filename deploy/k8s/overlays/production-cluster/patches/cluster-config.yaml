@@ -15,6 +15,10 @@ metadata:
   name: common-config
   namespace: synodic
 data:
+  # This overlay's shard statefulsets run FALKORDB_ARGS with
+  # TIMEOUT_MAX 120000 (not the base 180000) — keep the backend clamp
+  # aligned or FalkorDB rejects every query requesting more.
+  FALKORDB_SERVER_TIMEOUT_MAX_MS: "120000"
   FALKORDB_MODE: "cluster"
   FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
   FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"

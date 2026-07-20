@@ -63,7 +63,10 @@ async def test_login_endpoint_is_csrf_exempt(test_client: AsyncClient):
     assert resp.status_code != 403
 
 
-async def test_signup_endpoint_is_csrf_exempt(test_client: AsyncClient):
+async def test_signup_endpoint_is_csrf_exempt(test_client: AsyncClient, signup_enabled):
+    # Enable self-registration so the only 403 that could occur here is a CSRF
+    # rejection — otherwise the signupEnabled security gate (which fails closed)
+    # returns its own 403 and masks what this test is actually checking.
     test_client.headers.pop(CSRF_HEADER_NAME, None)
     test_client.cookies.delete(CSRF_COOKIE_NAME)
     resp = await test_client.post(

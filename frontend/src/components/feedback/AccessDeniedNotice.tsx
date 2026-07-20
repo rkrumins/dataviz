@@ -35,6 +35,7 @@ import {
     humanizeErrorMessage,
     type ParsedPermissionError,
 } from '@/lib/permissionError'
+import { DocsLink } from '@/components/help/DocsLink'
 
 
 export type AccessDeniedVariant = 'card' | 'inline' | 'compact'
@@ -231,7 +232,15 @@ function PermissionDeniedView({
                         </>
                     )}
                 </div>
-                {action && <div className="mt-4">{action}</div>}
+                <div className="mt-4">
+                    {action ?? (
+                        <DocsLink
+                            slug="users-access"
+                            variant="inline"
+                            label="Learn about roles & access"
+                        />
+                    )}
+                </div>
                 <button
                     onClick={() => setShowDetails((v) => !v)}
                     className="mt-4 inline-flex items-center gap-1 text-[11px] text-ink-muted hover:text-ink-secondary transition-colors"

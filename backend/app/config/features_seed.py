@@ -315,6 +315,31 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 1,
         "deprecated": False,
     },
+    # ── Display & UI ──────────────────────────────────────────────────────────
+    {
+        "key": "nodeSortingEnabled",
+        "name": "Node sorting controls",
+        "description": (
+            "Let people choose how nodes are ordered inside a Context View layer — alphabetical, "
+            "by type, by size, or a hand-arranged custom order (drag to reorder in a draft)."
+        ),
+        "impact_when_off": (
+            "The per-layer sort menu and drag-to-reorder disappear from the canvas. Orders already "
+            "saved on a view still RENDER exactly as curated — this only removes the controls for "
+            "changing them, so nothing anyone published is disturbed."
+        ),
+        "category_id": "display",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A kill switch for staged rollouts or locked-down estates where view curation is owned "
+            "by a central team. Off = consumers see curated views verbatim and cannot re-sort."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
     # ── Semantic layers ────────────────────────────────────────────────────────
     {
         "key": "semanticLayerEditMode",
@@ -488,6 +513,31 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "help_url": None,
         "admin_hint": (
             "The fastest way to silence every banner at once without going through them one by one."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+    # ── Experimental ───────────────────────────────────────────────────────────
+    {
+        "key": "toursEnabled",
+        "name": "Guided product tours",
+        "description": (
+            "Offer new users an interactive, in-product walkthrough of the workspace — a spotlight "
+            "tour of search, navigation, personas, and help — and let anyone replay it from Help."
+        ),
+        "impact_when_off": (
+            "No tour is ever shown or offered, and the 'Take the tour' action is hidden. Nothing "
+            "else changes — the Help panel and every guide stay available. This is a preview; it "
+            "ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn on to greet first-time users with a short guided tour. It's client-side only and "
+            "safe to toggle at any time; users can always skip or replay it."
         ),
         "sort_order": 0,
         "deprecated": False,

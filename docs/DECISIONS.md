@@ -1,6 +1,12 @@
 # Architectural Decision Records (ADRs)
 
-This document captures the key architectural decisions made in Synodic, their reasoning, trade-offs, and status.
+This document captures the key architectural decisions made in {brand} — the context, the decision, its trade-offs, and current status.
+
+**Who it's for:** developers and architects who want to understand *why* the system is shaped the way it is before changing it.
+
+**How to read an ADR:** each record states the **Context** (the problem), the **Decision**, the **Reasoning**, the **Trade-offs** (`+` benefit / `-` cost), and any **Alternatives considered**. Jump to the [Decision Summary](#decision-summary) table for the full index at a glance.
+
+> **Note:** ADRs are historical records, not living docs. A **Superseded** ADR (e.g. [ADR-002](#adr-002-dual-fastapi-services)) is kept for context even though its decision was later reversed — always check the **Status** line before treating an ADR as current.
 
 ---
 
@@ -23,7 +29,6 @@ graph LR
     Ontology --> DS
     Workspace --> DS
 
-    style DS fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Entity | Responsibility | Reuse Pattern |
@@ -55,7 +60,7 @@ graph LR
 
 ## ADR-002: Dual FastAPI Services
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-018](#adr-018-retire-the-graph-service) — the standalone `graph-service` was retired and pre-registration connectivity testing now runs in-process in the Visualization Service. Retained here for historical context.
 **Date:** 2025 Q4
 **Context:** Users need to test database connectivity before registering a provider. This testing should not require database access or authentication.
 
@@ -107,12 +112,11 @@ graph TB
     IsC -->|"Hierarchy queries"| CE
     IsL -->|"Lineage queries"| CE
 
-    style Ontology fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Reasoning:**
 - External systems (DataHub, Neo4j) use different edge type names
-- Ontology source mappings translate external types to Synodic types
+- Ontology source mappings translate external types to {brand} types
 - Classification is per-ontology, not global -- different workspaces can classify edges differently
 - Granularity aggregation uses hierarchy levels from ontology, not hardcoded entity types
 
@@ -269,8 +273,6 @@ graph LR
     Ontology -->|"icon, color, shape"| Schema
     Schema -->|"lookup by entityType"| Node
 
-    style Ontology fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Node fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **Reasoning:**
@@ -373,7 +375,6 @@ graph LR
     Provider --> Catalog
     Catalog --> DS
 
-    style Catalog fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Field | Purpose |
@@ -680,3 +681,14 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 | 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |
 | 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |
 | 022 | Central role-keyed Redis config (cache/streams independent) | Accepted | Low |
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — where these decisions are realized in the system design
+- [Data Architecture](/docs/data-architecture) — Redis topology and schema details behind ADR-017 through ADR-022
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — the pipeline shaped by the provider-protection decisions
+- [Services Overview](/docs/services-overview) — the process-role topology referenced by ADR-017/019
+- [Technical Debt](/docs/technical-debt) — open risks, some of which these ADRs resolved
+- [Overview](/docs/overview) — platform vision and key terms

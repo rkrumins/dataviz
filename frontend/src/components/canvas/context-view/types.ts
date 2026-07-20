@@ -15,12 +15,58 @@ export interface FlatTreeNode {
   isFailed?: boolean
 }
 
-export type OverflowBadge = {
-  /** Horizontal center of the badge in the gutter (relative to container) */
-  gutterX: number
-  direction: 'up' | 'down'
+/** Imperative geometry API each LayerColumn registers with the canvas.
+ *  Lets the edge overlay estimate row positions WITHOUT mounting rows —
+ *  offsets come from the column virtualizer's measurements cache, so
+ *  they are exact for measured rows and estimate-derived for unmounted
+ *  ones. */
+export interface ColumnGeometryApi {
+  /** O(1): does this column's flatTree contain a row for nodeId? */
+  hasNode(nodeId: string): boolean
+  /** Estimated viewport-space rect for the node's row. null when the
+   *  column is collapsed or the node has no row here. Compensates for
+   *  canvas zoom (CSS scale on the columns wrapper). */
+  getNodeRect(nodeId: string): { top: number; height: number; left: number; right: number } | null
+}
+
+/** Docked stand-in chip for an off-screen partner of the FOCUSED
+ *  (selected) node. Rendered as real DOM in the owning column's Anchor
+ *  Rail; the edge overlay anchors focus edges to the chip's actual
+ *  rect — never to an estimated position. */
+export type AnchorProxy = {
+  nodeId: string
+  /** Bundled edge count between the focused node and this partner. */
   count: number
   color: string
+  /** Where the real row sits relative to the canvas viewport. */
+  direction: 'up' | 'down'
+}
+
+export type AnchorProxyGroup = {
+  proxies: AnchorProxy[]
+  /** Partners beyond the rail cap — surfaced as "+N · Open lens". */
+  moreCount: number
+}
+
+export type OverflowDirection = 'up' | 'down' | 'left' | 'right'
+
+export type OverflowBadge = {
+  /** Horizontal center of the badge, SCROLLPORT-relative (the badge
+   *  layer is sticky-pinned to the scroll container's viewport —
+   *  content-space coordinates would extend the scrollable area). */
+  gutterX: number
+  /** Vertical center of the badge, scrollport-relative. */
+  y: number
+  direction: OverflowDirection
+  count: number
+  color: string
+  /** Off-screen partner node ids for tooltip / click-to-jump, capped at
+   *  MAX_BADGE_PARTNERS; `count` keeps the true total. */
+  partnerIds: string[]
+  /** Distinct off-screen partner ENTITIES (uncapped). `count` counts
+   *  connections; the tooltip's "+N more" must subtract entities from
+   *  entities, never from `count`. */
+  partnerTotal: number
 }
 
 /** A partial edge drawn from a visible node toward the container boundary,
@@ -30,7 +76,7 @@ export type OverflowEdge = {
   /** SVG path for the trailing curve */
   pathD: string
   color: string
-  direction: 'up' | 'down'
+  direction: OverflowDirection
   /** Unique gradient ID for the fade mask */
   gradientId: string
   /** Start Y (visible node) and end Y (container edge) for gradient coords */

@@ -11,7 +11,7 @@
  * matched pair (same portal pattern, framer-motion entrance, trigger shape).
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
@@ -245,6 +245,8 @@ interface DisplaySettingsSectionsProps {
   onToggleTypeBadge: () => void
   subtleTreeLines: boolean
   onToggleSubtleTreeLines: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
 }
 
 /**
@@ -261,20 +263,18 @@ export function DisplaySettingsSections({
   onToggleTypeBadge,
   subtleTreeLines,
   onToggleSubtleTreeLines,
+  onFitToWidth,
 }: DisplaySettingsSectionsProps) {
   const zoomPct = formatZoom(canvasZoom)
   const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
   const canZoomIn = canvasZoom < CANVAS_ZOOM_MAX - 0.001
+  const densityLabel = DENSITY_OPTIONS.find(o => o.mode === canvasDensity)?.label ?? 'Spacious'
+  const togglesOn = [showTypeBadge, subtleTreeLines].filter(Boolean).length
 
   return (
     <>
       {/* Zoom */}
-      <div className="px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <ZoomIn className="w-3 h-3" />
-          <span>Zoom</span>
-          <span className="ml-auto tabular-nums text-accent-lineage/80">{zoomPct}</span>
-        </div>
+      <CollapsibleSection id="zoom" icon={ZoomIn} title="Zoom" summary={zoomPct}>
         <div className="flex items-center gap-2 px-1 pt-2 pb-1">
           <button
             type="button"
@@ -321,17 +321,23 @@ export function DisplaySettingsSections({
           >
             100%
           </button>
+          {onFitToWidth && (
+            <button
+              type="button"
+              onClick={onFitToWidth}
+              title="Fit all layers into the viewport width (⌘/Ctrl+0)"
+              className="flex-shrink-0 px-2 h-7 rounded-lg text-[10.5px] font-semibold text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+            >
+              Fit
+            </button>
+          )}
         </div>
-      </div>
+      </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Density */}
-      <div className="px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <Rows3 className="w-3 h-3" />
-          <span>Density</span>
-        </div>
+      <CollapsibleSection id="density" icon={Rows3} title="Density" summary={densityLabel}>
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           Row height, padding, and icon size in every layer column.
         </p>
@@ -360,12 +366,18 @@ export function DisplaySettingsSections({
             )
           })}
         </div>
-      </div>
+      </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Toggles */}
-      <div className="px-3 pt-2.5 pb-3 space-y-1.5">
+      <CollapsibleSection
+        id="chrome"
+        icon={Eye}
+        title="Display options"
+        summary={`${togglesOn} on`}
+      >
+        <div className="pt-1.5 space-y-1.5">
         <ToggleRow
           label="Show entity type badge"
           description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
@@ -382,8 +394,74 @@ export function DisplaySettingsSections({
           onClick={onToggleSubtleTreeLines}
           accent="purple"
         />
-      </div>
+        </div>
+      </CollapsibleSection>
     </>
+  )
+}
+
+/**
+ * CollapsibleSection — accordion section whose COLLAPSED header still
+ * communicates its state (active value shown inline), so collapsing
+ * optimizes space without hiding what's configured. Open/closed state
+ * persists across sessions.
+ */
+const SECTIONS_STORAGE_KEY = 'nx-display-sections'
+
+function useSectionOpen(id: string): [boolean, () => void] {
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SECTIONS_STORAGE_KEY) ?? '{}')[id] !== false
+    } catch {
+      return true
+    }
+  })
+  const toggle = useCallback(() => {
+    setOpen(prev => {
+      const next = !prev
+      try {
+        const all = JSON.parse(localStorage.getItem(SECTIONS_STORAGE_KEY) ?? '{}')
+        all[id] = next
+        localStorage.setItem(SECTIONS_STORAGE_KEY, JSON.stringify(all))
+      } catch { /* storage unavailable — session-only state */ }
+      return next
+    })
+  }, [id])
+  return [open, toggle]
+}
+
+export function CollapsibleSection({
+  id,
+  icon: Icon,
+  title,
+  summary,
+  children,
+}: {
+  id: string
+  icon: typeof Eye
+  title: string
+  /** Active value shown in the header — visible even when collapsed. */
+  summary?: string
+  children: React.ReactNode
+}) {
+  const [open, toggle] = useSectionOpen(id)
+  return (
+    <div className="px-3 pt-2.5 pb-2">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="w-full flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80 hover:text-ink transition-colors"
+      >
+        <Icon className="w-3 h-3" />
+        <span>{title}</span>
+        <span className="ml-auto flex items-center gap-1.5">
+          {summary && <span className="tabular-nums text-accent-lineage/80">{summary}</span>}
+          <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', !open && '-rotate-90')} />
+        </span>
+      </button>
+      {open && children}
+    </div>
   )
 }
 

@@ -22,9 +22,12 @@ import {
   MoveRight,
   Settings2,
   Sliders,
+  Unlink,
+  Waves,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { LineageRenderMode } from '@/store/preferences'
+import { CollapsibleSection } from './DisplaySettingsPopover'
+import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
 
 interface LineageDisplayPopoverProps {
   lineageRenderMode: LineageRenderMode
@@ -51,7 +54,7 @@ const DENSITY_OPTIONS: DensityOption[] = [
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
-    description: 'Real edges on small graphs, stubs above the size threshold',
+    description: 'Strongest flows stay visible on dense graphs; markers summarize the rest — hover or select to focus',
   },
   {
     mode: 'raw',
@@ -177,7 +180,7 @@ export function LineageDisplayPopover({
                 width: POPOVER_WIDTH,
                 zIndex: 1000,
               }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-glass-border shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
               {/* Title bar — mirrors TraceDepthControl's header so the two
                   popovers read as a matched pair. */}
@@ -228,11 +231,12 @@ export function LineageDisplaySections({
   return (
     <div className={cn(disabled && 'opacity-50')}>
       {/* Edge Density */}
-      <div className="px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <Layers className="w-3 h-3" />
-          <span>Edge Density</span>
-        </div>
+      <CollapsibleSection
+        id="edge-density"
+        icon={Layers}
+        title="Edge Density"
+        summary={DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)?.label ?? 'Adaptive'}
+      >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           How many edges materialise on the canvas at once.
         </p>
@@ -289,16 +293,19 @@ export function LineageDisplaySections({
             )
           })}
         </div>
-      </div>
+        {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
+        {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
+      </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Direction */}
-      <div className="px-3 pt-2.5 pb-3">
-        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-          <MoveRight className="w-3 h-3" />
-          <span>Direction</span>
-        </div>
+      <CollapsibleSection
+        id="edge-direction"
+        icon={MoveRight}
+        title="Direction"
+        summary={showEdgeDirection ? 'On' : 'Off'}
+      >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           Show arrow markers on edges to indicate flow direction.
         </p>
@@ -346,7 +353,237 @@ export function LineageDisplaySections({
             </div>
           </div>
         </button>
+      </CollapsibleSection>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Missing connections — Views are subsets of a Data Source, so a
+          curated view legitimately excludes upstream/downstream partners.
+          This switch shows/hides the "connections not on canvas" alerts. */}
+      <MissingConnectionsToggle disabled={disabled} />
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <ExternalPreviewToggle disabled={disabled} />
+    </div>
+  )
+}
+
+/** Feature flag for the out-of-view lineage PREVIEW — the guided
+ *  click-through from the "outside this view" chip into the Lens.
+ *  Self-contained store access, mirroring MissingConnectionsToggle. */
+function ExternalPreviewToggle({ disabled }: { disabled: boolean }) {
+  const on = usePreferencesStore((s) => s.externalLineagePreview)
+  const toggle = usePreferencesStore((s) => s.toggleExternalLineagePreview)
+  return (
+    <div className="px-3 pt-2.5 pb-3">
+      <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Eye className="w-3 h-3" />
+        <span>External Preview</span>
       </div>
+      <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+        Adds a Preview action when a selected entity has lineage outside
+        this view — see those partners in the Lens without adding
+        anything to the canvas.
+      </p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        disabled={disabled}
+        onClick={toggle}
+        className={cn(
+          'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+          disabled && 'cursor-not-allowed',
+          on
+            ? 'bg-sky-500/12 border-sky-500/35 shadow-sm shadow-sky-500/10 dark:bg-sky-400/15 dark:border-sky-400/30'
+            : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+        )}
+      >
+        <div
+          className={cn(
+            'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+            on ? 'bg-sky-500/85 dark:bg-sky-400/80' : 'bg-ink-muted/25 dark:bg-white/15',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+              on ? 'left-[15px]' : 'left-[2px]',
+            )}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12px] font-medium leading-tight text-ink">Preview outside-view lineage</div>
+          <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+            {on ? 'On — chip offers Preview' : 'Off'}
+          </div>
+        </div>
+      </button>
+    </div>
+  )
+}
+
+const BUDGET_MIN = 100
+const BUDGET_MAX = 2000
+const BUDGET_STEP = 50
+
+/** Adaptive edge budget — how many of the strongest flows render at once
+ *  above the threshold (and the size of a focused node's materialized
+ *  fan). Reads/writes the persisted preference directly, mirroring the
+ *  self-contained MissingConnectionsToggle pattern. */
+function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
+  const budget = usePreferencesStore((s) => s.autoStubThreshold)
+  const setBudget = usePreferencesStore((s) => s.setAutoStubThreshold)
+  const clamped = Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, budget ?? 500))
+  return (
+    <div className="mt-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Sliders className="w-3 h-3" />
+        <span>Edge Budget</span>
+        <span className="ml-auto tabular-nums text-accent-lineage/80">{clamped.toLocaleString()}</span>
+      </div>
+      <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">
+        How many of the strongest flows stay visible at once on dense
+        graphs. Markers summarize the rest.
+      </p>
+      <input
+        type="range"
+        min={BUDGET_MIN}
+        max={BUDGET_MAX}
+        step={BUDGET_STEP}
+        value={clamped}
+        disabled={disabled}
+        onChange={(e) => setBudget(parseInt(e.target.value, 10))}
+        className="w-full accent-accent-lineage"
+        aria-label="Adaptive edge budget"
+      />
+      <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
+        <span>{BUDGET_MIN} · calm</span>
+        <span>{BUDGET_MAX.toLocaleString()} · detailed</span>
+      </div>
+    </div>
+  )
+}
+
+/** Flow ribbons on/off — Sankey-style macro volume bands between layer
+ *  columns while Adaptive is summarizing. Self-contained store access,
+ *  mirroring MissingConnectionsToggle. */
+function FlowRibbonsToggle({ disabled }: { disabled: boolean }) {
+  const show = usePreferencesStore((s) => s.showFlowRibbons) ?? true
+  const toggle = usePreferencesStore((s) => s.toggleFlowRibbons)
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={show}
+      disabled={disabled}
+      onClick={toggle}
+      className={cn(
+        'mt-2 w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+        disabled && 'cursor-not-allowed',
+        show
+          ? 'bg-accent-lineage/12 border-accent-lineage/35 shadow-sm shadow-accent-lineage/10'
+          : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+      )}
+    >
+      <div
+        className={cn(
+          'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+          show ? 'bg-accent-lineage/85' : 'bg-ink-muted/25 dark:bg-white/15',
+        )}
+      >
+        <div
+          className={cn(
+            'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+            show ? 'left-[15px]' : 'left-[2px]',
+          )}
+        />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            'text-[12px] font-medium leading-tight flex items-center gap-1.5',
+            show ? 'text-accent-lineage' : 'text-ink',
+          )}
+        >
+          <Waves className="w-3.5 h-3.5" strokeWidth={2.2} />
+          <span>Flow ribbons</span>
+        </div>
+        <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+          Layer-to-layer volume bands (Sankey-style) when flows exceed
+          the edge budget
+        </div>
+        <div
+          className={cn(
+            'text-[10.5px] font-semibold leading-snug mt-1',
+            show ? 'text-accent-lineage' : 'text-ink-muted/60',
+          )}
+        >
+          {show
+            ? 'On — bands appear once edges are summarized'
+            : 'Off'}
+        </div>
+      </div>
+    </button>
+  )
+}
+
+function MissingConnectionsToggle({ disabled }: { disabled: boolean }) {
+  const show = usePreferencesStore((s) => s.showMissingConnectionIndicators)
+  const toggle = usePreferencesStore((s) => s.toggleMissingConnectionIndicators)
+  return (
+    <div className="px-3 pt-2.5 pb-3">
+      <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Unlink className="w-3 h-3" />
+        <span>Missing Connections</span>
+      </div>
+      <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+        Alert when links reference entities outside this view. Views are
+        subsets — hide this if out-of-view partners are expected.
+      </p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={show}
+        disabled={disabled}
+        onClick={toggle}
+        className={cn(
+          'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+          disabled && 'cursor-not-allowed',
+          show
+            ? 'bg-amber-500/12 border-amber-500/35 shadow-sm shadow-amber-500/10 dark:bg-amber-400/15 dark:border-amber-400/30'
+            : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+        )}
+      >
+        <div
+          className={cn(
+            'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+            show ? 'bg-amber-500/85 dark:bg-amber-400/80' : 'bg-ink-muted/25 dark:bg-white/15',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+              show ? 'left-[15px]' : 'left-[2px]',
+            )}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              'text-[12px] font-medium leading-tight flex items-center gap-1.5',
+              show ? 'text-amber-700 dark:text-amber-300' : 'text-ink',
+            )}
+          >
+            <Unlink className="w-3.5 h-3.5" strokeWidth={2.2} />
+            <span>Missing-link alerts</span>
+          </div>
+          <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+            {show ? 'Currently visible' : 'Currently hidden'}
+          </div>
+        </div>
+      </button>
     </div>
   )
 }

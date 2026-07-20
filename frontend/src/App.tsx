@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { MotionConfig } from 'framer-motion'
@@ -109,13 +109,26 @@ function MotionRoot({ children }: { children: React.ReactNode }) {
  * RouterProvider handles URL-based navigation; AppLayout (inside routes)
  * manages auth, schema init, and the shell (TopBar + SidebarNav + Outlet).
  */
+/**
+ * True on the standalone /docs and /guide routes. The health banner is mounted
+ * outside <RouterProvider>, so react-router hooks aren't available here — we
+ * read the path reactively from the data router's own subscription instead, so
+ * it updates across in-app SPA navigation, not just full page loads.
+ */
+function useIsDocsOrGuide() {
+  const [path, setPath] = useState(() => router.state.location.pathname)
+  useEffect(() => router.subscribe((s) => setPath(s.location.pathname)), [])
+  return path.startsWith('/docs') || path.startsWith('/guide')
+}
+
 export function App() {
+  const hideProviderBanner = useIsDocsOrGuide()
   return (
     <QueryClientProvider client={queryClient}>
       <MotionRoot>
         <AuthBootstrap>
           <div className="h-screen w-screen flex flex-col overflow-hidden">
-            <BackendHealthBanner />
+            <BackendHealthBanner hideProviderBanner={hideProviderBanner} />
             <div className="flex-1 overflow-hidden">
               <GraphProvider>
                 <RouterProvider router={router} />

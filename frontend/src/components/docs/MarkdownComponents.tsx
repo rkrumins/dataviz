@@ -1,14 +1,18 @@
-import { Children, isValidElement } from 'react'
+import { Children, isValidElement, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
-import { Hash } from 'lucide-react'
+import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, type LucideIcon } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
+import { ZoomableImage } from './reading/ZoomableImage'
+import { LineageTraceDemo } from '../guide/demo/LineageTraceDemo'
+import { MarkdownTourButton } from './MarkdownTourButton'
 
 // Map the actual filenames from docs/ to route slugs. Adding a new doc to
 // docsConfig.ts? Add its filename here too, or its relative .md links from
 // other docs will fall through to the "external link" branch below instead
 // of routing in-SPA.
-const filenameMap: Record<string, string> = {
+export const filenameMap: Record<string, string> = {
   'OVERVIEW.md': 'overview',
   'SETUP.md': 'setup',
   'ARCHITECTURE.md': 'architecture',
@@ -24,19 +28,60 @@ const filenameMap: Record<string, string> = {
   'AGGREGATION_PIPELINE.md': 'aggregation-pipeline',
   'local-integration-testing.md': 'integration-testing',
   'VERSIONING_E2E.md': 'versioning-e2e',
-  'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-merge',
   '01-overview-and-architecture.md': 'versioning-overview',
   '06-api-reference.md': 'versioning-api-reference',
   'README-index.md': 'versioning-deep-dives',
   'RBAC.md': 'rbac',
   'SSO.md': 'sso',
   'SSO_INTEGRATION.md': 'sso-integration',
-  'rbac-sso-audit-2026-06-05.md': 'security-audit',
   'DEPLOYMENT.md': 'deployment',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
   'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',
+  // Platform Services (subfolder; keys path-qualified to avoid basename clashes)
+  'services/OVERVIEW.md': 'services-overview',
+  'services/INSIGHTS.md': 'services-insights',
+  'services/SEARCH.md': 'services-search',
+  'services/CONTEXT_ENGINE.md': 'services-context-engine',
+  'services/ASSIGNMENTS.md': 'services-assignments',
+  'INSIGHTS.md': 'services-insights',
+  'SEARCH.md': 'services-search',
+  'CONTEXT_ENGINE.md': 'services-context-engine',
+  'ASSIGNMENTS.md': 'services-assignments',
+}
+
+// ── Callouts ────────────────────────────────────────────────────────
+// A blockquote whose first line begins with a recognised label renders as
+// an accented callout box. Authors write either GitHub-alert syntax
+// (`> [!NOTE]`) or a bold label (`> **Note:** …`); anything else stays a
+// plain blockquote. One place, so docs and guide share the treatment.
+
+const CALLOUTS: Record<string, { icon: LucideIcon; box: string; icon_cls: string }> = {
+  note: { icon: Info, box: 'border-sky-500/30 bg-sky-500/[0.06]', icon_cls: 'text-sky-500' },
+  tip: { icon: Lightbulb, box: 'border-emerald-500/30 bg-emerald-500/[0.06]', icon_cls: 'text-emerald-500' },
+  important: { icon: AlertCircle, box: 'border-violet-500/30 bg-violet-500/[0.06]', icon_cls: 'text-violet-500' },
+  warning: { icon: AlertTriangle, box: 'border-amber-500/30 bg-amber-500/[0.08]', icon_cls: 'text-amber-500' },
+  caution: { icon: AlertTriangle, box: 'border-red-500/30 bg-red-500/[0.06]', icon_cls: 'text-red-500' },
+}
+
+/** Recursively pull the plain text out of react-markdown children. */
+function nodeText(node: React.ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeText).join('')
+  if (isValidElement(node)) {
+    return nodeText((node.props as { children?: React.ReactNode }).children)
+  }
+  return ''
+}
+
+/** Detect a leading callout label, tolerant of `[!NOTE]` or `**Note:**`. */
+function calloutKind(children: React.ReactNode): keyof typeof CALLOUTS | null {
+  const text = nodeText(children).trimStart()
+  const m = /^\[!(\w+)\]|^(note|tip|important|warning|caution)\b\s*:/i.exec(text)
+  const raw = (m?.[1] ?? m?.[2] ?? '').toLowerCase()
+  return raw in CALLOUTS ? (raw as keyof typeof CALLOUTS) : null
 }
 
 function rewriteDocLink(href: string): string {
@@ -47,6 +92,62 @@ function rewriteDocLink(href: string): string {
   }
   if (href.startsWith('#')) return href
   return href
+}
+
+/** The hash affordance on a heading — clicking copies a deep link to it. */
+function CopyAnchor({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    const url = `${window.location.origin}${window.location.pathname}#${id}`
+    void navigator.clipboard?.writeText(url).then(() => {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    })
+    window.history.replaceState(null, '', `#${id}`)
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label="Copy link to this section"
+      title="Copy link to this section"
+      className="heading-anchor"
+    >
+      {copied ? (
+        <Check className="w-4 h-4 inline text-emerald-500" />
+      ) : (
+        <Hash className="w-4 h-4 inline" />
+      )}
+    </button>
+  )
+}
+
+/** Copy-to-clipboard control overlaid on a fenced code block. */
+function CodeCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      aria-label="Copy code"
+      onClick={() =>
+        void navigator.clipboard?.writeText(text).then(() => {
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        })
+      }
+      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted opacity-0 backdrop-blur-sm transition-opacity hover:text-ink focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
+    >
+      {copied ? (
+        <>
+          <Check className="w-3.5 h-3.5 text-emerald-500" /> Copied
+        </>
+      ) : (
+        <>
+          <Copy className="w-3.5 h-3.5" /> Copy
+        </>
+      )}
+    </button>
+  )
 }
 
 function HeadingWithAnchor({
@@ -61,11 +162,7 @@ function HeadingWithAnchor({
   const content = (
     <>
       {children}
-      {id && (
-        <a href={`#${id}`} className="heading-anchor" aria-hidden>
-          <Hash className="w-4 h-4 inline" />
-        </a>
-      )}
+      {id && <CopyAnchor id={id} />}
     </>
   )
 
@@ -87,7 +184,7 @@ function extractCodeFromPre(children: React.ReactNode): { lang: string | null; t
   const child = Children.toArray(children)[0]
   if (!isValidElement(child)) return null
   const props = child.props as { className?: string; children?: React.ReactNode }
-  const match = /language-(\w+)/.exec(props.className || '')
+  const match = /language-([\w-]+)/.exec(props.className || '')
   return {
     lang: match?.[1] ?? null,
     text: String(props.children ?? '').replace(/\n$/, ''),
@@ -103,12 +200,28 @@ export const markdownComponents: Components = {
   h6: ({ children, id }) => <HeadingWithAnchor level={6} id={id}>{children}</HeadingWithAnchor>,
 
   // Intercept <pre> to detect mermaid blocks (avoids nesting <div> inside <pre>)
+  // and to overlay a copy-to-clipboard control on ordinary code blocks.
   pre: ({ children, ...props }) => {
     const info = extractCodeFromPre(children)
     if (info?.lang === 'mermaid') {
       return <MermaidBlock code={info.text} />
     }
-    return <pre {...props}>{children}</pre>
+    // Interactive "trace lineage" demo — the fenced block body is ignored;
+    // the widget is fully self-contained.
+    if (info?.lang === 'lineage-demo') {
+      return <LineageTraceDemo />
+    }
+    // ```tour-<id>``` embeds a "Take the tour" CTA. The id rides in the fence
+    // language (not the body) so highlighting never garbles it.
+    if (info?.lang?.startsWith('tour-')) {
+      return <MarkdownTourButton tourId={info.lang.slice('tour-'.length)} />
+    }
+    return (
+      <div className="group relative">
+        {info?.text ? <CodeCopyButton text={info.text} /> : null}
+        <pre {...props}>{children}</pre>
+      </div>
+    )
   },
 
   // Tables: scrollable wrapper
@@ -117,6 +230,26 @@ export const markdownComponents: Components = {
       <table {...props}>{children}</table>
     </div>
   ),
+
+  // Blockquotes: render a labelled callout box, else a plain quote
+  blockquote: ({ children }) => {
+    const kind = calloutKind(children)
+    if (!kind) return <blockquote>{children}</blockquote>
+    const { icon: Icon, box, icon_cls } = CALLOUTS[kind]
+    return (
+      <div
+        className={cn(
+          'my-4 flex gap-3 rounded-xl border px-4 py-3',
+          '[&>p]:m-0 [&>p+p]:mt-2 [&_code]:text-[0.85em]',
+          box,
+        )}
+        role="note"
+      >
+        <Icon className={cn('w-5 h-5 shrink-0 mt-0.5', icon_cls)} aria-hidden />
+        <div className="min-w-0 flex-1 text-sm leading-relaxed">{children}</div>
+      </div>
+    )
+  },
 
   // Links: rewrite .md links to SPA routes
   a: ({ href, children, ...props }) => {
@@ -143,8 +276,8 @@ export const markdownComponents: Components = {
     )
   },
 
-  // Images
-  img: ({ src, alt, ...props }) => (
-    <img src={src} alt={alt ?? ''} loading="lazy" {...props} />
+  // Images: framed, with click-to-zoom
+  img: ({ src, alt }) => (
+    <ZoomableImage src={typeof src === 'string' ? src : undefined} alt={alt} />
   ),
 }

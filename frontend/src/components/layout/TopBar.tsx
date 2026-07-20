@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -18,6 +18,7 @@ import {
   type SystemRole,
 } from '@/store/auth'
 import { useSchemaStore } from '@/store/schema'
+import { useHelpPanelStore } from '@/store/helpPanel'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
@@ -146,6 +147,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             'bg-gradient-to-r from-accent-business/30 via-accent-explore/20 to-accent-lineage/30'
           )} />
           <button
+            data-tour="search"
             onClick={onOpenCommandPalette}
             className={cn(
               "relative w-full flex items-center gap-3 px-4 py-2 rounded-xl",
@@ -168,7 +170,9 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         {/* Right: Actions — 3 groups separated by dividers */}
         <div className="flex items-center gap-2">
           {/* Group 1: Mode */}
-          <PersonaToggle />
+          <span data-tour="persona" className="inline-flex">
+            <PersonaToggle />
+          </span>
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
@@ -180,6 +184,16 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 3: System / Account */}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
+
+          <button
+            data-tour="help"
+            className="btn btn-ghost p-2 rounded-lg"
+            onClick={() => useHelpPanelStore.getState().openHelp()}
+            title="Help (?)"
+            aria-label="Help"
+          >
+            <HelpCircle className="w-5 h-5 text-ink-secondary" />
+          </button>
 
           {showAdminCog && (
             <button

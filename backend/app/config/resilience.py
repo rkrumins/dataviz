@@ -17,6 +17,14 @@ single query vs. an orchestration of many).
 import os
 
 # ── Circuit Breaker (applies to ALL provider types) ─────────────────
+# Wall-clock budget for instantiating a provider (connect + preflight +
+# index DDL). Under heavy FalkorDB load (single Cypher thread pinned by
+# large scans) instantiation legitimately exceeds the old hardcoded 10s
+# and trips the instantiation breaker ("breaker=closed fails=N/M");
+# raise per-deployment while load-shedding fixes land.
+PROVIDER_INSTANTIATION_TIMEOUT_SECS: float = float(
+    os.getenv("PROVIDER_INSTANTIATION_TIMEOUT_SECS", "10"))
+
 # Number of consecutive failures before the breaker opens.
 BREAKER_FAIL_MAX: int = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 # Seconds the breaker stays open before allowing a single probe request.
@@ -31,8 +39,18 @@ FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "
 FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
 # get_top_level_or_orphan_nodes per-query timeout. Larger than the generic
 # 5s read default because the structural top-level predicate scans wide
-# adjacency lists on large graphs; aligns with HTTP_TIMEOUT_GRAPH_SECS.
-FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_QUERY_TIMEOUT", "15"))
+# adjacency lists on large graphs (2-3M+ nodes legitimately need tens of
+# seconds when the materialized fast-path misses). Must stay below the
+# frontend's VITE_TIMEOUT_TOP_LEVEL_MS (45s) and HTTP_TIMEOUT_GRAPH_SECS
+# (60s) so this budget always fires first with an accurate error.
+FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_QUERY_TIMEOUT", "30"))
+# Budget for the top-level *count* query only. The count is display-only
+# and best-effort: on large graphs the full-scan count is expected to
+# miss this budget, in which case the endpoint degrades to
+# ``totalCount: null`` instead of failing the whole request. An explicit
+# ``query_timeout`` passed by a caller (e.g. the insights collector's
+# materialization) overrides this for both queries.
+FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_COUNT_TIMEOUT", "5"))
 # /edges/between resolves edges among a (potentially large) URN set. The
 # generic 5s read default times out on big graphs; this sits just under
 # the 45s ASGI/client budgets so the DB cancels first with a clean error.
@@ -40,6 +58,18 @@ FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_EDGES_BET
 # Aggregated-edge projection reads can scan large URN sets; the generic
 # 5s read timeout kills these on graphs with hundreds of containers.
 FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGATED_READ_TIMEOUT_SECS", "30"))
+# The FalkorDB server's TIMEOUT_MAX configuration (milliseconds). The
+# server REJECTS any query whose per-query TIMEOUT parameter exceeds it
+# ("The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX
+# configuration parameter") — the query never runs at all. Every
+# server-side timeout the provider sends is clamped to this value, so a
+# generous client budget (e.g. the insights materialization's 600s)
+# degrades to "run for up to TIMEOUT_MAX" instead of instant rejection.
+# MUST match the TIMEOUT_MAX in the deployed FALKORDB_ARGS (180000 in
+# docker-compose / helm / k8s manifests). 0 = no server cap configured
+# (no clamping).
+FALKORDB_SERVER_TIMEOUT_MAX_MS: int = int(os.getenv("FALKORDB_SERVER_TIMEOUT_MAX_MS", "180000"))
+
 # Soft cap on aggregated-edge result rows. When a response reaches this
 # count it is flagged ``truncated=true`` so the caller can render a
 # "narrow your selection" hint instead of silently showing partial data.

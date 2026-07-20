@@ -48,14 +48,16 @@ def _recording_ro_query(calls):
 # ── Provider-level: timeout propagation ─────────────────────────────
 
 @pytest.mark.asyncio
-async def test_default_timeout_used_for_both_queries(monkeypatch):
+async def test_default_timeouts_page_and_count_budgets(monkeypatch):
+    """Page gets the full budget; the count gets its own (shorter)
+    best-effort budget."""
     p = _make_provider()
     calls = []
     monkeypatch.setattr(p, "_ro_query", _recording_ro_query(calls))
     await p.get_top_level_or_orphan_nodes(include_child_count=False)
     assert len(calls) == 2
     assert calls[0][2] == resilience.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
-    assert calls[1][2] == resilience.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+    assert calls[1][2] == resilience.FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS
 
 
 @pytest.mark.asyncio
@@ -123,6 +125,65 @@ async def test_scrambled_page_rows_sorted_and_cursor_is_page_max(monkeypatch):
     # load-bearing property is unchanged: aggregation is re-projected through
     # a WITH before ORDER BY, so the count survives the reorder.
     assert "WITH n, count(child) as childCount ORDER BY" in page_cypher
+
+
+# ── Provider-level: count query is best-effort; page is not ─────────
+
+@pytest.mark.asyncio
+async def test_count_timeout_degrades_to_null_total(monkeypatch):
+    """A count-query timeout must NOT fail the request: the page is
+    returned intact with total_count=None (has_more stays page-derived)."""
+    import asyncio
+
+    p = _make_provider()
+
+    async def _ro_query(cypher, params=None, **kw):
+        if "count(" in cypher.lower():
+            raise asyncio.TimeoutError()
+        return _Result([
+            [{"urn": "urn:1", "entityType": "layer", "displayName": "Alpha"}, 0],
+        ])
+
+    monkeypatch.setattr(p, "_ro_query", _ro_query)
+    result = await p.get_top_level_or_orphan_nodes(include_child_count=False, limit=1)
+    assert result.total_count is None
+    assert [n.display_name for n in result.nodes] == ["Alpha"]
+    assert result.has_more is True  # len(nodes) >= limit
+
+
+@pytest.mark.asyncio
+async def test_page_timeout_still_raises_with_budget_in_message(monkeypatch):
+    """A page-query timeout is fatal (GraphCache stale-fallback handles
+    it), and the re-raised error names the budget that fired instead of
+    serializing to an empty string."""
+    import asyncio
+
+    p = _make_provider()
+
+    async def _ro_query(cypher, params=None, **kw):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(p, "_ro_query", _ro_query)
+    with pytest.raises(asyncio.TimeoutError) as exc_info:
+        await p.get_top_level_or_orphan_nodes(include_child_count=False)
+    assert "provider budget" in str(exc_info.value)
+    assert str(int(resilience.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS)) in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_count_transient_error_still_raises(monkeypatch):
+    """Non-timeout count failures (connection refused etc.) keep the old
+    fail-loud behavior — only the timeout path degrades."""
+    p = _make_provider()
+
+    async def _ro_query(cypher, params=None, **kw):
+        if "count(" in cypher.lower():
+            raise ConnectionError("refused")
+        return _Result([])
+
+    monkeypatch.setattr(p, "_ro_query", _ro_query)
+    with pytest.raises(ConnectionError):
+        await p.get_top_level_or_orphan_nodes(include_child_count=False)
 
 
 # ── Provider-level: known_total_count skips the count query ────────
@@ -203,3 +264,38 @@ async def test_engine_passes_new_kwargs_to_new_provider():
     assert result.total_count == 1
     assert provider.calls[0]["query_timeout"] == 5
     assert provider.calls[0]["known_total_count"] == 1
+
+
+# ── Server TIMEOUT_MAX clamp + socket-timeout floor ──────────────────
+
+def test_db_timeout_ms_clamped_to_server_timeout_max(monkeypatch):
+    """FalkorDB rejects (never runs) a query whose TIMEOUT exceeds the
+    server's TIMEOUT_MAX — an over-budget caller (the collector's 600s
+    materialization) must degrade to TIMEOUT_MAX, not fail instantly."""
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
+    assert FalkorDBProvider._db_timeout_ms(600) == 180_000
+    # Budgets under the cap keep the -500ms DB-cancels-first offset.
+    assert FalkorDBProvider._db_timeout_ms(30) == 29_500
+
+
+def test_db_timeout_ms_unclamped_when_cap_disabled(monkeypatch):
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0)
+    assert FalkorDBProvider._db_timeout_ms(600) == 599_500
+
+
+def test_graph_socket_timeout_floored_above_server_cap(monkeypatch):
+    """The graph-pool socket timeout must exceed the longest query the
+    server may legitimately run (TIMEOUT_MAX), or the socket recv timeout
+    kills long queries mid-flight. Per-call asyncio.wait_for budgets keep
+    hang detection tight despite the higher socket value."""
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
+    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "10")
+    p = _make_provider()
+    assert p._graph_socket_timeout() == pytest.approx(195.0)
+
+
+def test_graph_socket_timeout_uses_configured_when_cap_disabled(monkeypatch):
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0)
+    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "10")
+    p = _make_provider()
+    assert p._graph_socket_timeout() == pytest.approx(10.0)

@@ -118,7 +118,7 @@ class _StubProvider(GraphDataProvider):
     async def get_nodes_by_tag(self, tag, limit=100, offset=0) -> List[GraphNode]:
         return []
 
-    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0) -> List[GraphNode]:
+    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0, **kw) -> List[GraphNode]:
         return []
 
     async def save_custom_graph(self, nodes, edges) -> bool:
@@ -432,18 +432,39 @@ async def test_query_edges(graph_client):
 
 class _PassthroughGraphCache:
     """Bypasses GraphCache/Redis so these tests exercise only the
-    endpoint's own intercept logic inside `compute()`."""
+    endpoint's own intercept logic inside `compute()`. Records the
+    count side-cache traffic so tests can assert the get/set wiring."""
+
+    def __init__(self):
+        self.count_store: dict = {}
+        self.count_gets: list = []
+        self.count_sets: list = []
 
     async def get_or_compute(self, *, scope, endpoint, params, compute, model_cls,
                               ttl_seconds=None, on_stale=None):
         return await compute()
+
+    @staticmethod
+    def _count_key(params) -> str:
+        import json
+        return json.dumps(params, sort_keys=True, default=str)
+
+    async def get_top_level_count(self, scope, params):
+        self.count_gets.append((scope, params))
+        return self.count_store.get(self._count_key(params))
+
+    async def set_top_level_count(self, scope, params, value):
+        self.count_sets.append((scope, params, value))
+        self.count_store[self._count_key(params)] = value
 
 
 @pytest.fixture()
 async def top_level_client(test_client: AsyncClient, monkeypatch):
     """Like `graph_client`, but the mock engine carries a workspace/data
     source scope (so `_cache_scope` resolves to a real CacheScope) and
-    `get_graph_cache` is replaced with a passthrough."""
+    `get_graph_cache` is replaced with a passthrough. The single
+    passthrough instance is reachable via `graph_module.get_graph_cache()`
+    for count-cache assertions."""
     from backend.app.main import app
     from backend.app.api.v1.endpoints import graph as graph_module
 
@@ -455,7 +476,8 @@ async def top_level_client(test_client: AsyncClient, monkeypatch):
         return mock_engine
 
     app.dependency_overrides[graph_module.get_context_engine] = _override
-    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: _PassthroughGraphCache())
+    passthrough_cache = _PassthroughGraphCache()
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: passthrough_cache)
 
     yield test_client, mock_engine
     app.dependency_overrides.pop(graph_module.get_context_engine, None)
@@ -477,7 +499,8 @@ async def test_top_level_materialized_serve(top_level_client, monkeypatch):
 
     served = _stub_top_level_result(total=1)
 
-    async def _fake_try_serve(session, eng, *, ds_id, ws_id, limit, cursor):
+    async def _fake_try_serve(session, eng, *, ds_id, ws_id, limit, cursor,
+                              search_query=None, entity_types=None):
         assert ds_id == "ds1"
         assert ws_id == "ws1"
         return served, served.total_count
@@ -525,23 +548,24 @@ async def _assert_live_path(
 
 
 async def test_top_level_live_path_search_query(top_level_client, monkeypatch):
-    """searchQuery set -> intercept guard fails before calling the serve
-    helper; live engine called with known_total_count=None."""
+    """searchQuery set -> the serve helper IS consulted (it filters a
+    complete payload in-process) and, on a miss, the live engine is
+    called with known_total_count=None."""
     await _assert_live_path(
         top_level_client, monkeypatch,
         params={"searchQuery": "foo"},
-        expect_serve_called=False,
+        expect_serve_called=True,
         expected_known_total=None,
     )
 
 
 async def test_top_level_live_path_entity_types(top_level_client, monkeypatch):
-    """entityTypes set -> intercept guard fails; live engine called with
-    known_total_count=None."""
+    """entityTypes set -> serve helper consulted (filtered in-process on
+    complete payloads); miss falls back live with known_total_count=None."""
     await _assert_live_path(
         top_level_client, monkeypatch,
         params={"entityTypes": ["dataset"]},
-        expect_serve_called=False,
+        expect_serve_called=True,
         expected_known_total=None,
     )
 
@@ -593,3 +617,74 @@ async def test_top_level_cold_start_no_payload(top_level_client, monkeypatch):
         expect_serve_called=True,
         expected_known_total=None,
     )
+
+
+# ── GET /nodes/top-level (count side-cache wiring) ────────────────────
+
+async def test_top_level_count_cache_hit_skips_live_count(top_level_client, monkeypatch):
+    """A cached total for the same filter shape is forwarded to the live
+    engine as known_total_count (which skips the O(N) count scan)."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    serve_spy = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+    live_spy = AsyncMock(return_value=_stub_top_level_result(total=7))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    cache = graph_module.get_graph_cache()
+    cache.count_store[cache._count_key({"entityTypes": None, "searchQuery": "foo"})] = 7
+
+    resp = await client.get(
+        "/api/v1/test-ws/graph/nodes/top-level", params={"searchQuery": "foo"},
+    )
+    assert resp.status_code == 200
+    live_spy.assert_awaited_once()
+    assert live_spy.await_args.kwargs["known_total_count"] == 7
+    # Count was known — nothing new to store.
+    assert cache.count_sets == []
+
+
+async def test_top_level_live_count_populates_cache(top_level_client, monkeypatch):
+    """A live call that ran the count stores the total in the side-cache,
+    keyed by filters only (no cursor/limit)."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    serve_spy = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+    live_spy = AsyncMock(return_value=_stub_top_level_result(total=9))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get(
+        "/api/v1/test-ws/graph/nodes/top-level",
+        params={"searchQuery": "foo", "limit": 5},
+    )
+    assert resp.status_code == 200
+    cache = graph_module.get_graph_cache()
+    assert len(cache.count_sets) == 1
+    _, params, value = cache.count_sets[0]
+    assert params == {"entityTypes": None, "searchQuery": "foo"}
+    assert value == 9
+
+
+async def test_top_level_degraded_count_not_cached(top_level_client, monkeypatch):
+    """A live result whose best-effort count timed out (totalCount=None)
+    must not poison the count cache."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    serve_spy = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+    degraded = TopLevelNodesResult(
+        nodes=[GraphNode(urn="urn:li:dataset:x", displayName="X", entityType="dataset")],
+        totalCount=None, hasMore=True, nextCursor=None, rootTypeCount=1, orphanCount=0,
+    )
+    live_spy = AsyncMock(return_value=degraded)
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get("/api/v1/test-ws/graph/nodes/top-level")
+    assert resp.status_code == 200
+    assert resp.json()["totalCount"] is None
+    cache = graph_module.get_graph_cache()
+    assert cache.count_sets == []

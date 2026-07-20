@@ -827,6 +827,33 @@ class ViewActivityLogORM(Base):
         return f"<ViewActivityLog id={self.id!r} action={self.action!r} view={self.view_id!r}>"
 
 
+class ProductEventORM(Base):
+    """Append-only product telemetry — one immutable row per usage signal.
+
+    Records the signals the app chooses to emit (docs 'was this helpful?', a
+    search that returned nothing, a tour completed/skipped, an onboarding step),
+    so the Admin telemetry view can aggregate them. Deliberately SEPARATE from
+    ``outbox_events`` (a transient, consumer-drained relay) — these rows are
+    durable and queryable. ``payload`` is a small JSON string; there is no PII
+    beyond the actor id.
+    """
+    __tablename__ = "product_events"
+
+    id = Column(Text, primary_key=True, default=lambda: f"pev_{uuid.uuid4().hex[:12]}")
+    event_type = Column(Text, nullable=False)   # e.g. 'docs.feedback', 'docs.search_miss'
+    actor_id = Column(Text, nullable=True)       # principal id who acted (if authenticated)
+    payload = Column(Text, nullable=True)        # JSON string
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_product_events_type_created", "event_type", "created_at"),
+        Index("idx_product_events_created", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProductEvent id={self.id!r} type={self.event_type!r}>"
+
+
 # ------------------------------------------------------------------ #
 # view_layout_overlays (Branch-Scoped Layout)                          #
 # ------------------------------------------------------------------ #

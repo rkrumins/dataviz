@@ -7,6 +7,36 @@ streaming rebuild, cursor-paged MERGE loop) with a single resumable
 pipeline: **EXTRACT → COMPUTE → RECONCILE → APPLY**
 (`backend/app/providers/falkordb_materialize.py`).
 
+**Who it's for:** backend engineers working on aggregation, and operators
+tuning or debugging materialization jobs on large graphs.
+
+**What you'll find here:** the aggregation semantics and the structural
+materialization boundary, the four pipeline phases, the resume model,
+provider-protection controls, the full tuning knob reference, and the
+completeness contract.
+
+```mermaid
+graph LR
+    subgraph Extract["1 · EXTRACT (read-only)"]
+        E["ID-range partition scans<br/>containment + lineage edges"]
+    end
+    subgraph Compute["2 · COMPUTE (pure Python)"]
+        C["Ancestor-chain dict walks<br/>bottom-up pair weights<br/>(zero FalkorDB load)"]
+    end
+    subgraph Reconcile["3 · RECONCILE"]
+        R["Range-scan current :AGGREGATED<br/>delete stale (guarded)<br/>update changed in place"]
+    end
+    subgraph Apply["4 · APPLY"]
+        A["MERGE missing pairs<br/>sorted-key order (resume cursor)<br/>label+urn node match"]
+    end
+
+    E --> C --> R --> A
+    A -.->|"crash / cancel → resume<br/>v3:{run_start}:{phase}:{pos}"| E
+
+```
+
+> **Note:** The pipeline is **resumable and non-destructive by design**. RECONCILE guards deletes with `latestUpdate < run_start`, and there is **no epoch sweep** — a failed or resumed run can never wipe good edges.
+
 ## Semantics
 
 Given an ontology hierarchy (e.g. `Domain ⊃ Application ⊃ Database ⊃
@@ -141,15 +171,15 @@ enumerating the unmapped subtree.
    (deterministic resume cursor), with nodes matched by **label+urn**
    (per-label URN index seek) in both projection modes.
 
-**Hard rule: no ID-equality under UNWIND.** FalkorDB does not drive
-``WHERE ID(n) = x`` from a NodeByIdSeek inside an UNWIND — it scans all
-nodes per row (observed: 30s+ per 5k-row batch on a 500k-node graph,
-producing a timeout/quiesce/retry loop). The pipeline therefore resolves
-node IDs → (urn, label) through a lazily-built, range-scanned **node
-directory** (one bounded pass; only loaded when a write/delete actually
-needs it), writes via label+urn MERGE, and deletes via the aggKey edge
-index. Internal IDs are used only in range predicates
-(``ID(x) >= lo AND ID(x) < hi``), which are cheap filters.
+> **Caution: no ID-equality under UNWIND.** FalkorDB does not drive
+> ``WHERE ID(n) = x`` from a NodeByIdSeek inside an UNWIND — it scans all
+> nodes per row (observed: 30s+ per 5k-row batch on a 500k-node graph,
+> producing a timeout/quiesce/retry loop). The pipeline therefore resolves
+> node IDs → (urn, label) through a lazily-built, range-scanned **node
+> directory** (one bounded pass; only loaded when a write/delete actually
+> needs it), writes via label+urn MERGE, and deletes via the aggKey edge
+> index. Internal IDs are used only in range predicates
+> (``ID(x) >= lo AND ID(x) < hi``), which are cheap filters.
 
 In steady state a re-run after small source changes writes only the
 diff — near-zero load. Full recompute *is* the incremental strategy.
@@ -445,3 +475,13 @@ trigger via the UI with the worker container running, then
 `docker restart` the worker mid-APPLY — the control plane's reconciler
 auto-resumes from `last_cursor` (watch for "auto-resume #1"), no edge
 is wiped, and the re-run converges to a zero-write diff.
+
+---
+
+## Related
+
+- [Data Architecture](/docs/data-architecture) — the graph data model, aggregated-edge shape, and Redis job bus
+- [Decisions](/docs/decisions) — ADR-020/021/022 (FalkorDB client, Redis roles) that underpin provider protection
+- [Architecture](/docs/architecture) — where the aggregation control plane and worker fleet sit in the topology
+- [Services Overview](/docs/services-overview) — the WORKER and CONTROLPLANE roles that run this pipeline
+- [Technical Debt](/docs/technical-debt) — related scaling and observability gaps

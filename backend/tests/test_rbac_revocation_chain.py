@@ -73,11 +73,8 @@ async def _seed_group(session: AsyncSession, group_id: str, name: str) -> None:
         description=None,
         source="local",
         external_id=None,
-        external_member_count=None,
         created_at=_now_iso(),
-        created_by=None,
         updated_at=_now_iso(),
-        updated_by=None,
         deleted_at=None,
     ))
 

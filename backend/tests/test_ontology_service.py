@@ -77,8 +77,10 @@ assert isinstance(_StubOntologyRepository(), OntologyRepositoryProtocol)
 
 
 class TestResolve:
-    async def test_resolve_with_no_workspace_returns_system_defaults(self):
-        """When no workspace_id is given, resolve uses only system default."""
+    async def test_resolve_with_no_workspace_returns_empty(self):
+        """When no workspace_id is given, no assigned ontology is loaded and the
+        system default is gated out — resolve returns an empty ontology (the
+        system-default merge layer was removed)."""
         system = OntologyData(
             id="sys1", name="System", version=1,
             entity_type_definitions=SYSTEM_ENTITY_TYPES,
@@ -90,8 +92,8 @@ class TestResolve:
 
         resolved = await svc.resolve()
         assert isinstance(resolved, ResolvedOntology)
-        # Should have at least some entity definitions from system defaults
-        assert len(resolved.entity_type_definitions) > 0
+        # System defaults are NOT merged when there is no workspace/assignment.
+        assert len(resolved.entity_type_definitions) == 0
 
     async def test_resolve_with_assigned_ontology_merges_over_defaults(self):
         """Assigned ontology values override system defaults."""

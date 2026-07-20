@@ -51,6 +51,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_TOP_LEVEL,
     get_graph_cache,
 )
+from backend.app.services.top_level_cache import try_serve_top_level
 from backend.common.adapters import ProviderUnavailable
 
 logger = logging.getLogger(__name__)
@@ -133,9 +134,13 @@ ENABLE_ONE_DOWN: bool = _flag("CACHE_PREWARM_ENABLE_ONE_DOWN", default=False)
 # disables the pass even when the flag is on.
 ONE_DOWN_FANOUT: int = _clamped_int("CACHE_PREWARM_ONE_DOWN_FANOUT", 10, lo=0, hi=100)
 
-# Skip pre-warming for graphs above this node count. Bounds: at least
-# 1k (smaller is meaningless), at most 100M (anything bigger is a
-# different system).
+# Skip the aggregated/children fan-out steps for graphs above this node
+# count (the navigation-entry-point assumption doesn't hold at scale and
+# the fan-out is the expensive part). The top-level step is NOT gated:
+# on large graphs it serves from the materialized Postgres payload, so
+# warming it is cheap and is exactly what keeps the wizard's first
+# request off the live O(N) path. Bounds: at least 1k (smaller is
+# meaningless), at most 100M (anything bigger is a different system).
 MAX_NODE_COUNT: int = _clamped_int(
     "CACHE_PREWARM_MAX_NODE_COUNT", 500_000, lo=1_000, hi=100_000_000,
 )
@@ -213,16 +218,13 @@ async def warm_data_source(
     if not CACHE_PREWARM_ENABLED:
         result.skipped_reason = "feature_flag_off"
         return result
-    if MAX_NODE_COUNT > 0 and node_count > MAX_NODE_COUNT:
-        result.skipped_reason = f"node_count_{node_count}_over_cap_{MAX_NODE_COUNT}"
-        return result
 
     # Global concurrency cap — bounds total in-flight warms across all
     # data sources for this process. Acquired BEFORE the Redis lock so
     # we don't hold the lock while waiting for a semaphore slot.
     async with _global_warm_semaphore:
         return await _warm_data_source_locked(
-            ws_id=ws_id, ds_id=ds_id,
+            ws_id=ws_id, ds_id=ds_id, node_count=node_count,
             session=session, result=result,
         )
 
@@ -231,6 +233,7 @@ async def _warm_data_source_locked(
     *,
     ws_id: str,
     ds_id: str,
+    node_count: int,
     session: Optional[AsyncSession],
     result: WarmResult,
 ) -> WarmResult:
@@ -253,14 +256,16 @@ async def _warm_data_source_locked(
     try:
         if session is not None:
             await asyncio.wait_for(
-                _warm_steps(ws_id=ws_id, ds_id=ds_id, session=session, result=result),
+                _warm_steps(ws_id=ws_id, ds_id=ds_id, node_count=node_count,
+                            session=session, result=result),
                 timeout=DS_TIMEOUT_SECS,
             )
         else:
             # Fire-and-forget path: open our own readonly session.
             async with get_readonly_session() as own_session:
                 await asyncio.wait_for(
-                    _warm_steps(ws_id=ws_id, ds_id=ds_id, session=own_session, result=result),
+                    _warm_steps(ws_id=ws_id, ds_id=ds_id, node_count=node_count,
+                                session=own_session, result=result),
                     timeout=DS_TIMEOUT_SECS,
                 )
     except asyncio.TimeoutError:
@@ -286,6 +291,7 @@ async def _warm_steps(
     *,
     ws_id: str,
     ds_id: str,
+    node_count: int,
     session: AsyncSession,
     result: WarmResult,
 ) -> None:
@@ -304,6 +310,26 @@ async def _warm_steps(
     cache = get_graph_cache()
 
     # ── 1. top-level nodes ────────────────────────────────────────────
+    # Serve from the materialized Postgres payload when available (large
+    # graphs) so warming a 2-3M-node graph is a Postgres read → Redis
+    # fill, never a live O(N) scan; fall back live with the payload's
+    # known total when it can't serve the page.
+    async def _compute_top_level() -> TopLevelNodesResult:
+        served, known_total = await try_serve_top_level(
+            session, engine, ds_id=ds_id, ws_id=ws_id,
+            limit=TOP_LEVEL_LIMIT, cursor=None,
+        )
+        if served is not None:
+            return served
+        return await engine.get_top_level_or_orphan_nodes(
+            entity_types=None,
+            search_query=None,
+            limit=TOP_LEVEL_LIMIT,
+            cursor=None,
+            include_child_count=True,
+            known_total_count=known_total,
+        )
+
     top_level: Optional[TopLevelNodesResult] = None
     try:
         top_level = await cache.get_or_compute(
@@ -316,13 +342,7 @@ async def _warm_steps(
                 "cursor": None,
                 "includeChildCount": True,
             },
-            compute=lambda: engine.get_top_level_or_orphan_nodes(
-                entity_types=None,
-                search_query=None,
-                limit=TOP_LEVEL_LIMIT,
-                cursor=None,
-                include_child_count=True,
-            ),
+            compute=_compute_top_level,
             model_cls=TopLevelNodesResult,
         )
         result.top_level_filled = True
@@ -331,6 +351,13 @@ async def _warm_steps(
         return
     except Exception as exc:
         result.errors.append(f"top_level:{type(exc).__name__}:{exc}")
+        return
+
+    # The aggregated/children fan-out is the expensive part of the warm —
+    # gate IT on graph size, not the whole cycle (the top-level step above
+    # is cheap for large graphs via the materialized payload).
+    if MAX_NODE_COUNT > 0 and node_count > MAX_NODE_COUNT:
+        result.skipped_reason = f"fanout_node_count_{node_count}_over_cap_{MAX_NODE_COUNT}"
         return
 
     top_urns = [n.urn for n in (top_level.nodes if top_level else [])]

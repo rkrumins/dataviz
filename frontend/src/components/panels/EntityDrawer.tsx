@@ -66,6 +66,8 @@ import { MOTION } from '@/lib/motion'
 // ============================================
 
 interface EntityDrawerProps {
+  /** Open the Lineage Lens (ego-graph overlay) on this node. */
+  onFocusConnections?: (nodeId: string) => void
   /** Callback when trace upstream is triggered */
   onTraceUp?: (nodeId: string) => void
   /** Callback when trace downstream is triggered */
@@ -91,6 +93,7 @@ type ViewMode = 'view' | 'edit' | 'json'
 // ============================================
 
 export function EntityDrawer({
+  onFocusConnections,
   onTraceUp,
   onTraceDown,
   onFullTrace,
@@ -569,6 +572,13 @@ export function EntityDrawer({
 
           {/* Secondary Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
+            {onFocusConnections && !isGhost && (
+              <ActionButton
+                icon={LucideIcons.Focus}
+                label="Focus"
+                onClick={() => onFocusConnections(selectedNode.id)}
+              />
+            )}
             <ActionButton
               icon={LucideIcons.Pin}
               label={isPinned ? "Unpin" : "Pin"}

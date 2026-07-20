@@ -437,6 +437,7 @@ export function OntologySidebar({
 
     return (
       <div
+        data-tour="schema-sidebar"
         className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative"
         style={{ width: COLLAPSED_WIDTH }}
       >
@@ -602,6 +603,7 @@ export function OntologySidebar({
   // ── Expanded state ──────────────────────────────────────────────
   return (
     <div
+      data-tour="schema-sidebar"
       className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative"
       style={{ width }}
     >

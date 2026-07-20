@@ -584,8 +584,21 @@ export function AdminAnnouncements() {
 
       {/* Loading */}
       {isLoading && (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="w-6 h-6 animate-spin text-indigo-500" />
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="rounded-xl border border-glass-border bg-canvas-elevated p-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-lg bg-black/5 dark:bg-white/10 animate-pulse shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-1/3 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                  <div className="h-3 w-2/3 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

@@ -334,7 +334,14 @@ def fake_redis_and_falkor(monkeypatch):
             announced = captured.get("cluster_announced", [("10.0.0.5", 7001)])
             host, port = announced[0]
             node = types.SimpleNamespace(host=host, port=port)
-            return types.SimpleNamespace(get_node_from_slot=lambda slot: node)
+            return types.SimpleNamespace(
+                get_node_from_slot=lambda slot: node,
+                # Full coverage by default — the coverage guard in
+                # cluster_primary_nodes refuses a gapped slot map.
+                slots_cache=captured.get(
+                    "cluster_slots_cache", {i: [node] for i in range(16384)},
+                ),
+            )
 
         def get_primaries(self):
             announced = captured.get("cluster_announced", [("10.0.0.5", 7001)])

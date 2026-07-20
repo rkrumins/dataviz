@@ -1,12 +1,26 @@
 # Data Architecture
 
+The definitive reference for how {brand} stores and moves data across its two storage layers and its Redis topology.
+
+**Who it's for:** backend developers, DBAs, and operators who need the concrete schema, cache, and Redis-role details.
+
+**What you'll find here:**
+- The full management-DB entity-relationship model
+- End-to-end query flow and the graph data model
+- Credential encryption, caching, and Redis role decoupling
+- Stats polling, the transactional outbox, migrations, and data-integrity constraints
+
+---
+
 ## Overview
 
-Synodic's data architecture spans two distinct layers:
+{brand}'s data architecture spans two distinct layers:
 1. **Management Database** (PostgreSQL — no SQLite fallback; any non-`postgresql+asyncpg://` URL is rejected at startup) -- stores platform metadata: users, workspaces, providers, ontologies, views, feature flags
-2. **Graph Databases** (FalkorDB, Neo4j, DataHub) -- stores the actual graph data: nodes, edges, lineage, containment hierarchies
+2. **Graph Databases** (FalkorDB default, Neo4j, DataHub, Spanner Graph) -- stores the actual graph data: nodes, edges, lineage, containment hierarchies
 
-The management layer is accessed through SQLAlchemy 2.0 async ORM. Graph data is accessed through the pluggable `GraphDataProvider` interface.
+The management layer is accessed through SQLAlchemy 2.0 async ORM. Graph data is accessed through the pluggable `GraphDataProvider` interface. Redis backs the cache and aggregation streams.
+
+> **See also:** [Platform Services overview](/docs/services-overview) for the service/process-role topology (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) that operates over these data layers.
 
 ---
 
@@ -36,7 +50,7 @@ erDiagram
     providers {
         text id PK "prov_*"
         text name
-        text provider_type "falkordb|neo4j|datahub|mock"
+        text provider_type "falkordb|neo4j|datahub|spanner|mock"
         text host
         int port
         text credentials "Fernet-encrypted JSON"
@@ -345,10 +359,6 @@ graph TB
 
     Stats -.->|Cached| CE
 
-    style External fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style Backend fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style MgmtDB fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Frontend fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 ### Detailed Query Flow
@@ -395,8 +405,6 @@ graph LR
 
     Node --- Edge
 
-    style Node fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Edge fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Edge Classification
@@ -426,8 +434,6 @@ graph TB
 
     Fine -.->|"Granularity<br/>Aggregation"| Coarse
 
-    style Fine fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Coarse fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **AggregatedEdgeInfo:**
@@ -461,15 +467,14 @@ graph LR
     Fernet -->|"JSON dict"| Registry
     Registry --> Provider
 
-    style Store fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Encrypt fill:#3b1f1f,stroke:#ef4444,color:#e2e8f0
-    style Use fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
 **Credential fields** (per `ConnectionCredentials` Pydantic model):
 - `username: Optional[str]`
 - `password: Optional[str]`
 - `token: Optional[str]`
+
+> **Warning:** If `CREDENTIAL_ENCRYPTION_KEY` is unset, credentials are stored as **plaintext** — a development convenience that becomes a real risk in any shared or production environment. Generate a key with `Fernet.generate_key()` and set it before storing any real provider credentials. See [ADR-008](/docs/decisions#adr-008-fernet-for-credential-encryption).
 
 **Security rules:**
 - Credentials are **never returned in API responses** (stripped from ProviderResponse, ConnectionResponse)
@@ -505,10 +510,6 @@ graph TB
     OntologyCache -.->|"Expire after 5 min"| OntologyCache
     StatsCache -.->|"Refresh on poll"| StatsCache
 
-    style ProviderCache fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style OntologyCache fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style StatsCache fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style FECache fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 | Cache | Location | Key | TTL | Invalidation |
@@ -522,6 +523,8 @@ graph TB
 ---
 
 ## Redis Topology & Decoupling
+
+> **Important:** FalkorDB hosts the graph **only**. Every operational Redis structure (streams, cache, locks, rate-limit, revocation) lives on a dedicated Redis — never on FalkorDB. This is enforced by construction, not convention ([ADR-020](/docs/decisions#adr-020-dedicated-redis-decoupled-from-falkordb-by-construction)): a FalkorDB restart or OOM can never wipe the cache or contend with graph queries.
 
 There are **two distinct Redis roles**, and they must never be confused:
 
@@ -708,9 +711,6 @@ graph TB
     Poll -->|"upsert_data_source_stats()"| StatsTable
     Poll -->|"update last_polled_at<br/>last_status"| PollCfg
 
-    style Poller fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style MgmtDB fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Providers fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Polling lifecycle:**
@@ -882,3 +882,14 @@ All tables use text UUIDs with semantic prefixes:
 | `feature_registry_meta` | Single row by convention |
 | `management_db_config` | `id = 1` always |
 | `announcement_config` | `id = 1` always |
+
+---
+
+## Related
+
+- [Architecture](/docs/architecture) — system topology and the request lifecycle
+- [Decisions](/docs/decisions) — ADRs behind the entity model, Redis roles, and outbox
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are computed and written
+- [Services Overview](/docs/services-overview) — process-role topology over these data layers
+- [Technical Debt](/docs/technical-debt) — SQLite, migrations, and outbox-consumer risks
+- [Overview](/docs/overview) — platform vision and key terms

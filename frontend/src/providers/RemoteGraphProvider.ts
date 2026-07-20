@@ -331,6 +331,16 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
+        // Total lineage degree per URN over the FULL graph. A URN absent
+        // from the response is UNKNOWN (its provider bucket failed) —
+        // callers must never treat absence as zero.
+        return await this.fetch<Record<string, { in: number; out: number }>>('/nodes/degree', {
+            method: 'POST',
+            body: JSON.stringify({ urns, edgeTypes }),
+        })
+    }
+
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>('/search', {
             method: 'POST',
@@ -443,6 +453,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             limit?: number
             sortProperty?: string | null
             cursor?: string | null
+            sortDirection?: 'asc' | 'desc'
         }
     ): Promise<GraphNode[]> {
         const params = new URLSearchParams()
@@ -451,6 +462,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
         if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
         if (options?.cursor) params.append('cursor', options.cursor)
+        if (options?.sortDirection && options.sortDirection !== 'asc') params.append('sortDirection', options.sortDirection)
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))
@@ -472,6 +484,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             includeLineageEdges?: boolean
             sortProperty?: string | null
             cursor?: string | null
+            sortDirection?: 'asc' | 'desc'
         }
     ): Promise<{
         children: GraphNode[]
@@ -488,6 +501,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (options?.includeLineageEdges === false) params.append('includeLineageEdges', 'false')
         if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
         if (options?.cursor) params.append('cursor', options.cursor)
+        if (options?.sortDirection && options.sortDirection !== 'asc') params.append('sortDirection', options.sortDirection)
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))
@@ -520,6 +534,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (query.searchQuery) params.append('searchQuery', query.searchQuery)
         if (query.cursor) params.append('cursor', query.cursor)
         if (query.includeChildCount === false) params.append('includeChildCount', 'false')
+        if (query.sortDirection && query.sortDirection !== 'asc') params.append('sortDirection', query.sortDirection)
         if (query.entityTypes?.length) {
             query.entityTypes.forEach(t => params.append('entityTypes', t))
         }
@@ -527,6 +542,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // wire shape already matches TopLevelNodesResult one-to-one.
         return await this.fetch<TopLevelNodesResult>(
             `/nodes/top-level?${params.toString()}`,
+            { timeoutMs: TIMEOUTS.TOP_LEVEL_MS },
         )
     }
 

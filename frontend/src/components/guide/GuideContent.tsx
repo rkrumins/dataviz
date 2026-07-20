@@ -4,15 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSlug from 'rehype-slug'
 import rehypeHighlight from 'rehype-highlight'
-import GithubSlugger from 'github-slugger'
-import {
-  ChevronRight,
-  ChevronLeft,
-  FileText,
-  Clock,
-  List,
-  Home,
-} from 'lucide-react'
+import { ChevronRight, FileText, Clock, Home } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDocsLoader } from '@/hooks/useDocsLoader'
 import {
@@ -25,35 +17,13 @@ import { guideMarkdownComponents } from './guideMarkdown'
 import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-
-// Strip the inline markdown that doesn't survive into a heading's rendered
-// text, so slug ids match what rehype-slug produces.
-function headingText(raw: string): string {
-  return raw
-    .replace(/`/g, '')
-    .replace(/\*\*?/g, '')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // links → label
-    .trim()
-}
-
-// Build the "On this page" rail. We replay github-slugger over *every* heading
-// in document order — the same instance rehype-slug uses — so the ids (and any
-// duplicate "-1" suffixes) match the rendered anchors exactly. We surface h2s.
-function extractHeadings(md: string): { id: string; text: string }[] {
-  const slugger = new GithubSlugger()
-  const out: { id: string; text: string }[] = []
-  let inFence = false
-  for (const raw of md.split('\n')) {
-    if (/^\s*```/.test(raw)) inFence = !inFence
-    if (inFence) continue
-    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(raw)
-    if (!m) continue
-    const text = headingText(m[2])
-    const id = slugger.slug(text)
-    if (m[1].length === 2) out.push({ id, text })
-  }
-  return out
-}
+import { extractHeadings } from '@/components/docs/reading/headings'
+import { OnThisPage } from '@/components/docs/reading/OnThisPage'
+import { Pager } from '@/components/docs/reading/Pager'
+import { ContentSkeleton } from '@/components/docs/reading/ContentSkeleton'
+import { UpdatedChip } from '@/components/docs/reading/UpdatedChip'
+import { PageFeedback } from '@/components/docs/reading/PageFeedback'
+import { guideMeta } from '@/components/docs/reading/docMeta.generated'
 
 export function GuideContent() {
   const brand = useBrand()
@@ -67,10 +37,7 @@ export function GuideContent() {
 
   useDocumentTitle(entry?.title ? `${entry.title} · Guide` : 'User Guide')
 
-  const headings = useMemo(
-    () => (content ? extractHeadings(content) : []),
-    [content],
-  )
+  const headings = useMemo(() => (content ? extractHeadings(content) : []), [content])
   const { prev, next } = entry ? getPagerNeighbors(entry.slug) : { prev: undefined, next: undefined }
 
   if (error || !entry) {
@@ -90,22 +57,7 @@ export function GuideContent() {
     )
   }
 
-  if (isLoading) {
-    return (
-      <div className="max-w-5xl mx-auto px-8 py-10 animate-pulse">
-        <div className="h-4 w-48 bg-black/5 dark:bg-white/5 rounded mb-8" />
-        <div className="h-9 w-3/4 bg-black/5 dark:bg-white/5 rounded mb-6" />
-        <div className="space-y-3">
-          <div className="h-4 w-full bg-black/5 dark:bg-white/5 rounded" />
-          <div className="h-4 w-5/6 bg-black/5 dark:bg-white/5 rounded" />
-          <div className="h-4 w-4/6 bg-black/5 dark:bg-white/5 rounded" />
-          <div className="h-24 w-full bg-black/5 dark:bg-white/5 rounded-xl mt-6" />
-          <div className="h-4 w-full bg-black/5 dark:bg-white/5 rounded mt-6" />
-          <div className="h-4 w-3/4 bg-black/5 dark:bg-white/5 rounded" />
-        </div>
-      </div>
-    )
-  }
+  if (isLoading) return <ContentSkeleton />
 
   return (
     <div className="mx-auto max-w-6xl px-6 sm:px-8 py-10">
@@ -144,9 +96,9 @@ export function GuideContent() {
               <Clock className="w-3.5 h-3.5" />
               {entry.readingTime} read
             </span>
+            <UpdatedChip date={guideMeta[entry.slug]?.updated} />
           </div>
 
-          {/* Markdown body */}
           <article className="prose-synodic">
             <ReactMarkdown
               key={location.pathname}
@@ -158,63 +110,19 @@ export function GuideContent() {
             </ReactMarkdown>
           </article>
 
-          {/* Prev / next pager */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-12 pt-8 border-t border-glass-border">
-            {prev ? (
-              <Link
-                to={`/guide/${prev.slug}`}
-                className="group flex flex-col gap-1 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3 hover:border-indigo-500/30 hover:bg-indigo-500/[0.03] transition-colors"
-              >
-                <span className="flex items-center gap-1 text-[11px] text-ink-muted">
-                  <ChevronLeft className="w-3 h-3" /> Previous
-                </span>
-                <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                  {interp(prev.title)}
-                </span>
-              </Link>
-            ) : (
-              <span />
-            )}
-            {next && (
-              <Link
-                to={`/guide/${next.slug}`}
-                className="group flex flex-col gap-1 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3 text-right hover:border-indigo-500/30 hover:bg-indigo-500/[0.03] transition-colors sm:col-start-2"
-              >
-                <span className="flex items-center justify-end gap-1 text-[11px] text-ink-muted">
-                  Next <ChevronRight className="w-3 h-3" />
-                </span>
-                <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                  {interp(next.title)}
-                </span>
-              </Link>
-            )}
-          </div>
+          <PageFeedback pageKey={`guide:${entry.slug}`} />
+
+          <Pager
+            basePath="/guide"
+            prev={prev ? { slug: prev.slug, title: interp(prev.title) } : undefined}
+            next={next ? { slug: next.slug, title: interp(next.title) } : undefined}
+          />
 
           <div className="h-16" />
         </div>
 
         {/* On this page rail */}
-        {headings.length > 1 && (
-          <aside className="hidden lg:block">
-            <div className="sticky top-6">
-              <div className="flex items-center gap-2 mb-3 text-[10px] font-bold uppercase tracking-wider text-ink-muted">
-                <List className="w-3.5 h-3.5" />
-                On this page
-              </div>
-              <nav className="space-y-1 border-l border-glass-border">
-                {headings.map((h) => (
-                  <a
-                    key={h.id}
-                    href={`#${h.id}`}
-                    className="block -ml-px pl-3 py-1 text-xs text-ink-muted border-l border-transparent hover:border-indigo-500 hover:text-ink transition-colors"
-                  >
-                    {h.text}
-                  </a>
-                ))}
-              </nav>
-            </div>
-          </aside>
-        )}
+        {headings.length > 1 && <OnThisPage headings={headings} />}
       </div>
     </div>
   )

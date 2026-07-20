@@ -23,13 +23,16 @@ import {
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
-import type { ViewLayerConfig } from '@/types/schema'
-import type { HierarchyNode, FlatTreeNode } from './types'
+import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
+import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
+import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
+import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -74,12 +77,32 @@ interface LayerColumnProps {
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
   onScroll?: () => void
-  onAssignToLayer?: (entityId: string) => void
+  onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
    *  Edit mode, so View mode stays read-only. Reorder moves the column; its nodes/edges follow. */
   onRenameLayer?: (layerId: string, name: string) => void
   onDeleteLayer?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
+  /** Effective node sort mode for this column (override → layer → view default). */
+  sortMode?: LayerNodeSortMode
+  /** True when the column deviates from the view default (sort menu indicator dot). */
+  sortIsOverride?: boolean
+  /** The view-wide default named in the sort menu's "View default" item. */
+  viewDefaultSortMode?: LayerNodeSortAlgo
+  /** Draft mode — enables the persisted sort actions (Custom order / Apply to all layers). */
+  canPersistSort?: boolean
+  /** Presence mounts the header sort menu. `mode === null` clears the layer override. */
+  onSetSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+  onApplySortToView?: (layerId: string) => void
+  /** Presence shows "Reset custom order" in the sort menu (custom-sorted layers). */
+  onResetCustomOrder?: (layerId: string) => void
+  /** Custom-order drag-reorder (draft + custom sort mode): root rows show
+   *  before/after drop bands; drops land in handleReorderNode on the canvas. */
+  reorderEnabled?: boolean
+  onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Keyboard reorder nudge (⌥↑/↓) — resolves the sibling set canvas-side so it
+   *  works for roots and children alike. */
+  onReorderNudge?: (nodeId: string, dir: 'up' | 'down') => void
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -89,6 +112,37 @@ interface LayerColumnProps {
    *  (DOM scrolling can't work — rows below the overscan window aren't
    *  mounted). Columns that don't own the URN no-op. */
   revealTarget?: { id: string; pulse: number } | null
+  /** Shared registry the column registers its geometry API into (keyed
+   *  by layer id) so the edge overlay can estimate row positions for
+   *  unmounted rows via the virtualizer's measurements cache. */
+  geometryRegistry?: Map<string, ColumnGeometryApi>
+  /** Virtualizer overscan override — the canvas shrinks it at zoom-out
+   *  (the enlarged layout viewport already supplies the extra rows). */
+  overscan?: number
+  /** Per-node lineage in/out counts (from the canvas's projected set) —
+   *  drives the density gutter AND the per-row ambient hairlines. */
+  lineageCounts?: Map<string, { in: number; out: number }>
+  /** Per-node out-of-view lineage counts (curated views) — sky cue. */
+  externalCue?: Map<string, { in: number; out: number }>
+  /** Render the per-row ambient in/out hairlines (follows the lineage-
+   *  flow master switch). Now anchored to the row box, not the overlay. */
+  showLineageIndicators?: boolean
+  /** Show the connection-density gutter (summarized edge modes only). */
+  showDensityGutter?: boolean
+  /** Anchor Rail — the selected node's off-screen partners that live in
+   *  THIS column, docked as proxy chips the edge overlay anchors to. */
+  anchorProxies?: AnchorProxyGroup
+  /** Chip click — scroll the real row into view (per-partner Frame). */
+  onProxyReveal?: (nodeId: string) => void
+  /** "+N more" overflow — open the Lineage Lens for the full list. */
+  onProxyMore?: () => void
+  /** The user scrolled this column to its true end (only fires on
+   *  columns that actually scroll) — the canvas uses it to auto-load
+   *  the next page of ROOTS one page ahead. */
+  onEndReached?: () => void
+  /** Draft mode: persist a resized width into the VIEW definition
+   *  (null clears it). Absent ⇒ resizes stay a personal override. */
+  onResizeLayer?: (layerId: string, width: number | null) => void
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -135,8 +189,29 @@ export const LayerColumn = React.memo(function LayerColumn({
   onRenameLayer,
   onDeleteLayer,
   onReorderLayer,
+  sortMode = 'alpha-asc',
+  sortIsOverride = false,
+  viewDefaultSortMode = 'alpha-asc',
+  canPersistSort = false,
+  onSetSortMode,
+  onApplySortToView,
+  onResetCustomOrder,
+  reorderEnabled = false,
+  onReorderDrop,
+  onReorderNudge,
   isHydratingInitial = false,
   revealTarget,
+  geometryRegistry,
+  overscan = 15,
+  lineageCounts,
+  externalCue,
+  showLineageIndicators = false,
+  showDensityGutter = false,
+  anchorProxies,
+  onProxyReveal,
+  onProxyMore,
+  onEndReached,
+  onResizeLayer,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -154,6 +229,36 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const shouldShowGhosts = isHydratingInitial && layerHasConfiguredSources
 
+  // Custom-order guidance state: hint dismissal is a one-time preferences flag;
+  // the end-zone hover drives the "Move to end" affordance.
+  const customOrderHintDismissed = usePreferencesStore(
+    s => s.onboardingCompletedSteps.includes('custom-order-hint'),
+  )
+  const completeOnboardingStep = usePreferencesStore(s => s.completeOnboardingStep)
+  const [endZoneHover, setEndZoneHover] = useState(false)
+
+  // Per-layer column width. Precedence: personal (localStorage)
+  // override → authored view width (layer.width, ships to all viewers)
+  // → default flex range. In DRAFT mode (onResizeLayer present) a drag
+  // writes the VIEW definition and clears any personal override so the
+  // editor sees exactly what viewers will see; outside draft, drags
+  // stay personal. Width pins exactly (min == max) so dragging is 1:1.
+  const [customWidth, setCustomWidthState] = useState<number | null>(() => {
+    try {
+      const w = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')[layer.id]
+      return typeof w === 'number' ? w : null
+    } catch { return null }
+  })
+  const persistPersonalWidth = useCallback((w: number | null) => {
+    try {
+      const all = JSON.parse(localStorage.getItem('nx-layer-widths') ?? '{}')
+      if (w === null) delete all[layer.id]
+      else all[layer.id] = w
+      localStorage.setItem('nx-layer-widths', JSON.stringify(all))
+    } catch { /* storage unavailable — session-only width */ }
+  }, [layer.id])
+  const effectiveWidth = customWidth ?? layer.width ?? null
+
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -168,6 +273,35 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
+  // dragover events are irregular and stop entirely while the pointer holds
+  // still, so scrolling directly from them stutters. Instead dragover samples
+  // the pointer (see the container's onDragOver) and this loop scrolls every
+  // frame with distance-proportional speed, stopping itself once no fresh
+  // sample has arrived for ~200ms (drag ended or left the column).
+  const dragPointerRef = useRef<{ y: number; t: number } | null>(null)
+  const dragScrollRafRef = useRef<number | null>(null)
+  const dragScrollStep = useCallback(() => {
+    const el = scrollContainerRef.current
+    const sample = dragPointerRef.current
+    if (!el || !sample || performance.now() - sample.t > 200) {
+      dragScrollRafRef.current = null
+      dragPointerRef.current = null
+      return
+    }
+    const rect = el.getBoundingClientRect()
+    const zone = 48
+    if (sample.y < rect.top + zone) {
+      el.scrollTop -= Math.ceil((rect.top + zone - sample.y) / 4)
+    } else if (sample.y > rect.bottom - zone) {
+      el.scrollTop += Math.ceil((sample.y - (rect.bottom - zone)) / 4)
+    }
+    dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
+  }, [])
+  useEffect(() => () => {
+    if (dragScrollRafRef.current != null) cancelAnimationFrame(dragScrollRafRef.current)
+  }, [])
 
   const toggleSearchNode = useCallback((nodeId: string) => {
     setActiveSearchNodes(prev => {
@@ -435,6 +569,13 @@ export const LayerColumn = React.memo(function LayerColumn({
     return map
   }, [flatTree])
 
+  // Anchor Rail chip labels — the proxy's row lives in THIS column's
+  // flat tree, so the display name resolves locally (no extra plumbing).
+  const proxyLabel = useCallback((nodeId: string): string => {
+    const idx = nodeToFlatIndexMap.get(nodeId)
+    return idx !== undefined ? flatTree[idx].node.name : nodeId
+  }, [nodeToFlatIndexMap, flatTree])
+
   // ── Animation batching: track which items are newly appeared (cap at 20) ──
   const prevFlatTreeKeysRef = useRef<Set<string>>(new Set())
   const newItemKeys = useMemo(() => {
@@ -485,7 +626,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       if (item.isLoadMore) return rowHeights.loadMore
       return item.depth === 0 ? rowHeights.root : rowHeights.child
     },
-    overscan: 15,
+    overscan,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
@@ -578,9 +719,61 @@ export const LayerColumn = React.memo(function LayerColumn({
     return () => clearTimeout(timer)
   }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
 
+  // ── Expansion reveal ────────────────────────────────────────────────
+  // When a node is expanded, its subtree materializes BELOW it — if the
+  // parent sits near the bottom of the column's viewport (expanding the
+  // last visible row is the common case), every new row lands below the
+  // fold and the expansion reads as a silent no-op ("I expanded and
+  // nothing loaded"). Watch for newly-expanded ids owned by THIS column
+  // and nudge the first row of the new subtree into view once it exists
+  // in the flat tree (skeleton or real child). align:'auto' scrolls the
+  // minimum distance and no-ops when the row is already visible, so
+  // mid-viewport expansions never jump. Pending reveals expire so a
+  // slow child load can't hijack the user's scroll seconds later.
+  const prevExpandedRef = useRef<Set<string>>(expandedNodes)
+  const pendingExpandRevealRef = useRef<Map<string, number>>(new Map())
+  useEffect(() => {
+    const prev = prevExpandedRef.current
+    prevExpandedRef.current = expandedNodes
+    const pending = pendingExpandRevealRef.current
+    expandedNodes.forEach(id => {
+      if (!prev.has(id) && nodeToFlatIndexMap.has(id)) {
+        pending.set(id, Date.now() + 2000)
+      }
+    })
+    pending.forEach((deadline, id) => {
+      if (!expandedNodes.has(id) || deadline < Date.now()) {
+        pending.delete(id)
+        return
+      }
+      const idx = nodeToFlatIndexMap.get(id)
+      if (idx === undefined) return
+      const parentDepth = flatTree[idx]?.depth ?? 0
+      const next = flatTree[idx + 1]
+      // Subtree rows haven't materialized yet — keep waiting (flatTree
+      // changes re-fire this effect).
+      if (!next || next.depth <= parentDepth) return
+      pending.delete(id)
+      virtualizer.scrollToIndex(idx + 1, { align: 'auto', behavior: 'smooth' })
+    })
+  }, [expandedNodes, flatTree, nodeToFlatIndexMap, virtualizer])
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const count = navigableItems.length
     if (count === 0) return
+    // ⌥↑ / ⌥↓ — keyboard reorder for any node of a custom-sorted draft layer
+    // (roots AND children — the canvas nudge resolves the sibling set). The
+    // accessible sibling of the drag bands; focus follows the moved node via
+    // pendingFocusNodeIdRef once the re-sorted tree lands.
+    if (e.altKey && reorderEnabled && onReorderNudge && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const item = navigableItems[focusIndex]
+      if (item && !item.node.isLogical) {
+        e.preventDefault()
+        pendingFocusNodeIdRef.current = item.node.id
+        onReorderNudge(item.node.id, e.key === 'ArrowUp' ? 'up' : 'down')
+        return
+      }
+    }
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
@@ -616,10 +809,31 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderNudge])
 
-  // Get total items at current level
-  const visibleCount = flatTree.length
+  // After a keyboard reorder, re-point focus at the moved node's new row
+  // (its index shifts by the displaced neighbor's visible subtree size).
+  const pendingFocusNodeIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const id = pendingFocusNodeIdRef.current
+    if (!id) return
+    const idx = navigableItems.findIndex(it => it.node.id === id)
+    if (idx >= 0) {
+      setFocusIndex(idx)
+      pendingFocusNodeIdRef.current = null
+    }
+  }, [navigableItems])
+
+  // Entity rows currently in the tree (expanded children included).
+  // Auxiliary rows — search boxes, skeletons, load-more, failed
+  // placeholders — are UI, not entities: counting them pushed the header
+  // past the loaded total ("402 / 400"). Entity rows are a strict subset
+  // of loaded entities, so X ≤ Y holds by construction.
+  const visibleCount = useMemo(
+    () => flatTree.reduce((acc, it) =>
+      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore ? 0 : 1), 0),
+    [flatTree],
+  )
 
   // ── Overflow chips: track scroll position so we can show accurate
   // "↑ N above / ↓ N below" indicators that respond to user scroll. ─────────
@@ -674,10 +888,123 @@ export const LayerColumn = React.memo(function LayerColumn({
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
 
+  // Periphery summary — connections from visible entities to partners
+  // beyond THIS column's fold, computed by the edge overlay. Merged into
+  // the "N above/below" chips so rows and connections read as one
+  // labeled statement ("↑ 97 rows · 306 connections") instead of two
+  // unlabeled numbers in different units floating near each other.
+  const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
+
+  // ── End-reached sentinel (roots auto-paging) ─────────────────────────
+  // Fires when the user scrolls this column to its true end. Guards, in
+  // the order that killed the historical auto-load pump:
+  // - only on columns that ACTUALLY scroll (a short column is always "at
+  //   its end" and would otherwise drain every root page on load);
+  // - latched per flatTree.length, re-armed only when content grows;
+  // - 300ms dwell so momentum-scrolling through doesn't fire.
+  const endFiredForLenRef = useRef(-1)
+  useEffect(() => {
+    if (!onEndReached) return
+    if (flatTree.length === 0 || overflowCounts.below !== 0) return
+    if (endFiredForLenRef.current === flatTree.length) return
+    const el = scrollContainerRef.current
+    if (!el || el.scrollHeight <= el.clientHeight + 10) return
+    const t = setTimeout(() => {
+      endFiredForLenRef.current = flatTree.length
+      onEndReached()
+    }, 300)
+    return () => clearTimeout(t)
+  }, [onEndReached, overflowCounts.below, flatTree.length])
+
   const scrollToFlatIndex = useCallback((index: number, align: 'start' | 'end') => {
     if (index < 0 || index >= flatTree.length) return
     virtualizer.scrollToIndex(index, { align, behavior: 'smooth' })
   }, [virtualizer, flatTree.length])
+
+  // ── Density gutter buckets ────────────────────────────────────────────────
+  // Heaviest in/out volume in THIS column — the reference for the ambient
+  // hairline intensity (log-scaled) so median rows fade and hubs stand
+  // out. Per-column and across ALL rows so intensity is stable regardless
+  // of which rows are scrolled into view. 0 = no lineage / indicators off.
+  const lineageLogMax = useMemo(() => {
+    if (!showLineageIndicators || !lineageCounts || lineageCounts.size === 0) return 0
+    let maxCount = 0
+    for (const c of lineageCounts.values()) maxCount = Math.max(maxCount, c.in, c.out)
+    return Math.log2(1 + Math.max(1, maxCount))
+  }, [showLineageIndicators, lineageCounts])
+
+  // Where does connection mass live across the WHOLE column (not just the
+  // viewport)? Bucket the flat tree by index; each bucket sums the in+out
+  // lineage counts of its rows. Normalized 0..1 for the heat strip.
+  const densityBuckets = useMemo(() => {
+    if (!showDensityGutter || !lineageCounts || lineageCounts.size === 0 || flatTree.length === 0) return null
+    // Too few rows to have off-screen mass worth mapping.
+    if (flatTree.length < 24) return null
+    const n = Math.min(48, flatTree.length)
+    const vals = new Array<number>(n).fill(0)
+    flatTree.forEach((item, idx) => {
+      if (item.isSkeleton || item.isSearchBox || item.isFailed || item.isLoadMore) return
+      const c = lineageCounts.get(item.node.id)
+      if (!c) return
+      vals[Math.min(n - 1, Math.floor((idx / flatTree.length) * n))] += c.in + c.out
+    })
+    const max = Math.max(...vals)
+    if (max <= 0) return null
+    const normalized = vals.map(v => v / max)
+    // Contrast gate: a heatmap with no contrast is just a stripe. When
+    // density is near-uniform (most buckets close to the max), the strip
+    // carries no information — hide it entirely rather than render a
+    // solid bar that reads as a broken border.
+    const hot = normalized.filter(v => v > 0.55).length
+    if (hot / normalized.length > 0.6) return null
+    return normalized
+  }, [showDensityGutter, lineageCounts, flatTree])
+
+  // Click on the gutter → jump the column to the corresponding tree region.
+  const handleGutterClick = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    if (rect.height <= 0 || flatTree.length === 0) return
+    const fraction = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+    scrollToFlatIndex(Math.min(flatTree.length - 1, Math.floor(fraction * flatTree.length)), 'start')
+  }, [flatTree.length, scrollToFlatIndex])
+
+  // ── Geometry API registration ─────────────────────────────────────────────
+  // Exposes estimated row rects to the edge overlay WITHOUT mounting rows.
+  // Offsets come from the virtualizer's measurements cache (exact for
+  // measured rows, estimate-derived for unmounted ones). The lookup map is
+  // kept fresh via a ref so registration happens once per column mount
+  // (`virtualizer` is instance-stable).
+  const nodeToFlatIndexMapRef = useRef(nodeToFlatIndexMap)
+  nodeToFlatIndexMapRef.current = nodeToFlatIndexMap
+  useEffect(() => {
+    if (!geometryRegistry) return
+    // Matches the `py-2` on the totalSize wrapper below — virtualizer
+    // offsets are relative to the padded content box.
+    const LIST_PAD_TOP = 8
+    const api: ColumnGeometryApi = {
+      hasNode: (nodeId) => nodeToFlatIndexMapRef.current.has(nodeId),
+      getNodeRect: (nodeId) => {
+        const el = scrollContainerRef.current
+        if (!el) return null
+        const idx = nodeToFlatIndexMapRef.current.get(nodeId)
+        if (idx === undefined) return null
+        const m = virtualizer.measurementsCache[idx]
+        if (!m) return null
+        const rect = el.getBoundingClientRect()
+        // Canvas-zoom compensation: virtualizer offsets are unscaled local
+        // px while getBoundingClientRect returns scaled viewport px.
+        const scale = el.clientHeight > 0 ? rect.height / el.clientHeight : 1
+        return {
+          top: rect.top + (LIST_PAD_TOP + m.start - el.scrollTop) * scale,
+          height: m.size * scale,
+          left: rect.left,
+          right: rect.right,
+        }
+      },
+    }
+    geometryRegistry.set(layer.id, api)
+    return () => { geometryRegistry.delete(layer.id) }
+  }, [geometryRegistry, layer.id, virtualizer])
 
   return (
     <motion.div
@@ -689,12 +1016,79 @@ export const LayerColumn = React.memo(function LayerColumn({
         // inherited CSS property, so without this explicit `auto` chevrons,
         // headers, and node cards would inherit `none` and become inert.
         "flex flex-col relative group/column transition-all duration-300 pointer-events-auto",
-        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1 min-w-[320px] max-w-[480px]"
+        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1"
       )}
+      style={!isCollapsed ? { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 } : undefined}
       layout
     >
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
+
+      {/* ── Resize handle — drag the column's right edge (260–560px);
+          double-click resets to the default width. Width persists per
+          layer across sessions. ── */}
+      {!isCollapsed && (
+        <div
+          data-canvas-interactive
+          onPointerDown={(e) => {
+            e.preventDefault()
+            const startX = e.clientX
+            const startW = effectiveWidth ?? (e.currentTarget.parentElement?.getBoundingClientRect().width ?? 320)
+            let latest = startW
+            const onMove = (ev: PointerEvent) => {
+              latest = Math.round(Math.min(560, Math.max(260, startW + ev.clientX - startX)))
+              setCustomWidthState(latest)  // live visual only — persisted once, on release
+            }
+            const onUp = () => {
+              window.removeEventListener('pointermove', onMove)
+              window.removeEventListener('pointerup', onUp)
+              const w = Math.round(latest)
+              if (onResizeLayer) {
+                // Draft: the width becomes part of the VIEW definition;
+                // drop any personal override so the editor sees what
+                // viewers will see.
+                persistPersonalWidth(null)
+                setCustomWidthState(null)
+                onResizeLayer(layer.id, w)
+              } else {
+                persistPersonalWidth(w)
+              }
+            }
+            window.addEventListener('pointermove', onMove)
+            window.addEventListener('pointerup', onUp)
+          }}
+          onDoubleClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
+          title="Drag to resize this layer · double-click to reset"
+          className="absolute -right-1 top-0 bottom-0 w-2 z-30 cursor-col-resize opacity-0 group-hover/column:opacity-100 transition-opacity"
+        >
+          <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[3px] rounded-full bg-accent-lineage/40" />
+        </div>
+      )}
+
+      {/* ── Custom-width chip — visible (on column hover) whenever this
+          layer has a resized width. Names the current width and offers
+          the one-click reset, so the double-click gesture on the handle
+          doesn't have to be discovered to get back to defaults. ── */}
+      {!isCollapsed && effectiveWidth !== null && (
+        <button
+          type="button"
+          data-canvas-interactive
+          onClick={() => {
+            persistPersonalWidth(null)
+            setCustomWidthState(null)
+            onResizeLayer?.(layer.id, null)
+          }}
+          title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
+          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 backdrop-blur-sm border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
+        >
+          <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
+          Reset width · {effectiveWidth}px
+        </button>
+      )}
 
       {/* Layer Header - Glass morphism style + drag target (4.3).
           When collapsed, the header is the only content in the column; it
@@ -737,7 +1131,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
-          if (entityId && onAssignToLayer) onAssignToLayer(entityId)
+          if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
       >
         {/* Drop hint overlay */}
@@ -817,10 +1211,19 @@ export const LayerColumn = React.memo(function LayerColumn({
                 {layer.name}
               </span>
               <div
-                className="px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
+                className="relative px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
+                title={sortIsOverride ? `Sorted: ${SORT_MODE_LABELS[sortMode]}` : undefined}
               >
                 {totalCount}
+                {/* Sort-override indicator survives collapse, so a curated
+                    arrangement doesn't silently vanish from view. */}
+                {sortIsOverride && (
+                  <span
+                    className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ring-2 ring-canvas"
+                    style={{ backgroundColor: layer.color }}
+                  />
+                )}
               </div>
               <button
                 onClick={(e) => {
@@ -888,13 +1291,41 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <span className="text-[10px] font-semibold tracking-wide">Loading…</span>
                   </motion.div>
                 ) : (
-                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]">
+                  <div
+                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]"
+                    title={`${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
+                  >
                     <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
                       {visibleCount}
                     </span>
                     <span className="text-[9px] text-ink-muted/60">/</span>
                     <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
                   </div>
+                )}
+                {/* Curated-order signal — always visible (never hover-gated) so
+                    read-only consumers know the arrangement is deliberate. */}
+                {sortMode === 'custom' && (
+                  <div
+                    className="flex items-center gap-1 px-2 py-1 rounded-full"
+                    style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
+                    title="This layer uses a curated custom order"
+                  >
+                    <LucideIcons.ListOrdered className="w-3 h-3" />
+                    <span className="text-[10px] font-semibold">Custom</span>
+                  </div>
+                )}
+                {onSetSortMode && (
+                  <LayerSortMenu
+                    layerName={layer.name}
+                    layerColor={layer.color}
+                    mode={sortMode}
+                    isOverride={sortIsOverride}
+                    viewDefault={viewDefaultSortMode}
+                    canPersist={canPersistSort}
+                    onSelectMode={(mode) => onSetSortMode(layer.id, mode)}
+                    onApplyToView={() => onApplySortToView?.(layer.id)}
+                    onResetCustomOrder={onResetCustomOrder ? () => onResetCustomOrder(layer.id) : undefined}
+                  />
                 )}
                 {onAddToLayer && (
                   <button
@@ -969,7 +1400,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               >
                 <button
                   onClick={() => handleBreadcrumbClick(null)}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-black/[0.04] hover:bg-black/[0.08] border border-black/[0.08] dark:bg-white/[0.06] dark:hover:bg-white/[0.12] dark:border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
                 >
                   <LucideIcons.Home className="w-3 h-3" />
                   <span className="text-[10px] font-medium">Root</span>
@@ -979,7 +1410,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
                     <button
                       onClick={() => handleBreadcrumbClick(node)}
-                      className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
+                      className="px-2 py-1 rounded-lg bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.06] dark:bg-white/[0.04] dark:hover:bg-white/[0.08] dark:border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
                       title={node.name}
                     >
                       {node.name}
@@ -1002,60 +1433,269 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
-          {/* Top overflow chip — shown when items are clipped above the viewport.
-              Lives outside the scroll container so it stays anchored to the
-              viewport edge instead of scrolling with content. */}
+          {/* ── Periphery scrims — "content continues" affordances at the
+              column edges. A gradient veil lets the boundary rows fade
+              out beneath it (the veil IS the signal that more follows),
+              and one compact centered label states exactly how much:
+              "↑ N more · M connections". Scrims float, so scrolling
+              never shifts layout, and unlike the old floating pill the
+              occlusion reads as an intentional fade — never as chrome
+              covering a card. Click scrolls the column. ── */}
           <AnimatePresence>
-            {overflowCounts.above > 0 && (
-              <motion.button
-                key="above"
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
+            {(overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
+              <motion.div
+                key="periphery-top"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(0, 'start')}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title="Scroll to top"
+                className="absolute top-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronUp className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.above} above</span>
-              </motion.button>
+                <div className="h-12 bg-gradient-to-b from-canvas via-canvas/70 to-transparent" />
+                <InfoTooltip
+                  side="bottom"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.above.toLocaleString()} more row{overflowCounts.above === 1 ? '' : 's'} above
+                      </p>
+                      {(periphery?.upEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            entities on screen lead up there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.upPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.upEntities > periphery!.upPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.upEntities - periphery!.upPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(0, 'start')}
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronUp className="w-3 h-3" />
+                    {overflowCounts.above > 0 && (
+                      <span className="tabular-nums">{overflowCounts.above.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.upEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
+              </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Bottom overflow chip — shown when items are clipped below the viewport. */}
+          {/* Bottom periphery scrim — mirror of the top. */}
           <AnimatePresence>
-            {overflowCounts.below > 0 && (
-              <motion.button
-                key="below"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
+            {(overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
+              <motion.div
+                key="periphery-bottom"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-                onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10 shadow-md text-[11px] font-medium pointer-events-auto hover:scale-105 active:scale-95 transition-transform"
-                style={{
-                  backgroundColor: `${layer.color}22`,
-                  color: layer.color,
-                  boxShadow: `0 4px 14px ${layer.color}25`,
-                }}
-                title="Scroll to bottom"
+                className="absolute bottom-0 inset-x-0 z-20 pointer-events-none"
               >
-                <LucideIcons.ChevronDown className="w-3 h-3" />
-                <span className="tabular-nums">{overflowCounts.below} below</span>
-              </motion.button>
+                <div className="h-12 bg-gradient-to-t from-canvas via-canvas/70 to-transparent" />
+                <InfoTooltip
+                  side="top"
+                  content={
+                    <div>
+                      <p className="font-semibold mb-1">
+                        {overflowCounts.below.toLocaleString()} more row{overflowCounts.below === 1 ? '' : 's'} below
+                      </p>
+                      {(periphery?.downEdges ?? 0) > 0 && (
+                        <>
+                          <p className="text-ink-muted">
+                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            entities on screen lead down there:
+                          </p>
+                          <div className="mt-1">
+                            {periphery!.downPartnerIds.map(id => (
+                              <div key={id} className="flex items-center gap-1.5 min-w-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: layer.color }} />
+                                <span className="truncate text-ink-muted">{proxyLabel(id)}</span>
+                              </div>
+                            ))}
+                            {periphery!.downEntities > periphery!.downPartnerIds.length && (
+                              <p className="text-ink-muted/70 mt-0.5">
+                                +{(periphery!.downEntities - periphery!.downPartnerIds.length).toLocaleString()} more entities
+                              </p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
+                    </div>
+                  }
+                >
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                  >
+                    <LucideIcons.ChevronDown className="w-3 h-3" />
+                    {overflowCounts.below > 0 && (
+                      <span className="tabular-nums">{overflowCounts.below.toLocaleString()} more</span>
+                    )}
+                    {(periphery?.downEdges ?? 0) > 0 && (
+                      <>
+                        {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
+                        <span className="tabular-nums opacity-80">
+                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </InfoTooltip>
+              </motion.div>
             )}
           </AnimatePresence>
+
+          {/* ── Anchor Rail — docked stand-ins for the SELECTED node's
+              off-screen partners that live in this column. Real DOM
+              chips: the edge overlay anchors focus edges to these rects,
+              so "where does this go" always has a visible, named
+              destination — never an estimated position. Click = scroll
+              the real row into view (per-partner Frame); "+N more"
+              routes to the Lineage Lens for the complete searchable
+              list. Offset below/above the count chips so the two
+              surfaces never collide. ── */}
+          <AnimatePresence>
+            {anchorProxies && anchorProxies.proxies.length > 0 && (() => {
+              const upProxies = anchorProxies.proxies.filter(p => p.direction === 'up')
+              const downProxies = anchorProxies.proxies.filter(p => p.direction === 'down')
+              const renderChip = (p: typeof anchorProxies.proxies[number]) => (
+                <button
+                  key={p.nodeId}
+                  id={`anchor-proxy-${p.nodeId}`}
+                  type="button"
+                  data-canvas-interactive
+                  onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
+                  title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
+                  style={{ borderLeft: `2px solid ${p.color}` }}
+                >
+                  {p.direction === 'up'
+                    ? <LucideIcons.ChevronUp className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
+                    : <LucideIcons.ChevronDown className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />}
+                  <span className="truncate">{proxyLabel(p.nodeId)}</span>
+                  {p.count > 1 && (
+                    <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted/70">×{p.count}</span>
+                  )}
+                </button>
+              )
+              const moreChip = anchorProxies.moreCount > 0 && onProxyMore && (
+                <button
+                  key="anchor-more"
+                  type="button"
+                  data-canvas-interactive
+                  onClick={(e) => { e.stopPropagation(); onProxyMore() }}
+                  title="Every connection of the selected entity, grouped and searchable"
+                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                >
+                  <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
+                  +{anchorProxies.moreCount} more · Open lens
+                </button>
+              )
+              return (
+                <motion.div
+                  key="anchor-rail"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
+                  className="pointer-events-none"
+                >
+                  {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
+                    <div className="absolute top-12 left-3 right-3 z-30 flex flex-col gap-1">
+                      {upProxies.map(renderChip)}
+                      {downProxies.length === 0 && moreChip}
+                    </div>
+                  )}
+                  {(downProxies.length > 0) && (
+                    <div className="absolute bottom-12 left-3 right-3 z-30 flex flex-col gap-1">
+                      {downProxies.map(renderChip)}
+                      {moreChip}
+                    </div>
+                  )}
+                </motion.div>
+              )
+            })()}
+          </AnimatePresence>
+
+          {/* Density gutter — a slim heat strip on the column's right edge
+              showing where connection mass lives across the FULL scroll
+              range (the budget/stub modes summarize edges, this shows
+              where the summarized mass is). Click a hot zone to jump. */}
+          {densityBuckets && (
+            <button
+              type="button"
+              data-canvas-interactive
+              onClick={handleGutterClick}
+              title="Connection density across this column — click to jump"
+              className="absolute right-[2px] top-8 bottom-8 w-[4px] z-20 pointer-events-auto cursor-pointer flex flex-col gap-[1px] opacity-60 hover:opacity-100 transition-opacity"
+            >
+              {densityBuckets.map((v, i) => (
+                <span
+                  key={i}
+                  className="flex-1 w-full rounded-full"
+                  style={{
+                    // Floor at 0.15: cool zones stay invisible; only real
+                    // concentrations mark the strip.
+                    backgroundColor: v > 0.15
+                      ? `rgba(99, 102, 241, ${(0.15 + Math.pow(v, 1.5) * 0.65).toFixed(3)})`
+                      : 'transparent',
+                  }}
+                />
+              ))}
+            </button>
+          )}
 
           <div
             ref={scrollContainerRef}
             onScroll={handleScroll}
             onKeyDown={handleKeyDown}
+            onDragOver={(e) => {
+              // Auto-scroll while an entity drag hovers near the column's
+              // vertical edges. dragover only refreshes the pointer sample;
+              // the rAF loop below applies smooth, distance-proportional
+              // scrolling and self-terminates ~200ms after events stop
+              // (drop, cancel, or the pointer leaving the column).
+              // Deliberately does NOT preventDefault — drop acceptance stays
+              // with the row targets.
+              if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+              dragPointerRef.current = { y: e.clientY, t: performance.now() }
+              if (dragScrollRafRef.current == null) {
+                dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
+              }
+            }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
               // Clicks landing on a node card are handled by the card's own
@@ -1072,6 +1712,28 @@ export const LayerColumn = React.memo(function LayerColumn({
           {/* Subtle top fade for scroll indication — slimmer now that the
               floating chip handles the indicator role. */}
           <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
+
+          {/* First-use guidance for custom order — a dismissible caption in the
+              ghost-stack style, shown only while the layer is reorderable and
+              until the user dismisses it (preferences-flagged, once ever). */}
+          {reorderEnabled && !customOrderHintDismissed && flatTree.length > 0 && (
+            <div
+              className="flex items-center gap-2 px-3 py-2 mx-1 mt-2 mb-1 rounded-lg backdrop-blur-sm border"
+              style={{ backgroundColor: `${layer.color}10`, borderColor: `${layer.color}25` }}
+            >
+              <LucideIcons.ListOrdered className="w-3.5 h-3.5 flex-shrink-0" style={{ color: layer.color }} />
+              <span className="text-[11px] font-medium tracking-wide flex-1" style={{ color: layer.color }}>
+                Drag cards to arrange · ⌥↑↓ to nudge
+              </span>
+              <button
+                onClick={(e) => { e.stopPropagation(); completeOnboardingStep('custom-order-hint') }}
+                className="p-0.5 rounded text-ink-muted hover:text-ink transition-colors flex-shrink-0"
+                title="Got it"
+              >
+                <LucideIcons.X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
 
           {flatTree.length === 0 ? (
             <AnimatePresence mode="wait" initial={false}>
@@ -1280,6 +1942,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
                         onLoadMore={() => handleLoadMore(item.node.id)}
+                        // One-page-ahead auto-load — OFF in Isolate/Hide
+                        // filter modes, where freshly-loaded children are
+                        // filtered out of the tree and the pinned row
+                        // would drain the parent (the historical pump).
+                        autoLoad={matchUrnSet.size === 0 || canvasFilterMode === 'highlight'}
                       />
                     </div>
                   )
@@ -1323,11 +1990,54 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
+                        reorderEnabled={reorderEnabled}
+                        onReorderDrop={onReorderDrop}
+                        lineageIn={showLineageIndicators ? (lineageCounts?.get(node.id)?.in ?? 0) : 0}
+                        lineageOut={showLineageIndicators ? (lineageCounts?.get(node.id)?.out ?? 0) : 0}
+                        lineageIntensityIn={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.in ?? 0)) / lineageLogMax : 0}
+                        lineageIntensityOut={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.out ?? 0)) / lineageLogMax : 0}
+                        externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
+                        externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />
                     </div>
                   </div>
                 )
               })}
+            </div>
+          )}
+
+          {/* Drop-to-end zone — reaching the last row's bottom 30% band is a
+              precision trap; any drop on the space below the list appends to
+              the end of the custom arrangement instead of being dead. */}
+          {reorderEnabled && flatTree.length > 0 && (
+            <div
+              className={cn(
+                "mx-1 my-1 h-12 rounded-xl border border-dashed flex items-center justify-center transition-colors duration-150",
+                endZoneHover ? "border-accent-lineage/60 bg-accent-lineage/5" : "border-transparent",
+              )}
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (!endZoneHover) setEndZoneHover(true)
+              }}
+              onDragLeave={() => setEndZoneHover(false)}
+              onDrop={(e) => {
+                const draggedId = e.dataTransfer.getData('text/x-entity-id')
+                setEndZoneHover(false)
+                if (!draggedId || !onReorderDrop) return
+                e.preventDefault()
+                e.stopPropagation()
+                const lastRoot = [...nodes].reverse().find(n => !n.isLogical)
+                if (lastRoot && lastRoot.id !== draggedId) onReorderDrop(draggedId, lastRoot.id, 'after')
+              }}
+            >
+              {endZoneHover && (
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-accent-lineage">
+                  <LucideIcons.CornerDownRight className="w-3 h-3" />
+                  Move to end
+                </span>
+              )}
             </div>
           )}
 

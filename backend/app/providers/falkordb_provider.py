@@ -67,6 +67,69 @@ async def _completed(value):
     return value
 
 
+# Bulk-CREATE operator knobs — defaults shared with the class attributes.
+_BULK_CREATE_BATCH_DEFAULT = 10000
+_BULK_CREATE_TIMEOUT_DEFAULT = 60.0
+# Parsed-knob memo keyed by the RAW env values, so the parse (and its
+# operator-tuning log line) happens once per process per configuration —
+# not once per provider construction, which at fleet scale (discovery
+# transients, cache rebuilds) repeated the same line on every request.
+_BULK_CREATE_KNOBS_CACHE: dict = {}
+
+
+def _resolve_bulk_create_knobs() -> Tuple[int, float]:
+    """(batch_size, timeout_s) for bulk-CREATE, env-tuned with clamps.
+
+    Batch size: FalkorDB best practice is 10k-50k rows per UNWIND; the env
+    dial lets operators shrink it where the default monopolizes the single
+    Cypher thread under concurrent trace load. Timeout: bulk writes need more
+    headroom than incremental MERGEs; ceiling stays below the server's
+    TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or FalkorDB rejects the
+    per-query timeout and the write becomes unkillable server-side.
+    """
+    raw = (
+        os.getenv("FALKORDB_BULK_CREATE_BATCH_SIZE"),
+        os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S"),
+    )
+    if raw in _BULK_CREATE_KNOBS_CACHE:
+        return _BULK_CREATE_KNOBS_CACHE[raw]
+
+    size = _BULK_CREATE_BATCH_DEFAULT
+    if raw[0] is not None:
+        try:
+            size = max(100, min(50000, int(raw[0])))
+            if size != _BULK_CREATE_BATCH_DEFAULT:
+                logger.info(
+                    "FALKORDB_BULK_CREATE_BATCH_SIZE=%s (clamped to %d, "
+                    "default %d): operator-tuned bulk-CREATE batch size.",
+                    raw[0], size, _BULK_CREATE_BATCH_DEFAULT,
+                )
+        except ValueError:
+            logger.warning(
+                "FALKORDB_BULK_CREATE_BATCH_SIZE=%r is not an integer; "
+                "falling back to default %d.", raw[0], _BULK_CREATE_BATCH_DEFAULT,
+            )
+
+    timeout_s = _BULK_CREATE_TIMEOUT_DEFAULT
+    if raw[1] is not None:
+        try:
+            timeout_s = max(5.0, min(170.0, float(raw[1])))
+            if timeout_s != _BULK_CREATE_TIMEOUT_DEFAULT:
+                logger.info(
+                    "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
+                    "default %.1fs): operator-tuned bulk-CREATE write timeout.",
+                    raw[1], timeout_s, _BULK_CREATE_TIMEOUT_DEFAULT,
+                )
+        except ValueError:
+            logger.warning(
+                "FALKORDB_BULK_CREATE_TIMEOUT_S=%r is not a float; "
+                "falling back to default %.1fs.", raw[1], _BULK_CREATE_TIMEOUT_DEFAULT,
+            )
+
+    _BULK_CREATE_KNOBS_CACHE[raw] = (size, timeout_s)
+    return _BULK_CREATE_KNOBS_CACHE[raw]
+
+
 def _sanitize_label(s: str) -> str:
     """Sanitize string for use as FalkorDB label/relationship type (alphanumeric + underscore)."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
@@ -83,34 +146,89 @@ def _sanitize_label(s: str) -> str:
 #
 # A keyset is only correct on a UNIQUE sort key, so the cursor carries the urn
 # (which is unique) as a tiebreaker and the queries order by (displayName, urn).
+#
+# Direction: the cursor also records the sort direction it was minted under
+# ("d", absent = "asc" for cursors minted before direction support). A page
+# request whose direction disagrees with its cursor's is a client bug —
+# continuing would silently skip or repeat rows — so providers reject the
+# mismatch (ValueError → 400 at the endpoint).
 _CURSOR_PREFIX = "k1:"
 
 
-def _encode_keyset_cursor(display_name: Optional[str], urn: str) -> str:
-    payload = json.dumps({"n": display_name or "", "u": urn}, separators=(",", ":"))
-    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+class CursorMismatchError(ValueError):
+    """A pagination cursor (or sort_direction) that cannot serve the request —
+    minted under the other direction, unreadable, or malformed. Endpoints map
+    this (and only this) to HTTP 400; any other ValueError stays a 500."""
+
+
+def _validate_sort_direction(sort_direction: str) -> str:
+    direction = (sort_direction or "asc").lower()
+    if direction not in ("asc", "desc"):
+        raise CursorMismatchError(f"invalid sort_direction {sort_direction!r} (expected 'asc' or 'desc')")
+    return direction
+
+
+def _encode_keyset_cursor(display_name: Optional[str], urn: str, sort_direction: str = "asc") -> str:
+    payload: Dict[str, Any] = {"n": display_name or "", "u": urn}
+    if sort_direction == "desc":
+        payload["d"] = "desc"
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
     return _CURSOR_PREFIX + encoded
 
 
-def _decode_keyset_cursor(cursor: str) -> Tuple[str, Optional[str]]:
+def _decode_keyset_cursor(cursor: str, sort_direction: str = "asc") -> Tuple[str, Optional[str]]:
     """(displayName, urn). A legacy displayName-only cursor yields urn=None, so a
     client that is mid-pagination across a deploy keeps working (with the old,
-    lossy semantics) instead of erroring."""
+    lossy semantics) instead of erroring.
+
+    Raises CursorMismatchError when the cursor was minted under a different
+    sort direction than the one now requested (absent "d" = asc)."""
     if not cursor.startswith(_CURSOR_PREFIX):
+        if sort_direction == "desc":
+            raise CursorMismatchError("cursor direction mismatch: legacy asc cursor used with sort_direction=desc")
         return cursor, None
     raw = cursor[len(_CURSOR_PREFIX):]
     try:
         padded = raw + "=" * (-len(raw) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
-        return str(data.get("n", "")), data.get("u") or None
     except Exception:  # pragma: no cover - corrupt cursor, fall back to prefix scan
+        if sort_direction == "desc":
+            raise CursorMismatchError("cursor direction mismatch: unreadable cursor used with sort_direction=desc")
         return cursor, None
+    cursor_direction = data.get("d") or "asc"
+    if cursor_direction != sort_direction:
+        raise CursorMismatchError(
+            f"cursor direction mismatch: cursor was minted for {cursor_direction!r}, "
+            f"request asked for {sort_direction!r}"
+        )
+    return str(data.get("n", "")), data.get("u") or None
 
 
 def _keyset_sort_key(node: Any) -> Tuple[bool, str, str]:
-    """Sort rows the same way the keyset does: (displayName, urn), nulls last."""
+    """Sort rows the same way the ASC keyset does: (displayName, urn), nulls last."""
     name = getattr(node, "display_name", None)
     return (name is None, name or "", getattr(node, "urn", "") or "")
+
+
+def _keyset_sort(nodes: List[Any], sort_direction: str) -> List[Any]:
+    """Defensive re-sort matching the Cypher keyset order for the direction.
+
+    DESC is a TRUE descending lexicographic sort of (displayName, urn) with
+    null names kept last (parity with the ASC path). Implemented as a
+    two-bucket `reverse=True` sort — NOT a per-character complement key: a
+    negated-code-point tuple fails to invert Python's tuple-length rule, so
+    prefix pairs mis-order ("Account" would sort before "Accounts" although
+    true DESC is the opposite), and a cursor minted from that wrong page tail
+    silently duplicates/skips rows at page boundaries."""
+    if sort_direction != "desc":
+        return sorted(nodes, key=_keyset_sort_key)
+    named = [n for n in nodes if getattr(n, "display_name", None) is not None]
+    unnamed = [n for n in nodes if getattr(n, "display_name", None) is None]
+    named.sort(key=lambda n: (n.display_name, getattr(n, "urn", "") or ""), reverse=True)
+    unnamed.sort(key=lambda n: getattr(n, "urn", "") or "", reverse=True)
+    return named + unnamed
 
 
 # Exception class names that indicate a Redis Cluster routing change (the
@@ -753,62 +871,15 @@ class FalkorDBProvider(GraphDataProvider):
         self._level_digest: Optional[str] = None
         self._levels_warning_for_digest: Optional[str] = None
 
-        # Phase 1.6 — operator dial for the bulk-CREATE UNWIND batch
-        # size. Env-var lets operators dial back per-call cost on graphs
-        # where the default 10k batch monopolizes the single FalkorDB
-        # Cypher thread for too long under concurrent trace load.
-        # Bounded to a sane floor/ceiling to prevent obviously-bad
-        # values from causing surprise.
-        _bulk_size_raw = os.getenv("FALKORDB_BULK_CREATE_BATCH_SIZE")
-        if _bulk_size_raw is None:
-            self._bulk_create_batch_size: int = self._BULK_CREATE_BATCH_SIZE
-        else:
-            try:
-                _bulk_size_parsed = int(_bulk_size_raw)
-                self._bulk_create_batch_size = max(100, min(50000, _bulk_size_parsed))
-                if self._bulk_create_batch_size != self._BULK_CREATE_BATCH_SIZE:
-                    logger.info(
-                        "FALKORDB_BULK_CREATE_BATCH_SIZE=%s (clamped to %d, "
-                        "default %d): operator-tuned bulk-CREATE batch size.",
-                        _bulk_size_raw, self._bulk_create_batch_size,
-                        self._BULK_CREATE_BATCH_SIZE,
-                    )
-            except ValueError:
-                logger.warning(
-                    "FALKORDB_BULK_CREATE_BATCH_SIZE=%r is not an integer; "
-                    "falling back to default %d.",
-                    _bulk_size_raw, self._BULK_CREATE_BATCH_SIZE,
-                )
-                self._bulk_create_batch_size = self._BULK_CREATE_BATCH_SIZE
-
-        # Phase 1.8 — dedicated timeout for bulk-CREATE batches. Default
-        # 60s vs the standard 15s ``_WRITE_TIMEOUT``: bulk writes
-        # legitimately need more headroom than incremental MERGEs,
-        # especially on graphs where FalkorDB is concurrently serving
-        # trace reads. Clamped to [5s, 170s]: the ceiling must stay below
-        # the server's TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or
-        # FalkorDB rejects the per-query timeout and the write becomes
-        # unkillable server-side.
-        _bulk_timeout_raw = os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
-        if _bulk_timeout_raw is None:
-            self._bulk_create_timeout_s: float = 60.0
-        else:
-            try:
-                _bulk_timeout_parsed = float(_bulk_timeout_raw)
-                self._bulk_create_timeout_s = max(5.0, min(170.0, _bulk_timeout_parsed))
-                if self._bulk_create_timeout_s != 60.0:
-                    logger.info(
-                        "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
-                        "default 60.0s): operator-tuned bulk-CREATE write timeout.",
-                        _bulk_timeout_raw, self._bulk_create_timeout_s,
-                    )
-            except ValueError:
-                logger.warning(
-                    "FALKORDB_BULK_CREATE_TIMEOUT_S=%r is not a float; "
-                    "falling back to default 60.0s.",
-                    _bulk_timeout_raw,
-                )
-                self._bulk_create_timeout_s = 60.0
+        # Phase 1.6/1.8 — operator dials for the bulk-CREATE UNWIND batch size
+        # and write timeout. Parsed + logged ONCE per process per env value
+        # (see _resolve_bulk_create_knobs): providers are constructed
+        # continuously at fleet scale (discovery worker transients, cache
+        # rebuilds), and re-logging the same operator tuning on every
+        # construction read as a per-request warning storm.
+        self._bulk_create_batch_size, self._bulk_create_timeout_s = (
+            _resolve_bulk_create_knobs()
+        )
 
         # Phase 2 — provider-internal hard cap and latency-quiesce circuit.
         #
@@ -1018,6 +1089,12 @@ class FalkorDBProvider(GraphDataProvider):
             username=probe_username,
             password=probe_password,
             ssl_context=probe_ssl,
+            # Standalone mode against a cluster-enabled node silently sees only
+            # one node's graphs — surface it as a config verdict here (the /test
+            # wizard and discovery last_error both carry preflight reasons).
+            # Sentinel targets are never cluster nodes; cluster mode never
+            # reaches this call.
+            detect_cluster=(cfg.mode == "standalone"),
         )
 
     def _build_pool_kwargs(self, socket_timeout: float) -> dict:
@@ -1060,7 +1137,10 @@ class FalkorDBProvider(GraphDataProvider):
         a read-write one would lazily create an empty graph key per probe.
         """
         from redis.asyncio import Redis
-        from backend.app.providers.falkordb_connection import build_graph_client
+        from backend.app.providers.falkordb_connection import (
+            build_graph_client,
+            verify_not_cluster_node,
+        )
 
         self._db, self._pool = await build_graph_client(
             self._conn_cfg,
@@ -1087,6 +1167,9 @@ class FalkorDBProvider(GraphDataProvider):
             Redis(connection_pool=self._pool).ping(),
             timeout=init_timeout,
         )
+        # Standalone config against a cluster-enabled node would silently see
+        # only one node's graphs — fail loud at build time (no-op otherwise).
+        await verify_not_cluster_node(self._conn_cfg, self._pool, init_timeout)
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
@@ -1139,14 +1222,13 @@ class FalkorDBProvider(GraphDataProvider):
                 tls_enabled=self._tls_enabled,
                 credentials=self._credentials,
             )
-            socket_timeout = self._conn_cfg.socket_timeout or float(
-                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-            )
-            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. Auth + TLS
-            # are applied inside the connection factory (TLS via
-            # connection_class=SSLConnection on the raw pools); pool_kwargs
-            # carries only sizing/timeouts/auth/decode. Built once here and
-            # reused verbatim on failover rebuild.
+            socket_timeout = self._graph_socket_timeout()
+            # The graph-pool socket timeout bounds a single Cypher query
+            # (floored above the server's TIMEOUT_MAX — see
+            # _graph_socket_timeout). Auth + TLS are applied inside the
+            # connection factory (TLS via connection_class=SSLConnection on
+            # the raw pools); pool_kwargs carries only sizing/timeouts/auth/
+            # decode. Built once here and reused verbatim on failover rebuild.
             _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
             if self._conn_cfg.mode != "standalone":
                 logger.info(
@@ -1381,9 +1463,42 @@ class FalkorDBProvider(GraphDataProvider):
     # FalkorDB engine cancels the query 500ms before the asyncio deadline so
     # the DB-side cancel races first (frees the worker thread + the pool
     # connection); asyncio.wait_for is the safety net for socket-level hangs.
+    #
+    # Clamped to the server's TIMEOUT_MAX: FalkorDB REJECTS (never runs) a
+    # query whose TIMEOUT parameter exceeds it, so an over-budget caller
+    # (e.g. the insights materialization's 600s) must degrade to "run for
+    # up to TIMEOUT_MAX" rather than fail instantly with "The query TIMEOUT
+    # parameter value cannot exceed the TIMEOUT_MAX configuration parameter".
     @staticmethod
     def _db_timeout_ms(seconds: float) -> int:
-        return max(500, int(seconds * 1000) - 500)
+        from ..config import resilience
+        ms = max(500, int(seconds * 1000) - 500)
+        cap = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
+        if cap > 0:
+            ms = min(ms, cap)
+        return ms
+
+    def _graph_socket_timeout(self) -> float:
+        """Socket recv/send timeout for the GRAPH query pools.
+
+        Floored above the server's TIMEOUT_MAX: the redis client applies
+        ``socket_timeout`` to each ``read_response``, and a long-running
+        Cypher query sends no bytes until it completes — a socket timeout
+        below the query budget kills legitimate queries mid-flight. The
+        hang-net role the low per-tier value played is preserved by the
+        per-call ``asyncio.wait_for`` in ``_ro_query``/``_query``, which
+        bounds every call at its own (much smaller) budget regardless of
+        socket state.
+        """
+        from ..config import resilience
+        configured = (
+            (self._conn_cfg.socket_timeout if self._conn_cfg else None)
+            or float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+        )
+        cap_ms = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
+        if cap_ms <= 0:
+            return configured
+        return max(configured, cap_ms / 1000.0 + 15.0)
 
     async def _rebuild_graph_client_for_failover(self, seen_generation: int) -> None:
         """Re-resolve and rebuild the FalkorDB client(s) after a cluster
@@ -1401,9 +1516,7 @@ class FalkorDBProvider(GraphDataProvider):
                 build_graph_client, aclose_graph_client,
             )
 
-            socket_timeout = self._conn_cfg.socket_timeout or float(
-                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-            )
+            socket_timeout = self._graph_socket_timeout()
             # Same kwargs as the initial connect (auth; TLS re-applied inside
             # the factory) so failover never drops credentials or TLS.
             pool_kwargs = self._build_pool_kwargs(socket_timeout)
@@ -1636,15 +1749,79 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
+    async def _empty_key_is_genuine(self) -> bool:
+        """Whether an "Invalid graph operation on empty key" really means the
+        graph is empty.
+
+        Standalone/Sentinel: yes — one endpoint serves every key, so the error
+        can only mean the graph key does not exist yet.
+
+        Cluster: verify before believing it. The SAME error comes back when a
+        read lands on a node that does not hold the graph key — a stale pinned
+        handle after a slot migration, or a replica promoted without its
+        shard's data — and masking that as "0 nodes / 0 edges" is how a graph
+        silently reads as empty on one pod while another still shows data. A
+        slot-routed EXISTS through the cluster client asks the CURRENT owner:
+        0 → genuinely absent (mask as empty); 1 → the graph exists and the
+        empty read was a misroute (fail loud); probe error → fail loud, never
+        mask on an unhealthy cluster.
+        """
+        if self._conn_cfg is None or self._conn_cfg.mode != "cluster":
+            return True
+        try:
+            exists = await asyncio.wait_for(
+                self._db.execute_command("EXISTS", self._graph_name),
+                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
+        except Exception as probe_exc:
+            logger.warning(
+                "empty-key verification: EXISTS probe for %r failed (%s) — "
+                "treating the empty read as UNVERIFIED and failing loud.",
+                self._graph_name, probe_exc,
+            )
+            return False
+        if int(exists or 0) == 0:
+            return True
+        logger.warning(
+            "empty-key verification: graph %r EXISTS on the cluster but a read "
+            "reported 'empty key' — the read landed on a node that does not "
+            "hold the graph (stale routing or an unsynced promotee). Failing "
+            "loud and rebuilding the client.", self._graph_name,
+        )
+        # Heal, don't just detect: the client that produced the misroute stays
+        # cached otherwise (the bare ResponseError is not classified as a
+        # routing error, so _run_guarded never rebuilds for it) and every
+        # subsequent read keeps failing until an unrelated MOVED or a restart.
+        # The rebuild re-resolves the owning node; the CURRENT read still
+        # raises (fail loud), the next one uses the fresh route.
+        try:
+            await self._rebuild_graph_client_for_failover(self._conn_generation)
+        except Exception:                            # pragma: no cover - best effort
+            logger.warning(
+                "empty-key verification: client rebuild after stale-route "
+                "detection failed for %r.", self._graph_name, exc_info=True,
+            )
+        return False
+
+    async def _is_verified_missing_graph(self, exc: BaseException) -> bool:
+        """The ONLY predicate that may mask an 'empty key' error as an empty
+        graph: matches the error AND (in cluster mode) verifies via EXISTS that
+        the graph is genuinely absent. Every masking site calls this — a bare
+        ``_is_missing_graph_error`` check silently converts a cluster misroute
+        into '0 rows'."""
+        return _is_missing_graph_error(exc) and await self._empty_key_is_genuine()
+
     async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None,
                                  op: Optional[str] = None):
         """Like :meth:`_ro_query`, but a missing/empty graph yields an empty
         result set instead of raising. For introspection reads where an empty
-        graph is a valid 0-result state (the graph key may not exist yet)."""
+        graph is a valid 0-result state (the graph key may not exist yet).
+        On a cluster the empty-key signal is verified first — see
+        :meth:`_empty_key_is_genuine`."""
         try:
             return await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         except Exception as exc:
-            if _is_missing_graph_error(exc):
+            if await self._is_verified_missing_graph(exc):
                 return _EmptyResult()
             raise
 
@@ -1808,6 +1985,10 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
 
         labels = indexed_labels(entity_type_ids)
+        # Remember the ontology vocabulary the indices were built for, so
+        # label-union readers (get_nodes_by_layer) can anchor on the same
+        # label set the label-scoped indexes actually cover.
+        self._indexed_entity_type_ids = list(entity_type_ids or [])
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
 
@@ -2103,9 +2284,7 @@ class FalkorDBProvider(GraphDataProvider):
                     from backend.app.providers.falkordb_connection import (
                         build_graph_client,
                     )
-                    socket_timeout = self._conn_cfg.socket_timeout or float(
-                        os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
-                    )
+                    socket_timeout = self._graph_socket_timeout()
                     self._proj_db, self._proj_pool = await build_graph_client(
                         self._conn_cfg,
                         graph_name=proj_name,
@@ -2608,7 +2787,7 @@ class FalkorDBProvider(GraphDataProvider):
                     )
                     return res.result_set or []
                 except Exception as e:
-                    if _is_missing_graph_error(e):
+                    if await self._is_verified_missing_graph(e):
                         return []
                     logger.warning(f"get_nodes urn bucket failed: {e}")
                     return []
@@ -2698,7 +2877,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             result = await self._ro_query(cypher, params=params)
         except Exception as e:
-            if _is_missing_graph_error(e):
+            if await self._is_verified_missing_graph(e):
                 return []  # never-created / empty key = legitimately no data
             logger.warning(f"get_nodes query failed: {e}")
             raise  # connection refused / transient = surface it (breaker -> 503)
@@ -2937,8 +3116,10 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> List[GraphNode]:
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
         # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
@@ -2957,17 +3138,18 @@ class FalkorDBProvider(GraphDataProvider):
         # COMPOSITE on (displayName, urn) — displayName is not unique, and a
         # non-unique keyset drops rows at page boundaries (_encode_keyset_cursor).
         cursor_where = ""
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor:
-            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor, sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    "AND (c.displayName > $cursorName "
-                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                    f"AND (c.displayName {cmp} $cursorName "
+                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
-                cursor_where = "AND c.displayName > $cursorName "  # legacy cursor
+                cursor_where = f"AND c.displayName {cmp} $cursorName "  # legacy cursor
         else:
             # Fallback to offset when no cursor (first page or legacy callers)
             params["skip"] = offset
@@ -2976,7 +3158,8 @@ class FalkorDBProvider(GraphDataProvider):
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
+            dir_kw = " DESC" if sort_direction == "desc" else ""
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -3030,6 +3213,7 @@ class FalkorDBProvider(GraphDataProvider):
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         """Optimized single-roundtrip: children + containment edges + cross-child lineage edges.
 
@@ -3037,6 +3221,7 @@ class FalkorDBProvider(GraphDataProvider):
         When `cursor` is provided, it takes precedence over `offset`.
         """
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
@@ -3061,18 +3246,19 @@ class FalkorDBProvider(GraphDataProvider):
         # keyset silently drops every row sharing the boundary row's name — see
         # _encode_keyset_cursor.
         cursor_where = ""
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor:
-            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor, sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    "AND (c.displayName > $cursorName "
-                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                    f"AND (c.displayName {cmp} $cursorName "
+                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
                 # Legacy cursor minted before the tiebreaker existed.
-                cursor_where = "AND c.displayName > $cursorName "
+                cursor_where = f"AND c.displayName {cmp} $cursorName "
         else:
             params["skip"] = offset
 
@@ -3080,7 +3266,8 @@ class FalkorDBProvider(GraphDataProvider):
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
+            dir_kw = " DESC" if sort_direction == "desc" else ""
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -3182,16 +3369,22 @@ class FalkorDBProvider(GraphDataProvider):
         total = offset + len(children) + (1 if has_more else 0)
         # Defensive re-sort before deriving the keyset cursor: FalkorDB may
         # discard ORDER BY around an aggregating RETURN (count(gc) here), and
-        # the cursor MUST be the page's max sort key or keyset pagination
+        # the cursor MUST be the page's boundary sort key or keyset pagination
         # skips rows. LIMIT selection is unaffected (known engine behaviour).
-        # Sorts on (displayName, urn) — the same composite key the cursor uses.
+        # Sorts on (displayName, urn) — the same composite key the cursor uses,
+        # in the requested direction.
         if sort_property == "displayName" and children:
-            order = sorted(range(len(children)), key=lambda i: _keyset_sort_key(children[i]))
+            # Derive the index permutation from _keyset_sort (the single
+            # source of keyset order, incl. the DESC prefix semantics) so the
+            # paired containment_edges list stays aligned with its child.
+            ordered = _keyset_sort(list(children), sort_direction)
+            index_of = {id(node): i for i, node in enumerate(children)}
+            order = [index_of[id(node)] for node in ordered]
             children = [children[i] for i in order]
             containment_edges = [containment_edges[i] for i in order]
             child_urns = [children[i].urn for i in range(len(children))]
         next_cursor = (
-            _encode_keyset_cursor(children[-1].display_name, children[-1].urn)
+            _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
             if children and has_more else None
         )
 
@@ -3238,6 +3431,7 @@ class FalkorDBProvider(GraphDataProvider):
         include_child_count: bool = True,
         query_timeout: Optional[float] = None,
         known_total_count: Optional[int] = None,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         """Return structurally top-level nodes (no incoming containment edge).
 
@@ -3255,9 +3449,17 @@ class FalkorDBProvider(GraphDataProvider):
         serving from a materialized cache that already knows the total).
         """
         await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
 
-        from ..config.resilience import FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        from ..config.resilience import (
+            FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS,
+            FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS,
+        )
         t = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        # Count is best-effort with a shorter budget (display-only); an
+        # explicit query_timeout (e.g. the collector's materialization)
+        # keeps its generous budget for both queries.
+        ct = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS
 
         # Raises ProviderConfigurationError if no types resolvable — surfaced
         # as HTTP 400 by the endpoint. An empty set is a valid state meaning
@@ -3317,17 +3519,18 @@ class FalkorDBProvider(GraphDataProvider):
         # run of same-named nodes straddling a page boundary is silently dropped
         # (_encode_keyset_cursor).
         page_filters = list(filter_fragments)
+        cmp = "<" if sort_direction == "desc" else ">"
         if cursor is not None:
-            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor))
+            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor), sort_direction)
             params["cursorName"] = cursor_name
             if cursor_urn:
                 params["cursorUrn"] = cursor_urn
                 page_filters.append(
-                    "(n.displayName > $cursorName "
-                    "OR (n.displayName = $cursorName AND n.urn > $cursorUrn))"
+                    f"(n.displayName {cmp} $cursorName "
+                    f"OR (n.displayName = $cursorName AND n.urn {cmp} $cursorUrn))"
                 )
             else:
-                page_filters.append("n.displayName > $cursorName")  # legacy cursor
+                page_filters.append(f"n.displayName {cmp} $cursorName")  # legacy cursor
 
         def _build_match(filters: List[str]) -> str:
             where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
@@ -3340,31 +3543,40 @@ class FalkorDBProvider(GraphDataProvider):
             return f"MATCH (n){where_clause}"
 
         # ── Page query ────────────────────────────────────────────────────
+        dir_kw = "DESC" if sort_direction == "desc" else "ASC"
         if include_child_count and containment_rel_types:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
+                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
                 # Re-project through a non-aggregating WITH before ORDER BY:
                 # FalkorDB discards an ORDER BY that sits directly on an
                 # aggregating RETURN (and also a trailing RETURN ... ORDER BY),
                 # so the pre-aggregation window order is lost. Materializing the
                 # count into a WITH first, then ordering that WITH, restores the
-                # displayName-ASC output the keyset cursor depends on.
-                + " WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC"
+                # displayName-ordered output the keyset cursor depends on.
+                + f" WITH n, count(child) as childCount ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
                 + " RETURN n, childCount"
             )
         else:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
+                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
                 + " RETURN n, 0 as childCount"
             )
 
         try:
             page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
+        except asyncio.TimeoutError as e:
+            # Same type (GraphCache stale-fallback and the 503 handler match
+            # on it) but with a non-empty str() so the surfaced reason names
+            # the budget that actually fired instead of a blank string.
+            raise asyncio.TimeoutError(
+                f"top-level page query exceeded {t:.0f}s provider budget "
+                f"(graph={self._graph_name})"
+            ) from e
         except Exception as e:
-            if not _is_missing_graph_error(e):
+            if not await self._is_verified_missing_graph(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
                 raise  # connection refused / transient = surface it (breaker -> 503)
             page_result = None  # never-created / empty key = legitimately no data
@@ -3392,16 +3604,17 @@ class FalkorDBProvider(GraphDataProvider):
                     orphan_count += 1
                 nodes.append(node)
 
-        # Defense-in-depth: guarantee displayName-ASC output even if the engine
-        # reorders across the aggregating RETURN, so next_cursor is always the
-        # page maximum and keyset pagination never overlaps/skips. Uses the same
-        # key the cursor compares on. Classification/childCount are already
-        # attached above and are order-independent.
-        nodes.sort(key=_keyset_sort_key)
+        # Defense-in-depth: guarantee displayName-ordered output even if the
+        # engine reorders across the aggregating RETURN, so next_cursor is
+        # always the page boundary and keyset pagination never overlaps/skips.
+        # Uses the same key (and direction) the cursor compares on.
+        # Classification/childCount are already attached above and are
+        # order-independent.
+        nodes = _keyset_sort(nodes, sort_direction)
 
         has_more = len(nodes) >= int(limit)
         next_cursor = (
-            _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn)
+            _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn, sort_direction)
             if (has_more and nodes) else None
         )
 
@@ -3428,14 +3641,25 @@ class FalkorDBProvider(GraphDataProvider):
                 where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
                 count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
 
-            total_count = 0
+            total_count: Optional[int] = 0
             try:
-                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t, op="toplevel.count")
+                count_result = await self._ro_query(count_cypher, params=count_params, timeout=ct, op="toplevel.count")
                 if count_result and count_result.result_set:
                     first = count_result.result_set[0]
                     total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+            except asyncio.TimeoutError:
+                # Best-effort: the count is display-only, has_more is derived
+                # from the page size, and on large graphs the full-scan count
+                # is expected to miss its budget. Degrade instead of failing
+                # the whole request.
+                logger.warning(
+                    "get_top_level_or_orphan_nodes count query degraded: "
+                    f"exceeded {ct:.0f}s budget (graph={self._graph_name}); "
+                    "returning totalCount=null"
+                )
+                total_count = None
             except Exception as e:
-                if not _is_missing_graph_error(e):
+                if not await self._is_verified_missing_graph(e):
                     logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
                     raise  # connection refused / transient = surface it (breaker -> 503)
                 total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
@@ -4038,7 +4262,7 @@ class FalkorDBProvider(GraphDataProvider):
     # importer uses 2000 because its writes are MERGE-on-node (which is
     # more variance-prone); our path is CREATE-on-relationship, which
     # tolerates and benefits from the higher number.
-    _BULK_CREATE_BATCH_SIZE = 10000
+    _BULK_CREATE_BATCH_SIZE = _BULK_CREATE_BATCH_DEFAULT
     _BULK_WIPE_BATCH_SIZE = 50000    # cursored DELETE chunk for AGGREGATED wipe
 
     async def _wipe_aggregated_edges(
@@ -7847,7 +8071,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_type_counts[t] = cnt
                 edge_count += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_stats on %s: graph key does not exist yet (empty graph) "
@@ -7932,7 +8156,7 @@ class FalkorDBProvider(GraphDataProvider):
                 edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
                 total_edges += cnt
         except Exception as exc:
-            if not _is_missing_graph_error(exc):
+            if not await self._is_verified_missing_graph(exc):
                 raise
             logger.info(
                 "get_schema_stats on %s: graph key does not exist yet "
@@ -8144,6 +8368,62 @@ class FalkorDBProvider(GraphDataProvider):
 
         return result
 
+    async def get_node_degrees(
+        self, urns: List[str], edge_types: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, int]]:
+        """TOTAL lineage degree (in/out) per URN over the FULL graph.
+
+        The canvas subtracts its loaded (internal) degree from these
+        totals to derive how much lineage lies OUTSIDE the current
+        view's scope — the "no lineage" vs "lineage outside this view"
+        distinction for curated subset views. Per-node adjacency
+        aggregates (never a set-membership XOR over all edges), with
+        label-bucketed URN seeks so no bucket falls back to a full node
+        scan.
+
+        Semantics: a URN ABSENT from the result is UNKNOWN (its bucket's
+        query failed) — callers must not treat absence as zero. URNs in
+        a successfully-queried bucket that simply have no edges are
+        explicitly zero-filled.
+        """
+        out: Dict[str, Dict[str, int]] = {}
+        if not urns:
+            return out
+        await self._ensure_connected()
+        rel_alt = "|".join(_sanitize_label(t) for t in (edge_types or []) if t)
+        rel_frag = f":{rel_alt}" if rel_alt else ""
+        for label, bucket_urns in await self._label_buckets(urns):
+            lbl_frag = f":{label}" if label else ""
+            bucket_ok = True
+            counts: Dict[str, Dict[str, int]] = {}
+            for direction, pattern in (
+                ("out", f"(n{lbl_frag})-[r{rel_frag}]->()"),
+                ("in", f"(n{lbl_frag})<-[r{rel_frag}]-()"),
+            ):
+                cypher = (
+                    f"MATCH {pattern} WHERE n.urn IN $urns "
+                    "RETURN n.urn AS urn, count(r) AS c"
+                )
+                try:
+                    result = await self._ro_query(
+                        cypher, params={"urns": bucket_urns}, timeout=2.0,
+                        op="node_degrees",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "get_node_degrees %s failed (%d urns, label=%r): %s",
+                        direction, len(bucket_urns), label, exc,
+                    )
+                    bucket_ok = False
+                    break
+                for row in (result.result_set or []):
+                    counts.setdefault(str(row[0]), {"in": 0, "out": 0})[direction] = int(row[1] or 0)
+            if not bucket_ok:
+                continue  # absent = unknown, never zero
+            for urn in bucket_urns:
+                out[urn] = counts.get(urn, {"in": 0, "out": 0})
+        return out
+
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
         if property_name in ("entityType", "entitytype"):
@@ -8236,13 +8516,67 @@ class FalkorDBProvider(GraphDataProvider):
                 nodes.append(n)
         return nodes
 
-    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+    async def get_nodes_by_layer(
+        self, layer_id: str, limit: int = 100, offset: int = 0,
+        sort_direction: str = "asc", cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
+        """Nodes with `layerAssignment = layer_id`, ordered by (displayName, urn)
+        in `sort_direction`, with keyset-cursor pagination (offset fallback).
+
+        Label-anchored UNION over the indexed label set (same pattern as
+        `get_top_level_or_orphan_nodes`) so the label-scoped `layerAssignment`
+        index serves the filter — a bare `MATCH (n)` cannot use label-scoped
+        indexes and full-scans. Falls back to the bare match when no ontology
+        vocabulary has been applied (pre-ontology graphs); a case-drifted
+        physical label outside the vocabulary is, by construction, not in the
+        union (mirrors the top-level path's coverage tradeoff).
+        """
         await self._ensure_connected()
-        result = await self._ro_query(
-            "MATCH (n) WHERE n.layerAssignment = $lid RETURN n SKIP $skip LIMIT $limit",
-            params={"lid": layer_id, "skip": offset, "limit": limit},
-        )
-        return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
+        sort_direction = _validate_sort_direction(sort_direction)
+        from backend.app.providers.index_policy import indexed_labels
+
+        params: Dict[str, Any] = {"lid": layer_id, "limit": int(limit)}
+        cmp = "<" if sort_direction == "desc" else ">"
+        dir_kw = "DESC" if sort_direction == "desc" else "ASC"
+
+        filters = ["n.layerAssignment = $lid"]
+        skip_clause = ""
+        if cursor:
+            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor), sort_direction)
+            params["cursorName"] = cursor_name
+            if cursor_urn:
+                params["cursorUrn"] = cursor_urn
+                filters.append(
+                    f"(n.displayName {cmp} $cursorName "
+                    f"OR (n.displayName = $cursorName AND n.urn {cmp} $cursorUrn))"
+                )
+            else:
+                filters.append(f"n.displayName {cmp} $cursorName")  # legacy cursor
+        else:
+            params["skip"] = int(offset)
+            skip_clause = " SKIP $skip"
+
+        where = " WHERE " + " AND ".join(filters)
+        order = f" ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
+
+        vocabulary = getattr(self, "_indexed_entity_type_ids", None)
+        if vocabulary:
+            branches = " UNION ".join(
+                f"MATCH (n:{_sanitize_label(label)}){where} RETURN n"
+                for label in indexed_labels(vocabulary)
+            )
+            cypher = "CALL { " + branches + " }" + f" WITH n{order}{skip_clause} LIMIT $limit RETURN n"
+        else:
+            cypher = f"MATCH (n){where} WITH n{order}{skip_clause} LIMIT $limit RETURN n"
+
+        result = await self._ro_query(cypher, params=params, op="nodes.byLayer")
+        nodes: List[GraphNode] = []
+        for row in (result.result_set or []):
+            n = self._extract_node_from_result(row[0] if isinstance(row, (list, tuple)) else row)
+            if n:
+                nodes.append(n)
+        # Defensive re-sort (same rationale as the other keyset readers).
+        return _keyset_sort(nodes, sort_direction)
 
     # TTL for the observed-casing maps below. Long enough to amortize the
     # vocabulary probe across a bulk load's many calls; short enough that

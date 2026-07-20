@@ -16,6 +16,7 @@
  *   VITE_TIMEOUT_DEFAULT_MS
  *   VITE_TIMEOUT_TRACE_MS
  *   VITE_TIMEOUT_GET_CHILDREN_MS
+ *   VITE_TIMEOUT_TOP_LEVEL_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
  *   VITE_TIMEOUT_EDGES_BETWEEN_MS
  *   VITE_TIMEOUT_PROVIDER_HEALTH_MS
@@ -92,6 +93,11 @@ export const TIMEOUTS = {
   // assigned data source server-side — give it headroom over the default.
   PUBLISH_MS:           readMs('VITE_TIMEOUT_PUBLISH_MS',           60_000, _LONG),
   GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      30_000, _MEDIUM),
+  // /nodes/top-level. Must exceed the backend's worst case for this
+  // endpoint (page query 15s + best-effort count 5s + queue/serialize
+  // overhead — see FALKORDB_TOP_LEVEL_* in resilience.py) so the
+  // backend always loses the race and surfaces its own, accurate error.
+  TOP_LEVEL_MS:         readMs('VITE_TIMEOUT_TOP_LEVEL_MS',         45_000, _LONG),
   AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  45_000, _LONG),
   EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     45_000, _LONG),
   PROVIDER_HEALTH_MS:   readMs('VITE_TIMEOUT_PROVIDER_HEALTH_MS',   30_000, _MEDIUM),

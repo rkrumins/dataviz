@@ -53,6 +53,10 @@ from backend.common.adapters.redis_tls import TLSSettings
 
 logger = logging.getLogger(__name__)
 
+# (role, legacy_var) pairs whose migration nudge has already been logged this
+# process — the resolver runs per provider construction, the nudge should not.
+_LEGACY_URL_LOGGED: set = set()
+
 
 class RedisRole(str, Enum):
     STREAMS = "streams"
@@ -375,10 +379,15 @@ def resolve_redis_config(
             # _parse_url's internal key is "tls_enabled"; the real config field
             # (and the one the Admin page renders source for) is "tls".
             src[("tls" if k == "tls_enabled" else k)] = f"{legacy_var} (legacy)"
-        logger.info(
-            "redis_endpoint: %s resolved from legacy %s — migrate to %sHOST/_PORT/_DB "
-            "+ %sPASSWORD(_FILE).", role.value, legacy_var, prefix, prefix,
-        )
+        # Once per process per (role, var): this resolver runs on every
+        # provider construction (continuous at fleet scale), and repeating the
+        # same migration nudge per construction is log spam, not signal.
+        if (role.value, legacy_var) not in _LEGACY_URL_LOGGED:
+            _LEGACY_URL_LOGGED.add((role.value, legacy_var))
+            logger.info(
+                "redis_endpoint: %s resolved from legacy %s — migrate to %sHOST/_PORT/_DB "
+                "+ %sPASSWORD(_FILE).", role.value, legacy_var, prefix, prefix,
+            )
 
     def _pick(env_suffix: str, base_key: str, default, cast=str):
         raw = os.getenv(f"{prefix}{env_suffix}")

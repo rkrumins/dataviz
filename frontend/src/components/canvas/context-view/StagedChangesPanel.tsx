@@ -34,6 +34,7 @@ const TYPE_LABELS: Record<StagedChangeType, string> = {
   delete_edge: 'Edge deletions',
   reverse_edge: 'Edge reversals',
   layer_config: 'Layers',
+  reorder_nodes: 'Node order',
 }
 
 const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
@@ -48,12 +49,13 @@ const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
   delete_edge: 'Unlink',
   reverse_edge: 'Repeat',
   layer_config: 'Layers',
+  reorder_nodes: 'ListOrdered',
 }
 
 // View-layout changes (layer definitions AND entity placement) are VIEW presentation, not data-source
 // changes — they persist to referenceLayout, produce zero graph ops, and the review groups them under
 // their own "View layout" banner, visually separated from everything that touches the graph.
-const VIEW_LAYOUT_TYPES: ReadonlySet<StagedChangeType> = new Set(['layer_config', 'assign_layer', 'move_to_layer'])
+const VIEW_LAYOUT_TYPES: ReadonlySet<StagedChangeType> = new Set(['layer_config', 'assign_layer', 'move_to_layer', 'reorder_nodes'])
 
 // Color tokens shared between row tints and section headings.
 const TONE = {
@@ -139,7 +141,7 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
     const ORDER: StagedChangeType[] = [
       'create_entity', 'create_edge',
       'rename_entity', 'edit_edge', 'reverse_edge',
-      'assign_layer', 'move_to_layer',
+      'assign_layer', 'move_to_layer', 'reorder_nodes',
       'delete_edge', 'delete_entity',
       'layer_config',
     ]

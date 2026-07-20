@@ -237,6 +237,18 @@ export function useGraphProvider(): GraphDataProvider {
 }
 
 /**
+ * Provider when mounted and resolved, else null. For surfaces that
+ * DEGRADE to store-only data instead of erroring when no provider is
+ * reachable (e.g. the entity drawer's on-demand lineage fetch, or
+ * component tests rendered outside the provider tree).
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- context module exports hooks by design, same as its siblings
+export function useGraphProviderIfAvailable(): GraphDataProvider | null {
+    const context = useContext(GraphProviderContext)
+    return context?.provider ?? null
+}
+
+/**
  * Access the full provider context including loading/error state and workspaceId
  */
 export function useGraphProviderContext(): GraphProviderContextValueExtended {

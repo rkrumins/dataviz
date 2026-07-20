@@ -1,5 +1,14 @@
 # Frontend & UX Documentation
 
+> **At a glance:** The architecture, state model, and design system of the {brand} single-page app. Written for frontend engineers and anyone tracing how a user action becomes a rendered graph.
+
+**This doc covers:**
+
+- The **technology stack** and **component architecture**
+- Core **user flows** — auth, workspace navigation, graph exploration, view management
+- **State management** (Zustand stores) and the **data-fetching** layer
+- The **design system**, **performance** techniques, the **admin/onboarding** surface, and the **Layer System**
+
 ## Overview
 
 The {brand} frontend is a **React 19** single-page application built with **Vite**, **TypeScript**, **Tailwind CSS**, and **Zustand** for state management. It provides a rich graph visualization experience powered by **@xyflow/react** with layout computation offloaded to **Web Workers** (ELK.js).
@@ -77,10 +86,6 @@ graph TB
     Canvas --> Panels
     Layout --> Modals
 
-    style App fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Pages fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Canvas fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style CanvasParts fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Key Design Patterns
@@ -115,9 +120,6 @@ graph LR
     Reset -->|Success| Login
     Login -->|"JWT issued"| Dashboard
 
-    style Login fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Dashboard fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style Pending fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Workspace & Data Source Navigation
@@ -135,8 +137,9 @@ graph TB
     DSSelect --> SchemaReload
     SchemaReload --> CanvasUpdate
 
-    style Sidebar fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
 ```
+
+> **Note:** Views and ontology cache are keyed by the composite scope `${workspaceId}/${dataSourceId}`. Switching workspace or data source invalidates that cache and forces a schema reload — so a stale ontology never leaks across scopes.
 
 **Workspace scoping:** Navigation is workspace-aware. Changing workspaces or data sources triggers:
 1. `useWorkspacesStore` updates active IDs
@@ -169,8 +172,6 @@ graph TB
 
     Trace --> Controls
 
-    style Explorer fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Controls fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 **Canvas interactions:**
@@ -196,7 +197,6 @@ graph LR
     Create --> Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Save
     Save --> Browse
 
-    style Create fill:#312e81,stroke:#6366f1,color:#e2e8f0
 ```
 
 **View scoping:** Views are scoped to `{workspaceId}/{dataSourceId}`. Bookmarks and recent views provide cross-workspace access.
@@ -228,8 +228,6 @@ graph TB
     SchemaUI -->|"scope key"| SchemaData
     Auth -->|"JWT"| WS
 
-    style Persisted fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Runtime fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 | Store | Key State | Persistence | Update Pattern |
@@ -258,6 +256,27 @@ graph TB
 ---
 
 ## 5. Data Fetching
+
+Component data flows from React Query and the graph provider down through a single authenticated `fetch` wrapper:
+
+```mermaid
+graph LR
+    Comp["Component / Hook"]
+    RQ["React Query<br/>cache + staleTime"]
+    RGP["RemoteGraphProvider<br/>workspace-scoped"]
+    Svc["Service modules<br/>authService, viewApiService, …"]
+    AF["authFetch()<br/>JWT inject · 401 logout"]
+    BE["Backend API<br/>/api/v1/…"]
+    Mock["MockProvider<br/>(fallback)"]
+
+    Comp --> RQ
+    Comp --> RGP
+    RQ --> Svc
+    RGP --> Svc
+    RGP -.->|backend unreachable| Mock
+    Svc --> AF --> BE
+
+```
 
 ### API Client
 
@@ -355,9 +374,6 @@ graph LR
         JBMono["JetBrains Mono<br/>Code/monospace"]
     end
 
-    style Theme fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
-    style Colors fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style Typography fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ### Styling Approach
@@ -434,9 +450,6 @@ graph TB
     Registry --> RegistryTabs
     Users --> UserMgmt
 
-    style Admin fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style RegistryTabs fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style UserMgmt fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
 ```
 
 ### Admin Routes
@@ -532,8 +545,6 @@ graph LR
 
     Studio --> Features
 
-    style Studio fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style Features fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
 ```
 
 ### Key Components
@@ -554,15 +565,21 @@ graph LR
 - **Smart Rule Builder**: Define rules for automatic entity-to-layer assignment based on type, tags, or properties
 - **Conflict Resolution**: When multiple rules assign the same entity to different layers, a dialog helps resolve conflicts
 
-### Context Lenses (Preview)
+### Context View & Lineage Lens
 
-The Context View system provides hierarchical, layered visualization of graph data:
+The **Context View** (a.k.a. the Lineage Lens experience) is **shipped**. It provides a hierarchical, layer-organized visualization of graph data with a curated, paginated column layout and an ego-graph overlay for immediate-neighbor inspection.
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | Main context view renderer |
-| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout |
-| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay |
+| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | Main Context View renderer; wires the Layer Strip, layer columns, overlays, and external-degree signals |
+| `LineageLens` | `components/canvas/context-view/LineageLens.tsx` | Ego-graph overlay: click a node to see its immediate upstream (left) / downstream (right) neighbors grouped by entity type with counts, regardless of canvas scale/scroll. Breadcrumb re-centering; escalates to full Trace |
+| `LayerStrip` | `components/canvas/context-view/LayerStrip.tsx` | Horizontal strip of layer headers across the top of the canvas — layer navigation, counts, and add-layer affordance |
+| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout with **resizable columns** — a right-edge resize handle sets a per-layer custom width, persisted to `nx-layer-widths` in localStorage. Renders one-page-ahead paginated items |
+| `AddLayerColumn` | `components/canvas/context-view/AddLayerColumn.tsx` | Inline "add a layer" column affordance |
+| `anchorRail` | `components/canvas/context-view/anchorRail.ts` | **Anchor Rail** — keeps the focal/anchor entity stable while columns paginate and resize |
+| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay drawn across layer columns |
+
+**Curated-view "lineage outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`) and subtracts each node's loaded (internal) degree, surfacing a chip when a node has links beyond the current view.
 
 ---
 
@@ -576,6 +593,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useDataSourceSchema` | Load ontology for active data source |
 | `useGraphSchema` | Low-level graph API schema introspection |
 | `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `computeViewScopedRoots()` |
+| `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`; powers the Context View's "lineage outside this view" chip by comparing external totals against internally loaded degree |
 | `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
 | `useLayerAssignment` | Handle entity-to-layer assignment logic |
 | `useHighlightState` | Track highlighted/traced/dimmed nodes |
@@ -629,7 +647,7 @@ Views and schema are scoped by a composite key: `${workspaceId}/${dataSourceId}`
 
 ---
 
-## 10. Directory Structure
+## 14. Directory Structure
 
 ```
 frontend/src/
@@ -683,3 +701,12 @@ frontend/src/
 ├── lib/                        # Shared library code
 └── workers/                    # elk-layout.worker.ts
 ```
+
+---
+
+## Related
+
+- [Backend guide](/docs/backend) — the API this app consumes
+- [Features API contract](/docs/api-features) — feature flags that gate frontend surfaces
+- [Developer Setup](/docs/setup) — running the Vite dev server locally
+- [Platform Services overview](/docs/services-overview) · [Search](/docs/services-search) · [Assignments](/docs/services-assignments)

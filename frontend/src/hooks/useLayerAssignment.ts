@@ -9,7 +9,7 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -17,6 +17,7 @@ import {
   type EntityType,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
+import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 
 // ============================================
@@ -52,6 +53,18 @@ export interface UseLayerAssignmentOptions {
    * explicitly only in tests.
    */
   branchCreatedUrns?: Set<string>
+  /**
+   * View-wide default node sort (`referenceLayout.defaultNodeSortMode`) for
+   * layers without their own `nodeSortMode`. Defaults to 'alpha-asc'.
+   */
+  defaultNodeSortMode?: LayerNodeSortAlgo
+  /**
+   * Ephemeral per-layer sort overrides (session-local, e.g. a read-only viewer
+   * flipping a column to Z→A or By type). Wins over persisted config;
+   * algorithmic modes only — 'custom' requires persisted orderKeys so it
+   * can't be an ephemeral state.
+   */
+  sortOverrides?: ReadonlyMap<string, LayerNodeSortAlgo>
 }
 
 export interface UseLayerAssignmentResult {
@@ -63,6 +76,9 @@ export interface UseLayerAssignmentResult {
   /** Final effective layer per node id — exposed for layer-ordinal lookups
    *  by the canvas (e.g. left/right neighbor sort for trace pinning). */
   nodeLayerMap: Map<string, string>
+  /** Loaded nodes that resolved to NO layer and therefore render nowhere.
+   *  Surfaced so the canvas can tell the user instead of hiding them. */
+  unassignedNodes: Array<{ id: string; data?: Record<string, unknown> }>
 }
 
 // ============================================
@@ -81,6 +97,8 @@ export function useLayerAssignment({
   assignments = {},
   entityScope,
   branchCreatedUrns: branchCreatedUrnsOption,
+  defaultNodeSortMode,
+  sortOverrides,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
 
   // Branch-created delta: URNs created in the active branch's draft. Read from
@@ -131,6 +149,58 @@ export function useLayerAssignment({
   // Core Logic: Group nodes by layer with Deep Inheritance support
   const nodesByLayer = useMemo(() => {
     const grouped = new Map<string, HierarchyNode[]>()
+
+    // Per-layer node comparators. Effective mode resolution: ephemeral session
+    // override → layer.nodeSortMode → view defaultNodeSortMode → 'alpha-asc'.
+    // 'custom' mode is HIERARCHICAL: BOTH roots and children order by their
+    // assignment orderKey (keyed entries first, ordinally; unkeyed entries
+    // after, alphabetically). The comparator only ever compares siblings (one
+    // parent's children, or the layer's roots), so each sibling set holds an
+    // independent key sequence. All other modes leave children on the
+    // server's alphabetical order (asc, or desc when the whole layer is Z→A).
+    const alphaAsc = (a: HierarchyNode, b: HierarchyNode) => a.name.localeCompare(b.name)
+    const alphaDesc = (a: HierarchyNode, b: HierarchyNode) => b.name.localeCompare(a.name)
+    // Property-derived root orders. Type groups alphabetically by the stable
+    // type id (display names would need a schema lookup this hook doesn't
+    // have); container size prefers the backend's childCount (total, not just
+    // loaded) and falls back to the loaded child list. Both tie-break to
+    // name so equal groups stay alphabetical inside.
+    const typeAsc = (a: HierarchyNode, b: HierarchyNode) =>
+      (a.typeId || '').localeCompare(b.typeId || '') || alphaAsc(a, b)
+    const countOf = (n: HierarchyNode) =>
+      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0
+    const countDesc = (a: HierarchyNode, b: HierarchyNode) =>
+      countOf(b) - countOf(a) || alphaAsc(a, b)
+    // Custom comparator: keyed siblings first (ordinal orderKey, name+urn
+    // tiebreak), unkeyed after (alphabetical). Used for BOTH roots and
+    // children of a custom-sorted layer — only ever applied within one
+    // sibling set, so the shared function is safe.
+    const customCmp = (a: HierarchyNode, b: HierarchyNode) => {
+      const ka = assignments[a.id]?.orderKey
+      const kb = assignments[b.id]?.orderKey
+      if (ka && kb) return compareOrderKeys(ka, kb) || alphaAsc(a, b) || compareOrderKeys(a.urn, b.urn)
+      if (ka) return -1
+      if (kb) return 1
+      return alphaAsc(a, b)
+    }
+    const ROOT_CMPS: Record<LayerNodeSortMode, (a: HierarchyNode, b: HierarchyNode) => number> = {
+      'alpha-asc': alphaAsc,
+      'alpha-desc': alphaDesc,
+      'type-asc': typeAsc,
+      'count-desc': countDesc,
+      custom: customCmp,
+    }
+    const childCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
+    const rootCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
+    sortedLayers.forEach(layer => {
+      const mode: LayerNodeSortMode =
+        sortOverrides?.get(layer.id) ?? layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
+      // Children in 'custom' mode order by orderKey too (hierarchical custom
+      // order); every other mode leaves them on the server's alpha order
+      // (desc only flips the direction).
+      childCmpByLayer.set(layer.id, mode === 'custom' ? customCmp : mode === 'alpha-desc' ? alphaDesc : alphaAsc)
+      rootCmpByLayer.set(layer.id, ROOT_CMPS[mode] ?? alphaAsc)
+    })
 
     // Initialize layers
     sortedLayers.forEach(l => grouped.set(l.id, []))
@@ -183,6 +253,15 @@ export function useLayerAssignment({
     // Valid layer ids in this view — a node's persisted `layerAssignment` is only
     // honoured when it still names a layer that exists here.
     const validLayerIds = new Set(sortedLayers.map(l => l.id))
+
+    // Open-scope fallback: a layer opting in via `showUnassigned` receives
+    // root entities that match nothing else, instead of those entities
+    // silently vanishing from the canvas. Curated views keep their
+    // closed-scope drop semantics (the wizard is the source of truth
+    // there); the canvas surfaces the count separately.
+    const unassignedFallbackLayerId = !viewIsCurated
+      ? sortedLayers.find(l => l.showUnassigned === true)?.id
+      : undefined
 
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
@@ -259,6 +338,8 @@ export function useLayerAssignment({
             myLayerId = ruleAssignments.get(nodeId)
           } else if (inheritedLayerId) {
             myLayerId = inheritedLayerId
+          } else if (unassignedFallbackLayerId) {
+            myLayerId = unassignedFallbackLayerId
           }
         }
       }
@@ -293,6 +374,7 @@ export function useLayerAssignment({
       if (!rootNode) return null
 
       const rootLayer = effectiveLayer.get(rootId)
+      const childCmp = (rootLayer && childCmpByLayer.get(rootLayer)) || alphaAsc
       // Phase 1: collect nodes in DFS order (iterative)
       const order: Array<{ nodeId: string; depth: number; parentIdx: number }> = []
       const dfsStack: Array<{ nodeId: string; depth: number; parentIdx: number }> = [
@@ -322,7 +404,7 @@ export function useLayerAssignment({
         const node = nodeMap.get(nodeId)
         if (!node) continue
 
-        const children = childrenOf[i].sort((a, b) => a.name.localeCompare(b.name))
+        const children = childrenOf[i].sort(childCmp)
         const hNode: HierarchyNode = {
           id: node.id,
           typeId: node.data.type,
@@ -359,13 +441,18 @@ export function useLayerAssignment({
       }
     })
 
-    // Sort all lists
-    grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
+    // Sort all lists (per-layer comparator; custom mode orders by orderKey)
+    grouped.forEach((list, layerId) => list.sort(rootCmpByLayer.get(layerId) ?? alphaAsc))
 
     // 4. Wrap entities in logical groups where configured.
     // Build entityId -> logicalNodeId map from all layer entityAssignments,
     // then for each layer with logicalNodes, create wrapper HierarchyNodes
     // and move assigned entities under them.
+    // KNOWN LIMITATION (deliberate): custom orderKeys apply to a node's roots
+    // and its containment children, but NOT across logical-group wrappers —
+    // wrappers stay in config order and entities inside a wrapper sort by
+    // childCmp (which honours orderKeys, so a manually-ordered group is
+    // internally consistent, but the wrappers themselves aren't reorderable).
     const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {
@@ -428,7 +515,7 @@ export function useLayerAssignment({
               typeId: config.type,
               name: config.name,
               data: { type: config.type, label: config.name, isLogical: true },
-              children: [...childGroups, ...assignedEntities].sort((a, b) => a.name.localeCompare(b.name)),
+              children: [...childGroups, ...assignedEntities].sort(childCmpByLayer.get(layer.id) ?? alphaAsc),
               depth,
               urn: `logical:${config.id}`,
               entityTypeOption: config.type,
@@ -448,7 +535,7 @@ export function useLayerAssignment({
 
     return grouped
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -498,5 +585,14 @@ export function useLayerAssignment({
     return map
   }, [nodesByLayer])
 
-  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap }
+  // Loaded nodes that render nowhere — absent from every layer's emitted
+  // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
+  // canvas actually shows.
+  const unassignedNodes = useMemo(
+    () => nodes.filter((n: { id: string }) => !nodeLayerMap.has(n.id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nodeEdgeFingerprint, nodeLayerMap],
+  )
+
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }
 }

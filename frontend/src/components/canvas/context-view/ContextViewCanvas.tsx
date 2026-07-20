@@ -42,7 +42,10 @@ import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/feat
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { Crosshair, X } from 'lucide-react'
+import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
@@ -59,7 +62,7 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
-import { CanvasContextMenu } from '../CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
@@ -74,7 +77,7 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-import type { ViewLayerConfig, DisplayRuleConfig } from '@/types/schema'
+import type { ViewLayerConfig, DisplayRuleConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -86,10 +89,19 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import { SORT_MODE_LABELS } from './LayerSortMenu'
+import { CanvasStatusChips } from './CanvasStatusChips'
+import { computeFitZoom } from './fitZoom'
+import { LineageLens } from './LineageLens'
+import { useLensLineage } from '@/hooks/useLensLineage'
+import { aggregateFlowRibbons } from './flowRibbons'
+import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
+import type { HierarchyNode } from '@/types/hierarchy'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
 import * as assignmentOps from './assignmentMutations'
+import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
@@ -147,6 +159,41 @@ function explicitDescendants(
   return out
 }
 
+/** The rendered-tree context used to resolve custom-order reordering. */
+interface ReorderTreeContext {
+  displayMap: Map<string, HierarchyNode>
+  parentMap: Map<string, string>
+  nodesByLayer: Map<string, HierarchyNode[]>
+  nodeLayerMap: Map<string, string>
+}
+
+/**
+ * The sibling set a node belongs to for custom-order reordering, in current
+ * visual order, plus the layer that set lives in. A node with a containment
+ * parent in the SAME layer is a child — its siblings are that parent's
+ * rendered children; otherwise it is a visual root — its siblings are the
+ * layer's roots. Logical wrappers are excluded (not orderable). Returns null
+ * when the node resolves to no layer.
+ */
+function siblingContext(
+  nodeId: string,
+  ctx: ReorderTreeContext,
+): { siblings: string[]; layerId: string } | null {
+  const layerId = ctx.nodeLayerMap.get(nodeId)
+  if (!layerId) return null
+  const parentId = ctx.parentMap.get(nodeId)
+  if (parentId && ctx.nodeLayerMap.get(parentId) === layerId) {
+    const parent = ctx.displayMap.get(parentId)
+    if (parent) {
+      return { siblings: parent.children.filter(c => !c.isLogical).map(c => c.id), layerId }
+    }
+  }
+  return {
+    siblings: (ctx.nodesByLayer.get(layerId) ?? []).filter(n => !n.isLogical).map(n => n.id),
+    layerId,
+  }
+}
+
 export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
@@ -165,6 +212,9 @@ export function ContextViewCanvas({
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
+  const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
+  const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
@@ -187,6 +237,10 @@ export function ContextViewCanvas({
   // undefined for that cohort until the next setter fires.
   const canvasZoom = usePreferencesStore((s) => s.canvasZoom) ?? 1
   const setCanvasZoom = usePreferencesStore((s) => s.setCanvasZoom)
+  // Missing-link alerts are optional: Views are subsets of a Data Source,
+  // so links to out-of-view entities can be expected rather than a problem.
+  const showMissingConnectionIndicators = usePreferencesStore((s) => s.showMissingConnectionIndicators) ?? true
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? true
   const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
@@ -497,6 +551,8 @@ export function ContextViewCanvas({
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
     staleReason: aggregationStaleReason,
+    error: aggregationError,
+    loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
@@ -570,11 +626,20 @@ export function ContextViewCanvas({
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
   // (The context-menu mutation entry points are draft-gated separately.)
+  // Fit-to-width / lens handlers are defined further down (they need
+  // sortedLayers / lens state); ref indirection avoids the TDZ.
+  const fitToWidthRef = useRef<(() => void) | null>(null)
+  const focusLensRef = useRef<(() => void) | null>(null)
+  const zoomShortcutHandlers = useMemo(() => ({
+    onFitView: () => fitToWidthRef.current?.(),
+    onZoomPreset: (level: 1 | 2 | 3) => setCanvasZoom([0.5, 0.75, 1][level - 1]),
+    onFocusLens: () => focusLensRef.current?.(),
+  }), [setCanvasZoom])
   useCanvasKeyboard({
     enabled: true,
     handlers: isDraft
-      ? interactions.keyboardHandlers
-      : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers }
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -691,7 +756,11 @@ export function ContextViewCanvas({
   const currentLayout = useCallback((): NormalizedReferenceLayout => {
     const view = useSchemaStore.getState().getActiveView()
     const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
-    return { layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers, assignments: norm.assignments }
+    return {
+      layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers,
+      assignments: norm.assignments,
+      ...(norm.defaultNodeSortMode ? { defaultNodeSortMode: norm.defaultNodeSortMode } : {}),
+    }
   }, [])
 
   const persistReferenceLayout = useCallback((next: NormalizedReferenceLayout) => {
@@ -701,10 +770,15 @@ export function ContextViewCanvas({
     // implicitly: an open view stays 'all' (assigns render via the canonical map, not the scope),
     // a curated view stays 'curated'. `view` here is pre-write, so its layout is the pre-gesture one.
     const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
-    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes). Mirror
-    // the pinned scope into content.entityScope locally so it's explicit for the NEXT gesture (the
-    // durable updateViewLayout writes it too).
-    const referenceLayout = { layers: next.layers, assignments: next.assignments }
+    // Canonical-clean: layers + assignments (+ the defaultNodeSortMode side-field, which must ride the
+    // wholesale write or it would be wiped by every gesture). Mirror the pinned scope into
+    // content.entityScope locally so it's explicit for the NEXT gesture (the durable updateViewLayout
+    // writes it too).
+    const referenceLayout = {
+      layers: next.layers,
+      assignments: next.assignments,
+      ...(next.defaultNodeSortMode ? { defaultNodeSortMode: next.defaultNodeSortMode } : {}),
+    }
     useSchemaStore.getState().updateView(view.id, {
       layout: { ...(view.layout ?? {}), referenceLayout },
       content: { ...view.content, entityScope },
@@ -871,7 +945,7 @@ export function ContextViewCanvas({
       return
     }
 
-    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
     const prevLayerId = before.assignments[entityId]?.layerId
     const prevLayer = before.layers.find(l => l.id === prevLayerId)
@@ -879,7 +953,22 @@ export function ContextViewCanvas({
 
     // Descendants with their own explicit entries are cleared so they inherit the parent's new layer.
     const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
-    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants })
+    // A drop into a custom-sorted layer lands at the true BOTTOM of the manual
+    // arrangement: first seed any UNKEYED explicit roots of the target layer
+    // from its current visual order (else they'd render below the appended
+    // entry in the alpha tail), then mint a key after the layer's largest.
+    let base = before
+    let orderKey: string | undefined
+    if (before.layers.find(l => l.id === layerId)?.nodeSortMode === 'custom') {
+      const targetRoots = (nodesByLayerRef.current.get(layerId) ?? [])
+        .map(n => n.id)
+        .filter(id => !id.startsWith('logical:'))
+      base = layerOps.setLayerNodeSortMode(before, layerId, 'custom', targetRoots)
+      try {
+        orderKey = generateKeyBetween(assignmentOps.lastOrderKeyInLayer(base, layerId), null)
+      } catch { /* malformed keys — fall back to the unkeyed alpha tail */ }
+    }
+    const after = assignmentOps.assignEntities(base, [entityId], layerId, { clearDescendants, orderKey })
     persistReferenceLayout(after)
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
@@ -902,7 +991,7 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout, nodes])
+  }, [currentLayout, persistReferenceLayout])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -1220,6 +1309,43 @@ export function ContextViewCanvas({
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
+  // Zoom changes move every node card, but nothing else forces the edge
+  // overlay to recompute geometry. Double-rAF so the transform commits
+  // before the redraw reads fresh rects.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.())
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [canvasZoom])
+
+  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
+  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
+  // via padding — a change that does NOT resize the observed node cards,
+  // so the overlay's ResizeObserver never fires. Without an explicit
+  // nudge the lineage marks stay anchored to their pre-panel positions,
+  // stranding ghost stubs/edges over empty canvas when a panel opens,
+  // closes, or the tree is expanded/collapsed while one is open. Force a
+  // redraw on every panel transition, with trailing settle passes so the
+  // marks land on the post-animation geometry (panels slide ~300–400ms).
+  useEffect(() => {
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
+    )
+    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
+    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
+    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
+  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, advancedSearchOpen, builderOpen, buildOpen])
+
+  // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
+  // pre-compensation enlarges the scroll viewport in layout px), so the
+  // extra coverage comes from the larger window — overscan can shrink to
+  // keep total mounted rows bounded.
+  const effectiveOverscan = useMemo(
+    () => Math.min(15, Math.max(5, Math.round(15 * canvasZoom))),
+    [canvasZoom],
+  )
+
   // Drawer-aware horizontal autoscroll: when a side panel opens (EntityDrawer
   // for selected nodes or EdgeDetailPanel for selected edges) the right edge
   // of the canvas is reserved via padding, but a node already sitting on the
@@ -1317,6 +1443,13 @@ export function ContextViewCanvas({
     [activeLayers]
   )
 
+  // Layer Strip chips — stable identity so the strip's scroll-measure
+  // effect doesn't re-attach on unrelated canvas re-renders.
+  const stripLayers = useMemo(
+    () => sortedLayers.map(l => ({ id: l.id, name: l.name, color: l.color || '#6366f1' })),
+    [sortedLayers],
+  )
+
   // Monotonic version counter — replaces brittle fingerprint sampling.
   // Incremented automatically by canvas store middleware on every node/edge mutation.
   const canvasVersion = useCanvasVersion()
@@ -1360,14 +1493,83 @@ export function ContextViewCanvas({
     [activeView?.content, activeReferenceLayout],
   )
 
+  // ─── Node sort modes ────────────────────────────────────────────────────────
+  // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
+  // overrides (both in referenceLayout). Viewer state: DEVICE-LOCAL per-view
+  // overrides in the preferences store, so a read-only viewer's re-sort
+  // survives reload without ever writing to the shared view.
+  const viewDefaultSortMode = activeReferenceLayout.defaultNodeSortMode ?? 'alpha-asc'
+  const activeViewIdForSort = activeView?.id ?? ''
+  const persistedSortOverrides = usePreferencesStore(
+    (s) => s.viewSortOverrides[activeViewIdForSort],
+  )
+  const sortOverrides = useMemo<ReadonlyMap<string, LayerNodeSortAlgo>>(
+    () => new Map(Object.entries(persistedSortOverrides ?? {})),
+    [persistedSortOverrides],
+  )
+  // Node-ordering kill switch (Admin → Features): hides the sort menu and
+  // disables reordering; persisted orders still RENDER (read-only safety).
+  const nodeSortingEnabled = useFeature('nodeSortingEnabled')
+
+  // Fit-to-width: intrinsic width from state (scrollWidth lies under the
+  // 100/zoom% compensation). Column collapse state is LayerColumn-local,
+  // so v1 assumes all columns expanded — a safe over-estimate that only
+  // makes the fitted zoom slightly smaller.
+  const handleFitToWidth = useCallback(() => {
+    const viewport = horizontalScrollRef.current?.clientWidth ?? 0
+    setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
+    horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
+  }, [setCanvasZoom, sortedLayers.length])
+
+  // Measure the outer container's CLASSIC horizontal scrollbar into
+  // --canvas-hsb (0 for macOS overlay scrollbars). Percentage heights
+  // ignore scrollbar gutters, so without this the columns overflow the
+  // visible area by the scrollbar height and their bottom edge (and the
+  // bottom periphery scrims) clips below the fold.
+  useEffect(() => {
+    const el = horizontalScrollRef.current
+    if (!el) return
+    const update = () => {
+      el.style.setProperty('--canvas-hsb', `${Math.max(0, el.offsetHeight - el.clientHeight)}px`)
+    }
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
     assignments: activeReferenceLayout.assignments,
     entityScope: activeEntityScope,
+    defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
+    sortOverrides,
   })
+
+  // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
+  // sort handlers keep a stable identity and LayerColumn's memo holds).
+  const nodesByLayerRef = useRef(nodesByLayer)
+  nodesByLayerRef.current = nodesByLayer
+
+  // Live context for resolving a parent's effective child-sort direction inside
+  // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
+  // nodeLayerMap would re-mint it every canvas mutation and bust LayerColumn's memo).
+  const sortDirectionCtxRef = useRef({
+    nodeLayerMap, layers: sortedLayers, overrides: sortOverrides, dflt: viewDefaultSortMode,
+  })
+  sortDirectionCtxRef.current = {
+    nodeLayerMap, layers: sortedLayers, overrides: sortOverrides, dflt: viewDefaultSortMode,
+  }
+
+  // Live rendered-tree context for custom-order reordering (refs so the
+  // reorder handlers keep ONE identity — LayerColumn is React.memo'd).
+  const reorderTreeRef = useRef<ReorderTreeContext>({ displayMap, parentMap, nodesByLayer, nodeLayerMap })
+  reorderTreeRef.current = { displayMap, parentMap, nodesByLayer, nodeLayerMap }
 
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
   // ref declaration near the interactions call). Read lazily by onNodeCopied /
@@ -1518,7 +1720,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'delete' | 'reorder',
+    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -1545,17 +1747,29 @@ export function ContextViewCanvas({
       entityTypes: [],
       order: before.layers.length,
     })
-    const after = { layers, assignments: before.assignments }
+    const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Authored column width — part of the view definition (ships to every
+  // viewer of the published view). Not staged as a reviewable change:
+  // width is presentation, not model semantics; it rides the normal
+  // layout save. Fires once per drag (pointerup), never per move.
+  const resizeLayer = useCallback((id: string, width: number | null) => {
+    const before = currentLayout()
+    persistReferenceLayout({
+      layers: layerOps.setLayerWidth(before.layers, id, width ?? undefined),
+      assignments: before.assignments,
+    })
+  }, [currentLayout, persistReferenceLayout])
 
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
     const before = currentLayout()
     const old = before.layers.find((l) => l.id === id)
     if (!trimmed || !old || old.name === trimmed) return
-    const after = { layers: layerOps.renameLayer(before.layers, id, trimmed), assignments: before.assignments }
+    const after = { ...before, layers: layerOps.renameLayer(before.layers, id, trimmed) }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1573,7 +1787,7 @@ export function ContextViewCanvas({
       if (entry.layerId !== id) assignments[urn] = entry
       else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
     }
-    const after = { layers, assignments }
+    const after = { ...before, layers, assignments }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'delete', `Deleted layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
@@ -1585,10 +1799,204 @@ export function ContextViewCanvas({
     const dragged = before.layers.find((l) => l.id === draggedId)
     const layers = layerOps.reorderLayer(before.layers, draggedId, targetId)
     if (!dragged || layers === before.layers) return
-    const after = { layers, assignments: before.assignments }
+    const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  const sortModeLabel = (mode: LayerNodeSortMode) => SORT_MODE_LABELS[mode] ?? mode
+
+  // Set a layer's node sort mode. Draft → persisted on the layer config (staged, undoable).
+  // Read-only → device-local override (algorithmic modes only; the menu disables Custom there).
+  const handleSetLayerSortMode = useCallback((layerId: string, mode: LayerNodeSortMode | null) => {
+    const viewId = useSchemaStore.getState().getActiveView()?.id ?? ''
+    if (!isDraft) {
+      if (mode === 'custom' || !viewId) return
+      usePreferencesStore.getState().setViewSortOverride(viewId, layerId, mode)
+      return
+    }
+    // Draft: drop any device-local override so the persisted mode is what renders.
+    if (viewId) usePreferencesStore.getState().setViewSortOverride(viewId, layerId, null)
+    const before = currentLayout()
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    // Custom seeds orderKeys from the column's CURRENT visual order (full, un-traced roots).
+    const seedOrder = mode === 'custom'
+      ? (nodesByLayerRef.current.get(layerId) ?? []).map(n => n.id)
+      : undefined
+    const after = layerOps.setLayerNodeSortMode(before, layerId, mode, seedOrder)
+    if (after === before) return
+    persistReferenceLayout(after)
+    // First-use guidance: entering custom mode changes an invisible property
+    // (rows become drag-reorderable) — say so, once per user.
+    if (mode === 'custom') {
+      const prefs = usePreferencesStore.getState()
+      if (!prefs.onboardingCompletedSteps.includes('custom-order-toast')) {
+        prefs.completeOnboardingStep('custom-order-toast')
+        useToastStore.getState().addToast({
+          type: 'info',
+          message: `Custom order — drag cards to arrange “${layer.name}”`,
+        })
+      }
+    }
+    const label = mode === null
+      ? `View default (${sortModeLabel(before.defaultNodeSortMode ?? 'alpha-asc')})`
+      : mode === 'custom' ? 'Custom order' : sortModeLabel(mode)
+    stageLayerChange(`layer-sort:${layerId}`, before, after, 'sort', `Sort “${layer.name}”: ${label}`)
+  }, [isDraft, currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // "Apply to all layers": promote this column's asc/desc mode to the view default and
+  // clear other columns' asc/desc overrides (custom layers keep their arrangement).
+  const handleApplySortToView = useCallback((layerId: string) => {
+    const before = currentLayout()
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    const effective = layer.nodeSortMode ?? before.defaultNodeSortMode ?? 'alpha-asc'
+    if (effective === 'custom') return
+    const after = layerOps.setViewDefaultSortMode(before, effective)
+    const viewId = useSchemaStore.getState().getActiveView()?.id
+    if (viewId) usePreferencesStore.getState().clearViewSortOverrides(viewId)
+    persistReferenceLayout(after)
+    stageLayerChange('view-sort', before, after, 'sort', `Default sort: ${sortModeLabel(effective)} (all layers)`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // "Reset custom order": discard the layer's manual arrangement — every
+  // orderKey plus the mode override — falling back to the view default.
+  // Staged + undoable like every other layout gesture.
+  const handleResetCustomOrder = useCallback((layerId: string) => {
+    if (!isDraft) return
+    const before = currentLayout()
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    const after = layerOps.clearLayerOrderKeys(before, layerId)
+    if (after === before) return
+    persistReferenceLayout(after)
+    stageLayerChange(`layer-sort:${layerId}`, before, after, 'sort', `Reset custom order in “${layer.name}”`)
+  }, [isDraft, currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Drag-reorder — the top/bottom drop bands. Works in ANY draft column: a
+  // manual reorder AUTO-ADOPTS custom order (the layer flips to 'custom' and
+  // seeds its current visual order), so the user never has to pick a sort mode
+  // first. Custom order is HIERARCHICAL: the target's sibling set is its
+  // parent's children (a child drop) or the layer's roots (a root drop); the
+  // set is seeded so every neighbor has an orderKey, then a fractional key is
+  // minted between the drop-position neighbors — key order always matches the
+  // current visual order. A cross-set drop is a safe no-op; the MIDDLE band
+  // still reparents (nest into a node).
+  const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    if (draggedId === targetId) return
+    const before = currentLayout()
+    const ctx = siblingContext(targetId, reorderTreeRef.current)
+    if (!ctx) return
+    const { siblings, layerId } = ctx
+    const layer = before.layers.find(l => l.id === layerId)
+    if (!layer) return
+    if (!siblings.includes(draggedId)) return // cross-set drop — not a reorder
+
+    // Multi-select: dragging a node that is part of the current selection moves
+    // EVERY selected sibling as one contiguous block, preserving its visual
+    // order. A lone drag is a block of one.
+    const selectedIds = useCanvasStore.getState().selectedNodeIds
+    const block = selectedIds.includes(draggedId) && selectedIds.length > 1
+      ? siblings.filter(id => id === draggedId || selectedIds.includes(id))
+      : [draggedId]
+    if (block.includes(targetId)) return // dropping into (or onto) the block itself
+
+    // Auto-adopt custom order on the first manual reorder of a non-custom
+    // layer (seed the roots from their current visual order so nothing jumps),
+    // then seed the target sibling set so every neighbor carries an orderKey.
+    let layout = before
+    if (layer.nodeSortMode !== 'custom') {
+      const rootIds = (nodesByLayerRef.current.get(layerId) ?? [])
+        .filter(n => !n.isLogical).map(n => n.id)
+      layout = layerOps.setLayerNodeSortMode(layout, layerId, 'custom', rootIds)
+    }
+    layout = assignmentOps.ensureSiblingOrderKeys(layout, layerId, siblings)
+
+    const blockSet = new Set(block)
+    const order = siblings.filter(id => !blockSet.has(id))
+    const targetIdx = order.indexOf(targetId)
+    if (targetIdx < 0) return
+    const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
+    // keysForInsertion walks outward past any still-unkeyed neighbors and
+    // returns null on malformed keys (refuse rather than corrupt the order).
+    const newKeys = assignmentOps.keysForInsertion(layout, layerId, order, insertIdx, block.length)
+    if (newKeys === null) return
+    let after = layout
+    block.forEach((memberId, i) => {
+      after = assignmentOps.setAssignmentOrderKey(after, memberId, newKeys[i])
+    })
+    if (after === before) return
+    persistReferenceLayout(after)
+
+    const newKey = newKeys[0]
+    const node = nodesRef.current.find(n => n.id === draggedId || (n.data?.urn as string) === draggedId)
+    const name = block.length > 1
+      ? `${block.length} nodes`
+      : ((node?.data?.label as string) ?? draggedId)
+    // Undo baseline: a REPEAT drag of the same node must still restore the
+    // truly-original arrangement (incl. un-doing the first drag's lazy
+    // seeding), so reuse the pre-change layout captured by the FIRST staged
+    // reorder of this node rather than this drag's already-seeded `before`.
+    const existing = useStagedChangesStore.getState().changes.find(
+      (c) => c.type === 'reorder_nodes' && c.targetId === draggedId,
+    )
+    const baseline = ((existing?.before as { layout?: NormalizedReferenceLayout } | undefined)?.layout) ?? before
+    useStagedChangesStore.getState().stageOrReplace(
+      (c) => c.type === 'reorder_nodes' && c.targetId === draggedId,
+      {
+        type: 'reorder_nodes',
+        targetId: draggedId,
+        targetUrn: (node?.data?.urn as string) ?? draggedId,
+        before: { orderKey: baseline.assignments[draggedId]?.orderKey ?? null, layout: baseline },
+        after: { orderKey: newKey, layerId },
+        summary: `Reordered '${name}' in ${layer.name}`,
+        discard: () => persistReferenceLayout(baseline),
+        reapply: () => persistReferenceLayout(after),
+      },
+    )
+  }, [currentLayout, persistReferenceLayout])
+
+  // Keyboard-and-mouse reorder nudge — the a11y sibling of the drag bands
+  // (native HTML5 DnD is mouse-only). Resolves the node's sibling set (roots
+  // OR children) and delegates to handleReorderNode. Stable identity.
+  const nudgeReorder = useCallback((nodeId: string, dir: 'up' | 'down' | 'top' | 'bottom') => {
+    const ctx = siblingContext(nodeId, reorderTreeRef.current)
+    if (!ctx) return
+    const { siblings } = ctx
+    const idx = siblings.indexOf(nodeId)
+    if (idx < 0) return
+    if (dir === 'up' && idx > 0) handleReorderNode(nodeId, siblings[idx - 1], 'before')
+    else if (dir === 'down' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[idx + 1], 'after')
+    else if (dir === 'top' && idx > 0) handleReorderNode(nodeId, siblings[0], 'before')
+    else if (dir === 'bottom' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[siblings.length - 1], 'after')
+  }, [handleReorderNode])
+
+  // Context-menu "Move up / down / to top / to bottom" for any node of a draft
+  // layer (roots and children alike — the nudge resolves the right sibling set
+  // and auto-adopts custom order, matching the drag bands). Needs >1 sibling to
+  // be meaningful.
+  const reorderMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!nodeSortingEnabled || !isDraft || trace.isTracing || !target || target.type !== 'node') return []
+    const ctx = siblingContext(target.id, { displayMap, parentMap, nodesByLayer, nodeLayerMap })
+    if (!ctx || ctx.siblings.length < 2) return []
+    const idx = ctx.siblings.indexOf(target.id)
+    if (idx < 0) return []
+    const last = ctx.siblings.length - 1
+    const nid = target.id
+    const act = (id: string, label: string, icon: string, dir: 'up' | 'down' | 'top' | 'bottom', disabled: boolean, shortcut?: string): ContextMenuAction => ({
+      id, label, icon: icon as ContextMenuAction['icon'], shortcut, disabled,
+      onClick: () => { nudgeReorder(nid, dir); interactions.closeContextMenu() },
+    })
+    return [
+      act('reorder-top', 'Move to top', 'ArrowUpToLine', 'top', idx === 0),
+      act('reorder-up', 'Move up', 'ArrowUp', 'up', idx === 0, '⌥↑'),
+      act('reorder-down', 'Move down', 'ArrowDown', 'down', idx === last, '⌥↓'),
+      act('reorder-bottom', 'Move to bottom', 'ArrowDownToLine', 'bottom', idx === last),
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, nodeSortingEnabled, isDraft, trace.isTracing, displayMap, parentMap, nodeLayerMap, nodesByLayer, nudgeReorder])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -1596,8 +2004,43 @@ export function ContextViewCanvas({
     useHierarchyBuilderStore.getState().open({ parentUrn: parentId })
   }, [])
 
+  // Stable per-layer create/build/context-menu handlers — LayerColumn is
+  // React.memo'd, so these must keep ONE identity (an inline arrow at the
+  // render site re-renders every column on every canvas render).
+  const openBuilderForLayer = useCallback((layerId: string) => {
+    useHierarchyBuilderStore.getState().open({ layerId })
+  }, [])
+  const openBuildForLayer = useCallback((layerId: string) => {
+    useHierarchyBuilderStore.getState().openBuild({ layerId })
+  }, [])
+  const handleLayerContextMenuOpen = useCallback((e: React.MouseEvent, layerId: string) => {
+    interactions.openContextMenu(e, {
+      type: 'canvas',
+      position: { x: e.clientX, y: e.clientY },
+      layerId,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.openContextMenu])
+
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
+  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+
+  // Direction-aware child loading: a parent's children load server-sorted per
+  // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
+  // their children still load asc). Resolved via refs so this wrapper keeps
+  // one identity for LayerColumn's memo.
+  const layerSortDirectionFor = useCallback((nodeId: string): 'asc' | 'desc' => {
+    const ctx = sortDirectionCtxRef.current
+    const layerId = ctx.nodeLayerMap.get(nodeId)
+    if (!layerId) return 'asc'
+    const layer = ctx.layers.find(l => l.id === layerId)
+    const mode = ctx.overrides.get(layerId) ?? layer?.nodeSortMode ?? ctx.dflt
+    return mode === 'alpha-desc' ? 'desc' : 'asc'
+  }, [])
+  const loadChildrenSorted = useCallback(
+    (parentId: string) => loadChildren(parentId, { sortDirection: layerSortDirectionFor(parentId) }),
+    [loadChildren, layerSortDirectionFor],
+  )
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -1682,9 +2125,55 @@ export function ContextViewCanvas({
       if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
 
       autoLoadedFirstPageRef.current.add(nodeId)
-      void loadChildren(nodeId)
+      void loadChildrenSorted(nodeId)
     }
-  }, [expandedNodes, displayMap, childMap, loadingNodes, failedNodes, loadChildren, trace.isTracing])
+  }, [expandedNodes, displayMap, childMap, loadingNodes, failedNodes, loadChildrenSorted, trace.isTracing])
+
+  // Direction-flip refetch policy: when a layer's effective asc/desc flips,
+  // pages already loaded for PARTIALLY-loaded parents in that layer were
+  // fetched under the old direction — re-sorting them client-side would show
+  // the wrong window (the alphabetical head relabeled as the tail). Drop those
+  // loaded subtrees (sparing unsaved optimistic creates) so the auto-load
+  // effect above refetches page 1 under the new direction; FULLY-loaded
+  // parents keep their rows and simply re-sort in useLayerAssignment.
+  const prevLayerDirectionsRef = useRef<Map<string, 'asc' | 'desc'>>(new Map())
+  useEffect(() => {
+    const dirByLayer = new Map<string, 'asc' | 'desc'>()
+    sortedLayers.forEach(l => {
+      const mode = sortOverrides.get(l.id) ?? l.nodeSortMode ?? viewDefaultSortMode
+      dirByLayer.set(l.id, mode === 'alpha-desc' ? 'desc' : 'asc')
+    })
+    const prev = prevLayerDirectionsRef.current
+    prevLayerDirectionsRef.current = dirByLayer
+    const flipped = new Set(
+      [...dirByLayer].filter(([id, d]) => prev.has(id) && prev.get(id) !== d).map(([id]) => id),
+    )
+    if (flipped.size === 0) return
+
+    const dropIds = new Set<string>()
+    const refetchParents: string[] = []
+    for (const [nodeId, layerId] of nodeLayerMap) {
+      if (!flipped.has(layerId) || !expandedNodes.has(nodeId)) continue
+      const kids = childMap.get(nodeId) ?? []
+      if (kids.length === 0) continue
+      const childCount = (displayMap.get(nodeId)?.data?.childCount as number) ?? 0
+      if (childCount > 0 && kids.length >= childCount) continue // fully loaded — exact client re-sort
+      refetchParents.push(nodeId)
+      const stack = [...kids]
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        if ((displayMap.get(id)?.data as Record<string, unknown> | undefined)?.isPending === 'create') continue
+        dropIds.add(id)
+        for (const childId of childMap.get(id) ?? []) stack.push(childId)
+      }
+    }
+    if (dropIds.size === 0) return
+    useCanvasStore.getState().removeNodes([...dropIds])
+    // Re-arm the auto-loader for the affected parents so their first page
+    // refetches immediately under the new direction.
+    for (const parentId of refetchParents) autoLoadedFirstPageRef.current.delete(parentId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedLayers, sortOverrides, viewDefaultSortMode])
 
   // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
   // expands collapsed ancestors (lazy-loading from the backend if needed),
@@ -1694,7 +2183,7 @@ export function ContextViewCanvas({
   const revealAndFocus = useRevealNode({
     parentMap,
     setExpandedNodes,
-    loadChildren,
+    loadChildren: loadChildrenSorted,
     provider,
     focus: (id: string) => {
       const el = document.getElementById(`layer-node-${id}`)
@@ -1744,6 +2233,13 @@ export function ContextViewCanvas({
     [revealAndFocus],
   )
 
+  // Registry of per-column imperative geometry APIs, keyed by layer id.
+  // Identity-stable Map (state initializer, never re-set) — columns
+  // register/unregister via effect; the edge overlay reads it
+  // imperatively (pass-through detection, badge partner positions) so
+  // no React state churn is involved.
+  const [columnGeometryRegistry] = useState(() => new Map<string, ColumnGeometryApi>())
+
   // Reveal-into-view: the LayerColumn that owns the hit URN uses its
   // virtualizer's scrollToIndex (DOM scrollIntoView can't work — rows
   // below the overscan window aren't in the DOM at all). We signal via
@@ -1764,7 +2260,7 @@ export function ContextViewCanvas({
   // coexist with the entity-drawer reveal hook above).
   const revealSearchHit = useRevealSearchHit({
     setExpandedNodes,
-    loadChildren,
+    loadChildren: loadChildrenSorted,
     provider,
     scrollIntoView: scrollHitIntoView,
   })
@@ -2127,7 +2623,7 @@ export function ContextViewCanvas({
         // density-tier renderer + browse-mode bundling now absorb the
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
-        await loadChildren(nodeId)
+        await loadChildrenSorted(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
@@ -2296,7 +2792,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
 
 
 
@@ -2335,7 +2831,7 @@ export function ContextViewCanvas({
   // Edge projection: lineageEdges, visibleLineageEdges
   // Pass the trace-filtered views so projected edges only reference visible
   // nodes; outside trace mode these are pass-through to the originals.
-  const { visibleLineageEdges, unresolvedAggregatedCount } = useEdgeProjection({
+  const { visibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
@@ -2383,32 +2879,88 @@ export function ContextViewCanvas({
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
-  // suppresses them in favour of per-node stub indicators; `auto` flips
-  // between the two based on `autoStubThreshold`. The mode resolves
-  // identically in trace and browse — trace mode no longer bypasses the
-  // gate. Trace's focus-incident edges stay materialized via
-  // `effectiveLineageEdges` so the anchor is always legible.
+  // suppresses ambient edges in favour of per-node indicators (hover /
+  // selection materializes); `auto` renders everything below
+  // `autoStubThreshold` and switches to a BUDGETED presentation above it.
+  // The mode resolves identically in trace and browse — trace mode no
+  // longer bypasses the gate. Trace's focus-incident edges stay
+  // materialized via `effectiveLineageEdges` so the anchor is legible.
   const isStubsMode = useMemo(() => {
     if (lineageRenderMode === 'raw') return false
     if (lineageRenderMode === 'stubs') return true
     return visibleLineageEdges.length > autoStubThreshold
   }, [lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Effective edge set passed to the renderer. In stubs mode edges
-  // incident to the hovered, selected, or trace-focus node materialize
-  // (so the user can drill in by interacting and the trace anchor stays
-  // unmissable); the canvas otherwise stays light.
-  const effectiveLineageEdges = useMemo(() => {
-    if (!isStubsMode) return visibleLineageEdges
+  // Significance ranking: bundled edge count first (a 600-edge bundle IS
+  // the macro flow), confidence as the tie-break.
+  const bySignificance = (a: { edgeCount?: number; confidence?: number }, b: { edgeCount?: number; confidence?: number }) =>
+    ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0))
+
+  // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
+  // instead of cliffing (old behavior: all ambient edges vanished at
+  // once) or dumping (interim behavior: a 40k-path hairball): the
+  // STRONGEST flows render ambiently up to the budget, and the long
+  // tail is declared — per-node in/out indicators carry presence +
+  // counts, and a status chip reports "showing N strongest of M" with
+  // escalation to All Edges. Nothing is lost silently; the canvas stays
+  // readable; SVG path count stays bounded regardless of graph size.
+  const rankedAmbientEdges = useMemo(() => {
+    if (!isStubsMode || lineageRenderMode !== 'auto') return null
+    return [...visibleLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
+  }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
+
+  // Effective edge set passed to the renderer, plus the shown/total
+  // bookkeeping the status chips surface. Focus (hover / selection /
+  // trace anchor) materializes incident edges in every stub-y mode, but
+  // a hub's fan is ALSO capped at the strongest `autoStubThreshold` —
+  // 650 curves at once is noise; the Lineage Lens enumerates the full
+  // fan properly and the chip points there.
+  const edgePresentation = useMemo(() => {
+    if (!isStubsMode) {
+      return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
+    }
+    const ambient = rankedAmbientEdges ?? []
+    const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
     const focusIds = new Set<string>()
     if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
     if (trace.isTracing && trace.result?.focusId) focusIds.add(trace.result.focusId)
-    if (focusIds.size === 0) return []
-    return visibleLineageEdges.filter(e =>
+    if (focusIds.size === 0) {
+      return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
+    }
+    const focusAll = visibleLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
-  }, [visibleLineageEdges, isStubsMode, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+    const focus = focusAll.length > autoStubThreshold
+      ? [...focusAll].sort(bySignificance).slice(0, autoStubThreshold)
+      : focusAll
+    if (ambient.length === 0) {
+      return { edges: focus, ambientShown: 0, ambientTotal, focusShown: focus.length, focusTotal: focusAll.length }
+    }
+    const focusIdsSet = new Set(focus.map(e => e.id))
+    return {
+      edges: [...focus, ...ambient.filter(e => !focusIdsSet.has(e.id))],
+      ambientShown: ambient.length,
+      ambientTotal,
+      focusShown: focus.length,
+      focusTotal: focusAll.length,
+    }
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, trace.isTracing, trace.result?.focusId])
+  const effectiveLineageEdges = edgePresentation.edges
+
+  // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
+  // EVERY projected edge (not just the budgeted subset) so the bands show
+  // the true totals the budget summarizes. Only in Adaptive's summarized
+  // state; user-toggleable.
+  const flowRibbons = useMemo(() => {
+    if (!showFlowRibbons || !isStubsMode || lineageRenderMode !== 'auto') return undefined
+    const ribbons = aggregateFlowRibbons(
+      visibleLineageEdges,
+      nodeLayerMap,
+      sortedLayers.map(l => l.id),
+    )
+    return ribbons.length > 0 ? ribbons : undefined
+  }, [showFlowRibbons, isStubsMode, lineageRenderMode, visibleLineageEdges, nodeLayerMap, sortedLayers])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -2431,14 +2983,14 @@ export function ContextViewCanvas({
     return ids
   }, [trace.expandingPairs, effectiveLineageEdges, displayMap])
 
-  // Per-node lineage counts in stubs mode. Drives the small partial-edge
-  // markers on each entity card — a quiet inbound arrow on the left when
-  // `in > 0`, a quiet outbound arrow on the right when `out > 0`. Counts
-  // come from the full projected set (not the hover-filtered slice) so
-  // the markers reflect the entity's true lineage volume regardless of
-  // which edges happen to be materialized for the current hover.
+  // Per-node lineage counts. Drives the in/out indicators on each entity
+  // card — computed in EVERY render mode so a node always communicates
+  // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
+  // quiet tab otherwise; see LineageFlowOverlay). Counts come from the
+  // full projected set (not the hover-filtered slice) so the markers
+  // reflect the entity's true lineage volume regardless of which edges
+  // happen to be materialized for the current hover.
   const nodeStubCounts = useMemo(() => {
-    if (!isStubsMode) return new Map<string, { in: number; out: number }>()
     const counts = new Map<string, { in: number; out: number }>()
     for (const e of visibleLineageEdges) {
       const s = counts.get(e.source) ?? { in: 0, out: 0 }
@@ -2449,7 +3001,258 @@ export function ContextViewCanvas({
       counts.set(e.target, t)
     }
     return counts
-  }, [visibleLineageEdges, isStubsMode])
+  }, [visibleLineageEdges])
+
+  // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  const unassignedEntities = useMemo(() =>
+    unassignedNodes.map((n) => ({
+      id: n.id,
+      label: (n.data?.label ?? n.data?.businessLabel ?? n.id) as string,
+      type: n.data?.type as string | undefined,
+    })), [unassignedNodes])
+  // Truncated aggregated expansions: summed shown/total across all expanded
+  // bundles whose detail was capped, plus a load-more that pages each one.
+  const aggDetailStatus = useMemo(() => {
+    let shown = 0
+    let total = 0
+    const truncatedIds: string[] = []
+    aggregatedEdges.forEach((state, id) => {
+      if (state.state === 'expanded' && state.detailTruncated) {
+        shown += state.detailedEdges.length
+        total += state.detailTotal ?? state.detailedEdges.length
+        truncatedIds.push(id)
+      }
+    })
+    return { shown, total, truncatedIds }
+  }, [aggregatedEdges])
+  const handleLoadMoreAggDetail = useCallback(() => {
+    aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
+  }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
+
+  // ── Lineage Lens — ego-graph overlay (focal stack; empty = closed) ────
+  const [lensStack, setLensStack] = useState<string[]>([])
+  const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
+  const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
+  const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
+  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
+  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
+  // Miller-column branch: truncate to hop i, then step into nodeId.
+  const lensWalkTo = useCallback((index: number, nodeId: string) =>
+    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
+  const lensClose = useCallback(() => setLensStack([]), [])
+  // On-demand lineage for every visited focal node — the lens tells the
+  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
+  // Lens-local (never written to the canvas store), cached per session.
+  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
+  useEffect(() => {
+    focusLensRef.current = () => {
+      const target = selectedNodeId ?? drawerNodeId
+      if (target) setLensStack([target])
+    }
+  }, [selectedNodeId, drawerNodeId])
+
+  // ── Anchor Rail — the selected node's off-screen partners docked as
+  // proxy chips in their owning columns. The overlay computes the
+  // payload (it owns visibility truth) and pushes it here only on real
+  // content change; columns render the chips; next frame the overlay
+  // anchors the focus edges to the chip rects. Chip click reuses the
+  // reveal mechanism (per-partner Frame); the "+N more" overflow routes
+  // to the Lens — the full, searchable list.
+  // ── External lineage (curated views) — "no lineage" vs "outside this
+  // view". Total degrees fetched per hydration settle; external =
+  // total − internal(loaded). Selection-scoped surface: a status chip
+  // for the selected node. Absent totals mean UNKNOWN → no chip, never
+  // a false "no lineage" claim.
+  const externalDegrees = useExternalDegrees(
+    activeEntityScope === 'curated' && showMissingConnectionIndicators,
+  )
+  // Ambient per-node cue: external = total − internal(loaded), for every
+  // loaded node with a KNOWN total. One O(E) pass builds internal
+  // degrees; nodes absent from externalDegrees stay absent here
+  // (unknown ≠ zero). Empty map when the feature is off — the overlay
+  // renders nothing.
+  const externalCueByNode = useMemo(() => {
+    const cue = new Map<string, { in: number; out: number }>()
+    if (externalDegrees.size === 0) return cue
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    const internal = new Map<string, { in: number; out: number }>()
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      const s = internal.get(e.source) ?? { in: 0, out: 0 }
+      s.out++; internal.set(e.source, s)
+      const tg = internal.get(e.target) ?? { in: 0, out: 0 }
+      tg.in++; internal.set(e.target, tg)
+    }
+    externalDegrees.forEach((total, urn) => {
+      const loc = internal.get(urn) ?? { in: 0, out: 0 }
+      const exIn = Math.max(0, total.in - loc.in)
+      const exOut = Math.max(0, total.out - loc.out)
+      if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
+    })
+    return cue
+  }, [externalDegrees, edges, lineageEdgeTypes])
+
+  const selectedExternalLineage = useMemo(() => {
+    if (!selectedNodeId) return null
+    const total = externalDegrees.get(selectedNodeId)
+    if (!total) return null
+    const lineageTypeSet = new Set(lineageEdgeTypes)
+    let inLoaded = 0
+    let outLoaded = 0
+    for (const e of edges) {
+      const t = (e.data?.edgeType as string) || ''
+      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
+      if (e.source === selectedNodeId) outLoaded++
+      else if (e.target === selectedNodeId) inLoaded++
+    }
+    const exIn = Math.max(0, total.in - inLoaded)
+    const exOut = Math.max(0, total.out - outLoaded)
+    return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
+  }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+
+  // ── External lineage PREVIEW (feature-flagged) — the guided
+  // click-through: fetch ONE node's out-of-scope partners on demand
+  // (bounded: two edge queries + one name lookup) and show them in the
+  // Lens, badged. Nothing enters the canvas store — a preview must
+  // never mutate a curated view's scope.
+  const externalLineagePreview = usePreferencesStore((s) => s.externalLineagePreview)
+  const [externalPreview, setExternalPreview] = useState<{
+    nodeId: string
+    loading: boolean
+    records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
+  } | null>(null)
+  const handlePreviewExternal = useCallback(async () => {
+    const urn = selectedNodeId
+    if (!urn) return
+    setExternalPreview({ nodeId: urn, loading: true, records: [] })
+    openLens(urn)
+    try {
+      const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
+      const [outEdges, inEdges] = await Promise.all([
+        provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
+        provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
+      ])
+      const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+      const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
+      for (const e of outEdges) {
+        const p = e.targetUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
+      }
+      for (const e of inEdges) {
+        const p = e.sourceUrn
+        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+      }
+      const partnerUrns = [...partners.keys()].slice(0, 100)
+      const named = partnerUrns.length > 0
+        ? await provider.getNodes({ urns: partnerUrns, limit: partnerUrns.length })
+        : []
+      const labelByUrn = new Map(named.map(n => [n.urn, n.displayName]))
+      setExternalPreview({
+        nodeId: urn,
+        loading: false,
+        records: partnerUrns.map(p => ({
+          urn: p,
+          label: labelByUrn.get(p) || p.split(':').pop() || p,
+          direction: partners.get(p)!.direction,
+          edgeType: partners.get(p)!.edgeType,
+        })),
+      })
+    } catch {
+      // Preview is advisory — fail closed to "no preview", never block the lens.
+      setExternalPreview({ nodeId: urn, loading: false, records: [] })
+    }
+  }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+
+  const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
+  const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
+    setAnchorProxyGroups(groups)
+  }, [])
+
+  // Rail focus: selection wins instantly; hover engages after a short
+  // DWELL (so drive-by mouse movement doesn't flash chips) and, when the
+  // hover ends with nothing selected, the rail LINGERS long enough for
+  // the pointer to travel to a chip — the reason a naive hover-scoped
+  // rail is unusable (it dismisses itself en route). Timers are
+  // effect-scoped; every transition cancels the previous one.
+  const [railFocusId, setRailFocusId] = useState<string | null>(null)
+  useEffect(() => {
+    if (selectedNodeId) {
+      const raf = requestAnimationFrame(() => setRailFocusId(selectedNodeId))
+      return () => cancelAnimationFrame(raf)
+    }
+    if (hoveredNodeId) {
+      const t = setTimeout(() => setRailFocusId(hoveredNodeId), 250)
+      return () => clearTimeout(t)
+    }
+    const t = setTimeout(() => setRailFocusId(null), 1500)
+    return () => clearTimeout(t)
+  }, [selectedNodeId, hoveredNodeId])
+
+  const handleProxyMore = useCallback(() => {
+    const target = railFocusId ?? selectedNodeId
+    if (target) openLens(target)
+  }, [railFocusId, selectedNodeId, openLens])
+
+  // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
+  // Never auto-scrolls: business users hate surprise camera moves. The
+  // pill appears only when a meaningful share of the selection's
+  // neighborhood is outside the viewport, and dismisses on deselect.
+  const [framePill, setFramePill] = useState<{ nodeId: string; neighborIds: string[]; offCount: number } | null>(null)
+
+  // ── Framed-mode chrome — explicit exit for the framed state ──────────
+  // Clicking "Frame" reveals + centers the selection's neighborhood, and
+  // the focus dimming makes the canvas read as a MODE — but the only way
+  // out was the undiscoverable Esc. This context drives a persistent
+  // pill that names the state, offers an explicit "Exit frame" (which
+  // mirrors Esc exactly: clear the selection), and shows the Esc hint so
+  // the shortcut becomes learnable. Dismissed automatically when the
+  // framed selection changes or clears.
+  const [framedContext, setFramedContext] = useState<{ nodeId: string; count: number } | null>(null)
+  useEffect(() => {
+    if (!framedContext) return
+    if (selectedNodeId === framedContext.nodeId) return
+    // rAF-deferred like the framePill effect — keeps the reset out of the
+    // synchronous render/effect path (react-hooks/set-state-in-effect).
+    const raf = requestAnimationFrame(() => setFramedContext(null))
+    return () => cancelAnimationFrame(raf)
+  }, [selectedNodeId, framedContext])
+  const exitFrame = useCallback(() => {
+    useCanvasStore.getState().clearSelection()
+    setFramedContext(null)
+  }, [])
+  useEffect(() => {
+    // rAF defers both the DOM measurement (post-paint rects) and the
+    // state write off the effect's synchronous path. Deps use the STABLE
+    // edge fingerprint (+ ref read) — the projected array's identity
+    // churns per hover via delegation stamping, and re-measuring a hub
+    // node's whole fan on every hover flick would jank. Measurement is
+    // sampled: past the cap the neighborhood is off-screen-heavy by
+    // construction, and the pill's decision doesn't need exact counts.
+    const MEASURE_CAP = 300
+    const raf = requestAnimationFrame(() => {
+      if (!selectedNodeId) { setFramePill(null); return }
+      const neighborIds = new Set<string>()
+      for (const e of visibleLineageEdgesRef.current) {
+        if (e.source === selectedNodeId && e.target !== selectedNodeId) neighborIds.add(e.target)
+        else if (e.target === selectedNodeId && e.source !== selectedNodeId) neighborIds.add(e.source)
+      }
+      if (neighborIds.size === 0) { setFramePill(null); return }
+      const box = horizontalScrollRef.current?.getBoundingClientRect()
+      const ids = [...neighborIds]
+      const sample = ids.slice(0, MEASURE_CAP)
+      let off = 0
+      for (const id of sample) {
+        const el = document.getElementById(`layer-node-${id}`)
+        if (!el || !box) { off++; continue }
+        const r = el.getBoundingClientRect()
+        if (r.bottom < box.top || r.top > box.bottom || r.right < box.left || r.left > box.right) off++
+      }
+      setFramePill(off / sample.length > 0.3 ? { nodeId: selectedNodeId, neighborIds: ids, offCount: off } : null)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [selectedNodeId, visibleLineageEdgesFingerprint])
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
@@ -2664,6 +3467,7 @@ export function ContextViewCanvas({
         onRedo={redoStagedChange}
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
+        onFitToWidth={handleFitToWidth}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
@@ -2700,21 +3504,12 @@ export function ContextViewCanvas({
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {(aggregationTruncated || unresolvedAggregatedCount > 0) && (
+        {(aggregationTruncated || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">
-              {[
-                aggregationTruncated
-                  ? 'Showing the largest connections — narrow the selection to see more.'
-                  : null,
-                unresolvedAggregatedCount > 0
-                  ? `${unresolvedAggregatedCount} connection${unresolvedAggregatedCount === 1 ? '' : 's'} couldn't be placed on this canvas.`
-                  : null,
-              ].filter(Boolean).join(' ')}
-            </span>
+            <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
           </div>
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
@@ -2726,6 +3521,27 @@ export function ContextViewCanvas({
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
           >
             <span className="font-medium">Source data changed — lineage is being recomputed. Showing the previous rollup.</span>
+          </div>
+        )}
+        {/* Edge-fetch integrity banner — an edge query failed and was
+            swallowed to keep nodes rendering; the canvas may be missing
+            connections. Retry re-hydrates and refetches aggregated edges. */}
+        {(edgeFetchFailures > 0 || aggregationError) && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">Some connections could not be loaded — the canvas may be incomplete.</span>
+            <button
+              className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
+              onClick={() => {
+                clearEdgeFetchFailures()
+                invalidateAggregatedEdges()
+                retryHydration()
+              }}
+            >
+              Retry
+            </button>
           </div>
         )}
         {/* Warning: missing ontology configuration */}
@@ -2861,6 +3677,174 @@ export function ContextViewCanvas({
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
         </div>
 
+        {/* Status chips — loaded-but-hidden data (unresolved edges,
+            unassigned entities, truncated aggregated detail). The canvas
+            never hides lineage silently. */}
+        <CanvasStatusChips
+          rootsLoaded={rootsLoaded}
+          rootsHaveMore={rootsHaveMore}
+          onLoadMoreRoots={() => { void loadMoreRoots() }}
+          selectedExternal={selectedExternalLineage}
+          onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
+          unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
+          unassignedEntities={unassignedEntities}
+          onOpenEntity={openNodeDrawer}
+          aggDetailShown={aggDetailStatus.shown}
+          aggDetailTotal={aggDetailStatus.total}
+          onLoadMoreDetail={handleLoadMoreAggDetail}
+          viewScope={activeEntityScope}
+          adaptiveShown={edgePresentation.ambientShown}
+          adaptiveTotal={edgePresentation.ambientTotal}
+          onShowAllEdges={() => setLineageRenderMode('raw')}
+          focusShown={edgePresentation.focusShown}
+          focusTotal={edgePresentation.focusTotal}
+          onOpenFocusLens={() => {
+            const target = selectedNodeId ?? hoveredNodeId ?? drawerNodeId
+            if (target) openLens(target)
+          }}
+        />
+
+        {/* Frame pill — selection has off-screen neighbors; offer to frame
+            them (never auto-scroll) or open the lens. */}
+        <AnimatePresence>
+          {framePill && (
+            <motion.div
+              key={`frame-pill-${framePill.nodeId}`}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.18 }}
+              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
+              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              data-canvas-interactive
+            >
+              <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
+              <span>connection{framePill.offCount === 1 ? '' : 's'} off-screen</span>
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+                onClick={() => {
+                  setFramedContext({ nodeId: framePill.nodeId, count: framePill.neighborIds.length })
+                  void locateManyOnCanvas(framePill.neighborIds)
+                  setFramePill(null)
+                }}
+              >
+                Frame
+              </button>
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+                onClick={() => { openLens(framePill.nodeId); setFramePill(null) }}
+              >
+                Open lens
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Framed-mode chrome — persistent while the framed selection is
+            active. Names the state, provides the explicit exit the offer
+            pill (above) morphs into, and teaches the Esc shortcut. Same
+            bottom-center slot as the offer for spatial continuity. */}
+        <AnimatePresence>
+          {framedContext && selectedNodeId === framedContext.nodeId && (
+            <motion.div
+              key="framed-chrome"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.98 }}
+              transition={{ duration: 0.18 }}
+              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
+              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              data-canvas-interactive
+            >
+              <Crosshair className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+              <span className="min-w-0 max-w-[280px] truncate">
+                Framing{' '}
+                <span className="font-semibold text-ink">
+                  {nodeMap.get(framedContext.nodeId)?.data.label ?? framedContext.nodeId}
+                </span>
+                {' '}· <span className="tabular-nums">{framedContext.count}</span>{' '}
+                connection{framedContext.count === 1 ? '' : 's'}
+              </span>
+              <kbd className="flex-shrink-0 px-1.5 py-0.5 rounded-md border border-white/10 bg-white/[0.04] text-[9.5px] font-semibold uppercase tracking-wide text-ink-muted/70">
+                Esc
+              </kbd>
+              <button
+                type="button"
+                onClick={exitFrame}
+                className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-full font-semibold bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25 active:scale-95 transition-all"
+              >
+                <X className="w-3 h-3" />
+                Exit frame
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Layer Strip — docked horizontal navigator: you-are-here chips
+            per layer, click-to-jump, add-layer (draft) and Fit. Frame-
+            anchored (never in scroll content). */}
+        <LayerStrip
+          layers={stripLayers}
+          scrollRef={horizontalScrollRef}
+          // "+" routes to the existing AddLayerColumn at the canvas end —
+          // one deliberate creation flow (name input there), not a
+          // second create path.
+          onAddLayer={isDraft ? () => {
+            const el = horizontalScrollRef.current
+            el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
+          } : undefined}
+          onFit={handleFitToWidth}
+        />
+
+        {/* Lineage Lens — ego-graph overlay (portal to body). */}
+        <LineageLens
+          lensStack={lensStack}
+          supplementalEdges={lensLineage.supplementalEdges}
+          supplementalNodes={lensLineage.supplementalNodes}
+          fetchStatus={lensLineage.status}
+          fetchTruncatedIds={lensLineage.truncatedIds}
+          onRetryFetch={lensLineage.retry}
+          drillEdges={lensLineage.drillEdges}
+          drillStatus={lensLineage.drillStatus}
+          onDrillFetch={lensLineage.fetchDrill}
+          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
+          onRecenter={lensRecenter}
+          onBack={lensBack}
+          onJumpTo={lensJumpTo}
+          onWalkTo={lensWalkTo}
+          onShowPathOnCanvas={(ids) => {
+            // Presenting a walk IS a frame action — same chrome, same exit.
+            const focal = ids[ids.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length - 1 })
+            }
+            void locateManyOnCanvas(ids)
+          }}
+          onClose={lensClose}
+          onRevealOnCanvas={revealAndFocus}
+          onOpenDetails={openNodeDrawer}
+          onLocateAll={(ids) => {
+            // "Reveal all on canvas" IS a frame action — land the user in
+            // the same framed-mode chrome as the Frame pill so the state
+            // is named and has an explicit exit. Select the focal node so
+            // the canvas focus matches what the lens was showing (guarded:
+            // selectNode toggles OFF when re-selecting the current
+            // selection).
+            const focal = lensStack[lensStack.length - 1]
+            if (focal) {
+              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
+              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
+              setFramedContext({ nodeId: focal, count: ids.length })
+            }
+            void locateManyOnCanvas(ids)
+          }}
+          onTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
+        />
+
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
             empty model, and the first-steps companion while building. Both are
             scoped to kind === 'blank' so every other view is untouched.
@@ -2900,8 +3884,6 @@ export function ContextViewCanvas({
             <LineageFlowOverlay
               nodes={renderFlat}
               edges={effectiveLineageEdges}
-              nodeStubCounts={nodeStubCounts}
-              showStubs={isStubsMode}
               expandedNodes={expandedNodes}
               selectEdge={selectEdge}
               isEdgePanelOpen={isEdgePanelOpen}
@@ -2915,6 +3897,11 @@ export function ContextViewCanvas({
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
               expandingEdgeIds={expandingEdgeIds}
+              geometryRegistry={columnGeometryRegistry}
+              onRevealNode={scrollHitIntoView}
+              flowRibbons={flowRibbons}
+              focusNodeId={railFocusId}
+              onAnchorProxies={handleAnchorProxies}
             />
           )}
 
@@ -2972,13 +3959,27 @@ export function ContextViewCanvas({
             style={{
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
-              // Canvas zoom — CSS scale on the columns area. Width/height
-              // are pre-compensated so the inner flex layout stays truthful
-              // at non-100% zoom; the outer overflow-auto handles scrolling.
-              transform: canvasZoom !== 1 ? `scale(${canvasZoom})` : undefined,
-              transformOrigin: 'top left',
+              // Canvas zoom — CSS `zoom` (NOT transform: scale). zoom is a
+              // LAYOUT-affecting scale: the wrapper's 100/zoom% size lays
+              // out back to exactly 100% of the scroll container, so the
+              // scrollable area always equals the visible content. A
+              // transform here left a 100/zoom% layout-sized ghost scroll
+              // region (transforms never affect layout), letting users
+              // scroll far past the canvas into emptiness — and wheel
+              // scrolls chained into that ghost area instead of the
+              // columns' internal lists.
+              //
+              // --canvas-hsb: measured height of the container's CLASSIC
+              // horizontal scrollbar (0 for macOS overlay scrollbars).
+              // Percentage heights resolve against a box that ignores
+              // the scrollbar, so a plain 100% overflows the visible
+              // area by the scrollbar height — clipping the columns'
+              // bottom edge (and the bottom periphery scrims) below the
+              // fold. Subtracting the measured gutter makes the column
+              // bottom land exactly at the visible edge at every zoom.
+              zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
+              height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
             }}
           >
             {sortedLayers.map((layer) => (
@@ -3001,18 +4002,10 @@ export function ContextViewCanvas({
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={canEditGraph ? handleAddChildEntity : undefined}
-                onAddToLayer={canEditGraph ? (layerId) => {
-                  useHierarchyBuilderStore.getState().open({ layerId })
-                } : undefined}
-                onBuildToLayer={canEditGraph ? (layerId) => {
-                  useHierarchyBuilderStore.getState().openBuild({ layerId })
-                } : undefined}
+                onAddToLayer={canEditGraph ? openBuilderForLayer : undefined}
+                onBuildToLayer={canEditGraph ? openBuildForLayer : undefined}
                 onBeginConnect={canEditGraph ? edgeConnect.beginDrag : undefined}
-                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
-                  type: 'canvas',
-                  position: { x: e.clientX, y: e.clientY },
-                  layerId,
-                })}
+                onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
@@ -3021,19 +4014,48 @@ export function ContextViewCanvas({
                 isHighlightActive={isHighlightActive}
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
-                onLoadMore={loadChildren}
+                onLoadMore={loadChildrenSorted}
                 onSearchChildren={searchChildren}
                 isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
+                onAssignToLayer={handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 onRenameLayer={isDraft ? renameLayer : undefined}
                 onDeleteLayer={isDraft ? deleteLayer : undefined}
                 onReorderLayer={isDraft ? reorderLayer : undefined}
+                // Node sorting — the menu is available to everyone (viewers get a
+                // device-local override); persisted actions are draft-gated
+                // inside; the whole surface sits behind the nodeSortingEnabled
+                // kill switch (persisted orders still RENDER when it's off).
+                sortMode={sortOverrides.get(layer.id) ?? layer.nodeSortMode ?? viewDefaultSortMode}
+                sortIsOverride={sortOverrides.has(layer.id) || layer.nodeSortMode != null}
+                viewDefaultSortMode={viewDefaultSortMode}
+                canPersistSort={isDraft}
+                onSetSortMode={nodeSortingEnabled ? handleSetLayerSortMode : undefined}
+                onApplySortToView={nodeSortingEnabled ? handleApplySortToView : undefined}
+                onResetCustomOrder={nodeSortingEnabled && layer.nodeSortMode === 'custom' ? handleResetCustomOrder : undefined}
+                // Reorder bands are live in ANY draft column — a manual drag
+                // auto-adopts custom order, so the user never has to switch
+                // sort mode first. Off during trace (the tree is filtered there,
+                // so neighbor keys wouldn't match what's shown).
+                reorderEnabled={nodeSortingEnabled && isDraft && !trace.isTracing}
+                onReorderDrop={handleReorderNode}
+                onReorderNudge={nudgeReorder}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
+                geometryRegistry={columnGeometryRegistry}
+                overscan={effectiveOverscan}
+                lineageCounts={nodeStubCounts}
+                externalCue={externalCueByNode}
+                showLineageIndicators={showLineageFlow}
+                showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
+                anchorProxies={anchorProxyGroups.get(layer.id)}
+                onProxyReveal={scrollHitIntoView}
+                onProxyMore={handleProxyMore}
+                onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
+                onResizeLayer={isDraft ? resizeLayer : undefined}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
@@ -3101,6 +4123,7 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
+            onFocusConnections={openLens}
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
             onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
             onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
@@ -3161,6 +4184,7 @@ export function ContextViewCanvas({
           })
         } : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
+        onFocusConnections={openLens}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={canEditGraph ? interactions.editEdge : undefined}
         onDeleteEdge={canEditGraph ? interactions.deleteEdge : undefined}
@@ -3173,6 +4197,7 @@ export function ContextViewCanvas({
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
+        customActions={reorderMenuActions}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}

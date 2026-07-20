@@ -29,6 +29,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import pytest
+from fastapi import HTTPException, status
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -60,6 +61,7 @@ from backend.app.services.revocation_service import (
     InMemoryBackend,
     RevocationService,
     configure_revocation_service,
+    get_revocation_service,
 )
 
 
@@ -169,6 +171,38 @@ def _feature_flags_at_their_defaults():
     feature_flags._cache_ts = time.monotonic()
     yield
     feature_flags.invalidate()
+
+
+@pytest.fixture(autouse=True)
+def _reset_revocation_backend():
+    """Clear the process-global in-memory revocation set between tests.
+
+    The revocation backend is a single session-wide singleton (installed
+    above). Without a reset, a test that revokes a sid — notably the fake
+    ``sess_test`` that ``test_client`` now honours — would leave every later
+    test's requests 401ing. Clearing before and after keeps tests isolated."""
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if isinstance(backend, InMemoryBackend):
+        backend._set.clear()
+        backend._sets.clear()
+    yield
+    if isinstance(backend, InMemoryBackend):
+        backend._set.clear()
+        backend._sets.clear()
+
+
+@pytest.fixture()
+def signup_enabled():
+    """Turn self-registration ON for a test.
+
+    Signup is gated behind the ``signupEnabled`` flag, a security control that
+    fails CLOSED (default False, see ``auth.py``). It isn't in the seeded
+    defaults, so the endpoint returns 403 unless a test opts in. Prime the flag
+    in the cache — the same path a gate reads in production (see
+    ``_feature_flags_at_their_defaults`` above and ``test_feature_gates._prime``)."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "signupEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    yield
 
 
 @pytest.fixture()
@@ -343,6 +377,17 @@ async def test_client(
         yield db_session
 
     async def _override_get_current_user():
+        # Mirror the real dependency's revocation check (see
+        # ``get_current_user`` in auth/dependencies.py) for the fake session
+        # sid, so the dynamic-permission revocation chain is exercisable
+        # through the test client. Normal tests never revoke ``sess_test``,
+        # so this is a no-op for them; the ``_reset_revocation_backend``
+        # autouse fixture keeps a revoking test from leaking into the next.
+        if await get_revocation_service().is_revoked("sess_test"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session revoked",
+            )
         return _FAKE_USER
 
     async def _override_get_optional_user():

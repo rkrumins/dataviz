@@ -19,19 +19,30 @@ from pathlib import Path
 import pytest
 
 
-_MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "alembic" / "versions" / "20260430_1200_rbac_schema.py"
-)
+_VERSIONS_DIR = Path(__file__).resolve().parent.parent / "alembic" / "versions"
+_MIGRATION_PATH = _VERSIONS_DIR / "20260430_1200_rbac_schema.py"
+# Phase 18 added the workspace read/manage split for ontology / catalog /
+# provider. Those leaves are seeded here, not in the Phase-1 migration, so the
+# seed-vs-collapser check must account for them too.
+_WS_READS_MIGRATION_PATH = _VERSIONS_DIR / "20260605_1200_phase18_ws_reads.py"
 
 
-@pytest.fixture(scope="module")
-def migration_module():
-    spec = importlib.util.spec_from_file_location("_rbac_migration", _MIGRATION_PATH)
+def _load_migration(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+@pytest.fixture(scope="module")
+def migration_module():
+    return _load_migration(_MIGRATION_PATH, "_rbac_migration")
+
+
+@pytest.fixture(scope="module")
+def ws_reads_migration_module():
+    return _load_migration(_WS_READS_MIGRATION_PATH, "_rbac_ws_reads_migration")
 
 
 def test_migration_file_exists():
@@ -86,15 +97,20 @@ def test_viewer_role_is_read_only(migration_module):
     assert forbidden == set(), f"viewer has forbidden perms: {forbidden}"
 
 
-def test_seed_leaves_match_catalogue(migration_module):
+def test_seed_leaves_match_catalogue(migration_module, ws_reads_migration_module):
     """The wildcard collapser in ``permission_service`` knows about a
-    fixed set of leaves per prefix. They must match the migration's
+    fixed set of leaves per prefix. They must match the seeded permission
     catalogue exactly — otherwise we'd either fail to collapse claims
     that should be wildcards, or emit a wildcard for a partially
-    granted set."""
+    granted set.
+
+    The catalogue is seeded across more than one migration: the Phase-1
+    schema migration plus the Phase-18 workspace-reads migration (which
+    owns the ontology / catalog / provider leaves)."""
     from backend.app.services.permission_service import _SEED_LEAVES
 
     perm_ids = {p[0] for p in migration_module._PERMISSIONS}
+    perm_ids |= {p[0] for p in ws_reads_migration_module._NEW_PERMISSIONS}
     for prefix, leaves in _SEED_LEAVES.items():
         expected = {p for p in perm_ids if p.startswith(prefix + ":")}
         assert leaves == expected, (

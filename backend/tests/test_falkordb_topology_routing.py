@@ -29,6 +29,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from backend.app.providers import falkor_graph_registry as frg
 from backend.app.providers.falkordb_connection import (
+    ClusterCoverageError,
     TopologyGraphClients,
     list_graph_keys_for_config,
 )
@@ -50,6 +51,9 @@ CLUSTER_OWNERS = {
 }
 # Who Sentinel currently reports as master (mutated to simulate a failover).
 SENTINEL_MASTER = {"endpoint": ("se-master-1", 6379)}
+# Slots the fake cluster's slot map covers (mutated to simulate a shard whose
+# slots dropped out of the map — the silent GRAPH.LIST under-report window).
+CLUSTER_SLOTS = {"covered": 16384}
 
 PROVIDER_ROWS = {
     "standalone-1": dict(
@@ -192,6 +196,12 @@ def fleet(monkeypatch):
             self.port = port
 
     class _NodesManager:
+        def __init__(self):
+            # Same shape as redis-py's NodesManager.slots_cache: slot → nodes.
+            self.slots_cache = {
+                i: ["node"] for i in range(CLUSTER_SLOTS["covered"])
+            }
+
         def get_node_from_slot(self, slot):
             host, port = CLUSTER_OWNERS[slot]
             return FakeClusterNode(host, port)
@@ -301,6 +311,7 @@ def fleet(monkeypatch):
         "gv_cl_3": ("cl-node-c", 7002), "gv_cl_4": ("cl-node-a", 7000),
     })
     SENTINEL_MASTER["endpoint"] = ("se-master-1", 6379)
+    CLUSTER_SLOTS["covered"] = 16384
 
     built["clients"] = clients
     built["FakeFalkorDB"] = FakeFalkorDB
@@ -454,6 +465,27 @@ async def test_query_error_is_not_retried(fleet):
         await g.query("RETRUN 1")
 
 
+# ── build failure must not leak the freshly-built pool ──────────────
+
+@pytest.mark.asyncio
+async def test_build_failure_closes_the_new_pool(fleet, monkeypatch):
+    """A raise between pool construction and the cache insert (verify ping /
+    cluster-node guard) must close the pool: a persistent condition re-enters
+    _build on every call and would otherwise leak one live socket each time."""
+    from backend.app.providers import falkordb_connection as fc
+
+    async def _reject(cfg, pool, timeout):
+        raise ProviderConfigurationError("standalone config on a cluster node")
+
+    monkeypatch.setattr(fc, "verify_not_cluster_node", _reject)
+    graph = _factory()
+    with pytest.raises(ProviderConfigurationError):
+        await graph("gv_sa_1", "standalone-1")
+    assert fleet["pools"], "expected a pool to have been built"
+    assert all(p.closed for p in fleet["pools"])
+    assert fleet["clients"]._clients == {}          # nothing cached on failure
+
+
 # ── GRAPH.LIST must not under-report on a cluster ────────────────────
 
 @pytest.mark.asyncio
@@ -467,6 +499,36 @@ async def test_list_graph_keys_fans_out_across_cluster_primaries(fleet):
 
     keys_via_registry = await frg.list_graph_keys("cluster-1", _FakeSessionFactory())
     assert keys_via_registry == set(CLUSTER_GRAPHS)
+
+
+@pytest.mark.asyncio
+async def test_list_graph_keys_raises_on_partial_slot_coverage(fleet):
+    """A shard whose slots dropped out of the map (both pods down, mid-failover)
+    must FAIL the listing, never return the surviving shards' union: the
+    discovery worker would persist that shrunken list as fresh and the missing
+    shard's graphs would silently vanish from the UI for a whole sweep."""
+    cfg = await frg.resolve_provider_conn_config("cluster-1", _FakeSessionFactory())
+    CLUSTER_SLOTS["covered"] = 10923            # one shard's range missing
+    with pytest.raises(ClusterCoverageError) as excinfo:
+        await list_graph_keys_for_config(cfg)
+    assert "10923/16384" in str(excinfo.value)
+
+    # The registry wrapper reports "cannot verify" (None) — never a partial set.
+    assert await frg.list_graph_keys("cluster-1", _FakeSessionFactory()) is None
+
+
+@pytest.mark.asyncio
+async def test_list_graph_keys_raises_when_remap_collapses_primaries(fleet):
+    """An addressRemap that maps distinct primaries onto one endpoint would
+    make the fan-out query the same node repeatedly and under-report with no
+    error — a config bug that must surface as a configuration error."""
+    cfg = await frg.resolve_provider_conn_config("cluster-1", _FakeSessionFactory())
+    cfg.address_remap = (
+        ("cl-node-a:7000", "edge-gw:9000"),
+        ("cl-node-b:7001", "edge-gw:9000"),
+    )
+    with pytest.raises(ProviderConfigurationError):
+        await list_graph_keys_for_config(cfg)
 
 
 @pytest.mark.asyncio

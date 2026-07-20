@@ -5,8 +5,8 @@ Every edit to a graph's data goes through a **draft**, gets **reviewed**, and is
 **published** — with a full history you can always undo or roll back. This page
 covers the whole loop.
 
-> 💡 **The one-sentence model:** editing a graph works like editing a shared
-> document with track changes — you draft privately, someone reviews, it
+> **Note:** *The one-sentence model* — editing a graph works like editing a
+> shared document with track changes: you draft privately, someone reviews, it
 > publishes, and nothing is ever silently lost.
 
 ---
@@ -42,7 +42,7 @@ glance: solid means committed to your draft, a dashed halo means staged but
 not yet saved, and the colour says what happened — green for new, orange for
 edited, rose for deleted.
 
-> 💡 **Nothing is lost if you navigate away.** If you leave mid-edit, Synodic
+> **Note:** Nothing is lost if you navigate away. If you leave mid-edit, {brand}
 > restores your unsaved changes next time you return, with the option to
 > discard them instead.
 
@@ -73,13 +73,13 @@ A reviewer can:
 
 - **Approve** — sign off, so the change is ready to merge.
 - **Merge** — apply the change to the published version. If someone else
-  published a conflicting change first, Synodic detects it and walks the
+  published a conflicting change first, {brand} detects it and walks the
   reviewer through resolving it — a merge never silently overwrites someone
   else's work.
 - **Dismiss** — reject the request without applying anything. The draft's
   author keeps their draft and can revise it.
 
-If a draft has fallen behind the published version, Synodic tells you and
+If a draft has fallen behind the published version, {brand} tells you and
 offers a one-click **Pull latest** before merging.
 
 ---
@@ -94,7 +94,7 @@ nothing is ever truly destroyed.
 | --- | --- | --- |
 | **What it does** | Reverses *one specific* published change | Resets the *entire graph* to how it looked at a chosen moment |
 | **Later work** | Kept — only the targeted change is reversed | Rolled back along with everything else |
-| **Can it conflict?** | Yes — if later changes touched the same items, Synodic will say so and offer to restore instead | No — it can't conflict, by design |
+| **Can it conflict?** | Yes — if later changes touched the same items, {brand} will say so and offer to restore instead | No — it can't conflict, by design |
 | **Use it when** | You know exactly which change was wrong, and other work since then should stay | You need to get back to a known-good state, no matter what else has happened since |
 
 Both actions are reachable from the **history timeline** (scoped to a draft,
@@ -103,7 +103,7 @@ require the same review permissions as merging a change, and both are visible
 afterward in the history — an undo or a restore is just another recorded step,
 never a rewrite of what came before.
 
-> 💡 **If in doubt, Undo first.** It's the narrower, safer tool. Reach for
+> **Tip:** If in doubt, Undo first. It's the narrower, safer tool. Reach for
 > Restore only when you need to reset everything back to a specific point,
 > or when Undo tells you it can't apply cleanly.
 

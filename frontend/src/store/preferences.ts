@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { LayerNodeSortAlgo } from '@/types/schema'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -21,7 +22,11 @@ export const CANVAS_ZOOM_STEP = 0.05
 /**
  * How lineage edges render on the canvas.
  *  - 'stubs'  : every node with lineage shows a small stub; real edges materialize on hover/click.
- *  - 'auto'   : nodes with ≤ a small fan-in render real edges directly; denser nodes show stubs.
+ *  - 'auto'   : all real edges below `autoStubThreshold`; above it the STRONGEST flows (by
+ *               bundled edge count) render up to the threshold as a budget, per-node
+ *               indicators summarize the rest, and hover/selection materializes a node's
+ *               (also budget-capped) fan. A status chip reports shown/total with
+ *               escalation to 'raw'.
  *  - 'raw'    : every fetched edge renders as a real edge (legacy behavior). Prompts at >5,000.
  */
 export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
@@ -103,6 +108,27 @@ interface PreferencesState {
    */
   lineageBundleFanIn: number
   setLineageBundleFanIn: (n: number) => void
+  /**
+   * Show the "N connections not on canvas" indicators. Views are subsets
+   * of a Data Source — a curated view legitimately excludes upstream /
+   * downstream partners, so the missing-link alerts are informative for
+   * some users and noise for others. Toggleable from Display → Lineage.
+   */
+  showMissingConnectionIndicators: boolean
+  toggleMissingConnectionIndicators: () => void
+  /** Feature flag: clicking the "outside this view" chip fetches a
+   *  bounded on-demand preview of the selected node's out-of-scope
+   *  partners into the Lineage Lens. Off by default. */
+  externalLineagePreview: boolean
+  toggleExternalLineagePreview: () => void
+  /**
+   * Flow ribbons: in Adaptive mode above the edge budget, draw one
+   * Sankey-style band per (source layer → target layer) pair whose
+   * thickness encodes TOTAL edge volume — the macro flow stays legible
+   * while individual curves are budgeted. User-toggleable.
+   */
+  showFlowRibbons: boolean
+  toggleFlowRibbons: () => void
 
 
   // User avatar
@@ -115,6 +141,20 @@ interface PreferencesState {
   completeOnboardingStep: (step: string) => void
   dismissOnboarding: () => void
   resetOnboarding: () => void
+  /** Whether the user has hidden the Getting Started launcher from the sidebar. */
+  gettingStartedHidden: boolean
+  setGettingStartedHidden: (hidden: boolean) => void
+
+  /**
+   * Per-VIEW, per-layer node-sort overrides for read-only viewers, keyed
+   * `viewId -> layerId -> mode`. Device-local by design: a viewer's Z→A must
+   * not write to the shared view, but it also shouldn't vanish on reload.
+   * Algorithmic modes only ('custom' needs persisted orderKeys). Pruned to
+   * the most recent ~20 views so the record can't grow unbounded.
+   */
+  viewSortOverrides: Record<string, Record<string, LayerNodeSortAlgo>>
+  setViewSortOverride: (viewId: string, layerId: string, mode: LayerNodeSortAlgo | null) => void
+  clearViewSortOverrides: (viewId: string) => void
 
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
@@ -217,10 +257,49 @@ export const usePreferencesStore = create<PreferencesState>()(
       setAutoStubThreshold: (autoStubThreshold) => set({ autoStubThreshold }),
       lineageBundleFanIn: 1,
       setLineageBundleFanIn: (lineageBundleFanIn) => set({ lineageBundleFanIn }),
+      showMissingConnectionIndicators: true,
+      toggleMissingConnectionIndicators: () =>
+        set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
+      externalLineagePreview: false,
+      toggleExternalLineagePreview: () =>
+        set((state) => ({ externalLineagePreview: !state.externalLineagePreview })),
+      showFlowRibbons: true,
+      toggleFlowRibbons: () =>
+        set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
 
       // User avatar
       avatarId: null,
       setAvatarId: (avatarId) => set({ avatarId }),
+
+      // Per-view viewer sort overrides (device-local)
+      viewSortOverrides: {},
+      setViewSortOverride: (viewId, layerId, mode) => set((state) => {
+        const current = state.viewSortOverrides[viewId] ?? {}
+        let nextForView: Record<string, LayerNodeSortAlgo>
+        if (mode === null) {
+          if (!(layerId in current)) return state
+          const { [layerId]: _drop, ...rest } = current
+          nextForView = rest
+        } else {
+          if (current[layerId] === mode) return state
+          nextForView = { ...current, [layerId]: mode }
+        }
+        // Re-insert last so object insertion order doubles as recency; prune
+        // the oldest views beyond 20.
+        const { [viewId]: _self, ...others } = state.viewSortOverrides
+        const next: Record<string, Record<string, LayerNodeSortAlgo>> =
+          Object.keys(nextForView).length > 0 ? { ...others, [viewId]: nextForView } : others
+        const keys = Object.keys(next)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 20))) {
+          delete next[stale]
+        }
+        return { viewSortOverrides: next }
+      }),
+      clearViewSortOverrides: (viewId) => set((state) => {
+        if (!(viewId in state.viewSortOverrides)) return state
+        const { [viewId]: _drop, ...rest } = state.viewSortOverrides
+        return { viewSortOverrides: rest }
+      }),
 
       // Onboarding
       onboardingCompletedSteps: [],
@@ -229,6 +308,8 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (state.onboardingCompletedSteps.includes(step)) return state
         return { onboardingCompletedSteps: [...state.onboardingCompletedSteps, step] }
       }),
+      gettingStartedHidden: false,
+      setGettingStartedHidden: (gettingStartedHidden) => set({ gettingStartedHidden }),
       dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
       resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
 

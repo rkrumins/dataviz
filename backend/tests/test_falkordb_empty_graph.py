@@ -162,3 +162,147 @@ def test_both_paths_apply_local_dev_override(monkeypatch):
     )
     assert mgr._host == "127.0.0.1"
     assert reg._host == "127.0.0.1"
+
+
+# ── cluster-aware empty-key verification ────────────────────────────
+#
+# On a cluster, "Invalid graph operation on empty key" is ALSO what a read
+# returns when it lands on a node that doesn't hold the graph key (stale
+# pinned handle after a slot migration, or a promoted-but-unsynced replica).
+# Masking that as "0 nodes / 0 edges" made graphs silently read as empty on
+# some pods — so the mask is only allowed after a slot-routed EXISTS says
+# the graph is genuinely absent.
+
+from types import SimpleNamespace
+
+
+def _cluster_provider(exists_result):
+    """Provider faked into cluster mode with an EXISTS probe answering
+    ``exists_result`` (an int, or an exception instance to raise)."""
+    p = _make_provider()
+    p._conn_cfg = SimpleNamespace(mode="cluster")
+    calls = {"exists": 0}
+
+    async def _execute_command(cmd, *args):
+        assert cmd == "EXISTS"
+        calls["exists"] += 1
+        if isinstance(exists_result, BaseException):
+            raise exists_result
+        return exists_result
+
+    p._db = SimpleNamespace(execute_command=_execute_command)
+    return p, calls
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_with_existing_graph_fails_loud(monkeypatch):
+    """EXISTS=1: the graph is real and the empty read was a misroute —
+    get_stats must raise, never persist zero counts."""
+    p, calls = _cluster_provider(1)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p.get_stats()
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_with_absent_graph_returns_zero(monkeypatch):
+    """EXISTS=0: genuinely never-created graph — zeros, as before."""
+    p, calls = _cluster_provider(0)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    stats = await p.get_stats()
+    assert stats["nodeCount"] == 0 and stats["edgeCount"] == 0
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_empty_key_probe_failure_fails_loud(monkeypatch):
+    """A failing EXISTS probe must not mask — never report empty off an
+    unhealthy cluster."""
+    p, calls = _cluster_provider(ConnectionError("node gone"))
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p._ro_query_tolerant("MATCH (n) RETURN n")
+    assert calls["exists"] == 1
+
+
+@pytest.mark.asyncio
+async def test_standalone_empty_key_never_probes(monkeypatch):
+    """Standalone/Sentinel behavior is byte-identical: no EXISTS issued."""
+    p = _make_provider()          # _conn_cfg is None → non-cluster path
+
+    async def _boom(*a, **k):
+        raise AssertionError("EXISTS must not be issued outside cluster mode")
+
+    p._db = SimpleNamespace(execute_command=_boom)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    stats = await p.get_stats()
+    assert stats["nodeCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cluster_schema_stats_empty_key_verified(monkeypatch):
+    """get_schema_stats honours the same verification."""
+    p, _calls = _cluster_provider(1)
+
+    async def _raise(*a, **k):
+        raise _EMPTY_KEY
+
+    monkeypatch.setattr(p, "_ro_query", _raise)
+    with pytest.raises(ResponseError):
+        await p.get_schema_stats()
+
+
+# ── bulk-CREATE knob parsing: once per process per env value ────────
+
+def test_bulk_create_knobs_parsed_once_per_env_value(monkeypatch, caplog):
+    """The operator-tuning log line fires once per process per env value —
+    not once per provider construction (discovery builds transient providers
+    continuously; per-construction logging read as a warning storm)."""
+    import logging
+
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "120")
+    with caplog.at_level(logging.INFO, logger=fp.logger.name):
+        p1 = _make_provider()
+        p2 = _make_provider()
+    assert p1._bulk_create_timeout_s == 120.0
+    assert p2._bulk_create_timeout_s == 120.0
+    tuned = [r for r in caplog.records if "operator-tuned" in r.getMessage()]
+    assert len(tuned) == 1                       # logged once, not per instance
+
+    # A changed env value re-parses (and re-logs) once.
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "90")
+    assert _make_provider()._bulk_create_timeout_s == 90.0
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+
+
+def test_bulk_create_knobs_clamped_and_default(monkeypatch):
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_BATCH_SIZE", "999999")
+    monkeypatch.setenv("FALKORDB_BULK_CREATE_TIMEOUT_S", "not-a-float")
+    p = _make_provider()
+    assert p._bulk_create_batch_size == 50000    # clamped to ceiling
+    assert p._bulk_create_timeout_s == 60.0      # bad value → default
+    monkeypatch.delenv("FALKORDB_BULK_CREATE_BATCH_SIZE")
+    monkeypatch.delenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
+    fp._BULK_CREATE_KNOBS_CACHE.clear()
+    p = _make_provider()
+    assert p._bulk_create_batch_size == fp._BULK_CREATE_BATCH_DEFAULT
+    assert p._bulk_create_timeout_s == fp._BULK_CREATE_TIMEOUT_DEFAULT

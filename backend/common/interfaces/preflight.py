@@ -137,6 +137,11 @@ def _redis_auth_reason(line: bytes, *, had_password: bool) -> str | None:
 # the preflight already treats it as healthy (it falls through to PING).
 AUTH_REACHABLE_REASONS = ("auth_required", "auth_failed")
 
+# The full reachable-but-misconfigured set: auth problems plus a standalone-mode
+# config pointed at a multi-shard Redis Cluster node. Same breaker/warmup
+# semantics as auth — the server answered, only the provider config is wrong.
+REACHABLE_CONFIG_REASONS = AUTH_REACHABLE_REASONS + ("cluster_mode_mismatch",)
+
 
 def is_auth_reachable_reason(reason: str | None) -> bool:
     """True when a preflight failure reason means reachable-but-misconfigured
@@ -145,6 +150,17 @@ def is_auth_reachable_reason(reason: str | None) -> bool:
         return False
     r = reason.strip().lower()
     return any(m in r for m in AUTH_REACHABLE_REASONS)
+
+
+def is_reachable_config_reason(reason: str | None) -> bool:
+    """True for ANY reachable-but-misconfigured preflight reason (auth or
+    cluster-mode mismatch). Callers gating reads / pre-tripping breakers must
+    use this superset: classifying a config error as an outage keeps the
+    provider blocked even after the operator fixes the config."""
+    if not reason:
+        return False
+    r = reason.strip().lower()
+    return any(m in r for m in REACHABLE_CONFIG_REASONS)
 
 
 def _resp_auth(username: str | None, password: str) -> bytes:
@@ -161,6 +177,23 @@ def _resp_auth(username: str | None, password: str) -> bytes:
     return b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
 
 
+async def _resp_bulk_command(
+    reader, writer, command: bytes, *, deadline_s: float, t0: float,
+) -> bytes | None:
+    """Send one RESP command and read its bulk-string reply within the
+    remaining deadline. ``None`` for error/nil/unexpected replies."""
+    writer.write(command)
+    await writer.drain()
+    remaining = max(0.05, deadline_s - (time.monotonic() - t0))
+    header = await asyncio.wait_for(reader.readline(), timeout=remaining)
+    # Bulk string: $<len>\r\n<payload>\r\n. Anything else (nil, -ERR) → None.
+    if not header.startswith(b"$") or header.startswith(b"$-1"):
+        return None
+    n = int(header[1:].strip())
+    remaining = max(0.05, deadline_s - (time.monotonic() - t0))
+    return await asyncio.wait_for(reader.readexactly(n + 2), timeout=remaining)
+
+
 async def redis_ping_preflight(
     host: str,
     port: int,
@@ -169,6 +202,7 @@ async def redis_ping_preflight(
     password: str | None = None,
     username: str | None = None,
     ssl_context: "ssl.SSLContext | None" = None,
+    detect_cluster: bool = False,
 ) -> PreflightResult:
     """TCP(/TLS)-connect + send RESP ``PING`` + read the reply within
     ``deadline_s``. Confirms the peer is actually a Redis-protocol server,
@@ -177,6 +211,13 @@ async def redis_ping_preflight(
     When ``ssl_context`` is provided the probe completes a real TLS handshake
     (so a TLS-only server isn't wrongly marked unreachable). When ``username``
     is provided the two-arg ``AUTH user pass`` is used (Redis 6 ACL users).
+
+    ``detect_cluster``: after a successful PING, one ``INFO cluster`` — if the
+    server reports ``cluster_enabled:1`` the probe fails with reason
+    ``cluster_mode_mismatch``. Pass it ONLY when the caller intends to speak
+    standalone to this endpoint: a standalone client against a cluster node
+    sees only that node's slots (lists under-report silently, keyed commands
+    hit MOVED). Fail-open — an INFO error never fails an otherwise-green probe.
 
     Used by FalkorDB (which speaks Redis protocol) and any other
     Redis-compatible backend.
@@ -236,6 +277,45 @@ async def redis_ping_preflight(
             if reason is None:
                 reason = f"redis_error: {line.decode(errors='replace').strip()}"[:120]
             return PreflightResult.failure(reason=reason, elapsed_ms=elapsed_ms)
+
+        if detect_cluster:
+            try:
+                body = await _resp_bulk_command(
+                    reader, writer, b"*2\r\n$4\r\nINFO\r\n$7\r\ncluster\r\n",
+                    deadline_s=deadline_s, t0=t0,
+                )
+                if body is not None and b"cluster_enabled:1" in body:
+                    # Cluster-of-one exemption: a single master owning every
+                    # slot serves a standalone client completely (no MOVED, no
+                    # partial GRAPH.LIST), so only flag multi-shard clusters.
+                    # The exemption needs POSITIVE evidence (cluster_size:1
+                    # parsed) — if CLUSTER INFO can't be read, the confirmed
+                    # cluster_enabled:1 stands and the mismatch is reported.
+                    size = None
+                    try:
+                        cbody = await _resp_bulk_command(
+                            reader, writer, b"*2\r\n$7\r\nCLUSTER\r\n$4\r\nINFO\r\n",
+                            deadline_s=deadline_s, t0=t0,
+                        )
+                        for ln in (cbody or b"").splitlines():
+                            if ln.startswith(b"cluster_size:"):
+                                size = int(ln.split(b":", 1)[1].strip())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        size = None
+                    if size != 1:
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        return PreflightResult.failure(
+                            reason="cluster_mode_mismatch", elapsed_ms=elapsed_ms,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Fail-open: the server answered PING; a flaky INFO must not
+                # turn a reachable verdict into an outage.
+                pass
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         return PreflightResult.success(peer=f"{host}:{port}", elapsed_ms=elapsed_ms)
 
     except asyncio.CancelledError:

@@ -11,7 +11,7 @@
  * (layer re-assignment, initial load).
  */
 
-import { useMemo, useRef, useState, useEffect } from 'react'
+import { useMemo, useRef } from 'react'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
 
@@ -206,16 +206,12 @@ export function useEdgeProjection({
   browseBundleParentMap,
   browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
-}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedAggregatedCount: number } {
+}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number } {
 
-  // Telemetry for silently-dropped aggregated edges whose endpoints can't be
-  // resolved through displayMap/ancestorMap/urnToIdMap. Surfacing this lets
-  // callers render a "X edges hidden — expand parents to reveal" badge.
-  const unresolvedAggregatedRef = useRef(0)
+  // Throttle for the dev-facing console warning about dropped edges. The
+  // user-facing count itself is returned from the projection memo (no ref —
+  // it is render data).
   const lastWarnAtRef = useRef(0)
-  // Reactive mirror of the ref so callers can render a "N connections couldn't
-  // be placed" banner (the ref alone doesn't trigger a re-render).
-  const [unresolvedAggregatedCount, setUnresolvedAggregatedCount] = useState(0)
 
   // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
   const nodeIndex = useMemo(() => buildNodeIndex(nodesByLayer), [nodesByLayer])
@@ -339,8 +335,8 @@ export function useEdgeProjection({
   //
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
-  const projectedEdges = useMemo(() => {
-    if (!showLineageFlow) return []
+  const projection = useMemo(() => {
+    if (!showLineageFlow) return { edges: [], unresolvedCount: 0 }
 
     const edgeGroups = new Map<string, any[]>()
 
@@ -375,18 +371,13 @@ export function useEdgeProjection({
               sourceEdgeIds: agg.sourceEdgeIds,
             }
           }, 'AGGREGATED')
-        } else if (!sId && !tId) {
+        } else if (!sId || !tId) {
+          // ANY unresolved endpoint hides the edge — count them all, not
+          // just the both-unresolved case, so the surfaced hidden-count
+          // matches what the user actually can't see.
           unresolvedThisPass++
         }
       })
-    unresolvedAggregatedRef.current = unresolvedThisPass
-    if (unresolvedThisPass > 0) {
-      const now = Date.now()
-      if (now - lastWarnAtRef.current > 1000) {
-        lastWarnAtRef.current = now
-        console.warn(`[useEdgeProjection] ${unresolvedThisPass} aggregated edges hidden — endpoints unresolvable via displayMap/ancestorMap/urnToIdMap`)
-      }
-    }
 
     // Trace-mode bundling: walk an endpoint up the canvas containment
     // hierarchy until we land on an ancestor at the focus's trace level
@@ -472,6 +463,11 @@ export function useEdgeProjection({
             && suppressedAggEdgeKeys?.has(`${edge.source}->${edge.target}`)
           ) return
           addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge))
+        } else if (!sId || !tId) {
+          // Endpoint resolves to nothing on canvas (unloaded or unassigned
+          // entity) — the edge is hidden. Count it; sId === tId self-rollup
+          // collapses are legitimate and excluded.
+          unresolvedThisPass++
         }
       })
 
@@ -487,8 +483,18 @@ export function useEdgeProjection({
             id: edge.id,
             data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
           }, edge.edgeType)
+        } else if (!sId || !tId) {
+          unresolvedThisPass++
         }
       })
+
+    if (unresolvedThisPass > 0) {
+      const now = Date.now()
+      if (now - lastWarnAtRef.current > 1000) {
+        lastWarnAtRef.current = now
+        console.warn(`[useEdgeProjection] ${unresolvedThisPass} edges hidden — endpoints unresolvable via displayMap/ancestorMap/urnToIdMap`)
+      }
+    }
 
     // ── Browse-mode meta-bundling ─────────────────────────────────────────
     //
@@ -675,18 +681,21 @@ export function useEdgeProjection({
       }
     })
 
-    if (consumed.size === 0) return projected
-    return [...projected.filter(p => !consumed.has(p)), ...merged]
+    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass }
+    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass }
   }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap])
 
-  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
-  //
-  // The heavy edge projection above doesn't re-run on hover. This cheap pass
-  // stamps isDelegated/isResidual on the already-projected edges.
-  const visibleLineageEdgesWithDelegation = useMemo(() => {
-    if (projectedEdges.length === 0) return projectedEdges
+  const projectedEdges = projection.edges
 
-    // Build expanded parent info
+  // ── Delegation context — hover-INDEPENDENT so the per-hover pass below
+  // stays a single O(E) map. expandedParentInfo: expanded parents with
+  // loaded children (+ partial-load flag). coveredPairs: delegation
+  // coverage — a rolled-up parent-level edge may only be hidden
+  // (isDelegated) when finer child-level edges actually exist for the
+  // same lifted pair; an edge whose OWN pair never appears as a lifted
+  // pair has no finer substitute (container-own lineage) and must stay
+  // visible.
+  const delegationContext = useMemo(() => {
     const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
     expandedNodes.forEach(nodeId => {
       const node = displayMap.get(nodeId)
@@ -700,6 +709,30 @@ export function useEdgeProjection({
       }
     })
 
+    const containmentParentMap = browseBundleParentMap ?? traceBundleParentMap
+    const coveredPairs = new Set<string>()
+    if (containmentParentMap && expandedParentInfo.size > 0) {
+      for (const edge of projectedEdges) {
+        const sParent = containmentParentMap.get(edge.source)
+        const tParent = containmentParentMap.get(edge.target)
+        const liftedS = sParent && expandedParentInfo.has(sParent) ? sParent : edge.source
+        const liftedT = tParent && expandedParentInfo.has(tParent) ? tParent : edge.target
+        if (liftedS !== edge.source || liftedT !== edge.target) {
+          coveredPairs.add(`${liftedS}->${liftedT}`)
+        }
+      }
+    }
+    return { expandedParentInfo, coveredPairs }
+  }, [projectedEdges, expandedNodes, displayMap, browseBundleParentMap, traceBundleParentMap])
+
+  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
+  //
+  // The heavy edge projection above doesn't re-run on hover. This cheap pass
+  // stamps isDelegated/isResidual on the already-projected edges.
+  const visibleLineageEdgesWithDelegation = useMemo(() => {
+    if (projectedEdges.length === 0) return projectedEdges
+    const { expandedParentInfo, coveredPairs } = delegationContext
+
     // If no expanded parents with children, skip the mapping
     if (expandedParentInfo.size === 0) return projectedEdges
 
@@ -708,6 +741,9 @@ export function useEdgeProjection({
       const targetExpanded = expandedParentInfo.get(edge.target)
 
       if (!sourceExpanded && !targetExpanded) return edge
+
+      const hasFinerCoverage = coveredPairs.has(`${edge.source}->${edge.target}`)
+      if (!hasFinerCoverage) return edge
 
       const isEndpointHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target
       const anyPartial = sourceExpanded?.isPartiallyLoaded || targetExpanded?.isPartiallyLoaded
@@ -718,21 +754,13 @@ export function useEdgeProjection({
         isResidual: anyPartial ? !isEndpointHovered : false,
       }
     })
-  }, [projectedEdges, expandedNodes, displayMap, hoveredNodeId])
-
-  // Sync the projection pass's unresolved tally (mutated inside the
-  // projectedEdges memo) into reactive state after each commit. The equality
-  // guard means an unchanged count never re-renders. When flow is off the
-  // projection short-circuits without updating the ref, so read 0 there
-  // rather than a stale positive that would keep the banner up.
-  useEffect(() => {
-    const count = showLineageFlow ? unresolvedAggregatedRef.current : 0
-    setUnresolvedAggregatedCount(prev => (prev === count ? prev : count))
-  }, [projectedEdges, showLineageFlow])
+  }, [projectedEdges, delegationContext, hoveredNodeId])
 
   return {
     lineageEdges,
     visibleLineageEdges: visibleLineageEdgesWithDelegation,
-    unresolvedAggregatedCount,
+    unresolvedEdgeCount: projection.unresolvedCount,
+    // Legacy alias — same value; kept for existing consumers.
+    unresolvedAggregatedCount: projection.unresolvedCount,
   }
 }

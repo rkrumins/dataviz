@@ -1,25 +1,25 @@
-# Welcome to Synodic
+# Welcome to {brand}
 
-> **Synodic is a map for your data.** It connects to the systems where your data
+> **{brand} is a map for your data.** It connects to the systems where your data
 > already lives and draws a living, interactive picture of how everything is
 > connected — so anyone on your team can see where data comes from, where it
 > goes, and what depends on it.
 
-This guide is the **single stop-shop** for using Synodic. It is written for
+This guide is the **single stop-shop** for using {brand}. It is written for
 *everyone* who touches the platform — not just engineers. Whether you open
-Synodic once a week to check a dashboard's data source or you run the whole
+{brand} once a week to check a dashboard's data source or you run the whole
 platform for your organisation, there's a path here for you.
 
 ---
 
-## What problem does Synodic solve?
+## What problem does {brand} solve?
 
 Modern data lives in dozens of places: warehouses, pipelines, dashboards,
 spreadsheets, models. When something breaks — or when someone asks *"where did
 this number come from?"* — the answer is usually trapped in someone's head or
 buried in code.
 
-Synodic makes that knowledge **visible and shareable**:
+{brand} makes that knowledge **visible and shareable**:
 
 - **See the full picture.** Every table, column, dashboard, and pipeline appears
   as a node, with the connections between them drawn as lines (we call this
@@ -37,7 +37,7 @@ Synodic makes that knowledge **visible and shareable**:
 
 ## Who is this guide for?
 
-Synodic serves three broad audiences. Most people are mainly one of these, but
+{brand} serves three broad audiences. Most people are mainly one of these, but
 you can be all three on different days. Pick where you fit and start there —
 each path is self-contained.
 
@@ -47,8 +47,8 @@ each path is self-contained.
 | Build, organise, and share graphs and views | **Builder** | [Creating Views](/guide/creating-views) |
 | Connect data sources, manage users and access | **Administrator** | [Admin Setup](/guide/admin-setup) |
 
-> 💡 **Not sure?** Read [Key Concepts](/guide/key-concepts) first — ten minutes
-> there will make everything else click.
+> **Tip:** Not sure where to begin? Read [Key Concepts](/guide/key-concepts)
+> first — ten minutes there will make everything else click.
 
 ---
 
@@ -69,7 +69,7 @@ each path is self-contained.
 
 ## A note on the "why"
 
-Synodic is opinionated by design. A few principles shape almost every screen:
+{brand} is opinionated by design. A few principles shape almost every screen:
 
 1. **One graph, many lenses.** The underlying data is a single connected graph.
    Everything you do — filtering, tracing, changing granularity, switching

@@ -1073,3 +1073,90 @@ def test_ws7_new_endpoints_registered_enabled():
 def test_ws7_explicit_ttl_still_wins():
     from backend.app.services import graph_cache as gc
     assert gc._resolve_ttl(42, gc.ENDPOINT_EDGES_BETWEEN) == 42
+
+
+# ─── top-level count side-cache ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_top_level_count_roundtrip(monkeypatch) -> None:
+    monkeypatch.setitem(graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TOP_LEVEL, True)
+    store: dict[str, str] = {}
+    redis = _make_redis()
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ex=None):
+        store[key] = value
+        return True
+
+    redis.get = AsyncMock(side_effect=_get)
+    redis.set = AsyncMock(side_effect=_set)
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+    params = {"entityTypes": None, "searchQuery": "foo"}
+
+    assert await cache.get_top_level_count(scope, params) is None
+    await cache.set_top_level_count(scope, params, 42)
+    assert await cache.get_top_level_count(scope, params) == 42
+    # Different filter shape → different key → miss
+    assert await cache.get_top_level_count(scope, {"entityTypes": ["t"], "searchQuery": None}) is None
+
+
+@pytest.mark.asyncio
+async def test_top_level_count_invalidated_by_generation_bump(monkeypatch) -> None:
+    monkeypatch.setitem(graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TOP_LEVEL, True)
+    store: dict[str, str] = {}
+    gen = {"n": 0}
+    redis = _make_redis()
+
+    async def _get(key):
+        if key.startswith("graphgen:") or ":gen:" in key or key == graph_cache._gen_key(CacheScope("ws1", "ds1")):
+            return str(gen["n"])
+        return store.get(key)
+
+    async def _set(key, value, ex=None):
+        store[key] = value
+        return True
+
+    async def _incr(key):
+        gen["n"] += 1
+        return gen["n"]
+
+    redis.get = AsyncMock(side_effect=_get)
+    redis.set = AsyncMock(side_effect=_set)
+    redis.incr = AsyncMock(side_effect=_incr)
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+    params = {"entityTypes": None, "searchQuery": None}
+
+    await cache.set_top_level_count(scope, params, 7)
+    assert await cache.get_top_level_count(scope, params) == 7
+    await cache.bump_generation(scope)
+    assert await cache.get_top_level_count(scope, params) is None
+
+
+@pytest.mark.asyncio
+async def test_top_level_count_redis_errors_are_swallowed(monkeypatch) -> None:
+    monkeypatch.setitem(graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TOP_LEVEL, True)
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=RedisError("down"))
+    redis.set = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+
+    assert await cache.get_top_level_count(scope, {}) is None
+    await cache.set_top_level_count(scope, {}, 1)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_top_level_count_respects_feature_flag(monkeypatch) -> None:
+    monkeypatch.setitem(graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TOP_LEVEL, False)
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+
+    assert await cache.get_top_level_count(scope, {}) is None
+    await cache.set_top_level_count(scope, {}, 1)
+    redis.get.assert_not_awaited()
+    redis.set.assert_not_awaited()

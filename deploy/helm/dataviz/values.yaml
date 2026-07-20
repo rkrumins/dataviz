@@ -28,6 +28,12 @@ config:
     host: REPLACE_ME_FALKORDB_HOST
     port: "6379"
     graphName: nexus_lineage
+    # The FalkorDB server's TIMEOUT_MAX (ms). MUST match the TIMEOUT_MAX
+    # in the server's launch args (stores.falkordb.args when in-cluster,
+    # or your managed instance's config) — the backend clamps every
+    # per-query timeout it sends to this value because the server
+    # REJECTS queries requesting more.
+    serverTimeoutMaxMs: "180000"
   jwt:
     algorithm: HS256
     expiryMinutes: "60"

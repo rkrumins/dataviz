@@ -42,7 +42,10 @@ from backend.common.interfaces.provider import (
     GraphDataProvider,
     ProviderConfigurationError,
 )
-from backend.common.interfaces.preflight import is_auth_reachable_reason
+from backend.common.interfaces.preflight import (
+    is_auth_reachable_reason,
+    is_reachable_config_reason,
+)
 
 from .state import ProbeOutcome, ProviderState
 
@@ -100,6 +103,9 @@ _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.
 # providers skip the probe entirely (zero added latency on the hot path).
 _REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "1.5"))
 _REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
+
+# Breaker states that positively prove an outage (recovery-eviction check).
+_NON_CLOSED_BREAKER_STATES = (BreakerState.OPEN.value, BreakerState.HALF_OPEN.value)
 
 
 class HealthState(str, Enum):
@@ -321,12 +327,13 @@ class ProviderManager:
             )
             ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
             try:
+                from backend.app.config import resilience as _resilience
                 raw_provider = await asyncio.wait_for(
                     self._instantiate_from_provider(
                         ds.provider_id, ds.graph_name, session,
                         ds_extra_config=ds_extra,
                     ),
-                    timeout=10,
+                    timeout=_resilience.PROVIDER_INSTANTIATION_TIMEOUT_SECS,
                 )
             except asyncio.TimeoutError:
                 state_after, fails_after = await breaker._record_failure()
@@ -439,6 +446,16 @@ class ProviderManager:
                 f"missing or rejected — add/correct the provider's username/password "
                 f"(or disable auth on the instance)."
             )
+        if verdict == "config":
+            # Reachable but the topology mode is wrong (standalone config against
+            # a multi-shard cluster node). Same contract as the auth branch: a
+            # LOGICAL error the breaker ignores, so fixing the config heals
+            # immediately instead of waiting out a pre-tripped breaker.
+            raise ProviderConfigurationError(
+                f"FalkorDB provider {cp} is reachable but is a Redis Cluster node "
+                f"while this provider is configured mode=standalone — set "
+                f"falkordbConnection.mode=cluster with the cluster's startupNodes."
+            )
         raise ProviderUnavailable(
             provider_name=cp,
             reason="provider unreachable (preflight failed)",
@@ -491,6 +508,11 @@ class ProviderManager:
                     # the request as unreachable and, via warmup, pre-trips the
                     # instantiation breaker).
                     verdict = "auth"
+                elif is_reachable_config_reason(pf_reason):
+                    # Reachable but misconfigured for another reason (currently:
+                    # cluster_mode_mismatch). Same non-outage semantics, distinct
+                    # message at the raise site.
+                    verdict = "config"
             except Exception:
                 verdict = "down"
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
@@ -560,6 +582,14 @@ class ProviderManager:
     # 2 (not 1) absorbs single-cycle network blips.
     _PRE_TRIP_AFTER_N: int = int(os.getenv("PROVIDER_PRE_TRIP_AFTER_N", "2"))
 
+    # Recovery-eviction debounce: rebuilding a provider's pools on recovery is
+    # only worth it after a REAL outage (a rotation leaves dead sockets), which
+    # fails at least this many consecutive probes — a single blip followed by
+    # a success must not dump every per-graph instance of the provider.
+    # Mirrors the _PRE_TRIP_AFTER_N rationale; an OPEN breaker at recovery time
+    # also qualifies regardless of the streak.
+    _EVICT_ON_RECOVERY_AFTER_N: int = 2
+
     def _resolve_state_for_provider(self, provider_id: str) -> List[Tuple[str, str]]:
         """Return all cache_keys (across graph_names) for a given provider_id.
 
@@ -622,7 +652,15 @@ class ProviderManager:
             for cache_key in cache_keys:
                 state = self._ensure_state(cache_key)
                 if state.last_observation is not None and not state.last_observation.ok:
-                    was_unhealthy = True
+                    # DEBOUNCED: a single failed probe followed by a success is
+                    # a blip (probe timeout on a busy node), not an outage — a
+                    # pod rotation/real outage fails MULTIPLE consecutive
+                    # probes (or trips a breaker, checked below). Evicting on
+                    # every blip dumped ALL of this provider's per-graph
+                    # instances at once, so fleets with 100s of graphs
+                    # re-instantiated everything continuously.
+                    if state.consecutive_failures >= self._EVICT_ON_RECOVERY_AFTER_N:
+                        was_unhealthy = True
                 state.last_observation = outcome
                 state.consecutive_failures = 0
                 state.breaker_state = "closed"
@@ -639,10 +677,19 @@ class ProviderManager:
             for cache_key in cache_keys:
                 ib = self._instantiation_breakers.get(cache_key)
                 if ib is not None:
+                    # An OPEN/HALF_OPEN breaker proves a real outage regardless
+                    # of the probe streak — recovery from it must rebuild the
+                    # pools. Positive comparison against the known non-closed
+                    # states (never "!= closed"): the state must PROVE the
+                    # outage, not merely fail to look healthy.
+                    if getattr(ib, "current_state", None) in _NON_CLOSED_BREAKER_STATES:
+                        was_unhealthy = True
                     close_targets.append(ib)
                 proxy = self._providers.get(cache_key)
                 proxy_breaker = getattr(proxy, "_breaker", None) if proxy is not None else None
                 if proxy_breaker is not None:
+                    if getattr(proxy_breaker, "current_state", None) in _NON_CLOSED_BREAKER_STATES:
+                        was_unhealthy = True
                     close_targets.append(proxy_breaker)
 
         for breaker in close_targets:
@@ -698,16 +745,17 @@ class ProviderManager:
         """
         cache_keys = self._resolve_state_for_provider(provider_id)
 
-        # Reachable-but-misconfigured (missing/wrong graph auth): the instance
-        # ANSWERED, so it is NOT an outage. Counting it toward the pre-trip counter
-        # would open the instantiation breaker with reason=auth_required and block
-        # the provider even after the operator fixes the credentials (until the
-        # breaker resets); storing an ok=False observation would also make the
-        # fast-fail gate short-circuit requests. Record it as REACHABLE (breaker +
-        # gate stay clear) while preserving the reason for status, reset the failure
-        # streak, and never pre-trip. The real connection path surfaces the precise
-        # ProviderConfigurationError (which the circuit breaker ignores).
-        if is_auth_reachable_reason(reason):
+        # Reachable-but-misconfigured (missing/wrong graph auth, or a standalone
+        # config against a cluster node): the instance ANSWERED, so it is NOT an
+        # outage. Counting it toward the pre-trip counter would open the
+        # instantiation breaker and block the provider even after the operator
+        # fixes the config (until the breaker resets); storing an ok=False
+        # observation would also make the fast-fail gate short-circuit requests.
+        # Record it as REACHABLE (breaker + gate stay clear) while preserving the
+        # reason for status, reset the failure streak, and never pre-trip. The
+        # real connection path surfaces the precise ProviderConfigurationError
+        # (which the circuit breaker ignores).
+        if is_reachable_config_reason(reason):
             reachable = (
                 ProbeOutcome.from_warmup(ok=True, reason=reason, elapsed_ms=elapsed_ms)
                 if source == "warmup"

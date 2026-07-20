@@ -60,9 +60,40 @@ function providerAssetsQueryOptions(providerId: string) {
         gcTime: 10 * 60_000,
         retry: 1,
         refetchOnWindowFocus: true,
+        // Deliberately NO placeholderData/keepPreviousData here: the key
+        // includes providerId, so keepPreviousData would serve provider A's
+        // envelope under provider B's header while B's first fetch is in
+        // flight (status reads 'success', isLoading false) — mis-attributed
+        // assets, banners, and worse, registrable rows. Transient-null
+        // envelopes are handled by assetListState below instead.
         refetchInterval: (query: { state: { data?: Envelope<AssetListPayload> } }) =>
             query.state.data?.meta?.status === 'computing' ? 5_000 : (false as const),
     }
+}
+
+/**
+ * How the asset-list envelope should render when there is nothing to show.
+ *
+ * The insights endpoint answers 200 for every state; the payload alone can't
+ * distinguish "this provider genuinely has no graphs" from "the cache has no
+ * usable row yet". Only `ready` may render the true empty state:
+ *  - loading     — no envelope yet, or the backend is computing a cold cache.
+ *  - unavailable — data:null without a job in flight (`unavailable`, or a
+ *                  cache row whose payload failed to parse).
+ *  - error-stub  — the discovery worker's failure stub (payload `{}` with
+ *                  `last_error` stamped): listing failed and there is no
+ *                  last-known-good list to fall back on.
+ *  - ready       — a fresh/stale envelope carrying a real assets array.
+ */
+export type AssetListState = 'loading' | 'unavailable' | 'error-stub' | 'ready'
+
+export function assetListState(
+    env: Envelope<AssetListPayload> | null | undefined,
+): AssetListState {
+    if (!env || env.meta?.status === 'computing') return 'loading'
+    if (env.data == null) return 'unavailable'
+    if (!Array.isArray(env.data.assets)) return 'error-stub'
+    return 'ready'
 }
 
 function providerCatalogQueryOptions(providerId: string) {
@@ -128,7 +159,12 @@ export function useAllProviderCounts(providers: ProviderResponse[]): AllProvider
     let total = 0
     let registered = 0
     providers.forEach((p, i) => {
-        const assetList = assetResults[i]?.data?.data?.assets ?? []
+        // Same classifier as the list panel — the sidebar badge and the
+        // visible list must never disagree about what "has assets" means.
+        const envelope = assetResults[i]?.data
+        const assetList = assetListState(envelope) === 'ready'
+            ? envelope!.data!.assets
+            : []
         const catalog = catalogResults[i]?.data ?? []
         const existing = new Set(catalog.map(c => c.sourceIdentifier).filter(Boolean))
         const t = assetList.length

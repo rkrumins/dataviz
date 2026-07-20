@@ -20,6 +20,13 @@ data:
   # FALKORDB_TLS_CA_CERTS: "/certs/falkordb/ca.crt"
   # FALKORDB_SENTINEL_TLS_ENABLED: "true"    # absent → inherit data-plane TLS
   # FALKORDB_ADDRESS_REMAP: "announced:6379=reachable:6379"  # cross-cluster
+  # The FalkorDB server's TIMEOUT_MAX (ms). MUST match the TIMEOUT_MAX in
+  # the FalkorDB statefulset's FALKORDB_ARGS (base: 180000) — the backend
+  # clamps every per-query timeout it sends to this value, because the
+  # server REJECTS (never runs) a query requesting more. A mismatch in
+  # either direction silently breaks long-budget work (e.g. the insights
+  # top-level materialization for very large graphs).
+  FALKORDB_SERVER_TIMEOUT_MAX_MS: "180000"
   REDIS_URL: "redis://redis:6379/0"
   # Dedicated cache Redis for the FalkorDB provider's ancestor chain
   # and URN-label caches. Must point at a Redis instance that is NOT

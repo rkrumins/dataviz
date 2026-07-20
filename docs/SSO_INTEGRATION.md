@@ -2,13 +2,15 @@
 
 > **Team-facing developer + operator guide.** Read this end-to-end on
 > day one; keep it open as you build on top of, debug, or audit the
-> auth surface. **Pairs with** [`SSO.md`](SSO.md) (operator/feature
-> reference). When the same topic appears in both, this doc focuses
-> on *how to integrate* and *how to debug*; `SSO.md` focuses on *what
-> exists* and *how to operate*.
+> auth surface. **Pairs with** the [SSO operator reference](/docs/sso).
+> When the same topic appears in both, this doc focuses
+> on *how to integrate* and *how to debug*; the operator reference focuses on *what
+> exists* and *how to operate*. Role names throughout come from the
+> [RBAC taxonomy](/docs/rbac).
 
-> Branch: `claude/audit-rbac-enforcement-PikQK` · Shipped phases:
-> 0 → 4 · Last revised: 2026-06.
+> Covers the current auth surface: local password auth plus OIDC + SAML2,
+> DB-backed IdP providers, multi-identity per user, configurable claim
+> mapping, and the admin/self-service identity surfaces.
 
 ---
 
@@ -286,7 +288,7 @@ sequenceDiagram
     User->>IdP: present credentials
     IdP-->>User: 302 -> /auth/entra-staff/callback?code=…&state=…
     User->>Auth: GET /callback
-    Auth->>Auth: read nx_oidc cookie; verify state; CSRF
+    Auth->>Auth: read nx_oidc cookie, verify state, CSRF
     Auth->>IdP: POST /token (code, code_verifier)
     IdP-->>Auth: id_token + access_token
     Auth->>Auth: verify ID token (JWKS, iss, aud, exp, nonce, at_hash)
@@ -642,7 +644,7 @@ sequenceDiagram
     U->>IdP: authenticate
     IdP-->>U: HTML auto-POST form to /auth/okta-prod/acs
     U->>A: POST /acs (SAMLResponse, RelayState)
-    A->>A: read nx_saml cookie; compare RelayState (hmac.compare_digest)
+    A->>A: read nx_saml cookie, compare RelayState (hmac.compare_digest)
     A->>Saml: fetch_identity(host, https, post_data)
     Saml->>Saml: process_response (signature, conditions, audience, recipient)
     Saml->>Saml: replay_cache.record(assertion_id, NotOnOrAfter)
@@ -668,7 +670,7 @@ sequenceDiagram
     FE->>A: GET /auth/auth0/login (carries nx_link_intent)
     Note over A: standard OIDC flow up through fetch_identity
     A->>Svc: complete_sso_login(identity, link_intent_user_id=<from cookie>)
-    Svc->>Svc: skip find-by-email and policy gates; bind to intent user
+    Svc->>Svc: skip find-by-email and policy gates, bind to intent user
     Svc->>DB: create_identity(user=intent_user, provider, external_id)
     Svc->>DB: outbox "user.identity.linked"
     Svc-->>A: (User, SessionTokens) — same as before, just rebound
@@ -719,7 +721,7 @@ sequenceDiagram
     U->>FE: trigger any API call (cookie ~5 min old)
     FE->>R: POST /api/v1/auth/refresh (cookie nx_refresh)
     R->>Svc: refresh(token)
-    Svc->>Svc: decode token; check_and_record_rotation
+    Svc->>Svc: decode token, check_and_record_rotation
     Svc->>DB: get_user_by_id (still active)
     Svc->>Svc: is SSO (auth_time≠NULL) AND now-auth_time > 24h
     Svc->>Repo: list_for_user -> pick most-recent provider_slug
@@ -1356,7 +1358,7 @@ attacks at the bottom of the section.
 * **DDoS / rate limiting** — `slowapi` decorates `/login` and
   `/refresh` at 10/min and 30/min respectively. Anything broader
   is the reverse proxy / WAF's job.
-* **MFA** — not in this branch. See `SSO.md §4` for the deferred
+* **MFA** — not implemented. See `SSO.md §4` for the deferred
   pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
   endpoints cover the small-scale need.

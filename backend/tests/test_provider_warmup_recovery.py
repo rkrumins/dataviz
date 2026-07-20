@@ -38,13 +38,19 @@ def _fresh_manager() -> ProviderManager:
     return ProviderManager()
 
 
-def _make_unhealthy_state(prov_id: str, graph_name: str = "g") -> ProviderState:
-    """Pre-populate state as if warmup had previously observed failure."""
+def _make_unhealthy_state(
+    prov_id: str, graph_name: str = "g", consecutive_failures: int = 2,
+) -> ProviderState:
+    """Pre-populate state as if warmup had previously observed failure.
+
+    Defaults to 2 consecutive failures — a REAL outage per the recovery-
+    eviction debounce (_EVICT_ON_RECOVERY_AFTER_N). Pass 1 to model a
+    single-probe blip, which must NOT evict."""
     state = ProviderState(cache_key=(prov_id, graph_name))
     state.last_observation = ProbeOutcome.from_warmup(
         ok=False, reason="dns_unresolvable", elapsed_ms=1200,
     )
-    state.consecutive_failures = 1
+    state.consecutive_failures = consecutive_failures
     return state
 
 
@@ -99,6 +105,51 @@ async def test_record_probe_success_evicts_cached_provider_on_recovery():
     # Cache must be empty.
     assert cache_key not in mgr._providers
     # close() was called during eviction.
+    fake_provider.close.assert_awaited_once()
+
+
+async def test_single_probe_blip_recovery_does_not_evict():
+    """DEBOUNCE: one failed probe (a busy node, a timeout spike) followed by
+    a success is a blip, not an outage. Evicting on it dumped EVERY per-graph
+    instance of the provider at once — fleets with 100s of graphs
+    re-instantiated everything continuously. Breakers still get force-closed;
+    only the pool-dumping eviction is gated."""
+    mgr = _fresh_manager()
+    cache_key = ("prov_X", "graph_a")
+
+    fake_provider = MagicMock()
+    fake_provider.close = AsyncMock()
+    fake_provider.inflight_ops = MagicMock(return_value=0)
+    mgr._providers[cache_key] = fake_provider
+    mgr._provider_states[cache_key] = _make_unhealthy_state(
+        "prov_X", "graph_a", consecutive_failures=1,
+    )
+
+    await mgr.record_probe_success("prov_X", source="warmup")
+
+    assert cache_key in mgr._providers            # NOT evicted
+    fake_provider.close.assert_not_awaited()
+    assert mgr._provider_states[cache_key].consecutive_failures == 0
+
+
+async def test_open_breaker_recovery_evicts_despite_short_streak():
+    """An OPEN instantiation breaker proves a real outage regardless of the
+    probe streak — recovery from it must still rebuild the pools."""
+    mgr = _fresh_manager()
+    cache_key = ("prov_X", "graph_a")
+
+    fake_provider = MagicMock()
+    fake_provider.close = AsyncMock()
+    fake_provider.inflight_ops = MagicMock(return_value=0)
+    mgr._providers[cache_key] = fake_provider
+    mgr._provider_states[cache_key] = _make_unhealthy_state(
+        "prov_X", "graph_a", consecutive_failures=1,
+    )
+    mgr._get_instantiation_breaker(cache_key).open()
+
+    await mgr.record_probe_success("prov_X", source="warmup")
+
+    assert cache_key not in mgr._providers        # evicted: breaker proved outage
     fake_provider.close.assert_awaited_once()
 
 

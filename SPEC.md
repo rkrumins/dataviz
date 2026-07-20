@@ -1,8 +1,10 @@
-# NexusLineage Technical Specification
+# Technical Specification
+
+**What this is:** the platform's technical specification — data models, the rule/projection engine, and the API contract. **Who it's for:** engineers implementing or integrating against the platform who need the precise shapes and semantics.
 
 ## Overview
 
-NexusLineage is a billion-node-ready Data Lineage platform that overlays user-defined business ontologies (Context Lenses) onto physical technical metadata. The system uses a multi-graph architecture with sparse matrix projections for depth-99 lineage trace computation.
+The platform is a data-lineage system that overlays user-defined business ontologies (Context Lenses) onto physical technical metadata. It uses a multi-graph architecture over FalkorDB — a physical metadata graph plus ontology-driven lenses — with a materialized aggregation pipeline that pre-computes summary edges so large graphs (verified at millions of entities) can be traced and navigated at any level of detail without live traversal. The entity model described below is the platform's current data model.
 
 ---
 

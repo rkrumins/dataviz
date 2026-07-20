@@ -179,10 +179,27 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
 
     # Large graphs: materialize the top-level-nodes payload so the
     # /top-level endpoint serves pages out of Postgres instead of running
-    # the expensive live roots query per request. Change-detected against
-    # the stored payload's fingerprint + a Redis dirty flag so steady-
-    # state polls do zero extra provider work. Fully isolated from the
+    # the expensive live roots query per request. Fully isolated from the
     # counts write above — a roots-query failure must never lose counts.
+    await materialize_top_level(
+        engine=engine, envelope=envelope, stats=stats, resolved=resolved,
+        provider_id=provider_id, node_count=node_count,
+    )
+
+
+async def materialize_top_level(
+    *, engine, envelope: StatsJobEnvelope, stats: dict, resolved,
+    provider_id: str, node_count: int,
+) -> None:
+    """Materialize the top-level-nodes payload for a large graph.
+
+    Shared by both collection lanes so a freshly profiled data source
+    gets its payload on the first deep profile instead of waiting for
+    the counts cadence. Change-detected against the stored payload's
+    fingerprint + a Redis dirty flag so steady-state polls do zero
+    extra provider work. Never raises — materialization is an
+    optimization, not a correctness dependency.
+    """
     if node_count >= resilience.STATS_POLL_LARGE_THRESHOLD and resolved is not None:
         from backend.app.db.repositories.stats_repo import (
             get_data_source_stats,
@@ -263,10 +280,36 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
                         await set_top_level_nodes(
                             session, envelope.data_source_id, payload_json,
                         )
+                    # Seed the Redis count side-cache so even live-path
+                    # unfiltered requests (e.g. before the Redis response
+                    # cache warms) skip the O(N) count scan. Params shape
+                    # MUST match the endpoint's count_params for the
+                    # unfiltered case. Best-effort.
+                    if result.total_count is not None:
+                        try:
+                            from backend.app.services.graph_cache import (
+                                CacheScope,
+                                get_graph_cache,
+                            )
+                            await get_graph_cache().set_top_level_count(
+                                CacheScope(
+                                    workspace_id=envelope.workspace_id,
+                                    data_source_id=envelope.data_source_id,
+                                ),
+                                {"entityTypes": None, "searchQuery": None},
+                                result.total_count,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "top_level_materialize.count_seed_failed ds=%s: %s",
+                                envelope.data_source_id, exc,
+                            )
                     logger.info(
                         "top_level_materialize.done ds=%s totalCount=%s nodes=%d truncated=%s",
                         envelope.data_source_id, result.total_count, len(result.nodes),
-                        result.has_more or len(result.nodes) < result.total_count,
+                        result.has_more
+                        or (result.total_count is not None
+                            and len(result.nodes) < result.total_count),
                     )
         except Exception as exc:
             logger.warning(
@@ -293,7 +336,7 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
     re-profiling everything every interval and it costing two grouped
     scans per unchanged graph (near-zero with INSIGHTS_FAST_COUNTS).
     """
-    engine, provider, provider_id, ontology_meta, _ = await _open_context(
+    engine, provider, provider_id, ontology_meta, resolved = await _open_context(
         envelope, resolve_ontology=True,
     )
 
@@ -386,6 +429,15 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
         ws_id=envelope.workspace_id,
         ds_id=envelope.data_source_id,
         node_count=node_count,
+    )
+
+    # A freshly profiled large data source should be servable from the
+    # materialized payload immediately — don't wait for the counts lane.
+    # Same change-detection as the counts lane, so an unchanged payload
+    # costs one Postgres read.
+    await materialize_top_level(
+        engine=engine, envelope=envelope, stats=stats_payload,
+        resolved=resolved, provider_id=provider_id, node_count=node_count,
     )
 
 

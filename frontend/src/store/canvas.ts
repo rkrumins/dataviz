@@ -85,6 +85,19 @@ interface CanvasState {
   visibleEdges: LineageEdge[]
   setVisibleEdges: (edges: LineageEdge[]) => void
 
+  // Edge-fetch integrity — records swallowed edge-fetch failures so the
+  // canvas can tell the user the graph may be incomplete instead of
+  // silently rendering nodes with missing edges. Cleared on retry /
+  // successful rehydration.
+  edgeFetchFailures: number
+  lastEdgeError: string | null
+  noteEdgeFetchFailure: (message?: string) => void
+  clearEdgeFetchFailures: () => void
+  /** True when a raw edge fetch returned exactly its request limit — the
+   *  result was almost certainly truncated server-side. */
+  edgesTruncated: boolean
+  setEdgesTruncated: (edgesTruncated: boolean) => void
+
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
   // because multi-locate flows fire multiple pulses concurrently; using
@@ -234,6 +247,16 @@ export const useCanvasStore = create<CanvasState>()(
       setEdges: (edges) => set({ edges, _edgeIndex: new Set(edges.map((e) => e.id)) }),
       visibleEdges: [],
       setVisibleEdges: (visibleEdges) => set({ visibleEdges }),
+
+      edgeFetchFailures: 0,
+      lastEdgeError: null,
+      noteEdgeFetchFailure: (message) => set((state) => ({
+        edgeFetchFailures: state.edgeFetchFailures + 1,
+        lastEdgeError: message ?? state.lastEdgeError,
+      })),
+      clearEdgeFetchFailures: () => set({ edgeFetchFailures: 0, lastEdgeError: null }),
+      edgesTruncated: false,
+      setEdgesTruncated: (edgesTruncated) => set({ edgesTruncated }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the

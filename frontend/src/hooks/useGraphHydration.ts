@@ -26,7 +26,13 @@ import { useProviderHealthStore } from '@/store/providerHealth'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Max entities per type per fetch. Keeps initial loads manageable. */
+/** Max entities per type per fetch. Keeps initial loads manageable.
+ *  KNOWN LIMIT (deliberate, deferred): open ('all') views load only the
+ *  first 200 top-level entities per type and there is no top-level
+ *  load-more affordance — curated views (the primary product path) load
+ *  by explicit URN and are unaffected. Reaching entities beyond the cap
+ *  works via search + reveal. A per-type cursor through hydration is the
+ *  eventual fix. */
 const PER_TYPE_LIMIT = 200
 
 /**
@@ -36,6 +42,10 @@ const PER_TYPE_LIMIT = 200
  * documented in docs/audits/. 6 matches a browser's HTTP/1.1 connection
  * cap; tune via VITE_CHILD_LOAD_CONCURRENCY if needed.
  */
+/** Page size for top-level (root) entity loading — roots page exactly
+ *  like node children so no layer size silently caps the canvas. */
+const ROOT_PAGE_SIZE = 200
+
 const CHILD_LOAD_CONCURRENCY = (() => {
     const fromEnv = Number(import.meta.env?.VITE_CHILD_LOAD_CONCURRENCY)
     return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 6
@@ -44,8 +54,10 @@ const CHILD_LOAD_CONCURRENCY = (() => {
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
 interface LoadChildrenOptions {
-    // Reserved for future use. The useAllSchemaTypes option was removed —
-    // the Entity Browser now uses the dedicated useEntityBrowser hook.
+    /** Server-side sort direction for the child page (default 'asc').
+     *  All pages of one parent must load under ONE direction — the canvas
+     *  drops partially-loaded children when a layer's direction flips. */
+    sortDirection?: 'asc' | 'desc'
 }
 
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
@@ -95,6 +107,12 @@ export interface UseGraphHydrationResult {
     loadingNodes: Set<string>
     /** Set of node IDs that failed to load. */
     failedNodes: Set<string>
+    /** Load the next page of top-level (root) entities. */
+    loadMoreRoots: () => Promise<void> | void
+    /** Count of root entities loaded so far. */
+    rootsLoaded: number
+    /** Heuristic: the last root page was full, so more likely exist. */
+    rootsHaveMore: boolean
     /** Current phase of initial hydration (only meaningful when hydrate=true). */
     hydrationPhase: HydrationPhase
     /** Error message if hydration failed (e.g. provider unavailable/warming). */
@@ -265,6 +283,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // Prevent infinite retries when API returns [] for roots
     const rootsAttemptedForRef = useRef<string | null>(null)
 
+    // ── Root pagination ──────────────────────────────────────────────
+    // Layer roots page in ROOT_PAGE_SIZE batches, exactly like node
+    // children — the previous single fetch of 200 was the last silent
+    // cap on the canvas ("never lose data" invariant). Offset tracked
+    // in a ref (read at click time); count mirrored to state for the
+    // status chip; have-more uses the full-page heuristic shared with
+    // the truncation banners.
+    const rootsLoadedRef = useRef(0)
+    const [rootsLoaded, setRootsLoaded] = useState(0)
+    const [rootsHaveMore, setRootsHaveMore] = useState(false)
+
     // Track (provider, viewId) so reference views reload when the active view changes.
     const initializedKeyRef = useRef<string | null>(null)
 
@@ -276,6 +305,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // Reset when provider changes (e.g. workspace/datasource switch)
     useEffect(() => {
         rootsAttemptedForRef.current = null
+        // (Root pagination STATE resets in the root-load branch itself —
+        // setState here would run synchronously inside this effect.)
+        rootsLoadedRef.current = 0
         // Also reset the hydration guard so re-hydration happens on provider change
         initializedKeyRef.current = null
         // Cancel everything queued under the previous provider
@@ -352,6 +384,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // blink to "Start building" between attempts; a retry only clears them
         // by SUCCEEDING (markReady) below.
         setGraph([], [])
+        // Fresh attempt → fresh edge-integrity state; failures from the
+        // previous attempt would otherwise keep the incomplete-canvas
+        // banner up after a clean reload.
+        useCanvasStore.getState().clearEdgeFetchFailures()
+        useCanvasStore.getState().setEdgesTruncated(false)
 
         const controller = new AbortController()
 
@@ -510,8 +547,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // truncated at the 50k default on large graphs.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch(() => [] as GraphEdge[])
+                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch((err: unknown) => {
+                        // Nodes still render (graceful), but record the
+                        // failure so the canvas can say edges are missing.
+                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                        return [] as GraphEdge[]
+                    })
                     if (controller.signal.aborted) return
+                    // /edges/between returns a bare list with no truncated
+                    // flag — a result exactly at the request limit almost
+                    // certainly hit the server-side cap. (A response header
+                    // would be lost on GraphCache hits, so this length
+                    // heuristic is the compatible signal.)
+                    if (allEdges.length >= 200_000) {
+                        useCanvasStore.getState().setEdgesTruncated(true)
+                    }
 
                     // Replace with complete dataset atomically
                     setGraph(
@@ -602,8 +652,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Step 4: Fetch edges between ALL loaded nodes
                     setHydrationPhase('edges')
                     const allUrns = uniqueNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                    const allEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
+                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                        return [] as GraphEdge[]
+                    })
                     if (controller.signal.aborted) return
+                    if (allEdges.length >= 50_000) {
+                        useCanvasStore.getState().setEdgesTruncated(true)
+                    }
 
                     console.log(`[useGraphHydration] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${allEdges.length} edges`)
 
@@ -743,56 +799,82 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         })
     }, [enableHydration, providerWsId, providerDsId, retryHydration])
 
+    // ─── Root loading (paged) ───────────────────────────────────────────
+
+    // One page of top-level entities at `offset`. Shared by the initial
+    // hydration (offset 0) and loadMoreRoots. Runs through the bounded
+    // queue (key 'ROOT' — duplicate submissions collapse to the in-flight
+    // promise) so it shares the concurrency budget with child loads.
+    const submitRootPage = useCallback((offset: number) => {
+        const typesToLoad = rootEntityTypes
+        if (typesToLoad.length === 0) return
+        return queueRef.current.submit('ROOT', async (signal) => {
+            setLoadingNodes(prev => new Set(prev).add('ROOT'))
+            try {
+                const roots = await provider.getNodes({
+                    entityTypes: typesToLoad as any[],
+                    limit: ROOT_PAGE_SIZE,
+                    offset,
+                })
+                if (signal.aborted) return
+
+                // Full page ⇒ more likely exist beyond it (same heuristic
+                // as the edge-truncation banners); short page ⇒ exhausted.
+                rootsLoadedRef.current = offset + roots.length
+                setRootsLoaded(rootsLoadedRef.current)
+                setRootsHaveMore(roots.length >= ROOT_PAGE_SIZE)
+
+                if (roots.length > 0) {
+                    const nodesToAdd = roots.map(root => toCanvasNode(root))
+
+                    // Fetch real edges from backend
+                    const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
+                    const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
+                    const backendEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
+                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                        return [] as GraphEdge[]
+                    })
+                    if (signal.aborted) return
+
+                    useCanvasStore.getState().addGraph(nodesToAdd, backendEdges.map(e => toCanvasEdge(e)))
+                }
+            } catch (err) {
+                console.error('[useGraphHydration] Failed to load roots page', err)
+            } finally {
+                setLoadingNodes(prev => {
+                    const next = new Set(prev)
+                    next.delete('ROOT')
+                    return next
+                })
+            }
+        })
+    }, [provider, rootEntityTypes])
+
+    /** Load the next ROOT_PAGE_SIZE top-level entities (status chip). */
+    const loadMoreRoots = useCallback(() => {
+        if (loadingNodes.has('ROOT')) return
+        return submitRootPage(rootsLoadedRef.current)
+    }, [loadingNodes, submitRootPage])
+
     // ─── loadChildren ───────────────────────────────────────────────────
 
-    const loadChildren = useCallback(async (parentId: string, _options?: LoadChildrenOptions) => {
-        const { nodes, edges, addGraph } = useCanvasStore.getState()
+    const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
+        const { nodes, edges } = useCanvasStore.getState()
 
         // ── Handle root loading (empty parentId) ────────────────────
         if (!parentId) {
             if (loadingNodes.has('ROOT')) return
             if (!isSchemaReady) return
+            if (rootEntityTypes.length === 0) return
 
-            const typesToLoad = rootEntityTypes
-
-            if (typesToLoad.length === 0) return
-
-            const key = `all:${typesToLoad.join(',')}`
+            const key = `all:${rootEntityTypes.join(',')}`
             if (rootsAttemptedForRef.current === key) return
             rootsAttemptedForRef.current = key
+            rootsLoadedRef.current = 0
+            setRootsLoaded(0)
+            setRootsHaveMore(false)
 
-            // Roots load through the bounded queue too so it shares the
-            // concurrency budget with child loads under "expand all".
-            return queueRef.current.submit('ROOT', async (signal) => {
-                setLoadingNodes(prev => new Set(prev).add('ROOT'))
-                try {
-                    const roots = await provider.getNodes({
-                        entityTypes: typesToLoad as any[],
-                        limit: 200,
-                    })
-                    if (signal.aborted) return
-
-                    if (roots.length > 0) {
-                        const nodesToAdd = roots.map(root => toCanvasNode(root))
-
-                        // Fetch real edges from backend
-                        const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
-                        const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
-                        const backendEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
-                        if (signal.aborted) return
-
-                        addGraph(nodesToAdd, backendEdges.map(e => toCanvasEdge(e)))
-                    }
-                } catch (err) {
-                    console.error('[useGraphHydration] Failed to load roots', err)
-                } finally {
-                    setLoadingNodes(prev => {
-                        const next = new Set(prev)
-                        next.delete('ROOT')
-                        return next
-                    })
-                }
-            })
+            return submitRootPage(0)
         }
 
         // ── Handle child loading (specific parentId) ────────────────
@@ -840,6 +922,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     limit: CHILDREN_PAGE_SIZE,
                     offset: currentChildrenCount,
                     includeLineageEdges: true,
+                    sortDirection: options?.sortDirection,
                 })
 
                 // User collapsed mid-load — drop the result silently
@@ -869,6 +952,34 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     const { addGraph: addGraphFresh } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
 
+                    // Cross-page sibling lineage: getChildrenWithEdges only
+                    // returns lineage among [parent + this page's children],
+                    // so an edge between a page-1 child and a page-2 child
+                    // never arrives through it. For page ≥ 2, supplement
+                    // with one bounded edges-between call over ALL loaded
+                    // children of this parent; the store dedupes by id.
+                    if (currentChildrenCount > 0) {
+                        const fresh = useCanvasStore.getState()
+                        const loadedIds = new Set(fresh.nodes.map(n => n.id))
+                        const siblingUrns = fresh.edges
+                            .filter(e =>
+                                e.source === parentId
+                                && loadedIds.has(e.target)
+                                && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes))
+                            .map(e => e.target)
+                        const crossPageEdges = await provider.getEdgesBetween(
+                            [...new Set([urn, ...siblingUrns])],
+                            lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+                        ).catch((err: unknown) => {
+                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                            return [] as GraphEdge[]
+                        })
+                        if (signal.aborted) return
+                        if (crossPageEdges.length > 0) {
+                            useCanvasStore.getState().addGraph([], crossPageEdges.map(e => toCanvasEdge(e)))
+                        }
+                    }
+
                     console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
                 }
             } catch (err) {
@@ -882,7 +993,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 })
             }
         })
-    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes])
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage])
 
     /**
      * Cancel a queued or in-flight load for `parentId`. Aborts the
@@ -989,5 +1100,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         /** Explicit user retry (overlay "Retry" button). Re-arms a fresh round
          *  of bounded auto-retries. */
         retryHydration,
+        loadMoreRoots,
+        rootsLoaded,
+        rootsHaveMore,
     }
 }

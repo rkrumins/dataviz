@@ -9,6 +9,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 export function WorkspaceReviewsPage() {
   const { wsId } = useParams<{ wsId: string }>()
@@ -33,6 +34,7 @@ export function WorkspaceReviewsPage() {
             <h1 className="text-2xl font-bold text-ink leading-tight">Review Center</h1>
             <p className="text-sm text-ink-muted mt-0.5">Merge requests across {workspaceName ?? 'this workspace'}</p>
           </div>
+          <TourLaunchButton tourId="reviews" className="ml-auto" />
         </div>
       </div>
 

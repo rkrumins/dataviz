@@ -154,8 +154,8 @@ export function stagedChangesToOps(
         }
         break
       }
-      // assign_layer / move_to_layer / layer_config → VIEW config, not graph data. They persist to
-      // referenceLayout via persistReferenceLayout and produce ZERO graph ops here.
+      // assign_layer / move_to_layer / layer_config / reorder_nodes → VIEW config, not graph data.
+      // They persist to referenceLayout via persistReferenceLayout and produce ZERO graph ops here.
       default:
         break
     }

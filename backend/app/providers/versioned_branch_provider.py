@@ -98,35 +98,51 @@ class VersionedBranchProvider:
             limit=query.limit or 100, offset=query.offset or 0)
         return [GraphEdge(**d) for d in rows]
 
+    # `sort_direction` is accepted for interface parity; the Postgres state
+    # reads keep their native (asc) window order, so a desc request re-sorts
+    # the returned PAGE in Python. Exact for parents whose children fit one
+    # page (the common case on this as-of/audit path); a partially-paged desc
+    # window is best-effort.
+    @staticmethod
+    def _page_resort(nodes: list, sort_direction: str) -> list:
+        if sort_direction != "desc":
+            return nodes
+        return sorted(nodes, key=lambda n: ((n.display_name or ""), n.urn), reverse=True)
+
     async def get_children_with_edges(
         self, parent_urn: str, edge_types: Optional[List[str]] = None,
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
+        sort_direction: str = "asc",
     ) -> ChildrenWithEdgesResult:
         d = await self._svc.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             lineage_edge_types=lineage_edge_types, include_lineage_edges=include_lineage_edges,
             limit=limit, offset=offset)
-        return ChildrenWithEdgesResult(**d)
+        result = ChildrenWithEdgesResult(**d)
+        if sort_direction == "desc":
+            result.children = self._page_resort(result.children, sort_direction)
+        return result
 
     async def get_children(
         self, parent_urn: str, entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, sort_property: Optional[str] = "displayName",
-        cursor: Optional[str] = None,
+        cursor: Optional[str] = None, sort_direction: str = "asc",
     ) -> List[GraphNode]:
         d = await self._svc.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             include_lineage_edges=False, limit=limit, offset=offset)
-        return [GraphNode(**c) for c in d["children"]]
+        return self._page_resort([GraphNode(**c) for c in d["children"]], sort_direction)
 
     async def get_top_level_or_orphan_nodes(
         self, *, root_entity_types: Optional[List[str]] = None,
         entity_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
+        sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
         d = await self._svc.top_level_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
@@ -134,7 +150,10 @@ class VersionedBranchProvider:
             root_entity_types=root_entity_types, entity_types=entity_types,
             search_query=search_query, limit=limit, cursor=cursor,
             include_child_count=include_child_count)
-        return TopLevelNodesResult(**d)
+        result = TopLevelNodesResult(**d)
+        if sort_direction == "desc":
+            result.nodes = self._page_resort(result.nodes, sort_direction)
+        return result
 
     async def trace_at_level(
         self, urn: str, level: int, upstream_depth: int, downstream_depth: int,

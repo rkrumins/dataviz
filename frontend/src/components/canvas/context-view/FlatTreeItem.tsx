@@ -46,6 +46,24 @@ interface FlatTreeItemProps {
   isSearchVisible?: boolean
   /** When set (draft/authoring mode), show the hover connection handle. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+  /** Custom-order mode (draft + layer.nodeSortMode === 'custom'): root rows expose
+   *  before/after drop bands (top/bottom 30%) with an indicator line; the middle
+   *  band keeps the existing reparent drop. */
+  reorderEnabled?: boolean
+  onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Ambient in/out lineage counts for THIS node. Rendered as edge
+   *  hairlines ANCHORED TO THE ROW BOX — so they always track the card's
+   *  width/position and unmount with it (no overlay coordinate math, no
+   *  stale/offset/ghost marks). */
+  lineageIn?: number
+  lineageOut?: number
+  /** Relative volume (0..1) vs the column's heaviest node — drives the
+   *  hairline opacity so hubs stand out and median rows fade. */
+  lineageIntensityIn?: number
+  lineageIntensityOut?: number
+  /** Out-of-view lineage cue (curated views) — sky dashed marks. */
+  externalIn?: number
+  externalOut?: number
 }
 
 // Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
@@ -87,6 +105,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onToggleSearch,
   isSearchVisible = false,
   onBeginConnect,
+  reorderEnabled = false,
+  onReorderDrop,
+  lineageIn = 0,
+  lineageOut = 0,
+  lineageIntensityIn = 0,
+  lineageIntensityOut = 0,
+  externalIn = 0,
+  externalOut = 0,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -201,18 +227,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
 
-  // 4.3 Drag-and-drop — only root-level nodes (depth === 0, no parentId) may
-  // be re-assigned between layers. Children live inside their parent's
-  // containment scope; moving a column without its table would break the
-  // ontology. Attach native events via ref (avoids type conflict).
-  // A row being deleted (committed ghost or staged delete) is read-only — it must not be dragged to
-  // another layer. Restore it first if you want to move it.
-  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical && !isPendingDelete
+  // 4.3 Drag-and-drop — a row is draggable when it's a top-level node (which
+  // can be re-assigned between layers) OR when reorder bands are live (draft
+  // custom-order, any depth), so children can be picked up to reorder. The
+  // DROP side validates each gesture: cross-layer assign is blocked for
+  // children by the containment rule, reparent by ontology, and reorder stays
+  // within a sibling set. A row being deleted (committed ghost or staged
+  // delete) is read-only — restore it before moving.
+  // Custom order is hierarchical — roots AND children are reorderable within
+  // their own sibling set. The handler resolves the correct set (parent's
+  // children vs. layer roots) and no-ops on a cross-set drop, so bands are
+  // safe at every depth; logical wrappers stay out (they aren't orderable).
+  const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
+  const isRootDraggable = depth === 0 && !node.parentId && !isLogical
+  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive)
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
 
-    if (!isLayerDraggable) {
+    if (!isDraggable) {
       el.removeAttribute('draggable')
       return
     }
@@ -236,10 +269,32 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       el.removeEventListener('dragstart', onDragStart)
       el.removeEventListener('dragend', onDragEnd)
     }
-  }, [node.id, node.name, isLayerDraggable])
+  }, [node.id, node.name, isDraggable])
 
   const { reparent } = useReparentNode()
   const [dropHover, setDropHover] = useState(false)
+  // Custom-order drop bands: 'before'/'after' when a drag hovers the row's
+  // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
+  // band keeps the reparent drop, so one gesture serves both without a mode.
+  const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
+
+  // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
+  // Escape-cancelled drag (dragend fires on the source) could strand the
+  // indicator line. While any drop state is live, a window-level one-shot
+  // listener guarantees it clears on every way a drag can end.
+  useEffect(() => {
+    if (!dropIndicator && !dropHover) return
+    const clear = () => {
+      setDropIndicator(null)
+      setDropHover(false)
+    }
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+    }
+  }, [dropIndicator, dropHover])
 
   return (
     <div
@@ -248,25 +303,47 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       onDragOver={(e) => {
-        // Accept a node drag (reparent). The id can't be read during dragover, so we
-        // can't exclude self here — `reparent` guards self/cycles on drop.
+        // Accept a node drag (reparent / reorder). The id can't be read during
+        // dragover, so we can't exclude self here — drop handlers guard that.
         if (!e.dataTransfer.types.includes('text/x-entity-id')) return
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
+        if (reorderBandsActive) {
+          const rect = e.currentTarget.getBoundingClientRect()
+          const y = e.clientY - rect.top
+          const band = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
+          if (band !== dropIndicator) setDropIndicator(band)
+          if (band) {
+            if (dropHover) setDropHover(false)
+            return
+          }
+        }
         if (!dropHover) setDropHover(true)
       }}
-      onDragLeave={() => { if (dropHover) setDropHover(false) }}
+      onDragLeave={() => {
+        if (dropHover) setDropHover(false)
+        if (dropIndicator) setDropIndicator(null)
+      }}
       onDrop={(e) => {
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
         if (!draggedId) return
         e.preventDefault()
         e.stopPropagation()   // take precedence over the layer-column drop (move-to-layer)
+        const indicator = dropIndicator
         setDropHover(false)
+        setDropIndicator(null)
+        if (indicator && reorderBandsActive) {
+          if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
+          return
+        }
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
-        "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
+        "flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative z-[2]",
+        // Reorderable rows advertise the drag with a grab cursor (+ the
+        // hover-revealed grip below); everything else keeps the pointer.
+        reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
         paddingClass,
         // Subtle backdrop-blur on the card body — visually invisible
         // (matches the glassy translucent design) but blurs anything
@@ -313,8 +390,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isDimmed && "opacity-40",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
-        // Reparent drop target — a node drag is hovering over this row
-        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20"
+        // Reparent drop target (middle band) — a node drag will nest INTO
+        // this row: strong ring + fill so it reads as "drop inside".
+        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20",
+        // Reorder anchor (before/after band) — a lighter inset ring marks THIS
+        // row as the reference point, kept visually distinct from the reparent
+        // fill so the two gestures never look the same.
+        dropIndicator && "ring-1 ring-inset ring-accent-lineage/40"
       )}
       style={{
         paddingLeft: 12 + indentWidth,
@@ -342,6 +424,40 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
+      {/* Reorder affordance — hover-revealed grip on the left edge tells the
+          user this row is draggable in custom-order mode (same hover-reveal
+          language as the connection handle on the right edge). */}
+      {reorderBandsActive && (
+        <div className="pointer-events-none absolute left-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/item:opacity-60 transition-opacity duration-150">
+          <LucideIcons.GripVertical className="w-3 h-3 text-ink-muted" />
+        </div>
+      )}
+
+      {/* Custom-order drop indicator — a glowing accent line at the row edge
+          the drop will land on, capped by a dot, PLUS a directional chip that
+          spells out the placement in words ("Before ⟨name⟩" / "After ⟨name⟩").
+          The line shows WHERE, the chip removes any doubt about which side of
+          which node the dragged row will land on. */}
+      {dropIndicator && (
+        <div
+          className={cn(
+            'pointer-events-none absolute inset-x-0 z-30 flex items-center gap-1.5',
+            dropIndicator === 'before' ? '-top-[3px]' : '-bottom-[3px]',
+          )}
+        >
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)] flex-shrink-0" />
+          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
+          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgba(var(--accent-lineage-rgb),0.6)] max-w-[150px] flex-shrink-0">
+            {dropIndicator === 'before'
+              ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
+              : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
+            <span className="truncate">
+              {dropIndicator === 'before' ? 'Before' : 'After'} {node.name}
+            </span>
+          </span>
+        </div>
+      )}
+
       {/* Edge authoring: hover-reveal handle on the card's right edge. */}
       {onBeginConnect && (
         <NodeConnectionHandle
@@ -656,6 +772,50 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         }}
         transition={{ duration: 0.2 }}
       />
+
+      {/* ── Ambient lineage hairlines — ANCHORED TO THIS ROW BOX ──────────
+          Incoming hugs the left edge, outgoing the right; sky dashed cues
+          sit just inboard for out-of-view lineage. Because these are
+          children of the row (position:relative), they track the card's
+          width and position for free, unmount when the row collapses, and
+          can never drift/offset/ghost — no overlay coordinate math.
+          Opacity floors at 0.6 (presence is always legible) with volume
+          intensity on top so hubs stand out. Kept inside the box so the
+          column's overflow-x-hidden never clips them. ── */}
+      {lineageIn > 0 && (
+        <div
+          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
+          style={{
+            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
+            opacity: 0.6 + lineageIntensityIn * 0.4,
+          }}
+          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+        />
+      )}
+      {lineageOut > 0 && (
+        <div
+          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
+          style={{
+            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
+            opacity: 0.6 + lineageIntensityOut * 0.4,
+          }}
+          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+        />
+      )}
+      {externalIn > 0 && (
+        <div
+          className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
+          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+        />
+      )}
+      {externalOut > 0 && (
+        <div
+          className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
+          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+        />
+      )}
     </div>
   )
 })

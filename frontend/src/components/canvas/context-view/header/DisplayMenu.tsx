@@ -34,6 +34,8 @@ export interface DisplayMenuProps {
   subtleTreeLines: boolean | undefined
   onToggleSubtleTreeLines: () => void
   onReset: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
 
   // Lineage appearance — edge density / direction arrows
   lineageRenderMode: LineageRenderMode
@@ -58,6 +60,7 @@ export function DisplayMenu({
   subtleTreeLines: subtleTreeLinesRaw,
   onToggleSubtleTreeLines,
   onReset,
+  onFitToWidth,
   lineageRenderMode,
   onSetLineageRenderMode,
   showEdgeDirection,
@@ -119,6 +122,7 @@ export function DisplayMenu({
     <>
       <button
         ref={triggerRef}
+        data-tour="canvas-display"
         type="button"
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"
@@ -158,9 +162,15 @@ export function DisplayMenu({
                 right: anchor.right,
                 width: POPOVER_WIDTH,
                 zIndex: 1000,
+                // The menu can outgrow the window (Canvas + Lineage
+                // sections) — cap it to the space below the trigger and
+                // let the BODY scroll. Without this it clipped with no
+                // way to reach the lower settings.
+                maxHeight: `calc(100vh - ${anchor.top}px - 16px)`,
               }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="flex flex-col rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
               {/* Section: Canvas */}
               <div className="px-3 pt-3 pb-1 flex items-center gap-2 border-b border-black/[0.06] dark:border-white/[0.04]">
                 <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-accent-lineage/25 to-purple-500/15 flex items-center justify-center">
@@ -189,6 +199,7 @@ export function DisplayMenu({
                 onToggleTypeBadge={onToggleTypeBadge}
                 subtleTreeLines={subtleTreeLines}
                 onToggleSubtleTreeLines={onToggleSubtleTreeLines}
+                onFitToWidth={onFitToWidth}
               />
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -214,6 +225,7 @@ export function DisplayMenu({
                 onToggleEdgeDirection={onToggleEdgeDirection}
                 disabled={!lineageEnabled}
               />
+              </div>
             </motion.div>
           )}
         </>,

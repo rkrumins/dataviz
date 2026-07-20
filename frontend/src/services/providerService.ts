@@ -169,6 +169,7 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     provider_unavailable: "This provider is temporarily unavailable — it may be restarting or under load. Try again shortly.",
     out_of_memory: "The provider ran low on memory and is recovering. Give it a moment, then try again.",
     provider_loading: "This provider is still warming up — its data is loading and will appear shortly.",
+    cluster_mode_mismatch: "This server is a Redis Cluster node, but the provider is configured for standalone mode — a standalone connection sees only a fraction of the graphs. Edit the connection and set Mode to Cluster (with the cluster's startup nodes).",
 }
 
 export function friendlyError(raw: string): string {
@@ -261,6 +262,16 @@ export function isWarmingError(raw: string | null | undefined): boolean {
         || lower.includes('-loading')
         || lower.includes('is loading')
         || lower.includes('warming up')
+}
+
+/**
+ * True when a discovery `last_error` reports registry drift: graphs the
+ * catalog / versioning registry says should exist on the provider were
+ * missing from the last successful listing. The connection itself is fine —
+ * callers should show a data-integrity banner, not "unreachable".
+ */
+export function isDriftError(raw: string | null | undefined): boolean {
+    return !!raw && raw.startsWith('graph_drift:')
 }
 
 async function request<T>(

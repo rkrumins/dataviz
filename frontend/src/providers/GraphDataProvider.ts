@@ -583,12 +583,17 @@ export interface TopLevelNodesQuery {
     cursor?: string | null
     /** When true (default), each returned node has `childCount` populated. */
     includeChildCount?: boolean
+    /** Server-side sort direction on displayName (default 'asc'). Cursors are
+     *  direction-bound — never replay a cursor with the other direction. */
+    sortDirection?: 'asc' | 'desc'
 }
 
 export interface TopLevelNodesResult {
     nodes: GraphNode[]
-    /** Total count across all pages (diagnostic — NOT nodes.length). */
-    totalCount: number
+    /** Total count across all pages (diagnostic — NOT nodes.length).
+     *  `null` when the backend's best-effort count was skipped or timed
+     *  out on a very large graph; pagination is driven by `hasMore`. */
+    totalCount: number | null
     hasMore: boolean
     nextCursor: string | null
     /** How many of `totalCount` are ontology-root instances. */
@@ -635,6 +640,14 @@ export interface GraphDataProvider {
     getNodes(query: NodeQuery): Promise<GraphNode[]>
 
     /**
+     * TOTAL lineage degree (in/out) per URN over the full graph —
+     * optional capability. Absent URNs in the result are UNKNOWN, never
+     * zero. The canvas derives "lineage outside this view" as
+     * total − internal(loaded).
+     */
+    getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
+
+    /**
      * Search nodes by text query
      */
     searchNodes(query: string, limit?: number): Promise<GraphNode[]>
@@ -673,6 +686,7 @@ export interface GraphDataProvider {
             limit?: number
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
+            sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
         }
     ): Promise<GraphNode[]>
 
@@ -691,6 +705,7 @@ export interface GraphDataProvider {
             includeLineageEdges?: boolean
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
+            sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
         }
     ): Promise<{
         children: GraphNode[]

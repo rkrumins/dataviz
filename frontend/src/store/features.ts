@@ -37,6 +37,7 @@ import { fetchPublicFeatureValues } from '@/services/featuresService'
 export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
     editModeEnabled: true,
+    nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
     blankModelsEnabled: true,
@@ -48,6 +49,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerVersionHistory: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
     signupEnabled: false,                 // fail CLOSED — this one is a door
+    toursEnabled: false,                  // experimental preview — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

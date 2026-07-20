@@ -23,7 +23,12 @@ DEFAULT_INDEX_LABELS: List[str] = [
 
 # `level` indexed for trace queries that filter by hierarchy level
 # (Cypher: WHERE n.level = $level).
-INDEXED_NODE_PROPS: List[str] = ["urn", "displayName", "qualifiedName", "level"]
+# `layerAssignment` indexed for the by-layer listing (Cypher:
+# WHERE n.layerAssignment = $lid). NOTE: FalkorDB indexes are label-scoped,
+# so the index only serves label-anchored matches — get_nodes_by_layer takes
+# a CALL { MATCH (n:<label>) ... } UNION form over indexed_labels(...) for
+# exactly this reason; a bare MATCH (n) cannot use it.
+INDEXED_NODE_PROPS: List[str] = ["urn", "displayName", "qualifiedName", "level", "layerAssignment"]
 
 
 def indexed_labels(entity_type_ids: Optional[Iterable[str]] = None) -> List[str]:

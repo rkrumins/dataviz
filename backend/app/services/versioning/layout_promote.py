@@ -31,11 +31,17 @@ that exists only on published-since-fork is appended at the end, and ``order``
 is renumbered 0..n-1 on the final list. A final referential-integrity pass
 drops any surviving assignment whose ``layerId`` is no longer a merged layer.
 
-``merge_scope_3way`` (scalar ``entityScope``) and ``merge_display_rules_3way``
-(the opaque, ordered ``displayRules`` array) apply the same draft-wins rule to
+``merge_scope_3way`` (scalar ``entityScope``), ``merge_display_rules_3way``
+(the opaque, ordered ``displayRules`` array) and ``merge_default_sort_3way``
+(the scalar ``defaultNodeSortMode``) apply the same draft-wins rule to
 the referenceLayout's non-keyed side-fields and are kept separate so callers
 compose them with ``merge_layout_3way`` — which, merging only the keyed
-``layers``/``assignments`` collections, would otherwise drop ``displayRules``.
+``layers``/``assignments`` collections, would otherwise drop them.
+
+Because layers and assignments merge as WHOLE values per key, the node-ordering
+fields riding on them — ``layer.nodeSortMode`` and ``assignment.orderKey`` —
+inherit these semantics: a draft that touches an entry in any way (including
+only reordering it) draft-wins the entire entry.
 """
 from __future__ import annotations
 
@@ -222,6 +228,36 @@ def _display_rules_of(layout: Any) -> list | None:
         raw = _guard_bare_layout(raw)
     rules = raw.get("displayRules")
     return rules if isinstance(rules, list) else None
+
+
+def _default_sort_of(layout: Any) -> str | None:
+    """Extract the scalar ``defaultNodeSortMode`` side-field from a bare
+    ``referenceLayout``, or ``None`` when absent/malformed. Applies
+    ``_guard_bare_layout`` for the same wipe-protection as
+    ``_display_rules_of``."""
+    raw = layout if isinstance(layout, dict) else {}
+    if raw:
+        raw = _guard_bare_layout(raw)
+    value = raw.get("defaultNodeSortMode")
+    return value if isinstance(value, str) else None
+
+
+def merge_default_sort_3way(fork_base: dict, published: dict, draft: dict) -> str | None:
+    """3-way merge a ``referenceLayout``'s scalar ``defaultNodeSortMode``
+    (view-wide default node sort for layers without their own
+    ``nodeSortMode``) with the same draft-wins rule as ``merge_scope_3way``:
+    the draft's value when the draft changed it vs the fork-point base, else
+    the (possibly since-fork moved) published value.
+
+    Kept separate from ``merge_layout_3way`` for the same reason as
+    ``merge_display_rules_3way`` — the caller re-attaches the result so the
+    promote never wipes it. Returns ``None`` when it resolves to absent."""
+    f = _default_sort_of(fork_base)
+    p = _default_sort_of(published)
+    d = _default_sort_of(draft)
+    if d != f:
+        return d
+    return p
 
 
 def merge_display_rules_3way(fork_base: dict, published: dict, draft: dict) -> list | None:

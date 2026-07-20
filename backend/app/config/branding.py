@@ -25,11 +25,11 @@ from dataclasses import dataclass
 
 
 # Current product identity — the out-of-the-box defaults.
-_DEFAULT_NAME = "Nexus Lineage"
-_DEFAULT_SHORT_NAME = "NexusLineage"
+_DEFAULT_NAME = "Context Visualization Platform"
+_DEFAULT_SHORT_NAME = "CVP"
 _DEFAULT_DESCRIPTION = "Interactive Data Lineage Visualization"
 _DEFAULT_ACCENT_COLOR = "#6366f1"
-_DEFAULT_COPYRIGHT = "© 2026 Nexus Lineage"
+_DEFAULT_COPYRIGHT = "© 2026 Context Visualization Platform"
 _DEFAULT_SUPPORT_EMAIL = ""
 _DEFAULT_LOGIN_TAGLINE = "Sign in to continue"
 _DEFAULT_LOGO_URL = ""

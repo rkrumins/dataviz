@@ -1,6 +1,6 @@
 # Core backend
-fastapi>=0.109.1         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
-uvicorn[standard]>=0.23.0
+fastapi>=0.139.2         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
+uvicorn[standard]>=0.51.0
 gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via Transfer-Encoding). WSGI server (uvicorn workers) for viz/graph.
 pydantic>=2.4.0          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
@@ -10,16 +10,16 @@ redis>=8.0.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
 sqlalchemy>=2.0.51
-asyncpg>=0.29.0          # PostgreSQL async driver — runtime
+asyncpg>=0.31.0          # PostgreSQL async driver — runtime
 psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
-alembic>=1.13.0          # Schema migrations
+alembic>=1.18.5          # Schema migrations
 
 # Security (credential encryption + authentication)
 cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
 argon2-cffi>=23.1.0      # Argon2id password hashing (OWASP recommended)
 PyJWT>=2.13.0            # Stateless JWT token creation / verification; >=2.13.0: crit-header bypass, JWKS confusion, decode DoS (GHSA-752w-5fwx-jx9f et al.)
 Authlib>=1.6.12          # OIDC ID-token verification (JWKS) + OAuth client; >=1.6.12: algorithm confusion, JWS crit bypass, JWE decompression bomb (PYSEC-2024-52 et al.)
-zxcvbn>=4.4.28           # Server-side password strength validation (maintained fork; zxcvbn-python no longer builds on modern pip)
+zxcvbn>=4.5.0           # Server-side password strength validation (maintained fork; zxcvbn-python no longer builds on modern pip)
 slowapi>=0.1.10           # Rate limiting for auth endpoints
 
 # SAML 2.0 SP. Only the viz-service mounts the auth routes that need
@@ -37,11 +37,11 @@ python-dotenv>=1.2.2     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlink
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.28.1            # DataHub GraphQL HTTP client + async test client
 google-cloud-spanner>=3.49.0                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
-anyio>=4.14.1                                 # Threadpool used by Spanner async/sync seam
+anyio>=4.14.2                                 # Threadpool used by Spanner async/sync seam
 
 # Structured logging
 python-json-logger>=4.1.0
 
 greenlet>=3.1.1          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
-python-multipart>=0.0.31 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
-openpyxl>=3.1.0          # .xlsx import/export adapter (bulk import/export) — pure-Python read+write
+python-multipart>=0.0.32 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
+openpyxl>=3.1.5          # .xlsx import/export adapter (bulk import/export) — pure-Python read+write

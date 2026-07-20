@@ -513,3 +513,25 @@ describe('useAutoOpenCountdown', () => {
     expect(onFire).not.toHaveBeenCalled()
   })
 })
+
+describe('ViewWizard — node-ordering side-fields survive an edit-mode save', () => {
+  it('round-trips defaultNodeSortMode and assignment orderKeys through submit', async () => {
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0, nodeSortMode: 'custom' }],
+      assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true, orderKey: 'a1' } },
+      defaultNodeSortMode: 'alpha-desc',
+    })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalled())
+    const [, body] = updateViewLayoutMock.mock.calls[0]
+    // The wizard rebuilds the layout from form state — the scalar view default
+    // and per-assignment orderKeys must ride through, not be wiped.
+    expect(body.referenceLayout.defaultNodeSortMode).toBe('alpha-desc')
+    expect(body.referenceLayout.assignments['urn:a'].orderKey).toBe('a1')
+    expect(body.referenceLayout.layers[0].nodeSortMode).toBe('custom')
+  })
+})

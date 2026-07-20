@@ -18,6 +18,7 @@ from .endpoints import (
     me_identities,
     audit,
     branding,
+    telemetry,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -81,6 +82,13 @@ api_router.include_router(
 )
 api_router.include_router(
     announcements.admin_router, prefix="/admin/announcements", tags=["admin:announcements"],
+)
+# Product telemetry — auth-required event ingest + admin read of aggregates.
+api_router.include_router(
+    telemetry.router, prefix="/telemetry", tags=["telemetry"],
+)
+api_router.include_router(
+    telemetry.admin_router, prefix="/admin/telemetry", tags=["admin:telemetry"],
 )
 
 # ── RBAC Phase 2 admin surface ───────────────────────────────────────
