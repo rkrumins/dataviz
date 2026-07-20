@@ -94,6 +94,50 @@ export function lastOrderKeyInLayer(
 }
 
 /**
+ * Ensure EVERY id in `siblingIds` carries an `orderKey` — the seeding step that
+ * makes a sibling set (a layer's visual roots OR one node's children)
+ * manually orderable. Custom order is HIERARCHICAL: the orderKey lives on the
+ * node's own assignment entry (keyed by urn) and is only ever compared within
+ * its sibling set, so a child set and the root set can hold independent keys.
+ *
+ * Only the UNKEYED siblings are seeded, in `siblingIds` (current visual) order,
+ * appended after the largest key already in THIS set — so key order matches
+ * what the user sees. A sibling that lacks an assignment entry (children
+ * normally inherit their layer and have none) gets a bare orderKey-carrier
+ * entry; this is layer-safe because a containment child always inherits its
+ * parent's layer and never consults its own entry for placement. Returns the
+ * same layout when every sibling is already keyed.
+ */
+export function ensureSiblingOrderKeys(
+  layout: NormalizedReferenceLayout,
+  layerId: string,
+  siblingIds: readonly string[],
+): NormalizedReferenceLayout {
+  const toSeed = siblingIds.filter((id) => !layout.assignments[id]?.orderKey)
+  if (toSeed.length === 0) return layout
+  let last: string | null = null
+  for (const id of siblingIds) {
+    const key = layout.assignments[id]?.orderKey
+    if (key && (last === null || key > last)) last = key
+  }
+  let keys: string[]
+  try {
+    keys = generateNKeysBetween(last, null, toSeed.length)
+  } catch {
+    return layout // malformed existing key — refuse rather than corrupt
+  }
+  const assignments = { ...layout.assignments }
+  const now = new Date().toISOString()
+  toSeed.forEach((id, i) => {
+    const prev = assignments[id]
+    assignments[id] = prev
+      ? { ...prev, orderKey: keys[i] }
+      : { layerId, inheritsChildren: true, assignedBy: 'user', assignedAt: now, orderKey: keys[i] }
+  })
+  return { ...layout, assignments }
+}
+
+/**
  * Mint a fractional key for inserting at `insertIdx` within `order` (the
  * column's visual root ids, dragged node already removed). Immediate neighbors
  * may be UNKEYED rule-assigned roots (open scope) — `generateKeyBetween(null,
