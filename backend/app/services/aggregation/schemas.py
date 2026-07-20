@@ -723,17 +723,19 @@ class WorkersResponse(BaseModel):
         populate_by_name = True
 
 
-# ── Guarded provider refresh batch (F5) ──────────────────────────────
+# ── Guarded provider refresh batch (F5; reused for the fleet-wide
+# refresh-all batch, G2) ──────────────────────────────────────────────
 
 
 class BatchRefreshRequest(BaseModel):
-    """Body for the provider batch-refresh verb. ``scope``/``force`` are
-    forwarded to ``refresh_source`` for every live data source under the
-    provider; ``max_concurrent`` bounds the fan-out (the runner additionally
-    caps it at 4 regardless of what's requested)."""
+    """Body for the provider batch-refresh verb (also reused, unchanged,
+    by the fleet-wide refresh-all verb). ``scope``/``force`` are forwarded
+    to ``refresh_source`` for every live data source in scope;
+    ``max_concurrent`` bounds the fan-out (the runner additionally caps it
+    at 4 regardless of what's requested)."""
     scope: Literal["auto", "read-caches", "rollups", "full"] = "auto"
     force: bool = Field(False)
-    max_concurrent: int = Field(2, ge=1)
+    max_concurrent: int = Field(2, ge=1, alias="maxConcurrent")
 
     class Config:
         populate_by_name = True

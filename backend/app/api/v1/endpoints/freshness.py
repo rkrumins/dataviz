@@ -282,6 +282,33 @@ async def refresh_provider_batch(
     )
 
 
+# ── POST /freshness/refresh-all — fleet-wide guarded batch refresh ──
+
+@router.post(
+    "/freshness/refresh-all",
+    response_model=BatchStatus,
+    summary="Guarded fleet-wide refresh across every live data source",
+)
+async def refresh_fleet_batch(
+    request: Request,
+    # Fleet-wide twin of the provider batch route's gate: this spans every
+    # workspace, so it stays platform-admin-only too.
+    user: User = Depends(_REQUIRE_PROVIDER_MANAGE),
+):
+    """Fleet-wide twin of ``refresh_provider_batch`` — same CP-only runner
+    (there is no in-process equivalent, so this always proxies, regardless
+    of ``_PROXY_ENABLED``), same trust rule: the client body never decides
+    actor/origin, even in the internal channel to the CP."""
+    raw = await request.body()
+    forwarded = _json.loads(raw) if raw else {}
+    forwarded["actor"] = user.id
+    forwarded["origin"] = "api"
+    return await _proxy(
+        "POST", "/aggregation/refresh-batch", request,
+        body=_json.dumps(forwarded).encode(),
+    )
+
+
 # ── GET /refresh-batches/{batch_id} — batch progress ─────────────────
 
 @router.get(

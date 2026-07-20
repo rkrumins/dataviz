@@ -708,19 +708,29 @@ async def source_freshness(
     return doc
 
 
-# ── Guarded provider refresh batch (F5) ──────────────────────────────
+# ── Guarded provider refresh batch (F5) + fleet-wide twin (G2) ───────
 #
-# Bounded fan-out of ``refresh_source`` over a provider's live data sources.
+# Bounded fan-out of ``refresh_source`` over a set of live data sources.
 # The runner is a fire-and-forget ``asyncio.create_task`` background job:
-# the route acquires the single-flight lock and returns immediately with a
+# the route acquires a single-flight lock and returns immediately with a
 # ``batch_id``; ``GET .../refresh-batches/{batch_id}`` polls progress from
 # the Redis hash the runner writes to. Batch linkage lives entirely in that
 # hash — items are refreshed with the REQUESTED scope, never a synthetic
 # "batch-item" scope forced through ``refresh_source``.
+#
+# G2 reuses this SAME runner for a fleet-wide batch over EVERY live data
+# source across every provider — the only differences are how ``ds_ids``
+# is enumerated (unscoped vs. one provider, see ``_live_ds_ids``) and the
+# lock's scope id (``_FLEET_LOCK_SCOPE`` vs. a provider id). A fleet batch
+# does NOT also acquire every per-provider lock — a fleet batch and a
+# provider batch may legitimately overlap on the same source, and that's
+# safe: ``refresh_source`` is idempotent-safe (``auto`` gates on the change
+# signal, ``rollups`` collapses onto the active job's window).
 
 _REFRESH_BATCH_TTL_SECS = 86400
 _REFRESH_BATCH_LOCK_TTL_SECS = 3600
 _REFRESH_BATCH_MAX_CONCURRENT = 4
+_FLEET_LOCK_SCOPE = "__fleet__"
 
 
 async def _run_provider_batch(
@@ -738,7 +748,12 @@ async def _run_provider_batch(
     hash as it finishes. An item's own exception is recorded as ``error``
     and never aborts the batch. The single-flight lock is released in
     ``finally`` so it cannot leak — even if something here crashes outright
-    (not just an individual item failing)."""
+    (not just an individual item failing).
+
+    ``provider_id`` is really a generic lock-scope id: the per-provider
+    route passes the real provider id, the fleet-wide route (G2) passes
+    ``_FLEET_LOCK_SCOPE``. This function doesn't care which — it only uses
+    it to name the lock key and tag the batch hash."""
     hash_key = f"refreshbatch:{batch_id}"
     lock_key = f"refreshbatch:lock:{provider_id}"
     try:
@@ -782,6 +797,62 @@ async def _run_provider_batch(
         await redis.delete(lock_key)
 
 
+async def _live_ds_ids(
+    session: AsyncSession, *, provider_id: Optional[str] = None,
+) -> List[str]:
+    """Ids of every live (non-tombstoned) data source — the same
+    ``deleted_at IS NULL`` base filter ``assemble_fleet_freshness`` applies
+    for the freshness cockpit read. Optionally scoped to one provider (the
+    per-provider batch route); omitted entirely for the fleet-wide batch
+    route (G2), so the two enumerations share one query shape instead of
+    hand-rolling a second, potentially drifting, copy of the filter."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    q = select(WorkspaceDataSourceORM.id).where(
+        WorkspaceDataSourceORM.deleted_at.is_(None)
+    )
+    if provider_id is not None:
+        q = q.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    rows = await session.execute(q.order_by(WorkspaceDataSourceORM.id))
+    return [r[0] for r in rows.all()]
+
+
+async def _start_guarded_batch(
+    scope_id: str,
+    ds_ids: List[str],
+    body: BatchRefreshRequestInternal,
+    *,
+    request: Request,
+    svc,
+    redis,
+) -> BatchStatus:
+    """Acquire the single-flight lock named for ``scope_id`` and schedule
+    the shared runner over ``ds_ids``. Shared by the per-provider route
+    (``scope_id`` = the provider id) and the fleet-wide route (``scope_id``
+    = ``_FLEET_LOCK_SCOPE``) — the only difference between the two callers
+    is how ``ds_ids`` was enumerated and which scope id is passed here."""
+    lock_key = f"refreshbatch:lock:{scope_id}"
+    got = await redis.set(lock_key, "1", nx=True, ex=_REFRESH_BATCH_LOCK_TTL_SECS)
+    if not got:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A refresh batch is already running for {scope_id!r}",
+        )
+
+    from uuid import uuid4
+    batch_id = uuid4().hex
+    asyncio.create_task(
+        _run_provider_batch(
+            batch_id, scope_id, ds_ids, body,
+            svc=svc, session_factory=request.app.state.session_factory, redis=redis,
+        )
+    )
+    return BatchStatus(
+        batch_id=batch_id, provider_id=scope_id,
+        total=len(ds_ids), done=0, results=[], state="running",
+    )
+
+
 # ── POST /aggregation/providers/{provider_id}/refresh-batch ─────────
 
 @app.post(
@@ -797,7 +868,6 @@ async def start_refresh_batch(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
-    from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.db.repositories.provider_repo import get_provider_orm
     from .redis_client import get_redis
 
@@ -805,34 +875,40 @@ async def start_refresh_batch(
     if provider is None:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id!r} not found")
 
-    rows = await session.execute(
-        select(WorkspaceDataSourceORM.id)
-        .where(WorkspaceDataSourceORM.provider_id == provider_id)
-        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
-        .order_by(WorkspaceDataSourceORM.id)
-    )
-    ds_ids = [r[0] for r in rows.all()]
-
+    ds_ids = await _live_ds_ids(session, provider_id=provider_id)
     redis = get_redis()
-    lock_key = f"refreshbatch:lock:{provider_id}"
-    got = await redis.set(lock_key, "1", nx=True, ex=_REFRESH_BATCH_LOCK_TTL_SECS)
-    if not got:
-        raise HTTPException(
-            status_code=409,
-            detail=f"A refresh batch is already running for provider {provider_id!r}",
-        )
-
-    from uuid import uuid4
-    batch_id = uuid4().hex
-    asyncio.create_task(
-        _run_provider_batch(
-            batch_id, provider_id, ds_ids, body,
-            svc=svc, session_factory=request.app.state.session_factory, redis=redis,
-        )
+    return await _start_guarded_batch(
+        provider_id, ds_ids, body, request=request, svc=svc, redis=redis,
     )
-    return BatchStatus(
-        batch_id=batch_id, provider_id=provider_id,
-        total=len(ds_ids), done=0, results=[], state="running",
+
+
+# ── POST /aggregation/refresh-batch — fleet-wide twin (G2) ──────────
+
+@app.post(
+    "/aggregation/refresh-batch",
+    response_model=BatchStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Guarded batch refresh across every live data source (fleet-wide)",
+)
+async def start_fleet_refresh_batch(
+    request: Request,
+    body: BatchRefreshRequestInternal = Body(default=BatchRefreshRequestInternal()),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    """Fleet-wide twin of ``start_refresh_batch`` — same runner, same
+    per-item isolation, but enumerated across EVERY provider's live data
+    sources rather than one provider's. Guarded by the single GLOBAL lock
+    ``refreshbatch:lock:__fleet__`` — a fleet batch does NOT also take
+    every per-provider lock, so a fleet batch and a provider batch may
+    legitimately run over an overlapping source at once (see the module
+    comment above ``_run_provider_batch``)."""
+    from .redis_client import get_redis
+
+    ds_ids = await _live_ds_ids(session)
+    redis = get_redis()
+    return await _start_guarded_batch(
+        _FLEET_LOCK_SCOPE, ds_ids, body, request=request, svc=svc, redis=redis,
     )
 
 

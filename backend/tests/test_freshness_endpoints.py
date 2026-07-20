@@ -997,6 +997,50 @@ def test_provider_batch_route_defaults_empty_body(monkeypatch):
     assert body["origin"] == "api"
 
 
+# ── Fleet-wide batch-refresh route (G2): always proxies, forces actor/origin ──
+
+
+def test_fleet_batch_route_forwards_actor_and_forces_origin(monkeypatch):
+    # No direct branch for this route either (same CP-only runner) — it
+    # always proxies, but the client body still never decides actor/origin.
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-42")
+    out = _run(fresh_mod.refresh_fleet_batch(
+        _FakeRequest(b'{"scope":"rollups","origin":"connector"}'),
+        user=user,
+    ))
+    assert out == "proxied"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/aggregation/refresh-batch"
+    body = json.loads(captured["body"])
+    assert body["actor"] == "user-42"
+    assert body["origin"] == "api"  # client's "connector" overridden
+    assert body["scope"] == "rollups"
+
+
+def test_fleet_batch_route_defaults_empty_body(monkeypatch):
+    captured = {}
+
+    async def _fake_proxy(method, path, request, body=None):
+        captured["body"] = body
+        return "proxied"
+    monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
+
+    user = types.SimpleNamespace(id="user-7")
+    _run(fresh_mod.refresh_fleet_batch(_FakeRequest(b""), user=user))
+    body = json.loads(captured["body"])
+    assert body["actor"] == "user-7"
+    assert body["origin"] == "api"
+
+
 # ── RBAC: route dependencies carry the right gate ───────────────────────
 
 
@@ -1028,6 +1072,11 @@ def test_refresh_requires_manage_gate():
 
 def test_provider_batch_requires_provider_manage_gate():
     fns = _dep_calls(_route("/providers/{provider_id}/refresh", "POST").dependant)
+    assert fresh_mod._REQUIRE_PROVIDER_MANAGE in fns
+
+
+def test_fleet_batch_requires_provider_manage_gate():
+    fns = _dep_calls(_route("/freshness/refresh-all", "POST").dependant)
     assert fresh_mod._REQUIRE_PROVIDER_MANAGE in fns
 
 
