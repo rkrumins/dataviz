@@ -133,6 +133,56 @@ def test_apply_rollups_queries_are_label_anchored():
         assert timeout is not None, f"rollup query without timeout: {cypher[:80]}"
 
 
+def _node_items(client):
+    """Every node-merge batch item the projector wrote, flattened."""
+    out = []
+    for cypher, params, _t in client.calls:
+        if "MERGE (n:" in cypher and params and "batch" in params:
+            out.extend(params["batch"])
+    return out
+
+
+def test_node_merge_cypher_stamps_level():
+    """RC2: the projector must stamp n.level like save_custom_graph (falkordb_provider.py:8757),
+    else a rebuild drops it and trace level-pair filtering breaks."""
+    from backend.app.services.versioning.projection import _node_merge_cypher
+    assert "n.level = coalesce(item.level, n.level)" in _node_merge_cypher("Table")
+
+
+def test_apply_stamps_level_from_map():
+    client = _CaptureClient()
+    p = _projector()
+    _run(p._apply(client, [_NODE_A, _NODE_B], [], [], [], level_map={"Table": 2}))
+    by_urn = {it["urn"]: it for it in _node_items(client)}
+    assert by_urn["urn:a"]["level"] == 2            # Table is in the map
+    assert by_urn["urn:b"]["level"] is None          # Dataset absent → unset (COALESCE keeps as-is)
+
+
+def test_apply_level_none_when_map_empty():
+    client = _CaptureClient()
+    p = _projector()
+    _run(p._apply(client, [_NODE_A], [], [], [], level_map={}))
+    items = _node_items(client)
+    assert items and all(it["level"] is None for it in items)
+
+
+def test_resolve_level_map_reads_third_tuple_element():
+    async def _resolver(svc, gid):
+        return (["CONTAINS"], ["FLOWS"], {"Table": 2, "Dataset": 3})
+    p = _projector(edge_types_resolver=_resolver)
+    assert _run(p._resolve_level_map("g1")) == {"Table": 2, "Dataset": 3}
+
+
+def test_resolve_level_map_empty_without_resolver():
+    assert _run(_projector()._resolve_level_map("g1")) == {}
+
+
+def test_resolve_level_map_swallows_resolver_error():
+    async def _boom(svc, gid):
+        raise RuntimeError("resolver down")
+    assert _run(_projector(edge_types_resolver=_boom)._resolve_level_map("g1")) == {}
+
+
 def test_seed_resolves_edge_labels_from_window_nodes():
     p = _projector()
 

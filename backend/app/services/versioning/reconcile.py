@@ -268,6 +268,26 @@ class ProjectionReconciler:
             mismatched=mismatched, truncated=truncated, in_sync=in_sync,
         )
 
+    async def content_drift(
+        self, client, graph_id: str, main_id: str, *, deep: bool = True, sample_limit: int = 5
+    ) -> Tuple[List[dict], List[dict], List[str], List[str], List[dict]]:
+        """Guard-free content diff of committed ``main`` against an ALREADY-RESOLVED cache client:
+        the id-set diff (nodes + edges) plus, when ``deep``, the per-node field check
+        (entityId / displayName / entityType-label). Returns
+        ``(missing_nodes, extra_nodes, missing_edges, extra_edges, mismatched)``.
+
+        Unlike :meth:`reconcile`, this takes the client directly and skips the watermark /
+        in-flight guards — the projector's inline full-seed verify calls it while it still holds
+        the graph mid-rebuild (status ``rebuilding``, ``fresh`` still false), where those guards
+        would otherwise short-circuit. ``sample_limit`` bounds only the reported samples, not the
+        (full) scan, so any drift is detected."""
+        missing_n, extra_n, _ = await self._diff_nodes(client, graph_id, main_id, sample_limit)
+        missing_e, extra_e, _ = await self._diff_edges(client, graph_id, main_id, sample_limit)
+        mismatched: List[dict] = []
+        if deep:
+            mismatched, _ = await self._deep_check(client, graph_id, main_id, sample_limit)
+        return missing_n, extra_n, missing_e, extra_e, mismatched
+
     # ------------------------------------------------------------------ #
     # Streams                                                            #
     # ------------------------------------------------------------------ #

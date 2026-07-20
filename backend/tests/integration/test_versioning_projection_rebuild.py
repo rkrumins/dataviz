@@ -14,11 +14,6 @@ import os
 
 import pytest
 
-pytest.skip(
-    "QUARANTINED: the projection delete API changed — _DELETE_EDGES was replaced by typed/anchored _delete_edges_cypher(...) + _DELETE_EDGES_FALLBACK — and this module's fake graph interprets the exact Cypher the worker emits, so its interpreter needs updating for the typed delete shape. Un-skip after teaching the fake both forms.",
-    allow_module_level=True,
-)
-
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
@@ -333,6 +328,101 @@ async def _run_progress_writer() -> None:
     await db.dispose_engine()
 
 
+# --------------------------------------------------------------------------- #
+# 8. Hold-back on an UNFAITHFUL reseed (the data-integrity guarantee): a full   #
+#    seed that does not verify against committed main MUST NOT advance the      #
+#    watermark — reads keep serving Postgres instead of a corrupt cache.        #
+# --------------------------------------------------------------------------- #
+async def _run_holdback_on_count_shortfall() -> None:
+    """A reseed that silently drops an entity (a persistent count shortfall) must be HELD BACK,
+    not published. This is the class the old code advanced-on-error and served as 'fresh'."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    gid, proj, name = await _seed(svc, fake)
+    assert (await svc.projection_watermark(gid))["fresh"] is True
+
+    # Force the cache count to under-report by one node so verify can never reconcile — the heal
+    # reseed runs, still under-reports, and the pass must return a verify_error and hold back.
+    real_counts = proj._falkor_counts
+    async def _short(client):
+        n, e = await real_counts(client)
+        return max(0, n - 1), e
+    proj._falkor_counts = _short
+
+    assert await svc.request_projection_rebuild(gid) is True
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] and r["projected"] == 0, r          # held back at from_seq (0)
+    st, projected, target = await _status(gid)
+    assert st == "idle" and projected == 0, (st, projected)
+    assert target == 0, "target must pin to the held-back seq so the poll stops re-running it"
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is False and wm["last_error"], wm
+
+    # The poll loop must NOT resurrect a deterministic-fail seed (projected==target ⇒ not selected).
+    await proj.project_pending()
+    assert (await _status(gid))[1] == 0, "project_pending must not advance a held-back seed"
+
+    # Recovery: real counts again → a fresh rebuild converges and CLEARS the error.
+    proj._falkor_counts = real_counts
+    assert await svc.request_projection_rebuild(gid) is True
+    await proj.project_graph(gid)
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is True and wm["last_error"] is None, wm
+    await db.dispose_engine()
+
+
+class _FieldDriftGraph(ReconcileFakeGraph):
+    """Writes every node with a corrupted displayName: counts AND id-sets still match, so ONLY the
+    deep content check can catch it — exercises the full-seed CONTENT verify (counts are blind)."""
+
+    async def query(self, cypher: str, params: dict = None):
+        if cypher.startswith("UNWIND $batch AS item MERGE (n:") and params:
+            params = {**params, "batch": [{**it, "displayName": f"DRIFT::{it.get('displayName')}"}
+                                          for it in params["batch"]]}
+        return await super().query(cypher, params)
+
+
+class _FieldDriftFalkor(ReconcileFakeFalkor):
+    def __call__(self, name: str, provider_id=None) -> _FieldDriftGraph:
+        return self.graphs.setdefault(name, _FieldDriftGraph())
+
+
+async def _run_holdback_on_content_drift() -> None:
+    """A reseed whose COUNTS match but whose field content drifted (here every displayName) must
+    still be held back — the count-only verify was blind to exactly this class."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = _FieldDriftFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        {"op": "create", "entity_kind": "edge", "entity_id": "E1", "payload": _edge("A", "B")},
+    ], "seed")
+
+    r = await proj.project_graph(gid)                    # first projection == full seed
+    assert r["verify_error"] and "content drift" in r["verify_error"], r
+    assert r["projected"] == 0, r                        # held back — never published
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is False and "content drift" in (wm["last_error"] or ""), wm
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_holdback_on_count_shortfall_e2e():
+    asyncio.run(_run_holdback_on_count_shortfall())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_holdback_on_content_drift_e2e():
+    asyncio.run(_run_holdback_on_content_drift())
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
@@ -370,6 +460,7 @@ def test_projection_progress_writer_e2e():
 
 if __name__ == "__main__":
     for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id,
-                _run_failure_honesty, _run_progress_writer):
+                _run_failure_honesty, _run_progress_writer,
+                _run_holdback_on_count_shortfall, _run_holdback_on_content_drift):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

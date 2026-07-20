@@ -14,17 +14,16 @@ import os
 
 import pytest
 
-pytest.skip(
-    "QUARANTINED: the projection delete API changed — _DELETE_EDGES was replaced by typed/anchored _delete_edges_cypher(...) + _DELETE_EDGES_FALLBACK — and this module's fake graph interprets the exact Cypher the worker emits, so its interpreter needs updating for the typed delete shape. Un-skip after teaching the fake both forms.",
-    allow_module_level=True,
-)
-
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import (
     FalkorProjector,
-    _DELETE_EDGES,
-    _DELETE_NODES,
+    _DELETE_EDGES_FALLBACK,
+)
+from backend.app.services.versioning.reconcile import (
+    _DEEP_FETCH,
+    _SCAN_EDGES,
+    _SCAN_NODES,
 )
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -55,27 +54,75 @@ class FakeGraph:
             return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") != "_GVRollupMeta")]])
         if cypher == "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c":
             return _Result([[sum(1 for e in self.edges.values() if e.get("type") != "AGGREGATED")]])
+        # Content-verify scans (reconciler primitives the full-seed verify now runs): the sorted
+        # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
+        # / rollup exclusion mirror the real scan's guards.
+        if cypher == _SCAN_NODES:
+            rows = sorted(([n["entityId"], n.get("urn")] for n in self.nodes.values()
+                           if n.get("_label") != "_GVRollupMeta" and n.get("entityId") is not None),
+                          key=lambda r: r[0])
+            return _Result(rows[params["s"]: params["s"] + params["l"]])
+        if cypher == _SCAN_EDGES:
+            rows = sorted(([eid] for eid, e in self.edges.items()
+                           if e.get("type") != "AGGREGATED" and eid is not None),
+                          key=lambda r: r[0])
+            return _Result(rows[params["s"]: params["s"] + params["l"]])
+        if cypher == _DEEP_FETCH:
+            out = []
+            for u in params["urns"]:                     # nodes are keyed by urn (MATCH semantics)
+                n = self.nodes.get(u)
+                if n is not None:
+                    out.append([n["urn"], n["entityId"], n.get("displayName"), [n.get("_label")]])
+            return _Result(out)
+        # Node upsert: UNWIND $batch AS item MERGE (n:{label} {urn: item.urn}) SET ... REMOVE ...
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
             label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
             for it in params["batch"]:
                 self.nodes[it["urn"]] = {**it, "_label": label}
-        elif cypher.startswith("UNWIND $batch AS item MATCH (a {urn: item.src})"):
-            rel_type = cypher.split("MERGE (a)-[r:", 1)[1].split("]->", 1)[0]
+            return None
+        # Edge upsert (LABEL-ANCHORED): UNWIND $batch AS item MATCH (a:{slb} {urn: item.src})
+        #   MATCH (b:{tlb} {urn: item.tgt}) MERGE (a)-[r:{rel}]->(b) SET ...
+        if cypher.startswith("UNWIND $batch AS item MATCH (a:") and "MERGE (a)-[r:" in cypher:
+            slb = cypher.split("MATCH (a:", 1)[1].split(" {urn:", 1)[0]
+            tlb = cypher.split("MATCH (b:", 1)[1].split(" {urn:", 1)[0]
+            rel = cypher.split("MERGE (a)-[r:", 1)[1].split("]->", 1)[0]
             for it in params["batch"]:
-                if it["src"] in self.nodes and it["tgt"] in self.nodes:   # MATCH semantics
-                    self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel_type,
+                a, b = self.nodes.get(it["src"]), self.nodes.get(it["tgt"])
+                # Label-anchored MATCH: BOTH endpoints must exist WITH the anchored label, else the
+                # row binds nothing and the edge is silently not created (models the real drop).
+                if a and b and a.get("_label") == slb and b.get("_label") == tlb:
+                    self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
                                              "props": it.get("props"), "conf": it.get("conf")}
-        elif cypher == _DELETE_EDGES:
+            return None
+        # Typed + anchored edge delete: ...-[r:{rel} {id: item.eid}]->... DELETE r
+        if "DELETE r" in cypher and "$batch" in cypher and "{id: item.eid}" in cypher:
+            for it in params["batch"]:
+                self.edges.pop(it["eid"], None)
+            return None
+        # Legacy fallback edge delete: UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r
+        if cypher == _DELETE_EDGES_FALLBACK:
             for i in params["ids"]:
                 self.edges.pop(i, None)
-        elif cypher == _DELETE_NODES:
+            return None
+        # Node delete by (label, urn): UNWIND $urns AS u MATCH (n:{label} {urn: u}) DETACH DELETE n
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and "DETACH DELETE n" in cypher:
             for u in params["urns"]:
-                self.nodes.pop(u, None)
-                for k in [k for k, e in self.edges.items() if e["src"] == u or e["tgt"] == u]:
-                    self.edges.pop(k, None)
-        else:
-            raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
-        return None
+                self._drop_node(u)
+            return None
+        # Heal-path node delete confirming entityId: UNWIND $pairs AS p MATCH (n:{label} {urn: p.urn})
+        #   WHERE n.entityId = p.eid DETACH DELETE n
+        if cypher.startswith("UNWIND $pairs AS p MATCH (n:") and "DETACH DELETE n" in cypher:
+            for p in params["pairs"]:
+                n = self.nodes.get(p["urn"])
+                if n is not None and n.get("entityId") == p["eid"]:
+                    self._drop_node(p["urn"])
+            return None
+        raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
+
+    def _drop_node(self, urn: str) -> None:
+        self.nodes.pop(urn, None)
+        for k in [k for k, e in self.edges.items() if e["src"] == urn or e["tgt"] == urn]:
+            self.edges.pop(k, None)
 
     async def delete(self):
         """GRAPH.DELETE — drops the whole graph key (used by the clean-rebuild seed)."""
