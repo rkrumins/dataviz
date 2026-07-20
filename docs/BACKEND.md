@@ -366,18 +366,19 @@ Abstract base class defining the contract for all graph backends:
 
 ```mermaid
 classDiagram
+    class GraphDataProvider {
         <<abstract>>
         +get_node(urn) GraphNode
         +get_nodes(query) List~GraphNode~
         +search_nodes(query, limit, offset) List~GraphNode~
         +get_edges(query) List~GraphEdge~
-        +get_children(parent_urn, ...) List~GraphNode~
+        +get_children(parent_urn) List~GraphNode~
         +get_parent(child_urn) GraphNode
-        +get_upstream(urn, depth, ...) LineageResult
-        +get_downstream(urn, depth, ...) LineageResult
-        +get_full_lineage(urn, ...) LineageResult
-        +get_trace_lineage(urn, direction, ...) LineageResult
-        +get_aggregated_edges_between(...) Any
+        +get_upstream(urn, depth) LineageResult
+        +get_downstream(urn, depth) LineageResult
+        +get_full_lineage(urn) LineageResult
+        +get_trace_lineage(urn, direction) LineageResult
+        +get_aggregated_edges_between() Any
         +get_stats() Dict
         +get_schema_stats() GraphSchemaStats
         +get_ontology_metadata() OntologyMetadata
@@ -386,25 +387,24 @@ classDiagram
         +update_edge(edge_id, request) EdgeMutationResult
         +delete_edge(edge_id) bool
     }
-
+    class FalkorDBProvider {
         -pool: BlockingConnectionPool
         -graph_name: str
-        +materialize_aggregated_edges_batch(...)
+        +materialize_aggregated_edges_batch()
         +ensure_indices(entity_types)
     }
-
+    class Neo4jProvider {
         -driver: AsyncDriver
         -database: str
     }
-
+    class DataHubGraphQLProvider {
         -client: httpx.AsyncClient
         -base_url: str
     }
-
+    class MockGraphProvider {
         -nodes: Dict
         -edges: List
     }
-
     GraphDataProvider <|-- FalkorDBProvider
     GraphDataProvider <|-- Neo4jProvider
     GraphDataProvider <|-- DataHubGraphQLProvider

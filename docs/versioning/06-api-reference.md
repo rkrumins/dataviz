@@ -257,11 +257,11 @@ sequenceDiagram
     S->>PG: fold → version rows + commit
     C->>V: POST /branches/{bid}/publish
     V->>S: publish() → _apply_draft_squash()
-    S->>PG: squash_publish commit; target_commit_seq++
+    S->>PG: squash_publish commit, target_commit_seq++
     V-->>C: 200 {commitId}
     Note over V,W: publish schedules an in-process project_now
     W->>PG: read (projected, target]
-    W->>F: MERGE nodes/edges; advance watermark
+    W->>F: MERGE nodes/edges, advance watermark
     C->>V: GET /watermark → {fresh:true}
 ```
 

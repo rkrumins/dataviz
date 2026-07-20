@@ -96,10 +96,10 @@ flowchart LR
     D["Draft<br/>(working_changes)"] -->|checkpoint| C["Commit<br/>(version rows)"]
     C -->|merge-preview| R{"review /<br/>PR"}
     R -->|publish / merge| M["main @ head"]
-    M -->|revert one commit<br/>(may 409)| M
-    M -->|restore to a point<br/>(never conflicts)| M
+    M -->|"revert one commit<br/>(may 409)"| M
+    M -->|"restore to a point<br/>(never conflicts)"| M
     M -.->|project| F[("FalkorDB<br/>hot reads")]
-    D -.->|fork (copy-on-write)| D2["Fork → PR → base"]
+    D -.->|"fork (copy-on-write)"| D2["Fork → PR → base"]
     D2 -->|merge| M
 ```
 
