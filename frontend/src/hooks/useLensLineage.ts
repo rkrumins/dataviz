@@ -118,7 +118,13 @@ export function useLensLineage(
       const res = await provider.getNodes({ urns: chunk, limit: chunk.length })
       for (const n of res) named.push(toCanvasNode(n))
     }
-    capped.forEach(u => namedRef.current.add(u))
+    // Cache ONLY the URNs the backend actually returned. Marking every
+    // requested URN as "named" (even ones getNodes didn't return) left
+    // them permanently unresolvable — they surfaced as an "unresolved"
+    // group of raw-id rows. Un-returned URNs stay eligible for a later
+    // resolve attempt (a revisit or drill), bounded by startedRef.
+    const returned = new Set(named.map(n => n.id))
+    for (const u of capped) if (returned.has(u)) namedRef.current.add(u)
     return named
   }, [provider])
 

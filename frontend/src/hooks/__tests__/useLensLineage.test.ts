@@ -65,6 +65,35 @@ describe('useLensLineage', () => {
     expect(getEdges).toHaveBeenCalledTimes(4)
   })
 
+  it('does not cache URNs getNodes failed to return (they stay retryable)', async () => {
+    // getNodes returns ONLY 'x', never 'z' — 'z' must not be marked as
+    // resolved, so a later fetch can try again instead of stranding it
+    // as an unresolved raw-id row.
+    const returnedUrns: string[] = []
+    const { provider, getNodes } = makeProvider(
+      (q) => (q.sourceUrns?.length ? [ge('e1', 'a', 'x'), ge('e2', 'a', 'z')] : []),
+      (q) => {
+        returnedUrns.push(...(q.urns ?? []))
+        return (q.urns ?? []).filter(u => u === 'x').map(u => gn(u, 'X Node'))
+      },
+    )
+    const { result } = renderHook(() => useLensLineage(['a'], provider, []))
+    await waitFor(() => expect(result.current.status.get('a')).toBe('done'))
+    expect(result.current.supplementalNodes.has('x')).toBe(true)
+    expect(result.current.supplementalNodes.has('z')).toBe(false)
+    expect(returnedUrns).toContain('z')
+
+    // Revisit via a drill fetch that references 'z' again — because 'z'
+    // was never cached, it is requested once more (not stranded).
+    getNodes.mockClear()
+    returnedUrns.length = 0
+    act(() => result.current.fetchDrill(
+      { id: 'agg', source: 'a', target: 'z', data: { isAggregated: true, sourceEdgeCount: 2 } } as unknown as LineageEdge,
+    ))
+    await waitFor(() => expect(result.current.drillStatus.get('agg')).toBe('done'))
+    expect(returnedUrns).toContain('z')
+  })
+
   it('reports a failed fetch as error and recovers via explicit retry only', async () => {
     let fail = true
     const { provider, getEdges } = makeProvider(() => {
