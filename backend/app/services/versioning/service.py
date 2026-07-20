@@ -4414,6 +4414,52 @@ class GraphVersioningService:
                 graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
             raise GraphTooLargeToSync(entities, limit)
 
+    async def edge_payload_health(
+        self, graph_id: str, *, sample_limit: int = 20
+    ) -> Dict[str, object]:
+        """Flag edges on ``main`` whose durable payload is in the pre-contract FLATTENED shape
+        (user properties spread at the top level, ``confidence`` dropped) — i.e. graphs bootstrapped
+        or synced before the serialization contract. A non-zero ``flattened`` count means the graph
+        should be re-imported from its source via :meth:`resync_from_provider`
+        (``strategy='external_wins'``) to recover properties AND confidence — iff the source still
+        holds them. Keyset-paged over ``entity_heads`` (O(batch) memory). Returns
+        ``{scanned, flattened, samples}`` with ``samples`` bounded to ``sample_limit``."""
+        from .entity_serde import is_flattened_edge_payload
+        scanned = 0
+        flattened = 0
+        samples: List[dict] = []
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+        if main_id is None:
+            return {"scanned": 0, "flattened": 0, "samples": []}
+        cursor = ""
+        while True:
+            async with self._session() as s:
+                rows = (await s.execute(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.payload).join(
+                        EdgeVersionORM,
+                        (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                        & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+                    ).where(
+                        EntityHeadORM.graph_id == graph_id,
+                        EntityHeadORM.branch_id == main_id,
+                        EntityHeadORM.entity_kind == "edge",
+                        EntityHeadORM.is_tombstone.is_(False),
+                        EntityHeadORM.entity_id.collate("C") > cursor,
+                    ).order_by(EntityHeadORM.entity_id.collate("C")).limit(2000)
+                )).all()
+            for eid, payload in rows:
+                scanned += 1
+                if is_flattened_edge_payload(payload or {}):
+                    flattened += 1
+                    if len(samples) < sample_limit:
+                        samples.append({"entityId": eid,
+                                        "edgeType": (payload or {}).get("edgeType")})
+            if len(rows) < 2000:
+                break
+            cursor = rows[-1][0]
+        return {"scanned": scanned, "flattened": flattened, "samples": samples}
+
     async def sync_ingest(
         self, *, graph_id: str, rows, actor: str, source: str = "external",
         idempotency_key: Optional[str] = None, message: str = "external sync",

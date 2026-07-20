@@ -121,6 +121,20 @@ def payload_to_edge(entity_id: str, payload: Mapping) -> GraphEdge:
                      confidence=conf, properties=props)
 
 
+def is_flattened_edge_payload(payload: Mapping) -> bool:
+    """True iff a durable edge payload carries user properties SPREAD at the TOP level instead of
+    nested under ``properties`` — the fingerprint of a payload written by the pre-contract
+    flatteners. A canonical payload (nested ``properties``) and a legitimately attribute-less edge
+    (only the envelope keys) both return False.
+
+    Such a payload also DROPPED its ``confidence`` (the flatteners never carried it), which the shape
+    alone cannot prove; the spread keys are the detectable signal. A graph with any flattened edge
+    predates the serialization contract and should be re-imported from its source
+    (:func:`GraphVersioningService.resync_from_provider`, ``strategy='external_wins'``) to recover
+    properties AND confidence — iff the source still holds them."""
+    return any(k not in _EDGE_RESERVED for k in (payload or {}))
+
+
 def payload_to_node(entity_id: str, payload: Mapping) -> GraphNode:
     """Durable node payload → ``GraphNode`` (entity_id is the urn). Symmetric with
     :func:`node_to_payload` for verify/reader use."""

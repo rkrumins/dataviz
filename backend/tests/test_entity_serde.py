@@ -78,6 +78,24 @@ def test_discriminator_preserved_top_level_when_present():
     assert p["discriminator"] == "d1" and p["properties"] == {"k": "v"}
 
 
+def test_is_flattened_edge_payload_detects_the_pre_fix_shape():
+    # Pre-fix flattened: user props spread at the top level, no nested `properties`, no confidence.
+    assert es.is_flattened_edge_payload(
+        {"edgeType": "FLOWS", "sourceEntityId": "a", "targetEntityId": "b",
+         "sql": "select 1", "weight": 3}) is True
+    # Canonical (nested properties) is NOT flattened.
+    assert es.is_flattened_edge_payload(
+        {"edgeType": "FLOWS", "sourceEntityId": "a", "targetEntityId": "b",
+         "confidence": 0.9, "properties": {"sql": "select 1"}}) is False
+    # A legitimately attribute-less edge (only envelope keys) is NOT flattened.
+    assert es.is_flattened_edge_payload(
+        {"edgeType": "CONTAINS", "sourceEntityId": "a", "targetEntityId": "b"}) is False
+    # An explicit discriminator is envelope, not a stray user prop.
+    assert es.is_flattened_edge_payload(
+        {"edgeType": "FLOWS", "sourceEntityId": "a", "targetEntityId": "b",
+         "discriminator": "d1", "properties": {"k": "v"}}) is False
+
+
 def test_edge_payload_matches_versioned_branch_provider():
     """The write-through edit path serializes edges via ``versioned_branch_provider._edge_payload`` —
     a SEPARATE implementation from ``entity_serde.edge_to_payload``. If the two drift, an edit and a
