@@ -1164,6 +1164,14 @@ def _job_state(ds_id="ds-1", status="failed"):
     return types.SimpleNamespace(data_source_id=ds_id, aggregation_status=status)
 
 
+class _RaisingJobRowSession:
+    """Fake session whose ``execute()`` raises — simulates a DB hiccup on
+    the failure-backoff lookup itself."""
+
+    async def execute(self, stmt):
+        raise RuntimeError("db hiccup")
+
+
 # ── R1: reconciler backoff for recently-failed sources (Task H2) ────────
 
 
@@ -1216,6 +1224,17 @@ def test_recently_failed_naive_timestamp_handled_defensively():
 
 def test_recently_failed_unparseable_timestamp_is_false():
     session = _JobRowSession(("failed", "not-a-timestamp"))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(), 900)
+    ) is False
+
+
+def test_recently_failed_lookup_error_fails_open():
+    # Never-raise: a query hiccup must not propagate (which would let the
+    # reconciler's outer catch-all silently skip the whole iteration every
+    # tick) — it degrades to "not recently failed" so signaling proceeds
+    # as it did before H2.
+    session = _RaisingJobRowSession()
     assert _run(
         scheduler_mod._recently_failed(session, _job_state(), 900)
     ) is False

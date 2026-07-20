@@ -55,12 +55,22 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
         return False
     from .models import AggregationJobORM
 
-    row = (await session.execute(
-        select(AggregationJobORM.status, AggregationJobORM.updated_at)
-        .where(AggregationJobORM.data_source_id == state.data_source_id)
-        .order_by(AggregationJobORM.updated_at.desc())
-        .limit(1)
-    )).first()
+    try:
+        row = (await session.execute(
+            select(AggregationJobORM.status, AggregationJobORM.updated_at)
+            .where(AggregationJobORM.data_source_id == state.data_source_id)
+            .order_by(AggregationJobORM.updated_at.desc())
+            .limit(1)
+        )).first()
+    except Exception:
+        # Never-raise: a lookup hiccup must fail OPEN toward the
+        # pre-H2 behavior (proceed to signal) rather than silently
+        # freezing this source's reconcile via the caller's catch-all.
+        logger.warning(
+            "stale-marker reconcile: failure-backoff lookup failed for "
+            "%s — not backing off", state.data_source_id, exc_info=True,
+        )
+        return False
     if row is None or row[0] != "failed" or not row[1]:
         return False
     try:
