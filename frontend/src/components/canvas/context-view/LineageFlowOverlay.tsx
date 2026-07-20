@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
+import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
 import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
@@ -107,7 +107,6 @@ export function LineageFlowOverlay({
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
-  const [overflowEdges, setOverflowEdges] = useState<OverflowEdge[]>([])
   // Per-node lineage indicators — tight indigo ribbons that "peek out"
   // from behind each entity card on the side(s) with lineage. The
   // ribbon is rendered in the overlay's lower z-index so the card
@@ -172,10 +171,13 @@ export function LineageFlowOverlay({
   // Persistent element cache — survives across updateFlow calls, cleared on node changes
   const elementCacheRef = useRef(new Map<string, HTMLElement>())
 
-  // Stable fingerprint for expandedNodes — O(1) instead of O(N log N) sort+join.
-  // Size alone is sufficient because React will re-render when the Set reference changes,
-  // and we only need this for effect dependency tracking (not equality).
-  const expandedNodesFingerprint = expandedNodes.size
+  // Expand/collapse signal for the observer effects. The SET REFERENCE
+  // (not its .size) — every expand/collapse mint a fresh Set upstream, so
+  // the reference changes on ANY structural change, including
+  // membership-preserving ones (collapse-one + expand-another) where the
+  // size is unchanged. Keying on .size missed those and left the observer
+  // rebuild (which clears stale visibility) from firing.
+  const expandedNodesFingerprint = expandedNodes
 
   // Staged-change lookup map — keyed by edge ID. Recomputed when the staging
   // store's changes array changes; reads inside the edge .map() are O(1).
@@ -246,7 +248,11 @@ export function LineageFlowOverlay({
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
     if (!scrollParentRef.current) {
-      scrollParentRef.current = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+      // The outer canvas scroll container is `overflow-auto` (both axes),
+      // NOT `overflow-y-auto` (that's the per-COLUMN scroller). Matching
+      // only the latter bound the wrong ancestor (or null), leaving
+      // viewport.scrollTop/clientHeight stale for the edge-virtualization cull.
+      scrollParentRef.current = containerRef.current.closest('.overflow-auto') as HTMLElement
       if (scrollParentRef.current) {
         setViewport({
           scrollTop: scrollParentRef.current.scrollTop,
@@ -270,7 +276,6 @@ export function LineageFlowOverlay({
     // or skip (neither visible) — avoiding a second iteration over all edges.
     const GUTTER_HALF = 24
     const BADGE_BUCKET = 80
-    const MAX_STUBS_PER_BUCKET = 6
     const MAX_BADGE_PARTNERS = 8
     const containerH = containerRect.height
     // Visible viewport box — the overlay's parent IS the outer
@@ -279,8 +284,6 @@ export function LineageFlowOverlay({
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
     const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string>, layerId: string | null }>()
-    const trailingEdges: OverflowEdge[] = []
-    const bucketStubCount = new Map<string, number>()
 
     // Helper: look up or cache a DOM element. A cached element that has
     // DETACHED (expand/collapse and the virtualizer remount rows under
@@ -588,9 +591,6 @@ export function LineageFlowOverlay({
       const gutterX = sourceVisible
         ? vRect.right - containerRect.left + GUTTER_HALF
         : vRect.left - containerRect.left - GUTTER_HALF
-      const sx = sourceVisible
-        ? vRect.right - containerRect.left + 6
-        : vRect.left - containerRect.left - 8
       const sy = vRect.top + vRect.height / 2 - containerRect.top
 
       // 4-way partner classification: exact DOM rect when the partner is
@@ -603,11 +603,9 @@ export function LineageFlowOverlay({
       const offscreenEl = getEl(offscreenNodeId)
       const pRect = offscreenEl?.getBoundingClientRect() ?? estimateNodeRect(partnerId)
       let direction: OverflowDirection
-      let partnerY: number | null = null
       if (pRect) {
         const px = (pRect.left + pRect.right) / 2
         const py = pRect.top + pRect.height / 2
-        partnerY = py - containerRect.top
         const dx = px < viewportRect.left ? px - viewportRect.left : px > viewportRect.right ? px - viewportRect.right : 0
         const dy = py < viewportRect.top ? py - viewportRect.top : py > viewportRect.bottom ? py - viewportRect.bottom : 0
         if (dx === 0 && dy === 0) {
@@ -722,38 +720,13 @@ export function LineageFlowOverlay({
         bucket.partnerIds.push(partnerId)
       }
 
-      const stubCount = bucketStubCount.get(bucketKey) ?? 0
-      if (stubCount >= MAX_STUBS_PER_BUCKET) return
-      bucketStubCount.set(bucketKey, stubCount + 1)
-
-      let ex: number
-      let ey: number
-      if (isHorizontal) {
-        // Exit horizontally toward the viewport edge, nudged a few px
-        // toward the partner's row when known, fanned vertically per stub.
-        ex = direction === 'left'
-          ? viewportRect.left - containerRect.left
-          : viewportRect.right - containerRect.left
-        const nudge = partnerY !== null ? Math.max(-24, Math.min(24, partnerY - sy)) : 0
-        ey = sy + nudge + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
-      } else {
-        ey = direction === 'up' ? 0 : containerH
-        ex = gutterX + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
-      }
-
-      const cp1x = sx + (ex - sx) * 0.4
-      const cp2x = ex
-      const cp2y = sy + (ey - sy) * 0.6
-
-      const pathD = `M ${sx} ${sy} C ${cp1x} ${sy}, ${cp2x} ${cp2y}, ${ex} ${ey}`
-      const safeColor = color.replace(/[^a-zA-Z0-9]/g, '')
-      const gradId = `of-${safeColor}-${direction}`
-
-      trailingEdges.push({
-        id: `overflow-edge-${edge.source}-${edge.target}`,
-        pathD, color, direction, gradientId: gradId,
-        sy, ey,
-      })
+      // Off-screen lineage is conveyed by the directional BADGES built
+      // above (and the column periphery summaries) — NOT by per-edge
+      // trailing stubs. Those stubs ran from every visible row to a
+      // shared viewport-edge exit point, so a column of 160+ rows fanned
+      // into a moiré of vertical dashed lines that read as ghost/offset
+      // edges and never felt tied to a card. Removed entirely; the badge
+      // is the single, honest off-screen indicator.
     })
 
     setComputedEdges(newComputedEdges)
@@ -912,7 +885,6 @@ export function LineageFlowOverlay({
       })
     })
     setOverflowBadges(badges)
-    setOverflowEdges(trailingEdges)
     setProxyEdges(proxyEdgesNext)
 
     // Periphery emission — through the dedicated store so only the
@@ -1203,7 +1175,8 @@ export function LineageFlowOverlay({
   // Attach scroll listener to the parent container for Viewport Edge Virtualization
   useEffect(() => {
     if (!containerRef.current) return
-    const scrollParent = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+    // Outer scroll container is `overflow-auto` (see updateFlow note).
+    const scrollParent = containerRef.current.closest('.overflow-auto') as HTMLElement
     if (!scrollParent) return
 
     let rafId: number | null = null
@@ -1326,14 +1299,11 @@ export function LineageFlowOverlay({
     // and the user must see where the data flows.
     visibleEdges.forEach(e => markerColors.add(e.color))
 
-    const gradientKeys = new Set<string>()
-    overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
-
     return {
       markerColors: Array.from(markerColors),
-      gradientKeys: Array.from(gradientKeys),
+      gradientKeys: [] as string[],
     }
-  }, [visibleEdges, overflowEdges])
+  }, [visibleEdges])
 
   // Display names for badge tooltips — id → name over the rendered node
   // hierarchy (children included so partners below collapsed roots still
@@ -1849,20 +1819,6 @@ export function LineageFlowOverlay({
             })}
           </>
         )}
-
-        {/* ── Trailing overflow edges — partial S-curves fading toward container edge ── */}
-        {overflowEdges.map(oe => (
-          <path
-            key={oe.id}
-            d={oe.pathD}
-            stroke={`url(#${oe.gradientId})`}
-            strokeWidth={1.4}
-            fill="none"
-            strokeDasharray="6 4"
-            strokeLinecap="round"
-            className="pointer-events-none"
-          />
-        ))}
 
         {/* ── Proxy edges — the selected node's connections docked to
             Anchor Rail chips. The chip is real rendered DOM, so this is
