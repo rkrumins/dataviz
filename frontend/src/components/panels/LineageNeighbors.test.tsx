@@ -42,6 +42,20 @@ import type { WorkspaceSchema } from '@/types/schema'
 // app via `ReactDOM.createRoot(document.getElementById('root'))`, which
 // throws in jsdom (no `#root`). Mock the store to return a stable shape
 // for the StaleDataBanner scope.
+// Default: no provider — the drawer must DEGRADE to store-only data
+// (useLensLineage no-ops on a null provider), which is exactly the
+// behavior the store-driven assertions below encode. Individual tests
+// install a fake provider via the holder to exercise the source fetch.
+// Mocking here also keeps the provider context's heavy import chain
+// out of jsdom.
+const mockProviderHolder = vi.hoisted(() => ({ current: null as unknown }))
+vi.mock('@/providers/GraphProviderContext', () => ({
+  useGraphProviderIfAvailable: () => mockProviderHolder.current,
+}))
+vi.mock('@/hooks/useViewSchema', () => ({
+  useViewLineageEdgeTypes: () => [],
+}))
+
 vi.mock('@/store/workspaces', () => ({
   useWorkspacesStore: (selector?: (s: { activeWorkspaceId: null; activeDataSourceId: null }) => unknown) => {
     const state = { activeWorkspaceId: null, activeDataSourceId: null }
@@ -571,3 +585,34 @@ describe('LineageNeighbors — multi-select', () => {
   })
 })
 
+
+// ---------------------------------------------------------------------------
+// On-demand source fetch — parity with the Lineage Lens
+// ---------------------------------------------------------------------------
+
+describe('on-demand source fetch', () => {
+  it('merges data-source edges into the counts (drawer agrees with Focus mode)', async () => {
+    useCanvasStore.setState({
+      nodes: [makeNode('focal-x', 'dataset', 'Focal X')],
+      edges: [],
+      visibleEdges: [],
+    } as never)
+    mockProviderHolder.current = {
+      getEdges: async (q: { sourceUrns?: string[] }) =>
+        q.sourceUrns?.length
+          ? [{ id: 'sx1', sourceUrn: 'focal-x', targetUrn: 'ext-1', edgeType: 'FLOWS_TO' }]
+          : [],
+      getNodes: async () => [
+        { urn: 'ext-1', entityType: 'dataset', displayName: 'External One', properties: {} },
+      ],
+    }
+    try {
+      render(<LineageNeighbors nodeId="focal-x" />)
+      // The store alone has NO edges for this node — the count must come
+      // from the source fetch, merged exactly like the Lens does it.
+      await waitFor(() => expect(screen.getByText('1 connection')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})

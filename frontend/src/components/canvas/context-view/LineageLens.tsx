@@ -32,8 +32,14 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap } from '@/store/schema'
-import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
-import { EDGE_FETCH_LIMIT } from './useLensLineage'
+import {
+  deriveNeighborRecords,
+  mergeSupplementalEdges,
+  buildCanContainClosure,
+  isCoarserGrain,
+  type NeighborRecord,
+} from '@/lib/lineage-neighbors'
+import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -170,27 +176,7 @@ export function LineageLens({
   const edges = useMemo(() => {
     const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
     if (!supplementalEdges || supplementalEdges.length === 0) return base
-    const seenIds = new Set<string>()
-    const seenPairs = new Set<string>()
-    const coveringAggregates = new Map<string, Array<{ s: string; t: string }>>()
-    const pairKey = (e: LineageEdge) => `${e.source}\u0000${e.target}\u0000${(e.data?.edgeType as string) ?? ''}`
-    for (const e of base) {
-      seenIds.add(e.id)
-      seenPairs.add(pairKey(e))
-      for (const rid of e.data?.sourceEdges ?? []) {
-        const list = coveringAggregates.get(rid) ?? []
-        list.push({ s: e.source, t: e.target })
-        coveringAggregates.set(rid, list)
-      }
-    }
-    const merged = [...base]
-    for (const e of supplementalEdges) {
-      if (seenIds.has(e.id) || seenPairs.has(pairKey(e))) continue
-      const covers = coveringAggregates.get(e.id)
-      if (covers?.some(({ s, t }) => s === e.source || t === e.source || s === e.target || t === e.target)) continue
-      merged.push(e)
-    }
-    return merged
+    return mergeSupplementalEdges(base, supplementalEdges)
   }, [visibleEdges, rawEdges, supplementalEdges])
 
   // Endpoint index — one O(E) pass per edge-set change so everything
@@ -292,26 +278,12 @@ export function LineageLens({
   // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
   // schema helpers. Tiny input (schema type list), computed once.
   const hierarchyMap = useEntityTypeHierarchyMap()
-  const canContainClosure = useMemo(() => {
-    const closure = new Map<string, Set<string>>()
-    for (const [t, h] of Object.entries(hierarchyMap)) {
-      const seen = new Set<string>()
-      const stack = [...h.canContain]
-      while (stack.length > 0) {
-        const c = stack.pop()!
-        const cu = c.toUpperCase()
-        if (seen.has(cu)) continue
-        seen.add(cu)
-        for (const g of hierarchyMap[c]?.canContain ?? []) stack.push(g)
-      }
-      closure.set(t.toUpperCase(), seen)
-    }
-    return closure
-  }, [hierarchyMap])
-  const isCoarserThan = useCallback((partnerType: string | undefined, baseType: string): boolean => {
-    if (!partnerType) return false
-    return canContainClosure.get(partnerType.toUpperCase())?.has(baseType.toUpperCase()) ?? false
-  }, [canContainClosure])
+  const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
+  const isCoarserThan = useCallback(
+    (partnerType: string | undefined, baseType: string): boolean =>
+      isCoarserGrain(canContainClosure, partnerType, baseType),
+    [canContainClosure],
+  )
 
   // Containment parent of a node, when known — fetched or loaded
   // containment edge pointing at it, else the canvas's own assignment.
@@ -367,6 +339,20 @@ export function LineageLens({
     else next.add(key)
     return next
   })
+  // Opening a drill with incomplete local coverage fetches the
+  // underlying edges on demand (idempotent per aggregate). Shared by
+  // the walk columns and the classic-mode cards.
+  const toggleDrillWithFetch = (key: string, edge: LineageEdge) => {
+    const aggData = edge.data as { sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
+    if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) {
+      let localCount = 0
+      for (const eid of aggData?.sourceEdges ?? []) {
+        if (rawEdgeById.has(eid)) localCount++
+      }
+      if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(edge)
+    }
+    toggleDrill(key)
+  }
 
   // Auto-advance: when a hop is pushed, glide the column strip to the
   // frontier so the newest column is always in view.
@@ -850,19 +836,7 @@ export function LineageLens({
                               {canDrill && (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    // Opening a drill with incomplete local
-                                    // coverage fetches the underlying edges
-                                    // on demand (idempotent per aggregate).
-                                    if (!drilledRows.has(drillKey) && onDrillFetch && !drillEdges?.has(rec.edge.id)) {
-                                      let localCount = 0
-                                      for (const eid of aggData?.sourceEdges ?? []) {
-                                        if (rawEdgeById.has(eid)) localCount++
-                                      }
-                                      if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(rec.edge)
-                                    }
-                                    toggleDrill(drillKey)
-                                  }}
+                                  onClick={() => toggleDrillWithFetch(drillKey, rec.edge)}
                                   title={drilled
                                     ? 'Collapse back to the rolled-up connection'
                                     : `Refine — see the ${(aggData?.sourceEdgeCount ?? 0).toLocaleString()} underlying connection${(aggData?.sourceEdgeCount ?? 0) === 1 ? '' : 's'} this rolls up`}
@@ -1104,6 +1078,12 @@ export function LineageLens({
               collapseToggles={collapseToggles}
               onToggleCollapse={toggleCollapse}
               searching={q !== ''}
+              rawEdgeById={rawEdgeById}
+              drilledRows={drilledRows}
+              onToggleDrill={toggleDrillWithFetch}
+              drillEdges={drillEdges}
+              drillStatus={drillStatus}
+              onDrillFetch={onDrillFetch}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1205,6 +1185,12 @@ export function LineageLens({
               collapseToggles={collapseToggles}
               onToggleCollapse={toggleCollapse}
               searching={q !== ''}
+              rawEdgeById={rawEdgeById}
+              drilledRows={drilledRows}
+              onToggleDrill={toggleDrillWithFetch}
+              drillEdges={drillEdges}
+              drillStatus={drillStatus}
+              onDrillFetch={onDrillFetch}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1371,6 +1357,18 @@ function TypeChips({
   )
 }
 
+/** Drill payload for an aggregated (×N) row — computed by the column,
+ *  rendered by the row. Same refine semantics as the walk columns. */
+interface NeighborRowDrill {
+  drilled: boolean
+  onToggle: () => void
+  /** Locally loaded ∪ on-demand fetched underlying edges, deduped. */
+  constituents: LineageEdge[]
+  missing: number
+  state?: 'loading' | 'done' | 'error'
+  onRetry?: () => void
+}
+
 /** One neighbor row — shared by parent groups, type groups, and the
  *  rollup tier so the interaction contract stays identical everywhere. */
 function NeighborRow({
@@ -1378,6 +1376,8 @@ function NeighborRow({
   isIn,
   accentColor,
   rollup,
+  drill,
+  nodeMap,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -1387,15 +1387,21 @@ function NeighborRow({
   accentColor: string
   /** Coarser-grain summary row — muted, badged, never counted as more data. */
   rollup?: boolean
+  /** Present when the row is a drillable aggregate. */
+  drill?: NeighborRowDrill
+  nodeMap: Map<string, LineageNode>
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
   const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
+  const aggCount = (r.edge.data as { sourceEdgeCount?: number } | undefined)?.sourceEdgeCount
   const bundleCount = (r.edge as { edgeCount?: number }).edgeCount
     ?? (r.edge.data as { edgeCount?: number } | undefined)?.edgeCount
+    ?? aggCount
   const unloaded = !r.neighborNode
   return (
+    <div>
     <div
       role="button"
       tabIndex={0}
@@ -1428,8 +1434,24 @@ function NeighborRow({
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
           <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
           <span className="truncate uppercase tracking-wide">{r.edgeTypeNorm || 'relationship'}</span>
-          {bundleCount != null && bundleCount > 1 && (
-            <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
+          {drill ? (
+            // The ×N badge IS the drill toggle — same refine gesture as
+            // the walk columns (stopPropagation: card click re-centers).
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); drill.onToggle() }}
+              title={drill.drilled
+                ? 'Collapse back to the rolled-up connection'
+                : `Refine — see the ${(aggCount ?? bundleCount ?? 0).toLocaleString()} underlying connection${(aggCount ?? bundleCount ?? 0) === 1 ? '' : 's'} this rolls up`}
+              className="flex items-center gap-0.5 tabular-nums font-semibold text-ink-muted hover:text-accent-lineage transition-colors"
+            >
+              ×{(bundleCount ?? 0).toLocaleString()}
+              <LucideIcons.ChevronDown className={cn('w-2.5 h-2.5 transition-transform', !drill.drilled && '-rotate-90')} />
+            </button>
+          ) : (
+            bundleCount != null && bundleCount > 1 && (
+              <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
+            )
           )}
           {unloaded && <span className="italic">· not on canvas</span>}
         </p>
@@ -1469,6 +1491,56 @@ function NeighborRow({
         )}
       </span>
     </div>
+    {/* Refined constituents — the aggregate's real endpoints, local ∪
+        fetched, mirroring the walk-column drill exactly. */}
+    {drill?.drilled && (
+      <div className="ml-4 mt-0.5 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
+        {drill.constituents.map(e => {
+          const otherId = isIn ? e.source : e.target
+          const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
+          return (
+            <div
+              key={e.id}
+              className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
+              title={`${labelOf(e.source, nodeMap.get(e.source))} → ${labelOf(e.target, nodeMap.get(e.target))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
+            >
+              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
+              <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
+            </div>
+          )
+        })}
+        {drill.state === 'loading' && (
+          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
+            <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
+            Fetching underlying connections…
+          </div>
+        )}
+        {drill.state === 'error' && (
+          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+            <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+            <span>Couldn&apos;t fetch the underlying connections.</span>
+            {drill.onRetry && (
+              <button type="button" onClick={drill.onRetry} className="font-semibold hover:underline">
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+        {drill.constituents.length === 0 && drill.state !== 'loading' && drill.state !== 'error' && (
+          <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
+            {drill.state === 'done'
+              ? 'No underlying connections found between these entities.'
+              : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
+          </p>
+        )}
+        {drill.missing > 0 && drill.constituents.length > 0 && drill.state !== 'loading' && (
+          <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
+            +{drill.missing.toLocaleString()} more (showing the first {drill.constituents.length})
+          </p>
+        )}
+      </div>
+    )}
+    </div>
   )
 }
 
@@ -1487,6 +1559,12 @@ function NeighborColumn({
   collapseToggles,
   onToggleCollapse,
   searching,
+  rawEdgeById,
+  drilledRows,
+  onToggleDrill,
+  drillEdges,
+  drillStatus,
+  onDrillFetch,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -1514,6 +1592,13 @@ function NeighborColumn({
   /** Text filter active — auto-expand every group so matches can't
    *  hide inside a collapsed one (that would be silent loss). */
   searching: boolean
+  /** Drill machinery — same refine semantics as the walk columns. */
+  rawEdgeById: Map<string, LineageEdge>
+  drilledRows: Set<string>
+  onToggleDrill: (key: string, edge: LineageEdge) => void
+  drillEdges?: Map<string, LineageEdge[]>
+  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
+  onDrillFetch?: (edge: LineageEdge) => void
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -1566,6 +1651,37 @@ function NeighborColumn({
 
   const isIn = direction === 'incoming'
   const allFilteredOff = records.length > 0 && groups.length === 0 && rollups.length === 0
+
+  // Drill payload for an aggregated row — local raw edges ∪ on-demand
+  // fetched, mirroring the walk-column computation exactly.
+  const buildDrill = (r: NeighborRecord): NeighborRowDrill | undefined => {
+    const aggData = r.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
+    const canDrill = !!aggData?.isAggregated
+      && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
+    if (!canDrill) return undefined
+    const key = `c:${direction}:${r.edge.id}`
+    const drilled = drilledRows.has(key)
+    let constituents: LineageEdge[] = []
+    let missing = 0
+    if (drilled) {
+      const local = (aggData.sourceEdges ?? [])
+        .map(eid => rawEdgeById.get(eid))
+        .filter((e): e is LineageEdge => !!e)
+      const seenConstituent = new Set(local.map(e => e.id))
+      const fetched = (drillEdges?.get(r.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
+      const all = [...local, ...fetched]
+      constituents = all.slice(0, 50)
+      missing = Math.max(0, Math.max(aggData.sourceEdgeCount ?? 0, all.length) - constituents.length)
+    }
+    return {
+      drilled,
+      onToggle: () => onToggleDrill(key, r.edge),
+      constituents,
+      missing,
+      state: drilled ? drillStatus?.get(r.edge.id) : undefined,
+      onRetry: onDrillFetch ? () => onDrillFetch(r.edge) : undefined,
+    }
+  }
 
   return (
     <div className={cn(
@@ -1670,6 +1786,8 @@ function NeighborColumn({
                         r={r}
                         isIn={isIn}
                         accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
+                        drill={buildDrill(r)}
+                        nodeMap={nodeMap}
                         onRecenter={onRecenter}
                         onRevealOnCanvas={onRevealOnCanvas}
                         onOpenDetails={onOpenDetails}
@@ -1696,6 +1814,8 @@ function NeighborColumn({
                     r={r}
                     isIn={isIn}
                     accentColor={typeColor}
+                    drill={buildDrill(r)}
+                    nodeMap={nodeMap}
                     onRecenter={onRecenter}
                     onRevealOnCanvas={onRevealOnCanvas}
                     onOpenDetails={onOpenDetails}
@@ -1726,6 +1846,8 @@ function NeighborColumn({
                   isIn={isIn}
                   accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
                   rollup
+                  drill={buildDrill(r)}
+                  nodeMap={nodeMap}
                   onRecenter={onRecenter}
                   onRevealOnCanvas={onRevealOnCanvas}
                   onOpenDetails={onOpenDetails}

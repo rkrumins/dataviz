@@ -23,12 +23,19 @@ import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   useSchemaStore,
   useContainmentEdgeTypes,
+  useEntityTypeHierarchyMap,
 } from '@/store/schema'
 import {
   deriveNeighborRecords,
+  mergeSupplementalEdges,
+  buildCanContainClosure,
+  isCoarserGrain,
   type NeighborDirection,
   type NeighborRecord,
 } from '@/lib/lineage-neighbors'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
+import { useLensLineage, EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
@@ -55,10 +62,26 @@ type Direction = NeighborDirection
 export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageNeighborsProps) {
   const rawEdges = useCanvasStore((s) => s.edges)
   const visibleEdges = useCanvasStore((s) => s.visibleEdges)
-  // Mirror the canvas: prefer the projected/aggregated visible set; fall
-  // back to raw edges when no canvas has published one yet.
-  const edges = visibleEdges.length > 0 ? visibleEdges : rawEdges
   const nodes = useCanvasStore((s) => s.nodes)
+
+  // On-demand fetch — the drawer must AGREE with Focus mode about what
+  // the data source contains, not just what the canvas happens to have
+  // loaded (store-only counts silently lied for unexpanded regions).
+  // Same hook, same merge, same grain split as the Lens; degrades to
+  // store-only data when no provider is reachable.
+  const provider = useGraphProviderIfAvailable()
+  const lineageEdgeTypes = useViewLineageEdgeTypes()
+  const fetchStack = useMemo(() => (nodeId ? [nodeId] : []), [nodeId])
+  const sourceFetch = useLensLineage(fetchStack, provider, lineageEdgeTypes)
+  const fetchState = sourceFetch.status.get(nodeId)
+
+  // Mirror the canvas: prefer the projected/aggregated visible set; fall
+  // back to raw edges when no canvas has published one yet — then merge
+  // in the fetched edges (deduped by id / pair / covering aggregate).
+  const edges = useMemo(() => {
+    const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
+    return mergeSupplementalEdges(base, sourceFetch.supplementalEdges)
+  }, [visibleEdges, rawEdges, sourceFetch.supplementalEdges])
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const containmentEdgeTypes = useContainmentEdgeTypes()
@@ -102,9 +125,11 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
 
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>()
+    // Fetched partners first; store nodes win (they carry full canvas data).
+    for (const [id, n] of sourceFetch.supplementalNodes) m.set(id, n)
     for (const n of nodes) m.set(n.id, n)
     return m
-  }, [nodes])
+  }, [nodes, sourceFetch.supplementalNodes])
 
   // Lineage-only neighbors. Containment edges (structural parent ↔ child) are
   // filtered out — the section is about flow lineage. Shared derivation with
@@ -117,6 +142,21 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   const incomingCount = incomingRecords.length
   const outgoingCount = outgoingRecords.length
   const totalCount = incomingCount + outgoingCount
+
+  // Same grain split as the Lens header, so the two surfaces can never
+  // disagree: coarser-grain partners (their type can transitively
+  // contain this node's type) are summaries, counted separately.
+  const hierarchyMap = useEntityTypeHierarchyMap()
+  const grainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
+  const focalType = (nodeMap.get(nodeId)?.data?.type as string) ?? 'entity'
+  let rollupTotal = 0
+  for (const r of incomingRecords) {
+    if (isCoarserGrain(grainClosure, r.neighborNode?.data?.type as string | undefined, focalType)) rollupTotal++
+  }
+  for (const r of outgoingRecords) {
+    if (isCoarserGrain(grainClosure, r.neighborNode?.data?.type as string | undefined, focalType)) rollupTotal++
+  }
+  const directTotal = totalCount - rollupTotal
 
   const handleNeighborClick = async (neighborId: string) => {
     // Drawer-swap first (instant, no awaiting). selectNode so the canvas's
@@ -154,11 +194,20 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
             Lineage
           </h3>
         </div>
-        {totalCount > 0 && (
-          <span className="text-[10px] font-medium text-ink-muted/80 tabular-nums">
-            {totalCount} connection{totalCount === 1 ? '' : 's'}
-          </span>
-        )}
+        <span className="flex items-center gap-1.5 text-[10px] font-medium text-ink-muted/80 tabular-nums">
+          {fetchState === 'loading' && (
+            <LucideIcons.Loader2
+              className="w-3 h-3 animate-spin text-accent-lineage/70"
+              aria-label="Fetching lineage from the data source"
+            />
+          )}
+          {totalCount > 0 && (
+            <span>
+              {directTotal} connection{directTotal === 1 ? '' : 's'}
+              {rollupTotal > 0 && ` · ${rollupTotal} rolled-up`}
+            </span>
+          )}
+        </span>
       </div>
 
       <StaleDataBanner
@@ -168,6 +217,28 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
         className="mb-3"
       />
 
+      {/* Fetch narration — a failed or capped source fetch is SAID,
+          never silently rendered as smaller counts. */}
+      {fetchState === 'error' && (
+        <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
+          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+          <span>Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s loaded on the canvas.</span>
+          <button
+            type="button"
+            onClick={() => sourceFetch.retry(nodeId)}
+            className="ml-auto flex-shrink-0 font-semibold hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {fetchState === 'done' && sourceFetch.truncatedIds.has(nodeId) && (
+        <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
+          <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
+          <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source.</span>
+        </div>
+      )}
+
 
       <div className="space-y-2">
         <DirectionCard
@@ -176,6 +247,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           subLabel="Upstream connections"
           count={incomingCount}
           records={incomingRecords}
+          fetchState={fetchState}
           expanded={expanded === 'incoming'}
           onToggle={() => toggle('incoming')}
           onNeighborClick={handleNeighborClick}
@@ -189,6 +261,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           subLabel="Downstream connections"
           count={outgoingCount}
           records={outgoingRecords}
+          fetchState={fetchState}
           expanded={expanded === 'outgoing'}
           onToggle={() => toggle('outgoing')}
           onNeighborClick={handleNeighborClick}
@@ -264,6 +337,10 @@ interface DirectionCardProps {
   subLabel: string
   count: number
   records: NeighborRecord[]
+  /** On-demand source-fetch status for the focal node — an in-flight
+   *  fetch must not read as "no connections", and a completed one
+   *  upgrades the empty copy to a data-source claim. */
+  fetchState?: 'loading' | 'done' | 'error'
   expanded: boolean
   onToggle: () => void
   onNeighborClick: (neighborId: string) => void | Promise<void>
@@ -282,6 +359,7 @@ function DirectionCard({
   subLabel,
   count,
   records,
+  fetchState,
   expanded,
   onToggle,
   onNeighborClick,
@@ -350,19 +428,31 @@ function DirectionCard({
 
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2">
-            <span
-              className={cn(
-                'text-2xl font-display font-semibold tabular-nums leading-none',
-                tokens.accent,
-              )}
-            >
-              {count}
-            </span>
+            {count === 0 && fetchState === 'loading' ? (
+              <LucideIcons.Loader2 className={cn('w-5 h-5 animate-spin self-center', tokens.accent)} />
+            ) : (
+              <span
+                className={cn(
+                  'text-2xl font-display font-semibold tabular-nums leading-none',
+                  tokens.accent,
+                )}
+              >
+                {count}
+              </span>
+            )}
             <span className="text-sm font-medium text-ink truncate">
               {label}
             </span>
           </div>
-          <div className="text-[11px] text-ink-muted mt-0.5">{subLabel}</div>
+          <div className="text-[11px] text-ink-muted mt-0.5">
+            {count === 0 && fetchState === 'loading'
+              ? 'Checking the data source…'
+              // Post-fetch zero is a claim about the data source, not
+              // about what the canvas happens to have loaded.
+              : count === 0 && fetchState === 'done'
+                ? 'None found in the data source'
+                : subLabel}
+          </div>
         </div>
 
         {!disabled && (
