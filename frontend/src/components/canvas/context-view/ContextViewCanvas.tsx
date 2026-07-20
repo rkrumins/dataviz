@@ -3872,8 +3872,6 @@ export function ContextViewCanvas({
             <LineageFlowOverlay
               nodes={renderFlat}
               edges={effectiveLineageEdges}
-              nodeStubCounts={nodeStubCounts}
-              showStubs={isStubsMode}
               expandedNodes={expandedNodes}
               selectEdge={selectEdge}
               isEdgePanelOpen={isEdgePanelOpen}
@@ -3892,7 +3890,6 @@ export function ContextViewCanvas({
               flowRibbons={flowRibbons}
               focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
-              externalCue={externalCueByNode}
             />
           )}
 
@@ -4039,6 +4036,8 @@ export function ContextViewCanvas({
                 geometryRegistry={columnGeometryRegistry}
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
+                externalCue={externalCueByNode}
+                showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
                 anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}

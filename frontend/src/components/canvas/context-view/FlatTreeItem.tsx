@@ -51,6 +51,19 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Ambient in/out lineage counts for THIS node. Rendered as edge
+   *  hairlines ANCHORED TO THE ROW BOX — so they always track the card's
+   *  width/position and unmount with it (no overlay coordinate math, no
+   *  stale/offset/ghost marks). */
+  lineageIn?: number
+  lineageOut?: number
+  /** Relative volume (0..1) vs the column's heaviest node — drives the
+   *  hairline opacity so hubs stand out and median rows fade. */
+  lineageIntensityIn?: number
+  lineageIntensityOut?: number
+  /** Out-of-view lineage cue (curated views) — sky dashed marks. */
+  externalIn?: number
+  externalOut?: number
 }
 
 // Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
@@ -94,6 +107,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
+  lineageIn = 0,
+  lineageOut = 0,
+  lineageIntensityIn = 0,
+  lineageIntensityOut = 0,
+  externalIn = 0,
+  externalOut = 0,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -753,6 +772,50 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         }}
         transition={{ duration: 0.2 }}
       />
+
+      {/* ── Ambient lineage hairlines — ANCHORED TO THIS ROW BOX ──────────
+          Incoming hugs the left edge, outgoing the right; sky dashed cues
+          sit just inboard for out-of-view lineage. Because these are
+          children of the row (position:relative), they track the card's
+          width and position for free, unmount when the row collapses, and
+          can never drift/offset/ghost — no overlay coordinate math.
+          Opacity floors at 0.6 (presence is always legible) with volume
+          intensity on top so hubs stand out. Kept inside the box so the
+          column's overflow-x-hidden never clips them. ── */}
+      {lineageIn > 0 && (
+        <div
+          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
+          style={{
+            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
+            opacity: 0.6 + lineageIntensityIn * 0.4,
+          }}
+          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+        />
+      )}
+      {lineageOut > 0 && (
+        <div
+          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
+          style={{
+            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
+            opacity: 0.6 + lineageIntensityOut * 0.4,
+          }}
+          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+        />
+      )}
+      {externalIn > 0 && (
+        <div
+          className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
+          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+        />
+      )}
+      {externalOut > 0 && (
+        <div
+          className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
+          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+        />
+      )}
     </div>
   )
 })

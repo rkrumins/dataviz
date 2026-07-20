@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection, OverflowEdge } from './types'
+import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
 import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
@@ -31,8 +31,6 @@ export const EXTREMITY_EDGE_GUTTER_PX =
 export function LineageFlowOverlay({
   nodes,
   edges,
-  nodeStubCounts,
-  showStubs = false,
   expandedNodes,
   selectEdge,
   isEdgePanelOpen,
@@ -51,21 +49,9 @@ export function LineageFlowOverlay({
   flowRibbons,
   focusNodeId,
   onAnchorProxies,
-  externalCue,
 }: {
   nodes: any[],
   edges: any[],
-  /**
-   * Per-node lineage counts for the stub indicators. Drives a short
-   * partial-edge marker on each entity card: a quiet inbound arrow on
-   * the left if `in > 0`, a quiet outbound arrow on the right if
-   * `out > 0`. The stubs are entity-anchored decorations — they never
-   * attempt to span across to a partner node. Hover/select on an entity
-   * materializes the real edges over these markers.
-   */
-  nodeStubCounts?: Map<string, { in: number; out: number }>,
-  /** When true, render the per-node stub indicators. */
-  showStubs?: boolean,
   expandedNodes: Set<string>,
   selectEdge: (id: string) => void,
   isEdgePanelOpen: boolean,
@@ -98,35 +84,18 @@ export function LineageFlowOverlay({
   /** Rail payload per layer id — called only when the rail content
    *  actually changes (the compute pass runs per frame). */
   onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
-  /** Per-node lineage OUTSIDE the view's scope (curated views) —
-   *  hollow dashed hairline cue. Absent node = unknown, render nothing. */
-  externalCue?: Map<string, { in: number; out: number }>,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
-  const [overflowEdges, setOverflowEdges] = useState<OverflowEdge[]>([])
   // Per-node lineage indicators — tight indigo ribbons that "peek out"
   // from behind each entity card on the side(s) with lineage. The
   // ribbon is rendered in the overlay's lower z-index so the card
   // chrome hides the inboard portion — visually it reads as a soft
   // glow tab integrated into the card design rather than a separate
   // decoration. Stroke width / opacity scale with the lineage count.
-  const [computedStubs, setComputedStubs] = useState<Array<{
-    nodeId: string
-    side: 'in' | 'out'
-    count: number
-    cx: number; cy: number  // ribbon center
-    width: number; height: number
-    /** Volume relative to the heaviest visible node (log-scaled 0..1) —
-     *  drives hairline opacity so only hubs stand out. */
-    intensity: number
-    /** Out-of-view lineage cue (curated views): rendered HOLLOW/dashed,
-     *  visually distinct from the solid loaded-lineage hairline. */
-    external?: boolean
-  }>>([])
   // Flow ribbons — macro volume bands between layer columns, computed per
   // updateFlow frame (≤ MAX_FLOW_RIBBONS DOM rect reads).
   const [computedRibbons, setComputedRibbons] = useState<Array<{
@@ -172,10 +141,13 @@ export function LineageFlowOverlay({
   // Persistent element cache — survives across updateFlow calls, cleared on node changes
   const elementCacheRef = useRef(new Map<string, HTMLElement>())
 
-  // Stable fingerprint for expandedNodes — O(1) instead of O(N log N) sort+join.
-  // Size alone is sufficient because React will re-render when the Set reference changes,
-  // and we only need this for effect dependency tracking (not equality).
-  const expandedNodesFingerprint = expandedNodes.size
+  // Expand/collapse signal for the observer effects. The SET REFERENCE
+  // (not its .size) — every expand/collapse mint a fresh Set upstream, so
+  // the reference changes on ANY structural change, including
+  // membership-preserving ones (collapse-one + expand-another) where the
+  // size is unchanged. Keying on .size missed those and left the observer
+  // rebuild (which clears stale visibility) from firing.
+  const expandedNodesFingerprint = expandedNodes
 
   // Staged-change lookup map — keyed by edge ID. Recomputed when the staging
   // store's changes array changes; reads inside the edge .map() are O(1).
@@ -246,7 +218,11 @@ export function LineageFlowOverlay({
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
     if (!scrollParentRef.current) {
-      scrollParentRef.current = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+      // The outer canvas scroll container is `overflow-auto` (both axes),
+      // NOT `overflow-y-auto` (that's the per-COLUMN scroller). Matching
+      // only the latter bound the wrong ancestor (or null), leaving
+      // viewport.scrollTop/clientHeight stale for the edge-virtualization cull.
+      scrollParentRef.current = containerRef.current.closest('.overflow-auto') as HTMLElement
       if (scrollParentRef.current) {
         setViewport({
           scrollTop: scrollParentRef.current.scrollTop,
@@ -270,7 +246,6 @@ export function LineageFlowOverlay({
     // or skip (neither visible) — avoiding a second iteration over all edges.
     const GUTTER_HALF = 24
     const BADGE_BUCKET = 80
-    const MAX_STUBS_PER_BUCKET = 6
     const MAX_BADGE_PARTNERS = 8
     const containerH = containerRect.height
     // Visible viewport box — the overlay's parent IS the outer
@@ -279,8 +254,6 @@ export function LineageFlowOverlay({
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
     const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string>, layerId: string | null }>()
-    const trailingEdges: OverflowEdge[] = []
-    const bucketStubCount = new Map<string, number>()
 
     // Helper: look up or cache a DOM element. A cached element that has
     // DETACHED (expand/collapse and the virtualizer remount rows under
@@ -588,9 +561,6 @@ export function LineageFlowOverlay({
       const gutterX = sourceVisible
         ? vRect.right - containerRect.left + GUTTER_HALF
         : vRect.left - containerRect.left - GUTTER_HALF
-      const sx = sourceVisible
-        ? vRect.right - containerRect.left + 6
-        : vRect.left - containerRect.left - 8
       const sy = vRect.top + vRect.height / 2 - containerRect.top
 
       // 4-way partner classification: exact DOM rect when the partner is
@@ -603,11 +573,9 @@ export function LineageFlowOverlay({
       const offscreenEl = getEl(offscreenNodeId)
       const pRect = offscreenEl?.getBoundingClientRect() ?? estimateNodeRect(partnerId)
       let direction: OverflowDirection
-      let partnerY: number | null = null
       if (pRect) {
         const px = (pRect.left + pRect.right) / 2
         const py = pRect.top + pRect.height / 2
-        partnerY = py - containerRect.top
         const dx = px < viewportRect.left ? px - viewportRect.left : px > viewportRect.right ? px - viewportRect.right : 0
         const dy = py < viewportRect.top ? py - viewportRect.top : py > viewportRect.bottom ? py - viewportRect.bottom : 0
         if (dx === 0 && dy === 0) {
@@ -722,38 +690,13 @@ export function LineageFlowOverlay({
         bucket.partnerIds.push(partnerId)
       }
 
-      const stubCount = bucketStubCount.get(bucketKey) ?? 0
-      if (stubCount >= MAX_STUBS_PER_BUCKET) return
-      bucketStubCount.set(bucketKey, stubCount + 1)
-
-      let ex: number
-      let ey: number
-      if (isHorizontal) {
-        // Exit horizontally toward the viewport edge, nudged a few px
-        // toward the partner's row when known, fanned vertically per stub.
-        ex = direction === 'left'
-          ? viewportRect.left - containerRect.left
-          : viewportRect.right - containerRect.left
-        const nudge = partnerY !== null ? Math.max(-24, Math.min(24, partnerY - sy)) : 0
-        ey = sy + nudge + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
-      } else {
-        ey = direction === 'up' ? 0 : containerH
-        ex = gutterX + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
-      }
-
-      const cp1x = sx + (ex - sx) * 0.4
-      const cp2x = ex
-      const cp2y = sy + (ey - sy) * 0.6
-
-      const pathD = `M ${sx} ${sy} C ${cp1x} ${sy}, ${cp2x} ${cp2y}, ${ex} ${ey}`
-      const safeColor = color.replace(/[^a-zA-Z0-9]/g, '')
-      const gradId = `of-${safeColor}-${direction}`
-
-      trailingEdges.push({
-        id: `overflow-edge-${edge.source}-${edge.target}`,
-        pathD, color, direction, gradientId: gradId,
-        sy, ey,
-      })
+      // Off-screen lineage is conveyed by the directional BADGES built
+      // above (and the column periphery summaries) — NOT by per-edge
+      // trailing stubs. Those stubs ran from every visible row to a
+      // shared viewport-edge exit point, so a column of 160+ rows fanned
+      // into a moiré of vertical dashed lines that read as ghost/offset
+      // edges and never felt tied to a card. Removed entirely; the badge
+      // is the single, honest off-screen indicator.
     })
 
     setComputedEdges(newComputedEdges)
@@ -772,91 +715,11 @@ export function LineageFlowOverlay({
     // The ribbon vertical extent is sized to the card's own height
     // (45%) so it always feels proportional, whether the entity is a
     // tall layer card or a tight leaf row.
-    if (nodeStubCounts && nodeStubCounts.size > 0) {
-      // Always-on in/out indicators as FLUSH HAIRLINES. Design principle:
-      // ambient marks must only be visible where they carry contrast —
-      // when every row has lineage (the common case), a visible mark per
-      // row is pure noise. So the hairline's opacity scales with the
-      // node's volume RELATIVE to the heaviest visible node: median
-      // nodes fade to near-invisible, hubs stand out. No halo, no
-      // sheen, no peek-out — a 2.5px line hugging the card edge.
-      const RIBBON_W = 4
-      const RIBBON_HEIGHT_RATIO = 0.62
-      let maxCount = 0
-      globalVisibleNodes.forEach(domId => {
-        const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
-        const counts = nodeStubCounts.get(nodeId)
-        if (counts) maxCount = Math.max(maxCount, counts.in, counts.out)
-      })
-      const logMax = Math.log2(1 + Math.max(1, maxCount))
-      const newStubs: typeof computedStubs = []
-      globalVisibleNodes.forEach(domId => {
-        const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
-        const counts = nodeStubCounts.get(nodeId)
-        if (!counts) return
-        const el = getEl(domId)
-        if (!el) return
-        const rect = el.getBoundingClientRect()
-        // Rows mostly scrolled past their column's clip edge would leave
-        // floating hairline bars with no visible card ("blank node").
-        if (isCenterClipped(el, rect)) return
-        const midY = rect.top + rect.height / 2 - containerRect.top
-        const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
-        // Position just OUTSIDE the card edge: the overlay sits beneath
-        // the card chrome, so anything inside the boundary is covered by
-        // the opaque card. 1px breathing gap keeps it reading as part of
-        // the card's silhouette.
-        if (counts.in > 0) {
-          const cardLeft = rect.left - containerRect.left
-          newStubs.push({
-            nodeId, side: 'in', count: counts.in,
-            cx: cardLeft - RIBBON_W / 2 - 1,
-            cy: midY,
-            width: RIBBON_W,
-            height,
-            intensity: Math.log2(1 + counts.in) / logMax,
-          })
-        }
-        if (counts.out > 0) {
-          const cardRight = rect.right - containerRect.left
-          newStubs.push({
-            nodeId, side: 'out', count: counts.out,
-            cx: cardRight + RIBBON_W / 2 + 1,
-            cy: midY,
-            width: RIBBON_W,
-            height,
-            intensity: Math.log2(1 + counts.out) / logMax,
-          })
-        }
-        // Ambient external cue — hollow dashed tab one step further
-        // outboard: "this side ALSO has lineage outside this view".
-        // Absent from the map = unknown → nothing (never a zero-claim).
-        const ext = externalCue?.get(nodeId)
-        if (ext) {
-          const cardLeft = rect.left - containerRect.left
-          const cardRight = rect.right - containerRect.left
-          if (ext.in > 0) {
-            newStubs.push({
-              nodeId, side: 'in', count: ext.in,
-              cx: cardLeft - RIBBON_W * 1.5 - 3, cy: midY,
-              width: RIBBON_W, height: Math.max(12, height * 0.6),
-              intensity: 0.4, external: true,
-            })
-          }
-          if (ext.out > 0) {
-            newStubs.push({
-              nodeId, side: 'out', count: ext.out,
-              cx: cardRight + RIBBON_W * 1.5 + 3, cy: midY,
-              width: RIBBON_W, height: Math.max(12, height * 0.6),
-              intensity: 0.4, external: true,
-            })
-          }
-        }
-      })
-      setComputedStubs(newStubs)
-    } else if (computedStubs.length > 0) {
-      setComputedStubs([])
-    }
+    // Per-node in/out + external hairlines used to be computed here from
+    // node rects and drawn in this overlay. They are now rendered INSIDE
+    // each FlatTreeItem (anchored to the row box), so they track the
+    // card's width/position and unmount with it — no overlay coordinate
+    // math, no stale/offset/ghost marks. Nothing to emit here.
 
     // Vertical buckets attributed to a column fold into that column's
     // PERIPHERY SUMMARY — LayerColumn merges them into its own
@@ -912,7 +775,6 @@ export function LineageFlowOverlay({
       })
     })
     setOverflowBadges(badges)
-    setOverflowEdges(trailingEdges)
     setProxyEdges(proxyEdgesNext)
 
     // Periphery emission — through the dedicated store so only the
@@ -996,7 +858,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons, externalCue])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, geometryRegistry, flowRibbons])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1015,14 +877,13 @@ export function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, triggerRedrawRef])
 
-  // Stubs mode toggles + stub-count changes need a redraw because
-  // updateFlow's identity changes but the observers above don't refire —
-  // without this, switching to stubs (or swapping the per-node counts)
-  // leaves the canvas showing the previous geometry until the next
+  // Flow-ribbon changes need a redraw because updateFlow's identity
+  // changes but the observers above don't refire — without this, swapping
+  // the ribbon set leaves the previous geometry until the next
   // scroll / resize / hover.
   useEffect(() => {
     scheduleUpdate()
-  }, [showStubs, nodeStubCounts, flowRibbons, externalCue, scheduleUpdate])
+  }, [flowRibbons, scheduleUpdate])
 
   // ResizeObserver + IntersectionObserver for node elements.
   // Uses MutationObserver to dynamically track layer-node-* elements as they're
@@ -1203,7 +1064,8 @@ export function LineageFlowOverlay({
   // Attach scroll listener to the parent container for Viewport Edge Virtualization
   useEffect(() => {
     if (!containerRef.current) return
-    const scrollParent = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+    // Outer scroll container is `overflow-auto` (see updateFlow note).
+    const scrollParent = containerRef.current.closest('.overflow-auto') as HTMLElement
     if (!scrollParent) return
 
     let rafId: number | null = null
@@ -1326,14 +1188,11 @@ export function LineageFlowOverlay({
     // and the user must see where the data flows.
     visibleEdges.forEach(e => markerColors.add(e.color))
 
-    const gradientKeys = new Set<string>()
-    overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
-
     return {
       markerColors: Array.from(markerColors),
-      gradientKeys: Array.from(gradientKeys),
+      gradientKeys: [] as string[],
     }
-  }, [visibleEdges, overflowEdges])
+  }, [visibleEdges])
 
   // Display names for badge tooltips — id → name over the rendered node
   // hierarchy (children included so partners below collapsed roots still
@@ -1788,81 +1647,8 @@ export function LineageFlowOverlay({
           )
         })}
 
-        {/* ── Per-node lineage hairlines ──────────────────────────────────
-            A single 2.5px indigo line hugging the card edge on each side
-            with lineage. Opacity encodes volume RELATIVE to the heaviest
-            visible node — ambient marks only earn visibility through
-            contrast, so on a canvas where every row has lineage the
-            median rows fade out and only hubs read. Native SVG <title>
-            gives the exact counts on hover. ──────────────────────────── */}
-        {computedStubs.length > 0 && (
-          <>
-            <defs>
-              {/* Tight end-fade + indigo-600 core — the mark must read as a
-                  confident accent, not a wisp. */}
-              <linearGradient id="lineage-ribbon-core" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
-                <stop offset="14%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
-                <stop offset="86%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
-                <stop offset="100%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
-              </linearGradient>
-            </defs>
-            {computedStubs.map(stub => {
-              const key = `ribbon-${stub.nodeId}-${stub.side}`
-              const label = stub.count > 1
-                ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
-                : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
-              return (
-                // Floor 0.6: PRESENCE is always clearly visible — users
-                // must see where lineage exists at a glance. Intensity
-                // adds emphasis on top so hubs still stand out.
-                <g key={key} className="pointer-events-none" opacity={0.6 + stub.intensity * 0.4}>
-                  {stub.external ? (
-                    // Hollow + dashed + sky: same visual grammar as every
-                    // other "outside this view" surface.
-                    <rect
-                      x={stub.cx - stub.width / 2}
-                      y={stub.cy - stub.height / 2}
-                      width={stub.width}
-                      height={stub.height}
-                      rx={stub.width / 2}
-                      ry={stub.width / 2}
-                      fill="none"
-                      stroke="rgb(56, 189, 248)"
-                      strokeWidth={1.2}
-                      strokeDasharray="3 2"
-                    />
-                  ) : (
-                  <rect
-                    x={stub.cx - stub.width / 2}
-                    y={stub.cy - stub.height / 2}
-                    width={stub.width}
-                    height={stub.height}
-                    rx={stub.width / 2}
-                    ry={stub.width / 2}
-                    fill="url(#lineage-ribbon-core)"
-                  />
-                  )}
-                  <title>{label}</title>
-                </g>
-              )
-            })}
-          </>
-        )}
-
-        {/* ── Trailing overflow edges — partial S-curves fading toward container edge ── */}
-        {overflowEdges.map(oe => (
-          <path
-            key={oe.id}
-            d={oe.pathD}
-            stroke={`url(#${oe.gradientId})`}
-            strokeWidth={1.4}
-            fill="none"
-            strokeDasharray="6 4"
-            strokeLinecap="round"
-            className="pointer-events-none"
-          />
-        ))}
+        {/* Per-node lineage hairlines now render inside each FlatTreeItem
+            (anchored to the row box) — see FlatTreeItem. */}
 
         {/* ── Proxy edges — the selected node's connections docked to
             Anchor Rail chips. The chip is real rendered DOM, so this is
