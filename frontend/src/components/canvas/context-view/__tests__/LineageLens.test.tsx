@@ -149,6 +149,25 @@ describe('LineageLens on-demand fetch merge', () => {
     expect(screen.getByText('label-c2')).toBeTruthy()
   })
 
+  it('classic-mode ×N badge drills an aggregate into its constituents', () => {
+    const agg: LineageEdge = {
+      id: 'agg1', source: 'a', target: 'P',
+      data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 2, sourceEdges: ['r1', 'r2'] },
+    } as unknown as LineageEdge
+    useCanvasStore.setState({
+      nodes: [node('a'), node('P'), node('c1')],
+      edges: [edge('r1', 'a', 'c1')],
+      visibleEdges: [agg],
+    } as never)
+    renderLens(['a'])
+    // Constituents hidden until drilled.
+    expect(screen.queryByText('label-c1')).toBeNull()
+    fireEvent.click(screen.getByTitle(/Refine — see the 2 underlying connections/))
+    expect(screen.getByText('label-c1')).toBeTruthy()
+    // The unloaded remainder is reported, never invented.
+    expect(screen.getByText(/\+1 more \(showing the first 1\)/)).toBeTruthy()
+  })
+
   it('narrates an in-flight fetch instead of claiming "no connections"', () => {
     useCanvasStore.setState({ nodes: [node('a')], edges: [], visibleEdges: [] } as never)
     renderLens(['a'], {}, { fetchStatus: new Map([['a', 'loading' as const]]) })
