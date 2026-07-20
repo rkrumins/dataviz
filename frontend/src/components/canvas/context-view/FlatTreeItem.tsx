@@ -369,8 +369,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isDimmed && "opacity-40",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
-        // Reparent drop target — a node drag is hovering over this row
-        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20"
+        // Reparent drop target (middle band) — a node drag will nest INTO
+        // this row: strong ring + fill so it reads as "drop inside".
+        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20",
+        // Reorder anchor (before/after band) — a lighter inset ring marks THIS
+        // row as the reference point, kept visually distinct from the reparent
+        // fill so the two gestures never look the same.
+        dropIndicator && "ring-1 ring-inset ring-accent-lineage/40"
       )}
       style={{
         paddingLeft: 12 + indentWidth,
@@ -408,17 +413,27 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       )}
 
       {/* Custom-order drop indicator — a glowing accent line at the row edge
-          the drop will land on (before/after), with a dot cap so the insertion
-          point reads instantly even between visually-dense rows. */}
+          the drop will land on, capped by a dot, PLUS a directional chip that
+          spells out the placement in words ("Before ⟨name⟩" / "After ⟨name⟩").
+          The line shows WHERE, the chip removes any doubt about which side of
+          which node the dragged row will land on. */}
       {dropIndicator && (
         <div
           className={cn(
-            'pointer-events-none absolute inset-x-0 z-20 flex items-center gap-0',
-            dropIndicator === 'before' ? '-top-[2px]' : '-bottom-[2px]',
+            'pointer-events-none absolute inset-x-0 z-30 flex items-center gap-1.5',
+            dropIndicator === 'before' ? '-top-[3px]' : '-bottom-[3px]',
           )}
         >
-          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)]" />
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)] flex-shrink-0" />
           <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
+          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgba(var(--accent-lineage-rgb),0.6)] max-w-[150px] flex-shrink-0">
+            {dropIndicator === 'before'
+              ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
+              : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
+            <span className="truncate">
+              {dropIndicator === 'before' ? 'Before' : 'After'} {node.name}
+            </span>
+          </span>
         </div>
       )}
 
