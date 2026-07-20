@@ -120,8 +120,13 @@ interface LayerColumnProps {
    *  (the enlarged layout viewport already supplies the extra rows). */
   overscan?: number
   /** Per-node lineage in/out counts (from the canvas's projected set) —
-   *  drives the density gutter. */
+   *  drives the density gutter AND the per-row ambient hairlines. */
   lineageCounts?: Map<string, { in: number; out: number }>
+  /** Per-node out-of-view lineage counts (curated views) — sky cue. */
+  externalCue?: Map<string, { in: number; out: number }>
+  /** Render the per-row ambient in/out hairlines (follows the lineage-
+   *  flow master switch). Now anchored to the row box, not the overlay. */
+  showLineageIndicators?: boolean
   /** Show the connection-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
   /** Anchor Rail — the selected node's off-screen partners that live in
@@ -199,6 +204,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   geometryRegistry,
   overscan = 15,
   lineageCounts,
+  externalCue,
+  showLineageIndicators = false,
   showDensityGutter = false,
   anchorProxies,
   onProxyReveal,
@@ -915,6 +922,17 @@ export const LayerColumn = React.memo(function LayerColumn({
   }, [virtualizer, flatTree.length])
 
   // ── Density gutter buckets ────────────────────────────────────────────────
+  // Heaviest in/out volume in THIS column — the reference for the ambient
+  // hairline intensity (log-scaled) so median rows fade and hubs stand
+  // out. Per-column and across ALL rows so intensity is stable regardless
+  // of which rows are scrolled into view. 0 = no lineage / indicators off.
+  const lineageLogMax = useMemo(() => {
+    if (!showLineageIndicators || !lineageCounts || lineageCounts.size === 0) return 0
+    let maxCount = 0
+    for (const c of lineageCounts.values()) maxCount = Math.max(maxCount, c.in, c.out)
+    return Math.log2(1 + Math.max(1, maxCount))
+  }, [showLineageIndicators, lineageCounts])
+
   // Where does connection mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
   // lineage counts of its rows. Normalized 0..1 for the heat strip.
@@ -1974,6 +1992,12 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
+                        lineageIn={showLineageIndicators ? (lineageCounts?.get(node.id)?.in ?? 0) : 0}
+                        lineageOut={showLineageIndicators ? (lineageCounts?.get(node.id)?.out ?? 0) : 0}
+                        lineageIntensityIn={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.in ?? 0)) / lineageLogMax : 0}
+                        lineageIntensityOut={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.out ?? 0)) / lineageLogMax : 0}
+                        externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
+                        externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />
                     </div>
                   </div>

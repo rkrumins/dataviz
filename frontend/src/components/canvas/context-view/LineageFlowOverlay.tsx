@@ -31,8 +31,6 @@ export const EXTREMITY_EDGE_GUTTER_PX =
 export function LineageFlowOverlay({
   nodes,
   edges,
-  nodeStubCounts,
-  showStubs = false,
   expandedNodes,
   selectEdge,
   isEdgePanelOpen,
@@ -51,21 +49,9 @@ export function LineageFlowOverlay({
   flowRibbons,
   focusNodeId,
   onAnchorProxies,
-  externalCue,
 }: {
   nodes: any[],
   edges: any[],
-  /**
-   * Per-node lineage counts for the stub indicators. Drives a short
-   * partial-edge marker on each entity card: a quiet inbound arrow on
-   * the left if `in > 0`, a quiet outbound arrow on the right if
-   * `out > 0`. The stubs are entity-anchored decorations — they never
-   * attempt to span across to a partner node. Hover/select on an entity
-   * materializes the real edges over these markers.
-   */
-  nodeStubCounts?: Map<string, { in: number; out: number }>,
-  /** When true, render the per-node stub indicators. */
-  showStubs?: boolean,
   expandedNodes: Set<string>,
   selectEdge: (id: string) => void,
   isEdgePanelOpen: boolean,
@@ -98,9 +84,6 @@ export function LineageFlowOverlay({
   /** Rail payload per layer id — called only when the rail content
    *  actually changes (the compute pass runs per frame). */
   onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
-  /** Per-node lineage OUTSIDE the view's scope (curated views) —
-   *  hollow dashed hairline cue. Absent node = unknown, render nothing. */
-  externalCue?: Map<string, { in: number; out: number }>,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -113,19 +96,6 @@ export function LineageFlowOverlay({
   // chrome hides the inboard portion — visually it reads as a soft
   // glow tab integrated into the card design rather than a separate
   // decoration. Stroke width / opacity scale with the lineage count.
-  const [computedStubs, setComputedStubs] = useState<Array<{
-    nodeId: string
-    side: 'in' | 'out'
-    count: number
-    cx: number; cy: number  // ribbon center
-    width: number; height: number
-    /** Volume relative to the heaviest visible node (log-scaled 0..1) —
-     *  drives hairline opacity so only hubs stand out. */
-    intensity: number
-    /** Out-of-view lineage cue (curated views): rendered HOLLOW/dashed,
-     *  visually distinct from the solid loaded-lineage hairline. */
-    external?: boolean
-  }>>([])
   // Flow ribbons — macro volume bands between layer columns, computed per
   // updateFlow frame (≤ MAX_FLOW_RIBBONS DOM rect reads).
   const [computedRibbons, setComputedRibbons] = useState<Array<{
@@ -745,91 +715,11 @@ export function LineageFlowOverlay({
     // The ribbon vertical extent is sized to the card's own height
     // (45%) so it always feels proportional, whether the entity is a
     // tall layer card or a tight leaf row.
-    if (nodeStubCounts && nodeStubCounts.size > 0) {
-      // Always-on in/out indicators as FLUSH HAIRLINES. Design principle:
-      // ambient marks must only be visible where they carry contrast —
-      // when every row has lineage (the common case), a visible mark per
-      // row is pure noise. So the hairline's opacity scales with the
-      // node's volume RELATIVE to the heaviest visible node: median
-      // nodes fade to near-invisible, hubs stand out. No halo, no
-      // sheen, no peek-out — a 2.5px line hugging the card edge.
-      const RIBBON_W = 4
-      const RIBBON_HEIGHT_RATIO = 0.62
-      let maxCount = 0
-      globalVisibleNodes.forEach(domId => {
-        const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
-        const counts = nodeStubCounts.get(nodeId)
-        if (counts) maxCount = Math.max(maxCount, counts.in, counts.out)
-      })
-      const logMax = Math.log2(1 + Math.max(1, maxCount))
-      const newStubs: typeof computedStubs = []
-      globalVisibleNodes.forEach(domId => {
-        const nodeId = domId.startsWith('layer-node-') ? domId.slice('layer-node-'.length) : domId
-        const counts = nodeStubCounts.get(nodeId)
-        if (!counts) return
-        const el = getEl(domId)
-        if (!el) return
-        const rect = el.getBoundingClientRect()
-        // Rows mostly scrolled past their column's clip edge would leave
-        // floating hairline bars with no visible card ("blank node").
-        if (isCenterClipped(el, rect)) return
-        const midY = rect.top + rect.height / 2 - containerRect.top
-        const height = Math.max(18, rect.height * RIBBON_HEIGHT_RATIO)
-        // Position just OUTSIDE the card edge: the overlay sits beneath
-        // the card chrome, so anything inside the boundary is covered by
-        // the opaque card. 1px breathing gap keeps it reading as part of
-        // the card's silhouette.
-        if (counts.in > 0) {
-          const cardLeft = rect.left - containerRect.left
-          newStubs.push({
-            nodeId, side: 'in', count: counts.in,
-            cx: cardLeft - RIBBON_W / 2 - 1,
-            cy: midY,
-            width: RIBBON_W,
-            height,
-            intensity: Math.log2(1 + counts.in) / logMax,
-          })
-        }
-        if (counts.out > 0) {
-          const cardRight = rect.right - containerRect.left
-          newStubs.push({
-            nodeId, side: 'out', count: counts.out,
-            cx: cardRight + RIBBON_W / 2 + 1,
-            cy: midY,
-            width: RIBBON_W,
-            height,
-            intensity: Math.log2(1 + counts.out) / logMax,
-          })
-        }
-        // Ambient external cue — hollow dashed tab one step further
-        // outboard: "this side ALSO has lineage outside this view".
-        // Absent from the map = unknown → nothing (never a zero-claim).
-        const ext = externalCue?.get(nodeId)
-        if (ext) {
-          const cardLeft = rect.left - containerRect.left
-          const cardRight = rect.right - containerRect.left
-          if (ext.in > 0) {
-            newStubs.push({
-              nodeId, side: 'in', count: ext.in,
-              cx: cardLeft - RIBBON_W * 1.5 - 3, cy: midY,
-              width: RIBBON_W, height: Math.max(12, height * 0.6),
-              intensity: 0.4, external: true,
-            })
-          }
-          if (ext.out > 0) {
-            newStubs.push({
-              nodeId, side: 'out', count: ext.out,
-              cx: cardRight + RIBBON_W * 1.5 + 3, cy: midY,
-              width: RIBBON_W, height: Math.max(12, height * 0.6),
-              intensity: 0.4, external: true,
-            })
-          }
-        }
-      })
-      setComputedStubs(newStubs)
-    } else if (computedStubs.length > 0) {
-      setComputedStubs([])
-    }
+    // Per-node in/out + external hairlines used to be computed here from
+    // node rects and drawn in this overlay. They are now rendered INSIDE
+    // each FlatTreeItem (anchored to the row box), so they track the
+    // card's width/position and unmount with it — no overlay coordinate
+    // math, no stale/offset/ghost marks. Nothing to emit here.
 
     // Vertical buckets attributed to a column fold into that column's
     // PERIPHERY SUMMARY — LayerColumn merges them into its own
@@ -968,7 +858,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, showStubs, nodeStubCounts, geometryRegistry, flowRibbons, externalCue])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, geometryRegistry, flowRibbons])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -987,14 +877,13 @@ export function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, triggerRedrawRef])
 
-  // Stubs mode toggles + stub-count changes need a redraw because
-  // updateFlow's identity changes but the observers above don't refire —
-  // without this, switching to stubs (or swapping the per-node counts)
-  // leaves the canvas showing the previous geometry until the next
+  // Flow-ribbon changes need a redraw because updateFlow's identity
+  // changes but the observers above don't refire — without this, swapping
+  // the ribbon set leaves the previous geometry until the next
   // scroll / resize / hover.
   useEffect(() => {
     scheduleUpdate()
-  }, [showStubs, nodeStubCounts, flowRibbons, externalCue, scheduleUpdate])
+  }, [flowRibbons, scheduleUpdate])
 
   // ResizeObserver + IntersectionObserver for node elements.
   // Uses MutationObserver to dynamically track layer-node-* elements as they're
@@ -1758,67 +1647,8 @@ export function LineageFlowOverlay({
           )
         })}
 
-        {/* ── Per-node lineage hairlines ──────────────────────────────────
-            A single 2.5px indigo line hugging the card edge on each side
-            with lineage. Opacity encodes volume RELATIVE to the heaviest
-            visible node — ambient marks only earn visibility through
-            contrast, so on a canvas where every row has lineage the
-            median rows fade out and only hubs read. Native SVG <title>
-            gives the exact counts on hover. ──────────────────────────── */}
-        {computedStubs.length > 0 && (
-          <>
-            <defs>
-              {/* Tight end-fade + indigo-600 core — the mark must read as a
-                  confident accent, not a wisp. */}
-              <linearGradient id="lineage-ribbon-core" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
-                <stop offset="14%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
-                <stop offset="86%" stopColor="rgb(79, 70, 229)" stopOpacity="1" />
-                <stop offset="100%" stopColor="rgb(79, 70, 229)" stopOpacity="0.15" />
-              </linearGradient>
-            </defs>
-            {computedStubs.map(stub => {
-              const key = `ribbon-${stub.nodeId}-${stub.side}`
-              const label = stub.count > 1
-                ? `${stub.count.toLocaleString()} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connections`
-                : `${stub.count} ${stub.side === 'in' ? 'incoming' : 'outgoing'} connection`
-              return (
-                // Floor 0.6: PRESENCE is always clearly visible — users
-                // must see where lineage exists at a glance. Intensity
-                // adds emphasis on top so hubs still stand out.
-                <g key={key} className="pointer-events-none" opacity={0.6 + stub.intensity * 0.4}>
-                  {stub.external ? (
-                    // Hollow + dashed + sky: same visual grammar as every
-                    // other "outside this view" surface.
-                    <rect
-                      x={stub.cx - stub.width / 2}
-                      y={stub.cy - stub.height / 2}
-                      width={stub.width}
-                      height={stub.height}
-                      rx={stub.width / 2}
-                      ry={stub.width / 2}
-                      fill="none"
-                      stroke="rgb(56, 189, 248)"
-                      strokeWidth={1.2}
-                      strokeDasharray="3 2"
-                    />
-                  ) : (
-                  <rect
-                    x={stub.cx - stub.width / 2}
-                    y={stub.cy - stub.height / 2}
-                    width={stub.width}
-                    height={stub.height}
-                    rx={stub.width / 2}
-                    ry={stub.width / 2}
-                    fill="url(#lineage-ribbon-core)"
-                  />
-                  )}
-                  <title>{label}</title>
-                </g>
-              )
-            })}
-          </>
-        )}
+        {/* Per-node lineage hairlines now render inside each FlatTreeItem
+            (anchored to the row box) — see FlatTreeItem. */}
 
         {/* ── Proxy edges — the selected node's connections docked to
             Anchor Rail chips. The chip is real rendered DOM, so this is
