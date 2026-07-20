@@ -562,6 +562,19 @@ export function LineageFlowOverlay({
 
       const visibleNodeId = sourceVisible ? sourceId : targetId
       const offscreenNodeId = sourceVisible ? targetId : sourceId
+      const offscreenRawId = sourceVisible ? edge.target : edge.source
+
+      // Distinguish SCROLLED-OFF from COLLAPSED-AWAY. An overflow mark
+      // promises "there's a connection to something you can scroll to."
+      // When a parent is collapsed, its descendants leave every column's
+      // flat tree entirely — an overflow stub toward such a node points
+      // at nothing reachable (the user would have to re-expand), and it
+      // strands as a ghost after the collapse. The geometry registry's
+      // hasNode is backed by the live flat-tree index, so a node absent
+      // from every column has been collapsed away: skip its overflow
+      // mark. (Guarded on the registry existing so we never suppress
+      // legitimate overflow when geometry isn't wired.)
+      if (geometryRegistry && !findOwningLayer(offscreenRawId)) return
 
       const visibleEl = getEl(visibleNodeId)
       if (!visibleEl) return
