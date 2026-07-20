@@ -977,7 +977,8 @@ class BootstrapRunner:
 
     def _edges_to_rows(self, rows, commit, main_id, graph_id, actor, rules, live: set):
         from backend.app.providers.falkordb_provider import _edge_from_row
-        from backend.app.providers.versioned_bootstrap import canonicalize_rows
+        from backend.app.services.versioning.entity_serde import edge_to_payload
+        from backend.app.services.versioning.ontology import canonicalize_payload_types
         now = _now()
         tallies: Dict[str, int] = {}
         rejects = {"danglingEdges": 0, "samples": []}
@@ -991,18 +992,19 @@ class BootstrapRunner:
                                              "source": src_urn, "target": tgt_urn})
                 continue
             edge = _edge_from_row(src_urn, tgt_urn, str(rel), dict(props or {}))
-            row = {"kind": "edge", "id": edge.id, "edgeType": edge.edge_type,
-                   "source": src_urn, "target": tgt_urn, **(edge.properties or {})}
-            canonicalize_rows([row], rules)
             eid = edge.id
             if eid in seen:
                 dupes += 1
                 continue
             seen.add(eid)
-            et = str(row.get("edgeType") or rel)
-            payload = {"edgeType": et, "sourceEntityId": src_urn, "targetEntityId": tgt_urn,
-                       **{k: v for k, v in row.items()
-                          if k not in ("kind", "id", "source", "target", "edgeType")}}
+            # Canonical edge payload (confidence TOP-LEVEL, properties NESTED) via the shared
+            # contract. The old hand-built shape FLATTENED user props and dropped `confidence`, so a
+            # rebuild's reseed — which reads the canonical shape — blanked both. Endpoints are the
+            # scan's urns (edge.source_urn/target_urn == src_urn/tgt_urn).
+            payload = edge_to_payload(edge)
+            canonicalize_payload_types(payload, rules)      # rewrite edgeType casing in place
+            et = str(payload.get("edgeType") or rel)
+            payload["edgeType"] = et
             ch = content_hash(payload)
             tallies[et] = tallies.get(et, 0) + 1
             dicts.append(dict(

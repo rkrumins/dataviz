@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 
 from . import config, db
 from .changeset import Delta, materialize, net_delta, diff_states
+from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -4335,9 +4336,8 @@ class GraphVersioningService:
                     rejected.append({"row": i, "reason": "edge endpoint not found"})
                     continue
                 eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
-                payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                           **{k: v for k, v in row.items()
-                              if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+                payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                                  target_entity_id=teid, row=row)
                 edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
 
             deltas = node_deltas + edge_deltas
@@ -4647,9 +4647,8 @@ class GraphVersioningService:
             hit = by_triple.get((seid, teid, et))
             eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
                    or f"sync:e:{seid}->{teid}:{et}")
-            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                       **{k: v for k, v in row.items()
-                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                              target_entity_id=teid, row=row)
             seen.add(eid)
             if hit and not hit[2] and hit[1] == _ch(payload):
                 continue
@@ -4779,9 +4778,8 @@ class GraphVersioningService:
                 continue
             eid = (edge_index.get((seid, teid, et)) or row.get("entity_id")
                    or row.get("id") or f"sync:e:{seid}->{teid}:{et}")
-            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                       **{k: v for k, v in row.items()
-                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                              target_entity_id=teid, row=row)
             theirs[eid] = payload
         return theirs, rejected
 
