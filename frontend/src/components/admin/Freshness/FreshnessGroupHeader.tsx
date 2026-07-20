@@ -1,19 +1,28 @@
 /**
  * FreshnessGroupHeader — one provider group's header row. Collapsed, it is a
  * self-contained rollup ("«provider» · N sources · n ready · n not built ·
- * n attention"); expanded, it just names the provider and its size, with the
- * rows rendered beneath by the parent. Either way it carries the collapse
+ * n attention") with a compact cache-coverage chip; expanded, it names the
+ * provider and its size and adds a small typographic stat strip (ready ·
+ * rebuilding · needs-attention · cached%). Either way it carries the collapse
  * affordance (``aria-expanded``) and the admin-gated Refresh-provider action.
+ *
+ * Coverage/strip figures come from the server ``ProviderFreshnessSummary``
+ * (provider-wide, so a filtered page never understates coverage); when the
+ * fleet is too large to summarise (``providerSummaries`` null) they degrade to
+ * a client count over this group's fetched rows.
  */
 import { ChevronDown, ChevronRight, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { FreshnessRow } from '@/services/freshnessService'
-import { isGroupAttention, isNeverBuilt } from './freshnessTriage'
+import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
+import { isGroupAttention, isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
 
 interface Props {
     providerId: string
     name: string
     rows: FreshnessRow[]
+    /** Provider-wide counts; null when the fleet is too large to summarise
+     *  (chip + strip fall back to a client count over ``rows``). */
+    summary?: ProviderFreshnessSummary | null
     expanded: boolean
     onToggle: () => void
     isSystemAdmin: boolean
@@ -22,13 +31,33 @@ interface Props {
 }
 
 export function FreshnessGroupHeader({
-    providerId, name, rows, expanded, onToggle, isSystemAdmin, onRefreshProvider, colSpan,
+    providerId, name, rows, summary, expanded, onToggle, isSystemAdmin, onRefreshProvider, colSpan,
 }: Props) {
     const total = rows.length
     const ready = rows.filter(r => r.aggregationStatus === 'ready').length
     const notBuilt = rows.filter(isNeverBuilt).length
     const attention = rows.filter(isGroupAttention).length
     const Chevron = expanded ? ChevronDown : ChevronRight
+
+    // Coverage + strip counts: provider-wide summary when present, else a
+    // client count over this group's rows so it degrades gracefully. Each
+    // fallback mirrors the summary field it stands in for.
+    const cov = summary
+        ? {
+            total: summary.total,
+            cached: summary.cacheStamped,
+            ready: summary.ready,
+            rebuilding: summary.pending,
+            attention: summary.needsAttention,
+        }
+        : {
+            total,
+            cached: rows.filter(r => r.cacheAsOf != null).length,
+            ready,
+            rebuilding: rows.filter(isRebuilding).length,
+            attention: rows.filter(needsAttention).length,
+        }
+    const coverage = cov.total > 0 ? Math.round((cov.cached / cov.total) * 100) : 0
 
     return (
         <tr className={cn(
@@ -49,13 +78,24 @@ export function FreshnessGroupHeader({
                         <span className="text-xs font-semibold text-ink-secondary">{name}</span>
                         <span className="text-[11px] text-ink-muted">
                             · {total} {total === 1 ? 'source' : 'sources'}
-                            {!expanded && (
+                            {!expanded ? (
                                 <>
                                     {ready > 0 && <> · {ready} ready</>}
                                     {notBuilt > 0 && <> · {notBuilt} not built</>}
                                 </>
+                            ) : (
+                                <>
+                                    {' · '}{cov.ready} ready
+                                    {cov.rebuilding > 0 && <> · {cov.rebuilding} rebuilding</>}
+                                    {' · '}{coverage}% cached
+                                </>
                             )}
                         </span>
+                        {expanded && cov.attention > 0 && (
+                            <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                                · {cov.attention} attention
+                            </span>
+                        )}
                         {!expanded && attention > 0 && (
                             <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
                                 · {attention} attention
@@ -63,11 +103,31 @@ export function FreshnessGroupHeader({
                         )}
                     </button>
 
+                    {/* Cache-coverage chip: the collapsed group's at-a-glance
+                        coverage meter. Expanded, the strip above carries the %,
+                        so the chip stands down to keep the row quiet. */}
+                    {!expanded && (
+                        <span
+                            className="ml-auto inline-flex items-center gap-1.5 shrink-0"
+                            aria-label={`Cache coverage: ${cov.cached} of ${cov.total} sources cached, ${coverage} percent`}
+                        >
+                            <span aria-hidden className="hidden sm:block h-1 w-10 rounded-full bg-violet-500/15 overflow-hidden">
+                                <span className="block h-full rounded-full bg-violet-500" style={{ width: `${coverage}%` }} />
+                            </span>
+                            <span className="text-[11px] tabular-nums text-ink-muted">
+                                <span className="font-semibold text-violet-600 dark:text-violet-400">{coverage}%</span> cached
+                            </span>
+                        </span>
+                    )}
+
                     {isSystemAdmin && providerId !== '—' && (
                         <button
                             type="button"
                             onClick={() => onRefreshProvider(providerId, name)}
-                            className="ml-auto inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
+                            className={cn(
+                                'inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
+                                expanded && 'ml-auto',
+                            )}
                         >
                             <Zap className="w-3.5 h-3.5" /> Refresh provider…
                         </button>

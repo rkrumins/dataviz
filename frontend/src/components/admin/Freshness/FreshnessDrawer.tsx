@@ -26,6 +26,21 @@ function shortFp(fp?: string | null): string {
     return fp.length > 14 ? `${fp.slice(0, 14)}…` : fp
 }
 
+// Friendly names for the cache endpoint segments; anything else is sentence-
+// cased (matching the casing of these — "Aggregated lineage", not Title Case).
+const ENDPOINT_LABELS: Record<string, string> = {
+    aggregated: 'Aggregated lineage',
+    'children-with-edges': 'Hierarchy children',
+    children: 'Hierarchy children',
+    'top-level': 'Top-level roots',
+}
+
+function endpointLabel(key: string): string {
+    if (ENDPOINT_LABELS[key]) return ENDPOINT_LABELS[key]
+    const spaced = key.replace(/-/g, ' ')
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+}
+
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {
     return (
         <div className="min-w-0">
@@ -142,6 +157,59 @@ function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
     )
 }
 
+/**
+ * "Cache contents" — the source's live-cache footprint: total entries, a
+ * per-endpoint breakdown, and the last-known-good fallback the cache serves
+ * when a live rebuild fails. ``cacheKeyCount`` null = the cache couldn't be
+ * read (unavailable); 0 = nothing cached yet — two distinct states.
+ */
+function CacheContents({ doc }: { doc: FreshnessDoc }) {
+    const count = doc.cacheKeyCount
+    const byEndpoint = Object.entries(doc.cacheKeyCountByEndpoint ?? {})
+        .sort((a, b) => b[1] - a[1] || endpointLabel(a[0]).localeCompare(endpointLabel(b[0])))
+    const lkg = doc.lkgCount != null
+        ? `${doc.lkgCount.toLocaleString()} cached${doc.lkgOldestAgeSecs != null ? ` · oldest ${Math.round(doc.lkgOldestAgeSecs / 60)}m` : ''}`
+        : '—'
+
+    return (
+        <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+                    <Database className="w-4 h-4 text-violet-500" /> Cache contents
+                </div>
+                {count != null && count > 0 && (
+                    <span className="text-[11px] tabular-nums text-ink-muted">
+                        {count.toLocaleString()} {count === 1 ? 'entry' : 'entries'}
+                    </span>
+                )}
+            </div>
+
+            {count == null ? (
+                <p className="text-[11px] text-ink-muted">
+                    Cache contents unavailable — the cache could not be read.
+                </p>
+            ) : count === 0 ? (
+                <p className="text-[11px] text-ink-muted">Nothing cached yet.</p>
+            ) : (
+                <ul className="space-y-1">
+                    {byEndpoint.map(([key, n]) => (
+                        <li key={key} className="flex items-center justify-between gap-3 text-xs">
+                            <span className="text-ink-secondary truncate">{endpointLabel(key)}</span>
+                            <span className="tabular-nums text-ink-muted shrink-0">{n.toLocaleString()}</span>
+                        </li>
+                    ))}
+                </ul>
+            )}
+
+            {/* Last known good: the snapshot served if a live rebuild fails. */}
+            <div className="flex items-center justify-between gap-3 text-xs pt-1.5 border-t border-glass-border/60">
+                <span className="text-ink-muted">Last known good</span>
+                <span className="tabular-nums text-ink-muted shrink-0">{lkg}</span>
+            </div>
+        </div>
+    )
+}
+
 export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     dsId: string | null
     isOpen: boolean
@@ -213,13 +281,11 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         </Fact>
                                         <Fact label="Generation">{doc.generation ?? '—'}</Fact>
                                         <Fact label="Next rebuild">{timeUntil(doc.cooldownUntil) ? `in ${timeUntil(doc.cooldownUntil)}` : 'ready now'}</Fact>
-                                        <Fact label="Last known good">
-                                            {doc.lkgCount != null
-                                                ? `${doc.lkgCount} cached${doc.lkgOldestAgeSecs != null ? ` · oldest ${Math.round(doc.lkgOldestAgeSecs / 60)}m` : ''}`
-                                                : '—'}
-                                        </Fact>
                                         <Fact label="Stored fingerprint"><span className="font-mono text-xs">{shortFp(doc.storedFingerprint)}</span></Fact>
                                     </div>
+
+                                    {/* Cache contents (live footprint + last-known-good) */}
+                                    <CacheContents doc={doc} />
 
                                     {/* Rebuild cadence (resolved + per-source override) */}
                                     <RebuildCadenceRow doc={doc} />

@@ -22,10 +22,11 @@ import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
-import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
+import type { FreshnessRow as FreshnessRowData, ProviderFreshnessSummary, RefreshScope } from '@/services/freshnessService'
 import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
+import { FleetRefreshDialog } from './FleetRefreshDialog'
 import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
@@ -105,6 +106,7 @@ export function Freshness() {
     const [drawerDsId, setDrawerDsId] = useState<string | null>(null)
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
+    const [fleetDialogOpen, setFleetDialogOpen] = useState(false)
     const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
 
@@ -127,6 +129,17 @@ export function Freshness() {
 
     const rows = useMemo(() => fleet.data?.rows ?? [], [fleet.data])
     const summary = fleet.data?.summary ?? null
+
+    // Per-provider coverage summaries, keyed to match the group id (the
+    // no-provider group is '—'). Null above the summary cap → the group
+    // header degrades to a client count over its own rows.
+    const providerSummaryById = useMemo(() => {
+        const m = new Map<string, ProviderFreshnessSummary>()
+        for (const ps of fleet.data?.providerSummaries ?? []) {
+            m.set(ps.providerId ?? '—', ps)
+        }
+        return m
+    }, [fleet.data])
 
     // ── Facet options + counts (from the fetched rows) ────────────────
     const providerOptions = useMemo(() => {
@@ -243,6 +256,15 @@ export function Freshness() {
             <div className="flex items-center justify-end gap-2">
                 {isSystemAdmin && (
                     <button
+                        onClick={() => setFleetDialogOpen(true)}
+                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                    >
+                        <Zap className="w-3.5 h-3.5" />
+                        Refresh all sources
+                    </button>
+                )}
+                {isSystemAdmin && (
+                    <button
                         onClick={() => setCadenceOpen(true)}
                         className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
                     >
@@ -330,6 +352,7 @@ export function Freshness() {
                                             providerId={pid}
                                             name={g.name}
                                             rows={g.rows}
+                                            summary={providerSummaryById.get(pid) ?? null}
                                             expanded={expanded}
                                             onToggle={() => toggleGroup(pid, expanded)}
                                             isSystemAdmin={isSystemAdmin}
@@ -392,6 +415,13 @@ export function Freshness() {
                 providerName={providerDialog?.name ?? ''}
                 isOpen={providerDialog != null}
                 onClose={() => setProviderDialog(null)}
+            />
+
+            <FleetRefreshDialog
+                key={fleetDialogOpen ? 'open' : 'closed'}
+                fleetTotal={summary?.total ?? null}
+                isOpen={fleetDialogOpen}
+                onClose={() => setFleetDialogOpen(false)}
             />
 
             <CadenceSettingsDialog

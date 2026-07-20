@@ -47,6 +47,11 @@ export interface FreshnessRow {
 export interface FreshnessDoc extends FreshnessRow {
     lkgCount?: number | null
     lkgOldestAgeSecs?: number | null
+    /** Per-source cache footprint: total live-generation cache keys, and the
+     *  same tallied by endpoint segment. ``null`` = Redis error/disabled cache
+     *  (unavailable), distinct from ``{}``/0 = nothing cached yet. Doc-only. */
+    cacheKeyCount?: number | null
+    cacheKeyCountByEndpoint?: Record<string, number> | null
     liveFingerprint?: string | null
     liveNodeCount?: number | null
     liveEdgeCount?: number | null
@@ -85,10 +90,29 @@ export interface FreshnessSummary {
     cacheStamped: number
 }
 
+/** Per-provider breakdown of the fleet ``summary`` — identical bucket
+ *  semantics, grouped by provider. ``providerId``/``providerName`` are null
+ *  for the no-provider group. Note: no ``recomputing`` field (unlike the fleet
+ *  ``summary``); client-count from rows if a strip needs it. */
+export interface ProviderFreshnessSummary {
+    providerId?: string | null
+    providerName?: string | null
+    total: number
+    ready: number
+    pending: number
+    failed: number
+    notBuilt: number
+    needsAttention: number
+    cacheStamped: number
+}
+
 export interface FreshnessFleetResponse {
     rows: FreshnessRow[]
     total: number
     summary?: FreshnessSummary | null
+    /** Per-provider summaries, aligned with ``summary``: ``null`` above the
+     *  same >1000-source cap (coverage chips degrade to a client count). */
+    providerSummaries?: ProviderFreshnessSummary[] | null
 }
 
 export interface RefreshResponse {
@@ -163,6 +187,17 @@ export const freshnessService = {
         body: { scope: RefreshScope; force?: boolean },
     ): Promise<BatchStatus> {
         return authFetch<BatchStatus>(`${BASE}/providers/${providerId}/refresh`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Guarded batch across every live source in the whole fleet (every
+     *  provider/workspace). 409 when a fleet batch is already running.
+     *  system:admin only. The returned batch's ``providerId`` is the
+     *  ``__fleet__`` sentinel. */
+    refreshAll(body: { scope: RefreshScope; force?: boolean }): Promise<BatchStatus> {
+        return authFetch<BatchStatus>(`${BASE}/freshness/refresh-all`, {
             method: 'POST',
             body: JSON.stringify(body),
         })

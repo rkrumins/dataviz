@@ -127,6 +127,20 @@ export function useRefreshProvider(): UseMutationResult<BatchStatus, Error, Refr
     })
 }
 
+export interface RefreshFleetVars {
+    scope: RefreshScope
+    force?: boolean
+}
+
+/** Kick off the fleet-wide guarded batch. Progress is polled with the shared
+ *  ``useRefreshBatch`` (same BatchStatus shape as the provider batch), so this
+ *  only starts it; the caller invalidates the fleet on ``done``. */
+export function useRefreshFleet(): UseMutationResult<BatchStatus, Error, RefreshFleetVars> {
+    return useMutation<BatchStatus, Error, RefreshFleetVars>({
+        mutationFn: ({ scope, force }) => freshnessService.refreshAll({ scope, force }),
+    })
+}
+
 /** Poll a running batch every 2s; stop as soon as it reports ``done``. */
 export function useRefreshBatch(
     batchId: string | null,

@@ -11,9 +11,12 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, listProviders, listWorkspaces, permissionFn } = vi.hoisted(() => ({
+const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
+    getSourceDoc: vi.fn(),
+    refreshAll: vi.fn(),
+    getBatch: vi.fn(),
     listProviders: vi.fn(),
     listWorkspaces: vi.fn(),
     permissionFn: vi.fn(),
@@ -31,6 +34,9 @@ vi.mock('@/services/freshnessService', async () => {
             ...actual.freshnessService,
             listFleet,
             refreshSource,
+            getSourceDoc,
+            refreshAll,
+            getBatch,
         },
     }
 })
@@ -46,6 +52,7 @@ beforeAll(() => {
 })
 
 import { Freshness } from './index'
+import { FreshnessDrawer } from './FreshnessDrawer'
 import { compareSeverity, severityRank } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
@@ -304,5 +311,127 @@ describe('Freshness cockpit', () => {
         renderTab('/?tab=freshness&fprov=prov-2')
         await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
         expect(screen.queryByText('Orders Graph')).not.toBeInTheDocument()
+    })
+
+    // ── G3.R1 — per-provider cache-coverage chip ─────────────────────
+    const healthyRow = (over: Partial<FreshnessRowData>): FreshnessRowData => ({
+        dataSourceId: 'x', workspaceId: 'ws-1', providerId: 'prov-1', name: 'x',
+        providerName: 'Warehouse', aggregationStatus: 'ready', lastAggregatedAt: recent,
+        cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null, ...over,
+    })
+
+    it('renders the coverage chip from the provider summary and degrades to a client count', async () => {
+        // Provider summary present → provider-wide 8/10 (NOT the 2 fetched rows).
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                healthyRow({ dataSourceId: 'ds-1', name: 'Orders Graph' }),
+                healthyRow({ dataSourceId: 'ds-2', name: 'Customers Graph' }),
+            ],
+            summary: { total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0, recomputing: 0, needsAttention: 0, cacheStamped: 2 },
+            providerSummaries: [
+                { providerId: 'prov-1', providerName: 'Warehouse', total: 10, ready: 9, pending: 0, failed: 0, notBuilt: 1, needsAttention: 0, cacheStamped: 8 },
+            ],
+        })
+        const { unmount } = renderTab()
+
+        const chip = await screen.findByLabelText(/cache coverage/i)
+        expect(chip).toHaveTextContent('80%')
+        expect(chip).toHaveAttribute('aria-label', expect.stringContaining('8 of 10'))
+        unmount()
+
+        // No providerSummaries (fleet too large) → client count over the rows:
+        // one cached (ds-1), one not (ds-2) → 50%.
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                healthyRow({ dataSourceId: 'ds-1', name: 'Orders Graph', cacheAsOf: recent }),
+                healthyRow({ dataSourceId: 'ds-2', name: 'Customers Graph', cacheAsOf: null }),
+            ],
+        })
+        renderTab()
+        const chip2 = await screen.findByLabelText(/cache coverage/i)
+        expect(chip2).toHaveTextContent('50%')
+    })
+
+    // ── G3.R2 — drawer "Cache contents" section ──────────────────────
+    function renderDrawer() {
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        return render(
+            <QueryClientProvider client={qc}>
+                <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+            </QueryClientProvider>,
+        )
+    }
+    const baseDoc = {
+        dataSourceId: 'ds-1', name: 'Orders Graph', providerName: 'Warehouse',
+        workspaceId: 'ws-1', aggregationStatus: 'ready', lastAggregatedAt: recent,
+        cacheAsOf: recent, generation: 4, events: [],
+    }
+
+    it('renders the cache-contents breakdown, and distinguishes unavailable from empty', async () => {
+        getSourceDoc.mockResolvedValue({
+            ...baseDoc,
+            cacheKeyCount: 7,
+            cacheKeyCountByEndpoint: { aggregated: 4, 'children-with-edges': 2, 'trace-expand': 1 },
+            lkgCount: 3, lkgOldestAgeSecs: 600,
+        })
+        const { unmount } = renderDrawer()
+
+        expect(await screen.findByText('Cache contents')).toBeInTheDocument()
+        expect(screen.getByText('7 entries')).toBeInTheDocument()
+        // Friendly endpoint labels (sentence-cased fallback for "trace-expand").
+        const agg = screen.getByText('Aggregated lineage').closest('li') as HTMLElement
+        expect(within(agg).getByText('4')).toBeInTheDocument()
+        expect(screen.getByText('Hierarchy children')).toBeInTheDocument()
+        expect(screen.getByText('Trace expand')).toBeInTheDocument()
+        // LKG folds into the section.
+        expect(screen.getByText('Last known good')).toBeInTheDocument()
+        expect(screen.getByText(/3 cached/)).toBeInTheDocument()
+        unmount()
+
+        // null → the cache could not be read (unavailable).
+        getSourceDoc.mockResolvedValue({ ...baseDoc, cacheKeyCount: null, cacheKeyCountByEndpoint: null })
+        const r2 = renderDrawer()
+        expect(await screen.findByText(/cache contents unavailable/i)).toBeInTheDocument()
+        r2.unmount()
+
+        // 0 / {} → nothing cached yet (distinct from unavailable).
+        getSourceDoc.mockResolvedValue({ ...baseDoc, cacheKeyCount: 0, cacheKeyCountByEndpoint: {} })
+        renderDrawer()
+        expect(await screen.findByText(/nothing cached yet/i)).toBeInTheDocument()
+    })
+
+    // ── G3.R3 — fleet "Refresh all sources" (admin-gated) ────────────
+    it('gates Refresh all sources to system:admin, fires the chosen scope, and stops polling on done', async () => {
+        const user = userEvent.setup()
+
+        // Default (manage-only, not admin): the button is absent.
+        const { unmount } = renderTab()
+        await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
+        expect(screen.queryByRole('button', { name: /refresh all sources/i })).not.toBeInTheDocument()
+        unmount()
+
+        // Now as a system admin.
+        permissionFn.mockImplementation((perm: string) => perm === 'system:admin' || perm === 'workspace:datasource:manage')
+        refreshAll.mockResolvedValue({ batchId: 'batch-fleet', providerId: '__fleet__', total: 3, done: 0, results: [], state: 'running' })
+        getBatch.mockResolvedValue({
+            batchId: 'batch-fleet', providerId: '__fleet__', total: 3, done: 3,
+            results: [{ dataSourceId: 'ds-1', outcome: 'done' }], state: 'done',
+        })
+        renderTab()
+        await waitFor(() => expect(screen.getAllByText('Orders Graph').length).toBeGreaterThan(0))
+
+        await user.click(screen.getByRole('button', { name: /refresh all sources/i }))
+        // Advanced discloses the scope choice; pick Full refresh.
+        await user.click(await screen.findByRole('button', { name: /advanced options/i }))
+        await user.click(screen.getByText('Full refresh'))
+        await user.click(screen.getByRole('button', { name: /run full refresh/i }))
+
+        await waitFor(() => expect(refreshAll).toHaveBeenCalledWith(expect.objectContaining({ scope: 'full' })))
+        // Progress polled the batch and rendered completion; the done response
+        // stops the poll (no runaway refetch).
+        expect(await screen.findByText('Refresh complete')).toBeInTheDocument()
+        expect(getBatch).toHaveBeenCalledTimes(1)
     })
 })
