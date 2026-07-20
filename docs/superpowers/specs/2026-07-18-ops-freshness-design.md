@@ -76,3 +76,21 @@ Design:
 - **Stat-tile band = filters**: KPI tiles (Total/Ready/Rebuilding/Needs attention/Not built/Cache coverage) that toggle the corresponding table filter on click.
 - **Sticky faceted filter bar**: Provider + Workspace multi-select (with counts), status segmented control, name search, removable filter chips, URL-synced state (repo convention: state derives from URL).
 - **Table**: severity-sorted, collapsible provider groups with mini-rollups, sticky headers, denser rows. Never-built rows: freshness cell "Never built" (+ CTA), no fake "Up to date", collapsed em-dashes.
+
+## 8. Cheap-tier cache stats + fleet refresh (user addition 2026-07-20)
+
+Goal: "see cache stats per provider and per data source, and trigger a full refresh of everything from the UI." Cheap = reuse already-assembled data + on-demand bounded SCANs; NO new telemetry infra, NO per-row SCAN on the fleet path, invariants preserved (fleet stays DB+Redis-only, no read-path triggering).
+
+### 8a. Per-provider summaries (fleet response) — G1
+`FreshnessFleetResponse.providerSummaries: Optional[list[ProviderFreshnessSummary]]`, each `{providerId, providerName, total, ready, pending, failed, notBuilt, needsAttention, cacheStamped}`, computed in the SAME in-memory pass as the fleet `summary` (over the workspace/provider-filtered set, before staleOnly/pagination); `None` whenever `summary` is None (>1000 cap). Zero extra queries/Redis — a GROUP BY over rows already read. Pagination-accurate (not client-side over the 200-row page).
+
+### 8b. Per-source cache-key counts (doc, on-demand) — G1
+`FreshnessDoc.cacheKeyCount: Optional[int]` + `cacheKeyCountByEndpoint: Optional[dict[str,int]]` — one bounded SCAN over `graphcache:v1:{ws}:{ds}:{branch=""}:{current_gen}:*` (current generation = the live/usable entries), tally by the endpoint segment (split index 6). Best-effort, null on Redis error. DOC-ONLY (per-source, on-demand when the drawer opens) — never on the fleet list. Pairs with the existing `lkgCount`/`lkgOldestAgeSecs`.
+
+### 8c. Fleet-wide guarded refresh — G2
+`POST /api/v1/admin/freshness/refresh-all` (system:admin, proxy-aware + CP twin) — enumerates ALL live sources (deleted_at IS NULL) across every provider and runs the F5 batch runner with a GLOBAL single-flight lock (`refreshbatch:lock:__fleet__`), bounded concurrency, `{scope=auto, force=false}` body; returns `{batchId, total}`; progress via the existing `GET /refresh-batches/{id}`. 409 if a fleet batch is already running. actor/origin server-forced (api). Reuses F5's runner/hash/guard verbatim — only the enumeration source and lock key differ.
+
+### 8d. FE — G3
+- Provider group header: cache-coverage chip (cacheStamped/total for that provider, from providerSummaries) + the existing state rollup; expanded groups get a compact per-provider stat strip.
+- Drawer "Cache contents" section: total cached entries + per-endpoint breakdown (cacheKeyCountByEndpoint) + the existing LKG count/age.
+- Tab header: "Refresh all sources" button (system:admin, confirm dialog naming the total + cost/SWR reassurance copy), wired to 8c + batch progress (reuse the ProviderRefreshDialog progress shape). White-label, plain-language, tsc 76→76.
