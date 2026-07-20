@@ -279,7 +279,8 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
     onRetry: () => void
 }) {
     const category: FailureCategory = doc.lastFailureCategory ?? 'unknown'
-    const g = GUIDANCE[category]
+    // ?? unknown: a future backend category we don't map yet must not throw.
+    const g = GUIDANCE[category] ?? GUIDANCE.unknown
     const attempts = doc.retryCount != null && doc.retryCount > 1 ? doc.retryCount : null
 
     const primaryCls = 'text-white bg-indigo-600 hover:bg-indigo-700'

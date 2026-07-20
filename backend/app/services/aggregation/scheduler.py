@@ -59,7 +59,10 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
         row = (await session.execute(
             select(AggregationJobORM.status, AggregationJobORM.updated_at)
             .where(AggregationJobORM.data_source_id == state.data_source_id)
-            .order_by(AggregationJobORM.updated_at.desc())
+            # NULLS LAST: a freshly-created (pending) job has updated_at=NULL,
+            # which Postgres ranks FIRST on DESC (SQLite ranks it last) — pin
+            # both engines to "latest updated row wins, never a NULL".
+            .order_by(AggregationJobORM.updated_at.desc().nullslast())
             .limit(1)
         )).first()
     except Exception:

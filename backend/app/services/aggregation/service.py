@@ -1990,7 +1990,9 @@ class AggregationService:
                     AggregationJobORM.retry_count,
                 )
                 .where(AggregationJobORM.data_source_id == ds.id)
-                .order_by(AggregationJobORM.updated_at.desc())
+                # NULLS LAST: a pending job (updated_at=NULL) must not outrank
+                # the latest terminal row on Postgres DESC (SQLite already does).
+                .order_by(AggregationJobORM.updated_at.desc().nullslast())
                 .limit(1)
             )).first()
         except Exception as exc:
