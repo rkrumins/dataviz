@@ -307,7 +307,7 @@ graph TB
     subgraph AuthFlow["Authentication Flow"]
         Login[POST /auth/login<br/>email + password]
         Signup[POST /auth/signup<br/>name, email, password]
-        Approve[POST /admin/users/{id}/approve<br/>Admin only]
+        Approve["POST /admin/users/{id}/approve<br/>Admin only"]
     end
 
     subgraph Security["Security Layers"]

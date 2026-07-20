@@ -28,6 +28,7 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
   useEffect(() => {
     let cancelled = false
     async function render() {
+      const id = `mermaid-${++renderCounter}`
       try {
         const mermaid = (await loadMermaid()).default
         // Brand the diagrams from the app's live design tokens so they echo the
@@ -44,6 +45,9 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
           startOnLoad: false,
           theme: 'base',
           securityLevel: 'loose',
+          // A diagram that fails to parse should surface OUR inline error, not
+          // mermaid's full-page "Syntax Error" bomb graphic injected into the DOM.
+          suppressErrorRendering: true,
           fontFamily: 'Inter Variable, Inter, system-ui, sans-serif',
           themeVariables: {
             darkMode: isDark,
@@ -68,13 +72,16 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
             edgeLabelBackground: bgEl,
           },
         })
-        const id = `mermaid-${++renderCounter}`
         const { svg } = await mermaid.render(id, code)
         if (!cancelled) {
           setSvgHtml(svg)
           setError(null)
         }
       } catch (e: unknown) {
+        // Belt-and-suspenders: drop any temporary measuring node mermaid may
+        // have left in the DOM on a failed render, so nothing leaks visually.
+        document.getElementById(id)?.remove()
+        document.querySelector(`#d${id}`)?.remove()
         if (!cancelled) {
           setError(e instanceof Error ? e.message : 'Failed to render diagram')
         }

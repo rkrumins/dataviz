@@ -224,10 +224,10 @@ sequenceDiagram
     API->>SVC: compose draft = main ⊕ delta
     UI->>API: POST /branches/{id}/publish
     API->>SVC: squash → main (advisory lock, 3-way if stale)
-    SVC->>PG: squash_publish commit; bump target_commit_seq
+    SVC->>PG: squash_publish commit, bump target_commit_seq
     API-->>WK: nudge
     WK->>PG: read window
-    WK->>FDB: MERGE/DELETE; advance watermark
+    WK->>FDB: MERGE/DELETE, advance watermark
 ```
 
 ## 9. Headline architecture decisions
