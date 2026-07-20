@@ -10,7 +10,6 @@ import asyncio
 import os
 
 import pytest
-from types import SimpleNamespace
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.cache_manager import CacheManager
@@ -18,10 +17,7 @@ from backend.app.services.versioning.messaging import close_broker_redis, get_br
 from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
-
-
-async def _noop(cypher, params=None):
-    return None
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 
 async def _seed(svc) -> str:
@@ -45,7 +41,7 @@ async def _ps(gid):
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
-    proj = FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop))
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())      # faithful fake: DROP+reseed+verify all run
     cm = CacheManager(proj)
     dropped: list = []
 
