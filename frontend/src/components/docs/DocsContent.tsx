@@ -96,7 +96,7 @@ export function DocsContent() {
             </ReactMarkdown>
           </article>
 
-          <PageFeedback path={docMeta[entry.slug]?.path} pageKey={`docs:${entry.slug}`} />
+          <PageFeedback pageKey={`docs:${entry.slug}`} />
 
           <Pager
             basePath="/docs"
