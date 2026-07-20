@@ -6,8 +6,9 @@
  *                    → defaultNodeSortMode → 'alpha-asc'
  *
  * Roots in 'custom' mode order by assignment `orderKey` (keyed first,
- * ordinally; unkeyed after, alphabetically). Children always sort
- * alphabetically asc/desc (custom is a root-level concept).
+ * ordinally; unkeyed after, alphabetically). Custom order is HIERARCHICAL:
+ * children order by orderKey too (within their sibling set); all other modes
+ * leave children on the server's alphabetical order.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'

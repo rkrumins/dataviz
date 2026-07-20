@@ -208,18 +208,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
 
-  // 4.3 Drag-and-drop — only root-level nodes (depth === 0, no parentId) may
-  // be re-assigned between layers. Children live inside their parent's
-  // containment scope; moving a column without its table would break the
-  // ontology. Attach native events via ref (avoids type conflict).
-  // A row being deleted (committed ghost or staged delete) is read-only — it must not be dragged to
-  // another layer. Restore it first if you want to move it.
-  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical && !isPendingDelete
+  // 4.3 Drag-and-drop — a row is draggable when it's a top-level node (which
+  // can be re-assigned between layers) OR when reorder bands are live (draft
+  // custom-order, any depth), so children can be picked up to reorder. The
+  // DROP side validates each gesture: cross-layer assign is blocked for
+  // children by the containment rule, reparent by ontology, and reorder stays
+  // within a sibling set. A row being deleted (committed ghost or staged
+  // delete) is read-only — restore it before moving.
+  // Custom order is hierarchical — roots AND children are reorderable within
+  // their own sibling set. The handler resolves the correct set (parent's
+  // children vs. layer roots) and no-ops on a cross-set drop, so bands are
+  // safe at every depth; logical wrappers stay out (they aren't orderable).
+  const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
+  const isRootDraggable = depth === 0 && !node.parentId && !isLogical
+  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive)
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
 
-    if (!isLayerDraggable) {
+    if (!isDraggable) {
       el.removeAttribute('draggable')
       return
     }
@@ -243,7 +250,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       el.removeEventListener('dragstart', onDragStart)
       el.removeEventListener('dragend', onDragEnd)
     }
-  }, [node.id, node.name, isLayerDraggable])
+  }, [node.id, node.name, isDraggable])
 
   const { reparent } = useReparentNode()
   const [dropHover, setDropHover] = useState(false)
@@ -251,11 +258,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
   // band keeps the reparent drop, so one gesture serves both without a mode.
   const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
-  // Custom order is hierarchical — roots AND children are reorderable within
-  // their own sibling set. The handler resolves the correct set (parent's
-  // children vs. layer roots) and no-ops on a cross-set drop, so bands are
-  // safe at every depth; logical wrappers stay out (they aren't orderable).
-  const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
 
   // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
   // Escape-cancelled drag (dragend fires on the source) could strand the
