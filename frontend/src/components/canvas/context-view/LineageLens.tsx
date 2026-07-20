@@ -32,8 +32,14 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap } from '@/store/schema'
-import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
-import { EDGE_FETCH_LIMIT } from './useLensLineage'
+import {
+  deriveNeighborRecords,
+  mergeSupplementalEdges,
+  buildCanContainClosure,
+  isCoarserGrain,
+  type NeighborRecord,
+} from '@/lib/lineage-neighbors'
+import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 
@@ -169,27 +175,7 @@ export function LineageLens({
   const edges = useMemo(() => {
     const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
     if (!supplementalEdges || supplementalEdges.length === 0) return base
-    const seenIds = new Set<string>()
-    const seenPairs = new Set<string>()
-    const coveringAggregates = new Map<string, Array<{ s: string; t: string }>>()
-    const pairKey = (e: LineageEdge) => `${e.source}\u0000${e.target}\u0000${(e.data?.edgeType as string) ?? ''}`
-    for (const e of base) {
-      seenIds.add(e.id)
-      seenPairs.add(pairKey(e))
-      for (const rid of e.data?.sourceEdges ?? []) {
-        const list = coveringAggregates.get(rid) ?? []
-        list.push({ s: e.source, t: e.target })
-        coveringAggregates.set(rid, list)
-      }
-    }
-    const merged = [...base]
-    for (const e of supplementalEdges) {
-      if (seenIds.has(e.id) || seenPairs.has(pairKey(e))) continue
-      const covers = coveringAggregates.get(e.id)
-      if (covers?.some(({ s, t }) => s === e.source || t === e.source || s === e.target || t === e.target)) continue
-      merged.push(e)
-    }
-    return merged
+    return mergeSupplementalEdges(base, supplementalEdges)
   }, [visibleEdges, rawEdges, supplementalEdges])
 
   // Endpoint index — one O(E) pass per edge-set change so everything
@@ -291,26 +277,12 @@ export function LineageLens({
   // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
   // schema helpers. Tiny input (schema type list), computed once.
   const hierarchyMap = useEntityTypeHierarchyMap()
-  const canContainClosure = useMemo(() => {
-    const closure = new Map<string, Set<string>>()
-    for (const [t, h] of Object.entries(hierarchyMap)) {
-      const seen = new Set<string>()
-      const stack = [...h.canContain]
-      while (stack.length > 0) {
-        const c = stack.pop()!
-        const cu = c.toUpperCase()
-        if (seen.has(cu)) continue
-        seen.add(cu)
-        for (const g of hierarchyMap[c]?.canContain ?? []) stack.push(g)
-      }
-      closure.set(t.toUpperCase(), seen)
-    }
-    return closure
-  }, [hierarchyMap])
-  const isCoarserThan = useCallback((partnerType: string | undefined, baseType: string): boolean => {
-    if (!partnerType) return false
-    return canContainClosure.get(partnerType.toUpperCase())?.has(baseType.toUpperCase()) ?? false
-  }, [canContainClosure])
+  const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
+  const isCoarserThan = useCallback(
+    (partnerType: string | undefined, baseType: string): boolean =>
+      isCoarserGrain(canContainClosure, partnerType, baseType),
+    [canContainClosure],
+  )
 
   // Containment parent of a node, when known — fetched or loaded
   // containment edge pointing at it, else the canvas's own assignment.

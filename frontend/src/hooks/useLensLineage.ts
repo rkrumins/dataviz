@@ -79,7 +79,9 @@ const emptyState = (): FetchState => ({
 
 export function useLensLineage(
   lensStack: string[],
-  provider: GraphDataProvider,
+  /** Null = no provider reachable — the hook degrades to a no-op and
+   *  consumers keep rendering store-only data. */
+  provider: GraphDataProvider | null,
   lineageEdgeTypes: string[],
 ): LensLineageData {
   const containmentEdgeTypes = useContainmentEdgeTypes()
@@ -98,6 +100,7 @@ export function useLensLineage(
    *  haven't already looked up. Overflow beyond NAME_CAP keeps its
    *  URN-derived label — honest, never blank. Marks looked-up URNs. */
   const resolveNames = useCallback(async (urns: Iterable<string>): Promise<LineageNode[]> => {
+    if (!provider) return []
     // The store maintains this Set — O(1) membership, no O(N) rebuild
     // per fetch (the canvas can hold very large hydrated sets).
     const loaded = useCanvasStore.getState()._nodeIndex
@@ -120,6 +123,7 @@ export function useLensLineage(
   }, [provider])
 
   const fetchNode = useCallback(async (urn: string) => {
+    if (!provider) return
     const session = sessionRef.current
     startedRef.current.add(urn)
     setState(prev => {
@@ -208,7 +212,7 @@ export function useLensLineage(
    *  source×target pair query the canvas's expandEdge uses, so the
    *  backend resolves descendants of both endpoints. */
   const fetchDrill = useCallback((edge: LineageEdge) => {
-    if (drillStartedRef.current.has(edge.id)) return
+    if (!provider || drillStartedRef.current.has(edge.id)) return
     drillStartedRef.current.add(edge.id)
     const session = sessionRef.current
     setState(prev => {
