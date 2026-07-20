@@ -1318,6 +1318,24 @@ export function ContextViewCanvas({
     return () => cancelAnimationFrame(raf)
   }, [canvasZoom])
 
+  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
+  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
+  // via padding — a change that does NOT resize the observed node cards,
+  // so the overlay's ResizeObserver never fires. Without an explicit
+  // nudge the lineage marks stay anchored to their pre-panel positions,
+  // stranding ghost stubs/edges over empty canvas when a panel opens,
+  // closes, or the tree is expanded/collapsed while one is open. Force a
+  // redraw on every panel transition, with trailing settle passes so the
+  // marks land on the post-animation geometry (panels slide ~300–400ms).
+  useEffect(() => {
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
+    )
+    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
+    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
+    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
+  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, advancedSearchOpen, builderOpen, buildOpen])
+
   // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
   // pre-compensation enlarges the scroll viewport in layout px), so the
   // extra coverage comes from the larger window — overscan can shrink to
