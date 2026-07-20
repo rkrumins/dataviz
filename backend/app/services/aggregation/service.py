@@ -1658,7 +1658,7 @@ class AggregationService:
     ) -> RefreshResponse:
         """One operator-facing refresh verb over the convergence primitives.
 
-        Four scopes, one dispatch, NO new mechanisms:
+        Five scopes, one dispatch, NO new mechanisms:
 
           * ``auto``        — delegate verbatim to :meth:`signal_source_changed`
             (the change-gated signal). It owns both the gate AND its own audit
@@ -1671,6 +1671,10 @@ class AggregationService:
             FRESH idempotency key every call, bypassing the cooldown / dedup
             gate by construction (an explicit refresh must always do work).
           * ``full``        — the read-caches steps, then the rollups steps.
+          * ``clear``       — the read-caches steps, THEN clear the stale
+            marker (:func:`clear_source_stale`). No gate, no cooldown, no
+            rebuild — the operator's un-stick for a source whose rebuild
+            keeps failing (e.g. provider OOM) and is stuck "recomputing".
 
         Exactly ONE audit event per call. An unknown ``ds_id`` (neither an
         aggregation state row nor a workspace data-source row) raises
@@ -1727,11 +1731,12 @@ class AggregationService:
         audit: dict = {
             "marker_set": False, "gen_bumped": False, "lkg_purged": 0,
             "content_cleared": False, "stats_nudged": False,
-            "job_id": None, "deferred": False,
+            "marker_cleared": False, "job_id": None, "deferred": False,
         }
 
-        # 2. read-caches steps (also the first half of ``full``). No gate.
-        if scope in ("read-caches", "full"):
+        # 2. read-caches steps (also the first half of ``full``, and
+        # ``clear``'s first step — reused verbatim, not duplicated). No gate.
+        if scope in ("read-caches", "full", "clear"):
             from backend.app.services.graph_cache import (
                 CacheScope,
                 ENDPOINT_AGGREGATED,
@@ -1785,6 +1790,14 @@ class AggregationService:
                         "refresh_source: stats nudge failed for %s: %s",
                         ds_id, exc,
                     )
+
+        # 2b. clear-only: un-stick the stale marker. No gate, no cooldown,
+        # no rebuild — safe even when the store is out of memory.
+        if scope == "clear" and workspace_id:
+            from backend.app.services.graph_cache import clear_source_stale
+            await clear_source_stale(workspace_id, ds_id)
+            audit["marker_cleared"] = True
+            actions.append("marker_cleared")
 
         # 3. rollups steps (also the second half of ``full``). Marker + a
         # rebuild with a fresh idempotency key — cooldown / dedup gate bypass
@@ -1965,6 +1978,34 @@ class AggregationService:
             if cache_key_count_by_endpoint is not None else None
         )
 
+        # Failure surfacing (spec §9c): ONE bounded query for the latest job
+        # of this source. Populated only when it's ``failed``; doc-only,
+        # best-effort — a query error degrades to None fields, never raises.
+        last_failure_reason = last_failure_category = retry_count = None
+        try:
+            job_row = (await session.execute(
+                select(
+                    AggregationJobORM.status,
+                    AggregationJobORM.error_message,
+                    AggregationJobORM.retry_count,
+                )
+                .where(AggregationJobORM.data_source_id == ds.id)
+                .order_by(AggregationJobORM.updated_at.desc())
+                .limit(1)
+            )).first()
+        except Exception as exc:
+            logger.warning(
+                "assemble_source_freshness: latest-job query failed for %s: %s",
+                ds.id, exc,
+            )
+            job_row = None
+        if job_row is not None:
+            job_status, job_error, job_retry = job_row
+            if job_status == "failed":
+                last_failure_reason = job_error
+                last_failure_category = classify_failure(job_error)
+                retry_count = job_retry
+
         live_fingerprint = live_node_count = live_edge_count = None
         drifted = None
         if probe:
@@ -1989,6 +2030,9 @@ class AggregationService:
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
             cache_key_count_by_endpoint=cache_key_count_by_endpoint,
+            last_failure_reason=last_failure_reason,
+            last_failure_category=last_failure_category,
+            retry_count=retry_count,
             live_fingerprint=live_fingerprint,
             live_node_count=live_node_count,
             live_edge_count=live_edge_count,
@@ -2337,6 +2381,38 @@ def _event_summary(row) -> Optional[RefreshEventSummary]:
     if row is None:
         return None
     return RefreshEventSummary(origin=row.origin, outcome=row.outcome, ts=row.ts)
+
+
+def classify_failure(error_message: Optional[str]) -> Optional[str]:
+    """Classify a job's ``error_message`` into a coarse, UI-facing category
+    for resolution guidance (spec §9c). ``None`` when there is no error.
+
+    Order matters: ``out_of_memory`` is checked BEFORE
+    ``provider_unavailable`` because a FalkorDB OOM error is often wrapped
+    in connection/availability language (e.g. "provider unavailable: OOM
+    command not allowed..."), which would otherwise misclassify the more
+    actionable OOM case as a generic provider outage."""
+    if not error_message:
+        return None
+    if (
+        "OutOfMemoryError" in error_message
+        or "used memory > 'maxmemory'" in error_message
+        or "OOM" in error_message
+    ):
+        return "out_of_memory"
+    if "timeout" in error_message or "TimeoutError" in error_message:
+        return "timeout"
+    if "ontology" in error_message or "OntologyResolution" in error_message:
+        return "ontology"
+    if "conflict" in error_message or "ConflictError" in error_message:
+        return "conflict"
+    if (
+        "unavailable" in error_message
+        or "unreachable" in error_message
+        or "connection" in error_message
+    ):
+        return "provider_unavailable"
+    return "unknown"
 
 
 def _rebuild_cooldown_until(

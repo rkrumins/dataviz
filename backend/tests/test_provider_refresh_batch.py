@@ -162,6 +162,19 @@ class _MixedOutcomeSvc:
         return _resp(job_id=f"job-{ds_id}")
 
 
+class _ScopeCapturingSvc:
+    """Records the scope forwarded to ``refresh_source`` for every ds —
+    proves the batch passes whatever scope it's given (e.g. ``clear``,
+    H1/spec §9a) through per source, unmodified. The per-source marker-clear
+    mechanics themselves are covered in ``test_refresh_verb.py``."""
+    def __init__(self):
+        self.scopes: dict[str, str] = {}
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        self.scopes[ds_id] = scope
+        return _resp(job_id=f"job-{ds_id}")
+
+
 class _ConcurrencyCountingSvc:
     """Sleeps briefly on every call so overlapping calls are observable,
     tracking the peak number in flight at once."""
@@ -253,6 +266,19 @@ def test_session_commit_failure_recorded_as_error_batch_still_completes():
     assert outcomes.count("error") == 1  # exactly the one whose commit failed
     assert outcomes.count("done") == 2   # siblings recorded normally
     assert session_factory.calls == 3    # one fresh session per item
+
+
+def test_batch_forwards_clear_scope_to_every_source():
+    svc = _ScopeCapturingSvc()
+    redis = _FakeRedis()
+    ds_ids = ["ds-a", "ds-b", "ds-c"]
+    _run(cp._run_provider_batch(
+        "batch-clear", "prov-1", ds_ids, _req(scope="clear"),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    assert svc.scopes == {d: "clear" for d in ds_ids}
+    hash_ = redis.hashes["refreshbatch:batch-clear"]
+    assert hash_["state"] == "done"
 
 
 # ── Concurrency bound ─────────────────────────────────────────────────

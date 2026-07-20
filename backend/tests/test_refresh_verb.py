@@ -14,6 +14,8 @@ what is under test is the per-scope dispatch:
                   (no gate, no marker, no trigger)
     rollups     → mark_source_stale → trigger (fresh refresh-rollups: key)
     full        → read-caches steps, then rollups steps
+    clear       → the read-caches steps, THEN clear_source_stale (un-sticks
+                  a stuck source; no gate, no cooldown, no trigger)
 
 Exactly one audit event per call; an unknown ds 404s before any side
 effect; ``wait='complete'`` polls a queued rebuild to a terminal status.
@@ -146,6 +148,11 @@ def _build(
         captured["mark_reason"] = reason
 
     monkeypatch.setattr(graph_cache_mod, "mark_source_stale", _fake_mark_stale)
+
+    async def _fake_clear_stale(ws, ds_):
+        order.append("clear_source_stale")
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _fake_clear_stale)
 
     async def _fake_stats(ds_, ws):
         order.append("mark_stats_changed")
@@ -371,10 +378,49 @@ def test_full_runs_read_caches_then_rollups_in_order(monkeypatch):
     assert evt["actions"]["job_id"] == "agg_full"
 
 
+# ── clear: read-caches steps + un-stick the marker, no trigger ─────────
+
+
+def test_clear_runs_read_caches_then_clears_marker(monkeypatch):
+    svc, session, order, captured = _build(monkeypatch, state=_state())
+    resp = _run(svc.refresh_source("ds-1", session, scope="clear"))
+
+    assert order == _READ_CACHES_SEQUENCE + ["clear_source_stale"]
+    assert "mark_source_stale" not in order
+    assert "trigger" not in order
+    assert resp.scope == "clear"
+    assert resp.gate == "n/a"
+    assert resp.changed is True
+    assert resp.job_id is None
+    assert resp.actions == [
+        "content_cleared", "hierarchy_invalidated",
+        "aggregated_lkg_purged", "stats_nudged", "marker_cleared",
+    ]
+    # Exactly one event, scope clear, marker recorded cleared not set.
+    assert len(svc._events) == 1
+    evt = svc._events[0]
+    assert evt["scope"] == "clear"
+    assert evt["gate"] == "n/a"
+    assert evt["outcome"] == "accepted"
+    assert evt["actions"]["marker_set"] is False
+    assert evt["actions"]["marker_cleared"] is True
+    assert evt["actions"]["job_id"] is None
+    assert resp.event_id == "evt_1"
+
+
+def test_clear_does_not_touch_marker_when_workspace_unresolved(monkeypatch):
+    deleted = types.SimpleNamespace(id="ds-1", workspace_id="ws-1",
+                                    deleted_at="2026-07-18T00:00:00Z")
+    svc, session, order, captured = _build(monkeypatch, state=None, ds=deleted)
+    resp = _run(svc.refresh_source("ds-1", session, scope="clear"))
+    assert "clear_source_stale" not in order  # workspace_id unresolved
+    assert "marker_cleared" not in resp.actions
+
+
 # ── unknown ds → NotFoundError BEFORE any side effect ───────────────────
 
 
-@pytest.mark.parametrize("scope", ["auto", "read-caches", "rollups", "full"])
+@pytest.mark.parametrize("scope", ["auto", "read-caches", "rollups", "full", "clear"])
 def test_unknown_ds_raises_notfound_before_side_effects(monkeypatch, scope):
     svc, session, order, captured = _build(monkeypatch, state=None, ds=None)
 
@@ -474,6 +520,7 @@ def test_wait_none_never_polls(monkeypatch):
         ("read-caches", "read-caches"),
         ("rollups", "rollups"),
         ("full", "full"),
+        ("clear", "clear"),
     ],
 )
 def test_one_event_per_call_with_correct_scope(monkeypatch, scope, expected):

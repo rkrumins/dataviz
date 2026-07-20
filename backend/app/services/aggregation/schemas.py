@@ -416,12 +416,15 @@ class RefreshRequest(BaseModel):
                           and nudge stats (no change gate, no rebuild).
       * ``rollups``     — mark stale + queue an aggregation rebuild.
       * ``full``        — read-caches steps, then rollups steps.
+      * ``clear``       — the read-caches steps, THEN clear the stale marker
+                          (no gate, no cooldown, no rebuild) — un-sticks a
+                          source stuck "recomputing" after a failed rebuild.
 
     ``force`` only affects ``auto`` (it overrides the change gate); the other
     scopes act unconditionally by construction. ``wait='complete'`` blocks on
     a queued rebuild (bounded) so a caller can refresh-then-read synchronously.
     """
-    scope: Literal["auto", "read-caches", "rollups", "full"] = "auto"
+    scope: Literal["auto", "read-caches", "rollups", "full", "clear"] = "auto"
     force: bool = Field(False)
     reason: Optional[str] = None
     wait: Literal["none", "complete"] = "none"
@@ -549,6 +552,12 @@ class FreshnessDoc(FreshnessRow):
     cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
         None, alias="cacheKeyCountByEndpoint",
     )
+    # Failure surfacing (spec §9c): populated only when the latest job for
+    # this source is ``failed`` (one bounded query); None otherwise —
+    # doc-only, best-effort, never raises.
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    retry_count: Optional[int] = Field(None, alias="retryCount")
 
     class Config:
         populate_by_name = True
@@ -733,7 +742,7 @@ class BatchRefreshRequest(BaseModel):
     to ``refresh_source`` for every live data source in scope;
     ``max_concurrent`` bounds the fan-out (the runner additionally caps it
     at 4 regardless of what's requested)."""
-    scope: Literal["auto", "read-caches", "rollups", "full"] = "auto"
+    scope: Literal["auto", "read-caches", "rollups", "full", "clear"] = "auto"
     force: bool = Field(False)
     max_concurrent: int = Field(2, ge=1, alias="maxConcurrent")
 

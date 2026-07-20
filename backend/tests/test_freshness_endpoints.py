@@ -72,7 +72,13 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Returns queued results in call order; records queries for assertions."""
+    """Returns queued results in call order; records queries for assertions.
+
+    A call beyond the queued results gets an empty ``_FakeResult()`` rather
+    than raising — this lets existing fixtures (queued before the H1
+    latest-job failure query existed) keep working unchanged: an
+    unqueued/absent job query degrades exactly like "no jobs for this
+    source", which is the correct real-world default anyway."""
 
     def __init__(self, results):
         self._results = list(results)
@@ -80,7 +86,9 @@ class _FakeSession:
 
     async def execute(self, query):
         self.executed.append(query)
-        return self._results.pop(0)
+        if self._results:
+            return self._results.pop(0)
+        return _FakeResult()
 
 
 def _ds(id="ds-1", ws="ws-1", provider="prov-1", label="Orders DB",
@@ -796,6 +804,80 @@ def test_source_probe_failure_degrades_without_raising(monkeypatch):
     doc = _run(svc.assemble_source_freshness("ds-1", session, probe=True))
     assert doc.live_fingerprint is None
     assert doc.drifted is None  # probe failed → unknown, not a crash
+
+
+# ── classify_failure: category classifier, order matters (H1, spec §9c) ─
+
+
+@pytest.mark.parametrize(
+    "error_message,expected", [
+        (None, None),
+        ("", None),
+        ("OOM command not allowed when used memory > 'maxmemory'.", "out_of_memory"),
+        ("redis.exceptions.ResponseError: OutOfMemoryError while allocating", "out_of_memory"),
+        # OOM must win even though this message also contains "unavailable" —
+        # checked BEFORE provider_unavailable (spec §9c ordering).
+        ("provider unavailable: OOM command not allowed when used memory > 'maxmemory'.",
+         "out_of_memory"),
+        ("asyncio.TimeoutError: query timed out after 30s", "timeout"),
+        ("OntologyResolutionError: no ontology assigned to this source", "ontology"),
+        ("ConflictError: job already active for this source", "conflict"),
+        ("ConnectionError: provider unavailable, connection refused", "provider_unavailable"),
+        ("host unreachable", "provider_unavailable"),
+        ("some completely unrelated failure", "unknown"),
+    ],
+)
+def test_classify_failure_category_and_order(error_message, expected):
+    from backend.app.services.aggregation.service import classify_failure
+    assert classify_failure(error_message) == expected
+
+
+# ── Doc: failure fields from the latest job (H1, spec §9c) ──────────────
+
+
+def test_source_doc_failure_fields_populated_when_latest_job_failed(monkeypatch):
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([
+        _FakeResult(rows=[(_ds(), "Prov A")]),
+        _FakeResult(rows=[(
+            "failed",
+            "OOM command not allowed when used memory > 'maxmemory'.",
+            2,
+        )]),
+    ])
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.last_failure_reason == (
+        "OOM command not allowed when used memory > 'maxmemory'."
+    )
+    assert doc.last_failure_category == "out_of_memory"
+    assert doc.retry_count == 2
+
+
+def test_source_doc_failure_fields_none_when_latest_job_ready(monkeypatch):
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([
+        _FakeResult(rows=[(_ds(), "Prov A")]),
+        _FakeResult(rows=[("completed", None, 0)]),
+    ])
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.last_failure_reason is None
+    assert doc.last_failure_category is None
+    assert doc.retry_count is None
+
+
+def test_source_doc_failure_fields_none_when_no_jobs(monkeypatch):
+    svc = _svc(_FakeRegistry(_FailProvider(), fail_resolve=True))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([
+        _FakeResult(rows=[(_ds(), "Prov A")]),
+        _FakeResult(rows=[]),
+    ])
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=False))
+    assert doc.last_failure_reason is None
+    assert doc.last_failure_category is None
+    assert doc.retry_count is None
 
 
 def test_source_unknown_ds_returns_none(monkeypatch):

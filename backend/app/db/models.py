@@ -2180,7 +2180,7 @@ class RefreshEventORM(Base):
     """Immutable record of one freshness/refresh operation.
 
     Covers every origin (script, connector, api, drift, reconcile) and
-    scope (auto, read-caches, rollups, full, batch-item) — the durable
+    scope (auto, read-caches, rollups, full, batch-item, clear) — the durable
     source of truth for "when did this data source last refresh and what
     happened", read by the per-source history and the fleet freshness
     view. Emission is best-effort (see ``refresh_events_repo.emit_refresh_event``)
@@ -2195,7 +2195,7 @@ class RefreshEventORM(Base):
     provider_id = Column(Text, nullable=True)
     origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile
     actor = Column(Text, nullable=False, default="internal")
-    scope = Column(Text, nullable=False)       # auto|read-caches|rollups|full|batch-item
+    scope = Column(Text, nullable=False)       # auto|read-caches|rollups|full|batch-item|clear
     gate = Column(Text, nullable=False)        # changed|unchanged|forced|n/a
     actions = Column(Text, nullable=True)      # JSON: what was acted on
     outcome = Column(Text, nullable=False)     # accepted|deferred|noop|conflict|error|completed|failed
@@ -2208,7 +2208,8 @@ class RefreshEventORM(Base):
             name="ck_refresh_events_origin",
         ),
         CheckConstraint(
-            "scope IN ('auto', 'read-caches', 'rollups', 'full', 'batch-item')",
+            "scope IN ('auto', 'read-caches', 'rollups', 'full', 'batch-item', "
+            "'clear')",
             name="ck_refresh_events_scope",
         ),
         CheckConstraint(
