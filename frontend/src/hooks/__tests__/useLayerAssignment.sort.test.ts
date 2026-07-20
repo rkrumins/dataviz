@@ -212,3 +212,56 @@ describe('useLayerAssignment — property-derived sort modes', () => {
     expect(out.get('l1')).toEqual(['b', 'a'])
   })
 })
+
+describe('useLayerAssignment — hierarchical custom order (children)', () => {
+  it('orders a custom layer\'s CHILDREN by orderKey (keyed first, unkeyed alpha tail)', () => {
+    // root → children A, B, C (+ unkeyed D). Manual arrangement: B, C, A.
+    const nodes = [
+      node('root'), node('cA'), node('cB'), node('cC'), node('cD'),
+    ]
+    const childMap = new Map([['root', ['cA', 'cB', 'cC', 'cD']]])
+    const parentMap = new Map([['cA', 'root'], ['cB', 'root'], ['cC', 'root'], ['cD', 'root']])
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes,
+        sortedLayers: [layer('l1', 0, { nodeSortMode: 'custom' })],
+        nodeEdgeFingerprint: 'fp',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap: new Map(nodes.map(n => [n.id, n])),
+        childMap,
+        parentMap,
+        assignments: {
+          root: assign('l1', 'a0'),
+          cB: assign('l1', 'a1'),
+          cC: assign('l1', 'a2'),
+          cA: assign('l1', 'a3'),
+          // cD has no orderKey → alpha tail
+        },
+      }),
+    )
+    const root = result.current.nodesByLayer.get('l1')?.[0]
+    expect(root?.children.map(c => c.name)).toEqual(['cB', 'cC', 'cA', 'cD'])
+  })
+
+  it('leaves children alphabetical when the layer is NOT custom (orderKeys ignored)', () => {
+    const nodes = [node('root'), node('cB'), node('cA')]
+    const childMap = new Map([['root', ['cB', 'cA']]])
+    const parentMap = new Map([['cB', 'root'], ['cA', 'root']])
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes,
+        sortedLayers: [layer('l1', 0)], // default alpha-asc
+        nodeEdgeFingerprint: 'fp',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap: new Map(nodes.map(n => [n.id, n])),
+        childMap,
+        parentMap,
+        assignments: { root: assign('l1'), cB: assign('l1', 'a0'), cA: assign('l1', 'a1') },
+      }),
+    )
+    const root = result.current.nodesByLayer.get('l1')?.[0]
+    expect(root?.children.map(c => c.name)).toEqual(['cA', 'cB']) // alpha, not orderKey
+  })
+})

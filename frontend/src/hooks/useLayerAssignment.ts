@@ -152,10 +152,12 @@ export function useLayerAssignment({
 
     // Per-layer node comparators. Effective mode resolution: ephemeral session
     // override → layer.nodeSortMode → view defaultNodeSortMode → 'alpha-asc'.
-    // Roots in 'custom' mode order by their assignment orderKey (keyed entries
-    // first, ordinally; unkeyed entries after, alphabetically); children of
-    // expanded nodes always sort alphabetically asc/desc — custom is a
-    // root-level concept (children are server-paginated).
+    // 'custom' mode is HIERARCHICAL: BOTH roots and children order by their
+    // assignment orderKey (keyed entries first, ordinally; unkeyed entries
+    // after, alphabetically). The comparator only ever compares siblings (one
+    // parent's children, or the layer's roots), so each sibling set holds an
+    // independent key sequence. All other modes leave children on the
+    // server's alphabetical order (asc, or desc when the whole layer is Z→A).
     const alphaAsc = (a: HierarchyNode, b: HierarchyNode) => a.name.localeCompare(b.name)
     const alphaDesc = (a: HierarchyNode, b: HierarchyNode) => b.name.localeCompare(a.name)
     // Property-derived root orders. Type groups alphabetically by the stable
@@ -169,7 +171,11 @@ export function useLayerAssignment({
       Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0
     const countDesc = (a: HierarchyNode, b: HierarchyNode) =>
       countOf(b) - countOf(a) || alphaAsc(a, b)
-    const customRootCmp = (a: HierarchyNode, b: HierarchyNode) => {
+    // Custom comparator: keyed siblings first (ordinal orderKey, name+urn
+    // tiebreak), unkeyed after (alphabetical). Used for BOTH roots and
+    // children of a custom-sorted layer — only ever applied within one
+    // sibling set, so the shared function is safe.
+    const customCmp = (a: HierarchyNode, b: HierarchyNode) => {
       const ka = assignments[a.id]?.orderKey
       const kb = assignments[b.id]?.orderKey
       if (ka && kb) return compareOrderKeys(ka, kb) || alphaAsc(a, b) || compareOrderKeys(a.urn, b.urn)
@@ -182,16 +188,17 @@ export function useLayerAssignment({
       'alpha-desc': alphaDesc,
       'type-asc': typeAsc,
       'count-desc': countDesc,
-      custom: customRootCmp,
+      custom: customCmp,
     }
     const childCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     const rootCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     sortedLayers.forEach(layer => {
       const mode: LayerNodeSortMode =
         sortOverrides?.get(layer.id) ?? layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
-      // Children always sort alphabetically (their pages come from the server
-      // in displayName order); only alpha-desc flips their direction.
-      childCmpByLayer.set(layer.id, mode === 'alpha-desc' ? alphaDesc : alphaAsc)
+      // Children in 'custom' mode order by orderKey too (hierarchical custom
+      // order); every other mode leaves them on the server's alpha order
+      // (desc only flips the direction).
+      childCmpByLayer.set(layer.id, mode === 'custom' ? customCmp : mode === 'alpha-desc' ? alphaDesc : alphaAsc)
       rootCmpByLayer.set(layer.id, ROOT_CMPS[mode] ?? alphaAsc)
     })
 
@@ -441,10 +448,11 @@ export function useLayerAssignment({
     // Build entityId -> logicalNodeId map from all layer entityAssignments,
     // then for each layer with logicalNodes, create wrapper HierarchyNodes
     // and move assigned entities under them.
-    // KNOWN LIMITATION (deliberate): in a 'custom'-sorted layer, orderKeys
-    // order the UNGROUPED roots only — logical wrappers stay first in config
-    // order and entities inside a wrapper sort alphabetically (childCmp).
-    // Manual ordering inside logical groups is out of scope for now.
+    // KNOWN LIMITATION (deliberate): custom orderKeys apply to a node's roots
+    // and its containment children, but NOT across logical-group wrappers —
+    // wrappers stay in config order and entities inside a wrapper sort by
+    // childCmp (which honours orderKeys, so a manually-ordered group is
+    // internally consistent, but the wrappers themselves aren't reorderable).
     const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {

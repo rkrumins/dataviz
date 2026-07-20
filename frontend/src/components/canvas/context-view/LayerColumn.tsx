@@ -100,6 +100,9 @@ interface LayerColumnProps {
    *  before/after drop bands; drops land in handleReorderNode on the canvas. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Keyboard reorder nudge (⌥↑/↓) — resolves the sibling set canvas-side so it
+   *  works for roots and children alike. */
+  onReorderNudge?: (nodeId: string, dir: 'up' | 'down') => void
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -190,6 +193,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onResetCustomOrder,
   reorderEnabled = false,
   onReorderDrop,
+  onReorderNudge,
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
@@ -750,24 +754,16 @@ export const LayerColumn = React.memo(function LayerColumn({
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const count = navigableItems.length
     if (count === 0) return
-    // ⌥↑ / ⌥↓ — keyboard reorder for roots of a custom-sorted draft layer (the
-    // accessible sibling of the drag bands). Focus follows the moved node via
+    // ⌥↑ / ⌥↓ — keyboard reorder for any node of a custom-sorted draft layer
+    // (roots AND children — the canvas nudge resolves the sibling set). The
+    // accessible sibling of the drag bands; focus follows the moved node via
     // pendingFocusNodeIdRef once the re-sorted tree lands.
-    if (e.altKey && reorderEnabled && onReorderDrop && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    if (e.altKey && reorderEnabled && onReorderNudge && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       const item = navigableItems[focusIndex]
-      if (item && item.depth === 0 && !item.node.isLogical) {
+      if (item && !item.node.isLogical) {
         e.preventDefault()
-        const rootIds = nodes.filter(n => !n.isLogical).map(n => n.id)
-        const idx = rootIds.indexOf(item.node.id)
-        if (idx >= 0) {
-          if (e.key === 'ArrowUp' && idx > 0) {
-            pendingFocusNodeIdRef.current = item.node.id
-            onReorderDrop(item.node.id, rootIds[idx - 1], 'before')
-          } else if (e.key === 'ArrowDown' && idx < rootIds.length - 1) {
-            pendingFocusNodeIdRef.current = item.node.id
-            onReorderDrop(item.node.id, rootIds[idx + 1], 'after')
-          }
-        }
+        pendingFocusNodeIdRef.current = item.node.id
+        onReorderNudge(item.node.id, e.key === 'ArrowUp' ? 'up' : 'down')
         return
       }
     }
@@ -806,7 +802,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderDrop, nodes])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).

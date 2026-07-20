@@ -251,7 +251,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
   // band keeps the reparent drop, so one gesture serves both without a mode.
   const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
-  const reorderBandsActive = reorderEnabled && depth === 0 && !isLogical && !!onReorderDrop
+  // Custom order is hierarchical — roots AND children are reorderable within
+  // their own sibling set. The handler resolves the correct set (parent's
+  // children vs. layer roots) and no-ops on a cross-set drop, so bands are
+  // safe at every depth; logical wrappers stay out (they aren't orderable).
+  const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
 
   // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
   // Escape-cancelled drag (dragend fires on the source) could strand the

@@ -96,6 +96,7 @@ import { LineageLens } from './LineageLens'
 import { useLensLineage } from './useLensLineage'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
+import type { HierarchyNode } from '@/types/hierarchy'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
@@ -156,6 +157,41 @@ function explicitDescendants(
     queue.push(...(childMap.get(id) ?? []))
   }
   return out
+}
+
+/** The rendered-tree context used to resolve custom-order reordering. */
+interface ReorderTreeContext {
+  displayMap: Map<string, HierarchyNode>
+  parentMap: Map<string, string>
+  nodesByLayer: Map<string, HierarchyNode[]>
+  nodeLayerMap: Map<string, string>
+}
+
+/**
+ * The sibling set a node belongs to for custom-order reordering, in current
+ * visual order, plus the layer that set lives in. A node with a containment
+ * parent in the SAME layer is a child — its siblings are that parent's
+ * rendered children; otherwise it is a visual root — its siblings are the
+ * layer's roots. Logical wrappers are excluded (not orderable). Returns null
+ * when the node resolves to no layer.
+ */
+function siblingContext(
+  nodeId: string,
+  ctx: ReorderTreeContext,
+): { siblings: string[]; layerId: string } | null {
+  const layerId = ctx.nodeLayerMap.get(nodeId)
+  if (!layerId) return null
+  const parentId = ctx.parentMap.get(nodeId)
+  if (parentId && ctx.nodeLayerMap.get(parentId) === layerId) {
+    const parent = ctx.displayMap.get(parentId)
+    if (parent) {
+      return { siblings: parent.children.filter(c => !c.isLogical).map(c => c.id), layerId }
+    }
+  }
+  return {
+    siblings: (ctx.nodesByLayer.get(layerId) ?? []).filter(n => !n.isLogical).map(n => n.id),
+    layerId,
+  }
 }
 
 export function ContextViewCanvas({
@@ -1511,6 +1547,11 @@ export function ContextViewCanvas({
     nodeLayerMap, layers: sortedLayers, overrides: sortOverrides, dflt: viewDefaultSortMode,
   }
 
+  // Live rendered-tree context for custom-order reordering (refs so the
+  // reorder handlers keep ONE identity — LayerColumn is React.memo'd).
+  const reorderTreeRef = useRef<ReorderTreeContext>({ displayMap, parentMap, nodesByLayer, nodeLayerMap })
+  reorderTreeRef.current = { displayMap, parentMap, nodesByLayer, nodeLayerMap }
+
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
   // ref declaration near the interactions call). Read lazily by onNodeCopied /
   // onNodeDuplicated so each duplicate action sees live layer state.
@@ -1814,54 +1855,42 @@ export function ContextViewCanvas({
     stageLayerChange(`layer-sort:${layerId}`, before, after, 'sort', `Reset custom order in “${layer.name}”`)
   }, [isDraft, currentLayout, persistReferenceLayout, stageLayerChange])
 
-  // Drag-reorder within a custom-sorted column: mint a fractional key between the
-  // drop position's neighbors. All assignment-backed roots are lazily seeded from
-  // the column's current visual order first, so neighbor keys always exist and
-  // key order equals visual order (seeding appends after the largest existing
-  // key, and unkeyed roots already render in the post-keyed alpha tail).
+  // Drag-reorder within a custom-sorted column. Custom order is HIERARCHICAL:
+  // the target's sibling set is either its parent's children (a child drop) or
+  // the layer's roots (a root drop). The whole sibling set is seeded so every
+  // neighbor has an orderKey (creating bare entries for children / rule roots),
+  // then a fractional key is minted between the drop-position neighbors — key
+  // order always matches the current visual order. A cross-set drop (dragged
+  // and target aren't siblings) is a safe no-op; the middle band still reparents.
   const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
     if (draggedId === targetId) return
     const before = currentLayout()
-    const layerId = before.assignments[targetId]?.layerId
-      ?? sortDirectionCtxRef.current.nodeLayerMap.get(targetId)
-    if (!layerId) return
+    const ctx = siblingContext(targetId, reorderTreeRef.current)
+    if (!ctx) return
+    const { siblings, layerId } = ctx
     const layer = before.layers.find(l => l.id === layerId)
     if (!layer || layer.nodeSortMode !== 'custom') return
+    if (!siblings.includes(draggedId)) return // cross-set drop — not a reorder
 
-    // The column's current visual roots (logical wrappers can't be reordered).
-    const roots = (nodesByLayerRef.current.get(layerId) ?? [])
-      .map(n => n.id)
-      .filter(id => !id.startsWith('logical:'))
-    let layout = layerOps.setLayerNodeSortMode(before, layerId, 'custom', roots)
-
-    // Multi-select: dragging a root that is part of the current selection moves
-    // EVERY selected root of this layer as one contiguous block, preserving the
-    // block's visual order. A lone drag is just a block of one.
+    // Multi-select: dragging a node that is part of the current selection moves
+    // EVERY selected sibling as one contiguous block, preserving its visual
+    // order. A lone drag is a block of one.
     const selectedIds = useCanvasStore.getState().selectedNodeIds
     const block = selectedIds.includes(draggedId) && selectedIds.length > 1
-      ? roots.filter(id => id === draggedId || selectedIds.includes(id))
+      ? siblings.filter(id => id === draggedId || selectedIds.includes(id))
       : [draggedId]
     if (block.includes(targetId)) return // dropping into (or onto) the block itself
 
-    // A rule-assigned root has no explicit entry to carry an orderKey — reordering
-    // it is an explicit placement, so create entries in this layer for any such
-    // block member. A block member from ANOTHER layer aborts (cross-layer drops
-    // go through the assign flow, not the reorder bands).
-    for (const memberId of block) {
-      const memberLayerId = layout.assignments[memberId]?.layerId
-      if (!memberLayerId) {
-        layout = assignmentOps.assignEntities(layout, [memberId], layerId)
-      } else if (memberLayerId !== layerId) {
-        return
-      }
-    }
+    // Seed the whole sibling set so every neighbor carries an orderKey (bare
+    // entries are minted for children / rule roots that lack one).
+    const layout = assignmentOps.ensureSiblingOrderKeys(before, layerId, siblings)
 
     const blockSet = new Set(block)
-    const order = roots.filter(id => !blockSet.has(id))
+    const order = siblings.filter(id => !blockSet.has(id))
     const targetIdx = order.indexOf(targetId)
     if (targetIdx < 0) return
     const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
-    // keysForInsertion walks outward past unkeyed rule-assigned neighbors and
+    // keysForInsertion walks outward past any still-unkeyed neighbors and
     // returns null on malformed keys (refuse rather than corrupt the order).
     const newKeys = assignmentOps.keysForInsertion(layout, layerId, order, insertIdx, block.length)
     if (newKeys === null) return
@@ -1869,7 +1898,7 @@ export function ContextViewCanvas({
     block.forEach((memberId, i) => {
       after = assignmentOps.setAssignmentOrderKey(after, memberId, newKeys[i])
     })
-    if (after === layout && layout === before) return
+    if (after === before) return
     persistReferenceLayout(after)
 
     const newKey = newKeys[0]
@@ -1900,56 +1929,46 @@ export function ContextViewCanvas({
     )
   }, [currentLayout, persistReferenceLayout])
 
-  // Context-menu "Move up / Move down" for roots of a custom-sorted draft
-  // layer — the keyboard-and-mouse alternative to the drag bands (a11y: native
-  // HTML5 DnD is mouse-only). Neighbors come from the same visual root order
-  // the drag path uses.
+  // Keyboard-and-mouse reorder nudge — the a11y sibling of the drag bands
+  // (native HTML5 DnD is mouse-only). Resolves the node's sibling set (roots
+  // OR children) and delegates to handleReorderNode. Stable identity.
+  const nudgeReorder = useCallback((nodeId: string, dir: 'up' | 'down' | 'top' | 'bottom') => {
+    const ctx = siblingContext(nodeId, reorderTreeRef.current)
+    if (!ctx) return
+    const { siblings } = ctx
+    const idx = siblings.indexOf(nodeId)
+    if (idx < 0) return
+    if (dir === 'up' && idx > 0) handleReorderNode(nodeId, siblings[idx - 1], 'before')
+    else if (dir === 'down' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[idx + 1], 'after')
+    else if (dir === 'top' && idx > 0) handleReorderNode(nodeId, siblings[0], 'before')
+    else if (dir === 'bottom' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[siblings.length - 1], 'after')
+  }, [handleReorderNode])
+
+  // Context-menu "Move up / down / to top / to bottom" for any node of a
+  // custom-sorted draft layer (roots and children alike — the nudge resolves
+  // the right sibling set).
   const reorderMenuActions = useMemo<ContextMenuAction[]>(() => {
     const target = interactions.state.contextMenu.target
-    if (!isDraft || trace.isTracing || !target || target.type !== 'node') return []
-    const nodeId = target.id
-    const layerId = nodeLayerMap.get(nodeId)
-    if (!layerId) return []
-    if (sortedLayers.find(l => l.id === layerId)?.nodeSortMode !== 'custom') return []
-    const roots = (nodesByLayer.get(layerId) ?? []).filter(n => !n.isLogical).map(n => n.id)
-    const idx = roots.indexOf(nodeId)
-    if (idx < 0) return [] // children aren't manually orderable — roots only
+    if (!nodeSortingEnabled || !isDraft || trace.isTracing || !target || target.type !== 'node') return []
+    const ctx = siblingContext(target.id, { displayMap, parentMap, nodesByLayer, nodeLayerMap })
+    if (!ctx) return []
+    if (sortedLayers.find(l => l.id === ctx.layerId)?.nodeSortMode !== 'custom') return []
+    const idx = ctx.siblings.indexOf(target.id)
+    if (idx < 0) return []
+    const last = ctx.siblings.length - 1
+    const nid = target.id
+    const act = (id: string, label: string, icon: string, dir: 'up' | 'down' | 'top' | 'bottom', disabled: boolean, shortcut?: string): ContextMenuAction => ({
+      id, label, icon: icon as ContextMenuAction['icon'], shortcut, disabled,
+      onClick: () => { nudgeReorder(nid, dir); interactions.closeContextMenu() },
+    })
     return [
-      {
-        id: 'reorder-top',
-        label: 'Move to top',
-        icon: 'ArrowUpToLine',
-        disabled: idx === 0,
-        onClick: () => {
-          handleReorderNode(nodeId, roots[0], 'before')
-          interactions.closeContextMenu()
-        },
-      },
-      {
-        id: 'reorder-up',
-        label: 'Move up',
-        icon: 'ArrowUp',
-        shortcut: '⌥↑',
-        disabled: idx === 0,
-        onClick: () => {
-          handleReorderNode(nodeId, roots[idx - 1], 'before')
-          interactions.closeContextMenu()
-        },
-      },
-      {
-        id: 'reorder-down',
-        label: 'Move down',
-        icon: 'ArrowDown',
-        shortcut: '⌥↓',
-        disabled: idx === roots.length - 1,
-        onClick: () => {
-          handleReorderNode(nodeId, roots[idx + 1], 'after')
-          interactions.closeContextMenu()
-        },
-      },
+      act('reorder-top', 'Move to top', 'ArrowUpToLine', 'top', idx === 0),
+      act('reorder-up', 'Move up', 'ArrowUp', 'up', idx === 0, '⌥↑'),
+      act('reorder-down', 'Move down', 'ArrowDown', 'down', idx === last, '⌥↓'),
+      act('reorder-bottom', 'Move to bottom', 'ArrowDownToLine', 'bottom', idx === last),
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, isDraft, trace.isTracing, nodeLayerMap, sortedLayers, nodesByLayer, handleReorderNode])
+  }, [interactions.state.contextMenu.target, nodeSortingEnabled, isDraft, trace.isTracing, displayMap, parentMap, nodeLayerMap, sortedLayers, nodesByLayer, nudgeReorder])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -3985,6 +4004,7 @@ export function ContextViewCanvas({
                 // list but neighbor keys are computed from the full one.
                 reorderEnabled={nodeSortingEnabled && isDraft && layer.nodeSortMode === 'custom' && !trace.isTracing}
                 onReorderDrop={handleReorderNode}
+                onReorderNudge={nudgeReorder}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}

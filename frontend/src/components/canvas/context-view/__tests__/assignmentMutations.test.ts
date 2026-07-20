@@ -10,6 +10,7 @@ import {
   lastOrderKeyInLayer,
   keyForInsertion,
   keysForInsertion,
+  ensureSiblingOrderKeys,
 } from '../assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
@@ -335,5 +336,48 @@ describe('assignmentMutations — keysForInsertion (multi-select block reorder)'
     const keys = keysForInsertion(l, 'l1', ['x', 'y'], 1, 2)
     expect(keys).toHaveLength(2)
     expect(keys![0] > 'a5' && keys![1] > keys![0]).toBe(true)
+  })
+})
+
+describe('assignmentMutations — ensureSiblingOrderKeys (hierarchical seeding)', () => {
+  const entry = (layerId: string, orderKey?: string): LayerAssignmentEntry => ({
+    layerId,
+    inheritsChildren: true,
+    ...(orderKey ? { orderKey } : {}),
+  })
+  const layoutWith = (assignments: Record<string, LayerAssignmentEntry>): NormalizedReferenceLayout => ({
+    layers: [{ id: 'l1', name: 'L1', order: 0, entityTypes: [], nodeSortMode: 'custom' }],
+    assignments,
+  })
+
+  it('seeds unkeyed siblings in visual order, CREATING entries for entry-less children', () => {
+    // A, B, C are children with NO assignment entries (they inherit their layer).
+    const out = ensureSiblingOrderKeys(layoutWith({}), 'l1', ['A', 'B', 'C'])
+    const ka = out.assignments['A'].orderKey
+    const kb = out.assignments['B'].orderKey
+    const kc = out.assignments['C'].orderKey
+    expect(ka && kb && kc && ka < kb && kb < kc).toBe(true) // key order == visual order
+    // Created entries carry the layer + are inert orderKey carriers.
+    expect(out.assignments['A'].layerId).toBe('l1')
+    expect(out.assignments['A'].inheritsChildren).toBe(true)
+  })
+
+  it('is a no-op (same layout) when every sibling is already keyed', () => {
+    const input = layoutWith({ A: entry('l1', 'a0'), B: entry('l1', 'a1') })
+    expect(ensureSiblingOrderKeys(input, 'l1', ['A', 'B'])).toBe(input)
+  })
+
+  it('appends unkeyed siblings after the set max, preserving existing keys', () => {
+    const input = layoutWith({ A: entry('l1', 'a1'), B: entry('l1') })
+    const out = ensureSiblingOrderKeys(input, 'l1', ['A', 'B'])
+    expect(out.assignments['A'].orderKey).toBe('a1') // untouched
+    expect((out.assignments['B'].orderKey ?? '') > 'a1').toBe(true)
+  })
+
+  it('scopes the max to THIS sibling set (independent child/root key sequences)', () => {
+    // A root set already keyed to a9; a fresh child set should start low, not after a9.
+    const input = layoutWith({ root: entry('l1', 'a9'), childA: entry('l1'), childB: entry('l1') })
+    const out = ensureSiblingOrderKeys(input, 'l1', ['childA', 'childB'])
+    expect((out.assignments['childA'].orderKey ?? 'z') < 'a9').toBe(true)
   })
 })
