@@ -1,6 +1,6 @@
 """Rebrand the default branding singleton — Nexus Lineage → Context Visualization Platform.
 
-Revision ID: 20260719_1200_rebrand_default_branding
+Revision ID: 20260719_1200_rebrand_branding
 Revises: 20260714_1600_feature_changes
 Create Date: 2026-07-19 12:00
 
@@ -27,7 +27,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260719_1200_rebrand_default_branding"
+revision: str = "20260719_1200_rebrand_branding"
 down_revision: Union[str, None] = "20260714_1600_feature_changes"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

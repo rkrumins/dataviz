@@ -7,7 +7,7 @@ Create Date: 2026-07-20 12:00
 Both chains fork from ``20260714_1600_feature_changes``:
 
 * freshness cockpit → ``20260718_1200_refresh_events`` → ``20260719_1200_agg_cadence``
-* product events    → ``20260719_1200_rebrand_default_branding`` → ``20260719_1400_product_events``
+* product events    → ``20260719_1200_rebrand_branding`` → ``20260719_1400_product_events``
 
 They touch disjoint tables (``aggregation.refresh_events`` /
 ``aggregation.data_source_state`` / ``aggregation.aggregation_settings`` vs.
