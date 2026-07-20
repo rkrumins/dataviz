@@ -222,12 +222,16 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
       {fetchState === 'error' && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-          <span>Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s loaded on the canvas.</span>
+          <span className="min-w-0">Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s loaded on the canvas.</span>
+          {/* A real, obvious hit target — the old text-link retry was
+              easy to miss and hard to click. Force-clears the cache for
+              this node so it always re-attempts, even after a prior fail. */}
           <button
             type="button"
             onClick={() => sourceFetch.retry(nodeId)}
-            className="ml-auto flex-shrink-0 font-semibold hover:underline"
+            className="ml-auto flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
           >
+            <LucideIcons.RotateCw className="w-3 h-3" />
             Retry
           </button>
         </div>

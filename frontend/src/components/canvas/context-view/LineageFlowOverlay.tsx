@@ -282,9 +282,18 @@ export function LineageFlowOverlay({
     const trailingEdges: OverflowEdge[] = []
     const bucketStubCount = new Map<string, number>()
 
-    // Helper: look up or cache a DOM element
+    // Helper: look up or cache a DOM element. A cached element that has
+    // DETACHED (expand/collapse and the virtualizer remount rows under
+    // the SAME layer-node-* id) must never be reused — its
+    // getBoundingClientRect returns stale coordinates, which is exactly
+    // how ghost ribbons/badges end up drawn over empty canvas. Validate
+    // isConnected and re-query when stale.
     const getEl = (id: string): HTMLElement | null => {
       let el = elementCache.get(id) || null
+      if (el && !el.isConnected) {
+        elementCache.delete(id)
+        el = null
+      }
       if (!el) {
         el = document.getElementById(id)
         if (el) elementCache.set(id, el)
@@ -1073,12 +1082,25 @@ export function LineageFlowOverlay({
       observedElements.delete(el)
       resizeObserver.unobserve(el)
       visibilityObserver.unobserve(el)
-      if (el.id) globalVisibleNodes.delete(el.id)
+      if (el.id) {
+        globalVisibleNodes.delete(el.id)
+        // Evict the detached element so a remount re-queries a fresh
+        // one instead of anchoring to a stale rect (ghost marks).
+        elementCacheRef.current.delete(el.id)
+      }
     }
 
     // The overlay is a sibling of the layer columns, so we need to observe
     // the common parent that contains both.
     const observeRoot = container.parentElement || container
+
+    // Observe the CONTAINER itself, not just the node rows. Opening/closing
+    // the EntityDrawer (or any panel) narrows the canvas without necessarily
+    // resizing the fixed-width columns — so node ResizeObservers may never
+    // fire, leaving ribbons/badges anchored to their pre-drawer positions.
+    // A container-level observer guarantees a redraw on that width change.
+    resizeObserver.observe(observeRoot)
+    if (observeRoot !== container) resizeObserver.observe(container)
 
     // Scan for already-present node elements. SEED visibility synchronously
     // from rect math (mirroring the IO config: window root + 100px margin):
