@@ -163,16 +163,18 @@ class _MixedOutcomeSvc:
 
 
 class _ActionsAndDeferredSvc:
-    """Every call returns a fixed, non-empty ``actions`` list and
-    ``deferred=True`` — proves the runner threads ``RefreshResponse``'s
-    actions/deferred into the batch item verbatim, not just whatever
-    ``BatchItemResult``'s own defaults happen to be."""
+    """Varies actions/deferred PER SOURCE rather than returning the same
+    constant for every ds — proves the runner threads each item's OWN
+    ``RefreshResponse.actions``/``.deferred`` through, not a value hardcoded
+    once in the runner and reused for every item regardless of what
+    refresh_source actually returned for it."""
 
     async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
         return _resp(
             job_id=f"job-{ds_id}",
-            actions=["content_cleared", "rebuild_queued"],
-            deferred=True,
+            actions=(["content_cleared", "rebuild_queued"]
+                     if ds_id == "ds-labelled" else ["read_caches_refreshed"]),
+            deferred=(ds_id == "ds-cooldown"),
         )
 
 
@@ -312,9 +314,11 @@ def test_batch_item_threads_name_actions_and_deferred_from_response():
     labelled = json.loads(hash_["ds:ds-labelled"])
     assert labelled["name"] == "Solidatus Perf Xlarge"
     assert labelled["actions"] == ["content_cleared", "rebuild_queued"]
+    assert labelled["deferred"] is False
     cooldown = json.loads(hash_["ds:ds-cooldown"])
     assert cooldown["name"] is None
     assert cooldown["deferred"] is True
+    assert cooldown["actions"] == ["read_caches_refreshed"]
 
 
 # ── Concurrency bound ─────────────────────────────────────────────────
