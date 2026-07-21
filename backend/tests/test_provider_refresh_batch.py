@@ -139,8 +139,8 @@ class _FailNthCommitSessionFactory:
         return _CommitFailCM(fail=(self.calls == self._fail_at_call))
 
 
-def _resp(job_id="job-1"):
-    return types.SimpleNamespace(job_id=job_id, actions=[], deferred=False)
+def _resp(job_id="job-1", actions=None, deferred=False):
+    return types.SimpleNamespace(job_id=job_id, actions=list(actions or []), deferred=deferred)
 
 
 class _AllSucceedSvc:
@@ -160,6 +160,20 @@ class _MixedOutcomeSvc:
         if ds_id in self._fail_ids:
             raise RuntimeError(f"boom: {ds_id}")
         return _resp(job_id=f"job-{ds_id}")
+
+
+class _ActionsAndDeferredSvc:
+    """Every call returns a fixed, non-empty ``actions`` list and
+    ``deferred=True`` — proves the runner threads ``RefreshResponse``'s
+    actions/deferred into the batch item verbatim, not just whatever
+    ``BatchItemResult``'s own defaults happen to be."""
+
+    async def refresh_source(self, ds_id, session, *, scope, force, actor, origin):
+        return _resp(
+            job_id=f"job-{ds_id}",
+            actions=["content_cleared", "rebuild_queued"],
+            deferred=True,
+        )
 
 
 class _ScopeCapturingSvc:
@@ -279,6 +293,28 @@ def test_batch_forwards_clear_scope_to_every_source():
     assert svc.scopes == {d: "clear" for d in ds_ids}
     hash_ = redis.hashes["refreshbatch:batch-clear"]
     assert hash_["state"] == "done"
+
+
+def test_batch_item_threads_name_actions_and_deferred_from_response():
+    """Pins the runner's own item-building, not just BatchItemResult in
+    isolation (see the two model-only tests near the bottom of this file):
+    the source's label, RefreshResponse.actions, and RefreshResponse.deferred
+    must all reach the batch hash. Two rows — one labelled, one not — also
+    pin the nullable-label path."""
+    redis = _FakeRedis()
+    _run(cp._run_provider_batch(
+        "batch-named", "prov-1",
+        [("ds-labelled", "Solidatus Perf Xlarge"), ("ds-cooldown", None)],
+        _req(),
+        svc=_ActionsAndDeferredSvc(), session_factory=_session_factory, redis=redis,
+    ))
+    hash_ = redis.hashes["refreshbatch:batch-named"]
+    labelled = json.loads(hash_["ds:ds-labelled"])
+    assert labelled["name"] == "Solidatus Perf Xlarge"
+    assert labelled["actions"] == ["content_cleared", "rebuild_queued"]
+    cooldown = json.loads(hash_["ds:ds-cooldown"])
+    assert cooldown["name"] is None
+    assert cooldown["deferred"] is True
 
 
 # ── Concurrency bound ─────────────────────────────────────────────────

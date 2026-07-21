@@ -719,7 +719,7 @@ async def source_freshness(
 # "batch-item" scope forced through ``refresh_source``.
 #
 # G2 reuses this SAME runner for a fleet-wide batch over EVERY live data
-# source across every provider — the only differences are how ``ds_ids``
+# source across every provider — the only differences are how ``ds_rows``
 # is enumerated (unscoped vs. one provider, see ``_live_ds_rows``) and the
 # lock's scope id (``_FLEET_LOCK_SCOPE`` vs. a provider id). A fleet batch
 # does NOT also acquire every per-provider lock — a fleet batch and a
@@ -810,8 +810,12 @@ async def _live_ds_rows(
 ) -> List[Tuple[str, Optional[str]]]:
     """(id, label) of every live (non-tombstoned) data source — the same
     ``deleted_at IS NULL`` base filter ``assemble_fleet_freshness`` applies
-    for the freshness cockpit read. The label rides along so batch results
-    can name a source without a second query per item."""
+    for the freshness cockpit read. One helper backs both the per-provider
+    batch route (``provider_id`` set) and the fleet-wide one
+    (``provider_id=None``), so the two share one query shape instead of
+    hand-rolling a second, potentially drifting, copy of the filter. The
+    label rides along so batch results can name a source without a second
+    query per item."""
     from backend.app.db.models import WorkspaceDataSourceORM
 
     q = select(
