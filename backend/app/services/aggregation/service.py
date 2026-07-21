@@ -488,10 +488,13 @@ class AggregationService:
         can_create = status in ("ready", "skipped")
         is_ready = status == "ready"
 
-        # Check for drift using the aggregation-owned fingerprint
+        # Check for drift using the aggregation-owned fingerprint, and read the
+        # cube's depth-stamp contract version — both off the SAME provider fetch
+        # so a ready data source pays at most one provider resolution here.
         drift = False
+        stamp_version: Optional[int] = None
         _DRIFT_TIMEOUT = float(__import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
-        if is_ready and state.graph_fingerprint:
+        if is_ready:
             try:
                 provider = await asyncio.wait_for(
                     self._registry.get_provider_for_workspace(
@@ -499,13 +502,26 @@ class AggregationService:
                     ),
                     timeout=_DRIFT_TIMEOUT,
                 )
-                current_fp = await asyncio.wait_for(
-                    compute_graph_fingerprint(provider),
-                    timeout=_DRIFT_TIMEOUT,
-                )
-                drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+                # Depth-stamp contract version — an O(1) _AggMeta singleton read
+                # (cached ~5min on the provider), NOT the forbidden all-edges
+                # scan. stamp_version < 2 ⇒ pre-depth cube ⇒ self-nesting reads
+                # degenerate until re-aggregated. FalkorDB-only; other providers
+                # lack the method, so it stays None (no warning).
+                _run_meta = getattr(provider, "_aggregation_run_meta", None)
+                if _run_meta is not None:
+                    try:
+                        meta = await asyncio.wait_for(_run_meta(), timeout=_DRIFT_TIMEOUT)
+                        stamp_version = meta.stamp_version
+                    except Exception:
+                        pass
+                if state.graph_fingerprint:
+                    current_fp = await asyncio.wait_for(
+                        compute_graph_fingerprint(provider),
+                        timeout=_DRIFT_TIMEOUT,
+                    )
+                    drift = not fingerprints_match(state.graph_fingerprint, current_fp)
             except Exception:
-                pass  # Can't check drift — don't block
+                pass  # Can't reach the graph — don't block or false-warn
 
         messages = {
             "none": "Aggregation has not been configured. Aggregate or skip to create views.",
@@ -525,6 +541,10 @@ class AggregationService:
             drift_detected=drift,
             last_aggregated_at=state.last_aggregated_at,
             aggregation_edge_count=state.aggregation_edge_count or 0,
+            aggregation_stamp_version=stamp_version,
+            # A ready cube stamped below v2 predates depth stamps — rebuild to
+            # restore depth-accurate (self-nesting) hierarchy reads.
+            needs_rebuild=bool(is_ready and stamp_version is not None and stamp_version < 2),
             message=messages.get(status, "Unknown status."),
         )
 

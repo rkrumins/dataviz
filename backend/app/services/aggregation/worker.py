@@ -545,9 +545,19 @@ class AggregationWorker:
                     from backend.insights_service.enqueue import mark_stats_changed
                     await mark_stats_changed(job.data_source_id, job.workspace_id)
 
+                # created_edges is the desired-cube total (used for the
+                # readiness edge count). It is NOT how many edges this run
+                # wrote — a steady-state re-run finds the cube already present
+                # and writes zero. Report both so a genuine write is never
+                # confused with a no-op reconcile ("49747 created" while
+                # writes=0 previously read as if 49747 edges were persisted).
+                _run_writes = result.get("writes", 0)
+                _run_deletes = result.get("deletes", 0)
                 logger.info(
-                    "Aggregation job %s completed: %d edges processed, %d AGGREGATED created",
+                    "Aggregation job %s completed: %d edges processed, "
+                    "%d AGGREGATED edges in cube (%d written, %d deleted this run)",
                     job_id, job.processed_edges, job.created_edges,
+                    _run_writes, _run_deletes,
                 )
 
             except asyncio.TimeoutError as timeout_exc:

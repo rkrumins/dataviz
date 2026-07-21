@@ -47,7 +47,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 POLL_INTERVAL_S = 10.0
 JOB_TIMEOUT_S = float(os.getenv("REMAT_JOB_TIMEOUT_S", "3600"))
-TERMINAL_STATES = {"succeeded", "failed", "cancelled", "skipped"}
+# Aggregation job terminal statuses per the ck_agg_jobs_status CHECK constraint
+# (aggregation/models.py): pending | running | completed | failed | cancelled.
+# There is NO "succeeded"/"skipped" job status — polling for those made this
+# script hang the full JOB_TIMEOUT_S on every data source and report success as
+# failure.
+TERMINAL_STATES = {"completed", "failed", "cancelled"}
+SUCCESS_STATE = "completed"
 
 
 def _pg_dsn() -> str:
@@ -172,7 +178,7 @@ async def main() -> int:
                     print("    dry-run: would trigger")
                     continue
                 state = await _trigger_and_wait(client, args.control_plane, ds_id)
-                if state != "succeeded":
+                if state != SUCCESS_STATE:
                     results[ds_id] = f"job {state}"
                     print(f"    job ended: {state}")
                     continue
