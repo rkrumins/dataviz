@@ -31,6 +31,7 @@ from backend.common.models.management import (
     OntologyDefinitionResponse,
     OntologyCoverageResponse,
     OntologyMatchResult,
+    TypeCaseDrift,
     OntologyResolutionResponse,
     OntologyResolutionRelGap,
     OntologyResolutionHierarchyGap,
@@ -1391,6 +1392,7 @@ async def suggest_ontology(
     graph_types = graph_entity_ids | graph_rel_ids
 
     from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+    from backend.app.ontology import adoption
 
     matches = []
     if graph_types:
@@ -1428,6 +1430,18 @@ async def suggest_ontology(
                         uncategorized_rels.append(_rid)
                 uncategorized_rels.sort()
 
+                # Case-drift: physical edge spellings that match a declared type case-INSENSITIVELY
+                # but not exactly (`To` vs declared `TO`) — present but missing FalkorDB's per-label
+                # index. Reuse the SAME engine Health's adoption view uses so the two never disagree.
+                _edge_drift = adoption.classify_dimension(
+                    declared=list(rel_defs.keys()),
+                    physical=[{"id": s.id, "count": getattr(s, "count", 0)} for s in stats.edge_type_stats],
+                )
+                case_drift_rels = [
+                    TypeCaseDrift(id=d.id, declared=d.declared, count=d.count)
+                    for d in _edge_drift.case_drift
+                ]
+
                 matches.append(OntologyMatchResult(
                     ontologyId=ont.id,
                     ontologyName=ont.name,
@@ -1440,6 +1454,7 @@ async def suggest_ontology(
                     totalEntityTypes=len(ont_entity_ids),
                     totalRelationshipTypes=len(ont_rel_ids),
                     uncategorizedRelationshipTypes=uncategorized_rels,
+                    caseDriftRelationshipTypes=case_drift_rels,
                 ))
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)
