@@ -723,6 +723,33 @@ class AggregationPipeline:
                 "— alias-map-only spelling matching this run.",
                 self.p._graph_name, exc,
             )
+        # The schema-catalog procedure can return EMPTY even when the graph
+        # holds edges (a stale/partial catalog on some engines) — the exact
+        # failure that left declared ``TO`` scanning nothing and folded the
+        # hierarchy flat. Recover the observed vocabulary with the SAME
+        # edge-type scan ``get_ontology_metadata`` already falls back to, so
+        # the case-fold union below always has a real vocabulary to match
+        # against. O(#edges), but only on the empty path (never for a healthy
+        # catalog), and the scan-timeout still bounds it.
+        if not rels:
+            try:
+                res = await self.p._ro_query(
+                    "MATCH ()-[r]->() RETURN DISTINCT type(r)",
+                    timeout=_scan_timeout_s(),
+                )
+                rels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
+                if rels:
+                    logger.info(
+                        "aggregation pipeline on %s: db.relationshipTypes() was "
+                        "empty; recovered %d edge type(s) via edge scan.",
+                        self.p._graph_name, len(rels),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "aggregation pipeline on %s: edge-type fallback scan failed "
+                    "(%s) — declared casing only this run.",
+                    self.p._graph_name, exc,
+                )
         self._observed_rels = rels
         self._observed_labels = labels
 

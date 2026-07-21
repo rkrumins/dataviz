@@ -2378,8 +2378,37 @@ class FalkorDBProvider(GraphDataProvider):
         levels = getattr(self, "_entity_type_levels", None) or {}
         return max(2 * len(levels), 16)
 
+    def _floor_case_fold(self, types, observed):
+        """Universal case-fold floor: union each resolved type with every
+        observed spelling that shares its case-fold, so a declared ``TO``
+        still resolves to a graph's ``To``/``to`` even when the injected
+        alias map is empty (a governed-but-drifted source, or introspection
+        that came back empty). Monotonic — only ADDS same-casefold spellings
+        the graph actually has; it never drops a type, so a mismatched cache
+        can't make a query miss. Mirrors the aggregation pipeline's
+        ``_fold_expand`` at the read-path choke point every consumer flows
+        through (trace / top-level / containment / lineage accessors)."""
+        if not types or not observed:
+            return types
+        by_fold: Dict[str, List[str]] = {}
+        for o in observed:
+            by_fold.setdefault(str(o).casefold(), []).append(str(o))
+        out: List[str] = list(types)
+        have = set(out)
+        for t in list(out):
+            for variant in by_fold.get(str(t).casefold(), []):
+                if variant not in have:
+                    have.add(variant)
+                    out.append(variant)
+        return set(out) if isinstance(types, (set, frozenset)) else out
+
     def _alias_rel_types(self, types):
-        return self._alias_types(types, "_source_rel_aliases")
+        # Alias translation first (declared → the source's mapped spelling),
+        # then a case-fold floor from the reliably-probed observed vocabulary
+        # (populated by get_ontology_metadata, which has an edge-scan fallback)
+        # so an empty/partial alias map can never cause a silent case miss.
+        aliased = self._alias_types(types, "_source_rel_aliases")
+        return self._floor_case_fold(aliased, getattr(self, "_observed_rel_types", None))
 
     def _alias_entity_types(self, types):
         return self._alias_types(types, "_source_entity_aliases")
@@ -8185,7 +8214,13 @@ class FalkorDBProvider(GraphDataProvider):
             try:
                 cached = await self._redis.get(cache_key)
                 if cached:
-                    return OntologyMetadata(**json.loads(cached))
+                    cached_meta = OntologyMetadata(**json.loads(cached))
+                    # Keep the sync case-fold floor (_alias_rel_types) warm even
+                    # on a cache hit: the metadata's edge-type keys ARE the
+                    # observed physical spellings, so trace/top-level resolve
+                    # declared→physical correctly without re-probing the graph.
+                    self._observed_rel_types = set(cached_meta.edge_type_metadata or {})
+                    return cached_meta
             except Exception:
                 pass
 
@@ -8228,7 +8263,13 @@ class FalkorDBProvider(GraphDataProvider):
                 "MATCH ()-[r]->() RETURN DISTINCT type(r)", op="ontology.edge_scan",
             )
             all_types = [row[0] for row in (type_res.result_set or [])]
-        
+
+        # Feed the sync case-fold floor (_alias_rel_types) the observed
+        # vocabulary discovered here (catalog ∪ edge-scan fallback), so every
+        # read-path consumer resolves declared→physical case variants without
+        # depending on the injected per-source alias map being non-empty.
+        self._observed_rel_types = {str(t) for t in all_types if t}
+
         # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
         resolved_meta = getattr(self, "_resolved_edge_metadata", None)
         resolved_lineage = getattr(self, "_resolved_lineage_types", None)
