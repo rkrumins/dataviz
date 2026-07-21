@@ -11,7 +11,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn } = vi.hoisted(() => ({
+const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
     getSourceDoc: vi.fn(),
@@ -20,6 +20,7 @@ const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProvid
     listProviders: vi.fn(),
     listWorkspaces: vi.fn(),
     permissionFn: vi.fn(),
+    listJobsGlobal: vi.fn(),
 }))
 
 vi.mock('@/store/auth', () => ({
@@ -42,6 +43,7 @@ vi.mock('@/services/freshnessService', async () => {
 })
 vi.mock('@/services/providerService', () => ({ providerService: { list: listProviders } }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: listWorkspaces } }))
+vi.mock('@/services/aggregationService', () => ({ aggregationService: { listJobsGlobal } }))
 
 // jsdom lacks the pointer-capture + scroll APIs Radix calls when a menu opens.
 beforeAll(() => {
@@ -107,6 +109,8 @@ describe('Freshness cockpit', () => {
         refreshSource.mockResolvedValue({ scope: 'read-caches', gate: 'n/a', changed: true, actions: [], deferred: false })
         listProviders.mockResolvedValue([{ id: 'prov-1', name: 'Warehouse' }])
         listWorkspaces.mockResolvedValue([{ id: 'ws-1', name: 'Analytics' }])
+        // Default: no active jobs, so unrelated tests see no live-progress badges.
+        listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
         // Default: caller can manage sources (rows show actions); not admin.
         permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
     })
@@ -572,6 +576,30 @@ describe('Freshness cockpit', () => {
         // stops the poll (no runaway refetch).
         expect(await screen.findByText('Refresh complete')).toBeInTheDocument()
         expect(getBatch).toHaveBeenCalledTimes(1)
+    })
+
+    // ── Join coverage — index.tsx wires useActiveJobs into each row via
+    // activeJobs.byDataSource.get(row.dataSourceId). The rebuild-progress
+    // tests below construct the `job` prop by hand directly on FreshnessRow,
+    // so this is the only test that exercises the real map lookup.
+    it('joins a live job from useActiveJobs onto its row through the real dataSourceId map', async () => {
+        listJobsGlobal.mockResolvedValue({
+            items: [{
+                id: 'job-1', dataSourceId: 'ds-1', status: 'running', triggerSource: 'api',
+                currentPhase: 'computing', progress: 62, totalEdges: 10, processedEdges: 6,
+                createdEdges: 0, batchSize: 1000, resumable: false, retryCount: 0, createdAt: recent,
+            }],
+            total: 1, limit: 100, offset: 0,
+        })
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [{ ...fleet.rows[0], runningJobId: 'job-1' }, fleet.rows[1]],
+        })
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
+        expect(screen.getByText(/Computing rollups/)).toBeInTheDocument()
+        expect(screen.getByText(/62%/)).toBeInTheDocument()
     })
 })
 
