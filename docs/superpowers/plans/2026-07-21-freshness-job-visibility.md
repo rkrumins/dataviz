@@ -1147,11 +1147,11 @@ def test_batch_item_reports_name_actions_and_deferral():
         name="Solidatus Perf Xlarge",
         outcome="done",
         jobId="job_9",
-        actions=["content_cleared", "gen_bumped", "job_queued"],
+        actions=["content_cleared", "hierarchy_invalidated", "rebuild_queued"],
         deferred=False,
     )
     assert item.name == "Solidatus Perf Xlarge"
-    assert "job_queued" in item.actions
+    assert "rebuild_queued" in item.actions
     assert item.deferred is False
 
 
@@ -1319,7 +1319,7 @@ import { BatchResultsList, describeActions } from './BatchResultsList'
 
 const results = [
     { dataSourceId: 'ds_1', name: 'Solidatus Perf Xlarge', outcome: 'done' as const,
-      jobId: 'job_1', actions: ['content_cleared', 'job_queued'], deferred: false },
+      jobId: 'job_1', actions: ['content_cleared', 'rebuild_queued'], deferred: false },
     { dataSourceId: 'ds_2', name: 'Nexus Lineage', outcome: 'done' as const,
       jobId: null, actions: ['content_cleared'], deferred: false },
     { dataSourceId: 'ds_3', name: 'Manual Lineage', outcome: 'done' as const,
@@ -1355,7 +1355,7 @@ describe('BatchResultsList', () => {
 
 describe('describeActions', () => {
     it('humanizes known actions', () => {
-        expect(describeActions(['content_cleared', 'job_queued'])).toBe('cache cleared · rebuild queued')
+        expect(describeActions(['content_cleared', 'rebuild_queued'])).toBe('cache cleared · rebuild queued')
     })
 
     it('passes unknown actions through rather than hiding them', () => {
@@ -1395,12 +1395,19 @@ import { jobHistoryPath } from '../job-history/shared'
 /** Raw action ids → operator language. Unknown ids are humanized, never
  *  hidden: a silently-dropped action is how a report starts lying. */
 const ACTION_COPY: Record<string, string> = {
-    marker_set: 'flagged as changed',
+    // Verified against refresh_source in aggregation/service.py — these are
+    // the literal strings it appends, not a paraphrase of them.
     content_cleared: 'cache cleared',
-    gen_bumped: 'cached views invalidated',
-    lkg_purged: 'fallback snapshot dropped',
+    hierarchy_invalidated: 'cached views invalidated',
+    aggregated_lkg_purged: 'fallback snapshot dropped',
     stats_nudged: 'figures refreshed',
-    job_queued: 'rebuild queued',
+    marker_set: 'flagged as changed',
+    marker_cleared: 'stale flag cleared',
+    invalidated: 'caches invalidated',
+    rebuild_queued: 'rebuild queued',
+    rebuild_deferred: 'rebuild deferred',
+    rebuild_conflict: 'rebuild already running',
+    rebuild_error: 'rebuild could not be queued',
 }
 
 export function describeActions(actions: string[]): string {
