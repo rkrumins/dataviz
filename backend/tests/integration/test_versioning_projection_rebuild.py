@@ -139,15 +139,19 @@ async def _run_drift() -> None:
     assert rep.pg_nodes == rep.falkor_nodes == 2 and rep.pg_edges == rep.falkor_edges == 1
     assert not rep.missing_nodes and not rep.extra_nodes
 
-    # drop B (and its incident edge E1) straight out of the cache → reconcile reports both missing.
+    # drop B (and its incident edge E1) straight out of the cache → reconcile reports B missing; the
+    # dropped edge surfaces as a DISTINCT-triple COUNT shortfall, NOT an id sample. Edge id-samples
+    # are collapse-noise (N parallel edges share ONE FalkorDB relationship, so a "missing" id is not
+    # edge loss) so reconcile no longer reports them — edge COVERAGE is owned by the triple count.
     g = fake.graphs[name]
     g.nodes.pop(g.node("B")["urn"])
     g.edges.pop("E1")
     rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid)
     assert rep.in_sync is False
     assert [m["entityId"] for m in rep.missing_nodes] == ["B"], rep.missing_nodes
-    assert rep.missing_edges == ["E1"], rep.missing_edges
-    assert rep.falkor_nodes == 1 and rep.falkor_edges == 0        # counts caught it too
+    assert rep.missing_edges == [], rep.missing_edges             # id-samples dropped (collapse-noise)
+    assert rep.falkor_nodes == 1 and rep.falkor_edges == 0        # counts caught both
+    assert rep.pg_edges == 1 and rep.falkor_edges == 0            # triple-count shortfall = edge coverage signal
 
     # rebuild + project → cache is whole again, reconcile clean.
     assert await svc.request_projection_rebuild(gid) is True

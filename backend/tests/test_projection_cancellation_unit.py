@@ -132,19 +132,19 @@ def test_cancelled_during_client_acquisition_does_not_strand_status(monkeypatch)
     assert ps.last_error == "projection cancelled (timeout)", ps.last_error
 
 
-def test_cancelled_full_seed_pins_target_to_stop_wipe_loop(monkeypatch):
-    # A full seed (projected=0) DROPs the graph, so a cancel-by-timeout mid-run must PIN target down
-    # to the un-advanced seq — else the poll loop (projected < target) re-selects it and re-DROPs
-    # forever, wiping the cache every cycle. Pinning makes project_pending stop; a manual rebuild
-    # re-arms target=head.
+def test_cancelled_full_seed_stays_retryable(monkeypatch):
+    # A full seed (projected=0) cancelled by a SHORT-budget caller (project_now's 10s interactive
+    # ceiling, e.g. a first-import / post-eviction reseed) must NOT pin target — it DEFERS to the
+    # async worker, which re-runs with the 900s budget. Pinning would strand the graph un-projected
+    # (the nudge/worker could never rescue it). The wipe-loop is prevented by the now-fast verify, not
+    # by pinning here.
     ps = asyncio.run(_run(monkeypatch, hang_at="apply", projected=0, target=5))
-    assert ps.status == "idle", ps.status
-    assert ps.target_commit_seq == 0, ps.target_commit_seq   # pinned to projected → loop broken
+    assert ps.status == "idle", ps.status                    # not stranded at "rebuilding"
+    assert ps.target_commit_seq == 5, ps.target_commit_seq   # untouched → project_pending re-selects
 
 
-def test_cancelled_incremental_leaves_target_retryable(monkeypatch):
-    # An incremental window (projected>0) never DROPs, so a cancel there must NOT pin target — the
-    # window stays retryable (the worker re-projects it on the next poll / commit).
+def test_cancelled_incremental_stays_retryable(monkeypatch):
+    # An incremental window is likewise left retryable (the worker re-projects it on the next poll).
     ps = asyncio.run(_run(monkeypatch, hang_at="apply", projected=3, target=5))
     assert ps.status == "idle", ps.status
-    assert ps.target_commit_seq == 5, ps.target_commit_seq   # untouched → still retryable
+    assert ps.target_commit_seq == 5, ps.target_commit_seq

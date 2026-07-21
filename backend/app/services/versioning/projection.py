@@ -457,19 +457,16 @@ class FalkorProjector:
                                          else str(exc)[:500])
                         ps.progress_done = None          # don't strand a stale progress bar
                         ps.progress_total = None
-                        # WIPE-LOOP GUARD — CANCELLATION only. A full seed DROPs the graph at line
-                        # ~374; if it is then CANCELLED by the rebuild's `wait_for` timeout (a verify
-                        # or apply too slow to finish in the budget), re-selecting it just re-DROPs and
-                        # re-times-out — an endless DROP→reseed→cancel→repeat that wipes the cache every
-                        # cycle (edges visibly vanish). Pin target to the un-advanced seq (as the clean
-                        # verify-failure path does at ~431) so project_pending (projected < target)
-                        # stops re-running it; a manual rebuild (re-arms target=head) or a new commit
-                        # retries it. ONLY on cancel + full seed: a plain EXCEPTION (e.g. a transient
-                        # FalkorDB blip, or a failed synchronous rebuild that deliberately "defers to
-                        # the async worker") MUST stay retryable — pinning it there would strand the
-                        # graph un-projected. An incremental window never DROPs, so it is never pinned.
-                        if cancelled and from_seq <= 0:
-                            ps.target_commit_seq = ps.projected_commit_seq
+                        # NB: do NOT pin target on a cancel here. The original "Rebuild fast read layer"
+                        # wipe-loop was driven by the O(N²) verify blowing past the 900s rebuild budget
+                        # and being cancelled — that root cause is fixed (the verify is now an O(N+E)
+                        # single scan, size-gated), so a full seed completes well inside the budget and
+                        # is not cancelled. A cancel now means a SHORT-budget caller gave up
+                        # (project_now's 10s interactive ceiling — common for a first-import / post-
+                        # eviction full seed) and DEFERS to the async worker, which re-runs with the
+                        # 900s budget. Pinning target here would strand that graph un-projected (the
+                        # nudge/worker could never rescue it) — the very regression an adversarial
+                        # review caught. Leave projected<target so project_pending re-selects it.
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the

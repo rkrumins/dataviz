@@ -93,16 +93,27 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
     (:func:`pg_live_counts`) therefore reports a false shortfall on ANY graph with parallel edges and
     holds the rebuild back forever. Counting DISTINCT triples models the collapse exactly: a genuine
     dropped triple still shows as a shortfall, an extra still shows as a surplus. Nodes never collapse,
-    so the node count is unchanged. O(E) — one indexed aggregation, not per-edge."""
+    so the node count is unchanged. O(E) — one indexed aggregation, not per-edge.
+
+    The triple's TYPE must be the SAME string the projector stamps as the relationship type —
+    ``_sanitize_label(edgeType or "REL")`` — NOT the raw ``edge_type`` column: ``_sanitize_label`` maps
+    every non-alphanumeric/underscore char to ``_`` (so ``depends on`` / ``depends-on`` / ``depends.on``
+    ALL become ``depends_on``) and an empty/NULL type defaults to ``REL``. Counting the raw column would
+    treat those as distinct triples while FalkorDB collapses them to one — the very false shortfall this
+    function exists to prevent. ``[:alnum:]`` (POSIX, locale-aware) mirrors Python ``str.isalnum`` for
+    the punctuation cases that actually occur in imported free-form labels."""
     pg_nodes = (await session.execute(
         select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
             EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(False),
         ))).scalar_one()
+    projected_type = func.regexp_replace(
+        func.coalesce(func.nullif(EdgeVersionORM.edge_type, ""), "REL"),
+        "[^[:alnum:]_]", "_", "g")               # == _sanitize_label(edge_type or "REL")
     triples = (await session.execute(
         select(func.count(func.distinct(func.concat(
             EdgeVersionORM.source_entity_id, "\x1f",
-            EdgeVersionORM.edge_type, "\x1f",
+            projected_type, "\x1f",
             EdgeVersionORM.target_entity_id,
         )))).select_from(EntityHeadORM).join(
             EdgeVersionORM,
@@ -251,8 +262,11 @@ class ProjectionReconciler:
             status = ps.status if ps is not None else "idle"
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
+            # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
+            # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
+            # is NOT reported as a false shortfall / out-of-sync.
             pg_nodes, pg_edges = (
-                await pg_live_counts(s, graph_id, main_id) if main_id is not None else (0, 0)
+                await pg_live_counts_projectable(s, graph_id, main_id) if main_id is not None else (0, 0)
             )
         fresh = projected >= committed
 
@@ -291,19 +305,24 @@ class ProjectionReconciler:
 
         missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
             client, graph_id, main_id, sample_limit, deep)
-        missing_edges, extra_edges, edge_mismatched, trunc_e = await self._diff_edges(
+        # Edge missing/extra BY ID is collapse-noisy — N Postgres edges sharing a (src,type,tgt)
+        # triple collapse to ONE FalkorDB relationship, so the collapsed-away ids read as "missing"
+        # though the triple is present. Edge COVERAGE is owned by the DISTINCT-triple count compare
+        # (``pg_edges == falkor_edges`` below, where ``pg_edges`` is the projectable triple count);
+        # drop the id samples and keep only the per-edge ATTRIBUTE drift on matched ids.
+        _me, _xe, edge_mismatched, trunc_e = await self._diff_edges(
             client, graph_id, main_id, sample_limit, deep)
         truncated = trunc_n or trunc_e
 
         in_sync = (
-            not missing_nodes and not extra_nodes and not missing_edges and not extra_edges
+            not missing_nodes and not extra_nodes
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
         return _report(
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
-            missing_edges=missing_edges, extra_edges=extra_edges,
+            missing_edges=[], extra_edges=[],
             mismatched=mismatched, edge_mismatched=edge_mismatched,
             truncated=truncated, in_sync=in_sync,
         )
