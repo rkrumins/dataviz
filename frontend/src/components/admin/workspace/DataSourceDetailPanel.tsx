@@ -12,6 +12,7 @@ import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
+    Fingerprint, ChevronDown, ShieldAlert, KeyRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -37,6 +38,8 @@ import { DataSourceProfile, type DataSourceProfileContext } from '@/components/i
 export interface AggregationConfigSnapshot {
     projectionMode: string
     dedicatedGraphName: string
+    /** URN-equivalent node-identity property. "urn" is the default. */
+    identityProperty: string
 }
 
 interface DataSourceDetailPanelProps {
@@ -174,8 +177,15 @@ export function DataSourceDetailPanel({
     //    reloads that would unmount this drawer mid-interaction.
     const originalMode = ds?.projectionMode ?? ''
     const originalDedicatedName = ds?.dedicatedGraphName ?? ''
+    // Node-identity property (URN-equivalent). Server always echoes "urn" by
+    // default, so a missing value on legacy responses folds to "urn" too.
+    const originalIdentityProperty = ds?.identityProperty || 'urn'
     const [pendingMode, setPendingMode] = useState(originalMode)
     const [pendingDedicatedName, setPendingDedicatedName] = useState(originalDedicatedName)
+    const [pendingIdentityProperty, setPendingIdentityProperty] = useState(originalIdentityProperty)
+    // Advanced disclosure — the identity mapping is an expert-only, footgun-y
+    // control, so it stays collapsed (and unemphasised) until deliberately opened.
+    const [identityAdvancedOpen, setIdentityAdvancedOpen] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
 
     // Reset pending state whenever the drawer points at a different DS, or when
@@ -183,11 +193,19 @@ export function DataSourceDetailPanel({
     useEffect(() => {
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
+        setPendingIdentityProperty(originalIdentityProperty)
+        setIdentityAdvancedOpen(false)
         setIsSaving(false)
-    }, [ds?.id, originalMode, originalDedicatedName])
+    }, [ds?.id, originalMode, originalDedicatedName, originalIdentityProperty])
 
-    const isDirty = pendingMode !== originalMode || pendingDedicatedName !== originalDedicatedName
+    // Normalise for comparison/save: trim, and treat empty as the default "urn".
+    const normalizedIdentityProperty = pendingIdentityProperty.trim() || 'urn'
+    const isDirty =
+        pendingMode !== originalMode ||
+        pendingDedicatedName !== originalDedicatedName ||
+        normalizedIdentityProperty !== originalIdentityProperty
     const isOverridden = !!pendingMode
+    const isIdentityOverridden = normalizedIdentityProperty !== 'urn'
 
     const handleSelectInherit = () => setPendingMode('')
     const handleSelectInSource = () => setPendingMode('in_source')
@@ -203,8 +221,8 @@ export function DataSourceDetailPanel({
         setIsSaving(true)
         try {
             await onSaveAggregationConfig(
-                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName },
-                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName },
+                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName, identityProperty: normalizedIdentityProperty },
+                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName, identityProperty: originalIdentityProperty },
             )
             // The parent triggers a reload after save. The useEffect above will
             // resync pending state when the new originals arrive.
@@ -216,6 +234,7 @@ export function DataSourceDetailPanel({
     const handleDiscardConfig = () => {
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
+        setPendingIdentityProperty(originalIdentityProperty)
     }
 
     // Last-aggregated timestamp prefers the live readiness over the persisted
@@ -480,6 +499,117 @@ export function DataSourceDetailPanel({
                                             </div>
                                         </div>
                                     )}
+
+                                    {/* ── Advanced: Node Identity Property (URN-equivalent) ──
+                                        Expert-only mapping for onboarded third-party graphs whose
+                                        nodes carry no canonical `urn`. Collapsed by default so it
+                                        never distracts the 99% case; when set, the next aggregation
+                                        run resolves identity as coalesce(n.urn, n.<property>). */}
+                                    <div className="mt-2 rounded-xl border border-glass-border overflow-hidden">
+                                        <button
+                                            type="button"
+                                            onClick={() => setIdentityAdvancedOpen(o => !o)}
+                                            className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                                        >
+                                            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500/15 to-indigo-500/15 text-violet-500 flex-shrink-0">
+                                                <Fingerprint className="w-4 h-4" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className="text-sm font-medium text-ink">Node Identity Property</span>
+                                                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-violet-500/10 text-violet-500 tracking-wider">ADVANCED</span>
+                                                    {isIdentityOverridden && (
+                                                        <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
+                                                    )}
+                                                </div>
+                                                <p className="text-[11px] text-ink-muted mt-0.5 truncate">
+                                                    {isIdentityOverridden
+                                                        ? <>Identity falls back to <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalizedIdentityProperty}</code> when a node has no <code className="font-mono text-[10px]">urn</code></>
+                                                        : <>Using the platform default — nodes identified by <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code></>}
+                                                </p>
+                                            </div>
+                                            <ChevronDown className={cn("w-4 h-4 text-ink-muted transition-transform flex-shrink-0", identityAdvancedOpen && "rotate-180")} />
+                                        </button>
+
+                                        {identityAdvancedOpen && (
+                                            <div className="px-3 pb-3 pt-2 space-y-3 border-t border-glass-border animate-in slide-in-from-top-1 fade-in duration-200">
+                                                {/* What it is + why it matters */}
+                                                <div className="text-[11px] text-ink-secondary leading-relaxed space-y-1.5">
+                                                    <p>
+                                                        The platform identifies every node by a universal <strong className="text-ink">URN</strong> — it is how
+                                                        aggregation, lineage, trace and the catalog cross-reference nodes across the graph. Nodes
+                                                        <strong className="text-ink"> should</strong> carry a <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code> property.
+                                                    </p>
+                                                    <p>
+                                                        Onboarded third-party graphs often key their nodes by a differently-named property
+                                                        (e.g. <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">id</code>) and carry no <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code>.
+                                                        Map that property here and the platform resolves identity at read time —
+                                                        <strong className="text-ink"> without</strong> rewriting your graph, so the source can keep updating independently.
+                                                    </p>
+                                                </div>
+
+                                                {/* Presets + free-form input */}
+                                                <div>
+                                                    <label className="block text-[11px] font-medium text-ink-secondary mb-1.5">URN-equivalent property</label>
+                                                    <div className="flex items-center gap-1.5 mb-2">
+                                                        {['urn', 'id', 'name'].map(preset => (
+                                                            <button
+                                                                key={preset}
+                                                                type="button"
+                                                                disabled={!canManageDs}
+                                                                onClick={() => setPendingIdentityProperty(preset)}
+                                                                className={cn(
+                                                                    "px-2.5 py-1 rounded-md text-[11px] font-mono border transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                                                                    normalizedIdentityProperty === preset
+                                                                        ? "border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300"
+                                                                        : "border-glass-border text-ink-muted hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                                                                )}
+                                                            >
+                                                                {preset}{preset === 'urn' && ' (default)'}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                    <div className="relative">
+                                                        <KeyRound className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted pointer-events-none" />
+                                                        <input
+                                                            type="text"
+                                                            value={pendingIdentityProperty}
+                                                            disabled={!canManageDs}
+                                                            onChange={e => setPendingIdentityProperty(e.target.value)}
+                                                            placeholder="urn"
+                                                            spellCheck={false}
+                                                            autoCapitalize="none"
+                                                            autoCorrect="off"
+                                                            className="w-full pl-8 pr-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-sm font-mono text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 disabled:opacity-50"
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Live resolution preview */}
+                                                <div className="rounded-lg bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border px-3 py-2">
+                                                    <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-muted mb-1">Resolved at read time as</div>
+                                                    <code className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono break-all">
+                                                        {normalizedIdentityProperty === 'urn'
+                                                            ? 'n.urn'
+                                                            : `coalesce(n.urn, n.${normalizedIdentityProperty})`}
+                                                    </code>
+                                                </div>
+
+                                                {/* Risk callout — only when diverging from the default */}
+                                                {isIdentityOverridden && (
+                                                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/[0.07] border border-amber-500/20">
+                                                        <ShieldAlert className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                                                        <div className="text-[11px] text-amber-600/90 dark:text-amber-400/90 leading-relaxed">
+                                                            <strong>Expert setting — handle with care.</strong> The chosen property must be
+                                                            <strong> unique per node</strong> and stable; it becomes this source's identity everywhere the
+                                                            platform reads it. A non-unique or wrong mapping can merge distinct nodes or drop them from
+                                                            aggregation. The change takes effect on the <strong>next</strong> aggregation run.
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
                                     {isDirty && canManageDs && (

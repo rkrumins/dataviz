@@ -351,6 +351,10 @@ class AggregationService:
                 entity_type_levels=json.dumps(
                     ontology_data.get("entity_type_levels") or {}
                 ),
+                # URN-equivalent node-identity property frozen at trigger time.
+                # A change to the data source's identity_property is picked up
+                # on the next trigger; in-flight jobs keep their frozen value.
+                identity_property=ontology_data.get("identity_property") or "urn",
                 status="pending",
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
@@ -1384,6 +1388,10 @@ class AggregationService:
             "containment_edge_types": containment_types,
             "lineage_edge_types": lineage_types,
             "entity_type_levels": entity_type_levels,
+            # URN-equivalent for this physical graph. Frozen onto the job so a
+            # mid-lifecycle change to the data source's identity_property is
+            # picked up by the NEXT run. Default "urn" for every existing source.
+            "identity_property": getattr(ds, "identity_property", None) or "urn",
         }
 
     async def _replay_fingerprint_matches(

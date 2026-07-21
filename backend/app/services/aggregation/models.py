@@ -74,6 +74,14 @@ class AggregationJobORM(Base):
     # label-scan trace fallback, both correct).
     entity_type_levels = Column(Text, nullable=True)  # JSON: {"<entity_type>": <level int>}
 
+    # Node-identity property frozen at trigger time — the physical graph
+    # property that stands in for the platform's canonical ``urn``. NULL means
+    # "urn" (default, and every legacy row). Freezing it here (rather than
+    # reading the data-source row at pickup) is what lets an operator change the
+    # data source's identity_property mid-lifecycle and have the NEXT run pick
+    # up the new value while an in-flight run keeps its own frozen value.
+    identity_property = Column(Text, nullable=True)
+
     # ── Progress tracking (cursor-based checkpoint) ──────────────────
     progress = Column(Integer, nullable=False, default=0)  # 0-100
     total_edges = Column(Integer, nullable=False, default=0)

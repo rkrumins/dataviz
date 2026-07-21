@@ -310,6 +310,33 @@ def test_cursor_rejects_legacy_and_garbage():
     assert mat.parse_cursor("v3:x:apply:0") is None
 
 
+# ── node-identity resolution (URN-equivalent) ────────────────────────────
+
+def test_node_identity_expr_default_is_plain_urn(monkeypatch):
+    """Default (None / "urn") keeps the historical hardcoded n.urn — no
+    coalesce, so conforming graphs are byte-for-byte unchanged."""
+    monkeypatch.delenv("AGGREGATION_NODE_IDENTITY_PROPERTY", raising=False)
+    assert mat._node_identity_expr(None) == "n.`urn`"
+    assert mat._node_identity_expr("urn") == "n.`urn`"
+
+
+def test_node_identity_expr_maps_configured_property():
+    """A configured URN-equivalent falls back to it only when urn is absent."""
+    assert mat._node_identity_expr("id") == "coalesce(n.`urn`, n.`id`)"
+    assert mat._node_identity_expr("name") == "coalesce(n.`urn`, n.`name`)"
+
+
+def test_node_identity_expr_strips_backticks_to_prevent_injection():
+    """A hostile property name can't break out of the backtick-quoted ident."""
+    assert mat._node_identity_expr("id`") == "coalesce(n.`urn`, n.`id`)"
+
+
+def test_node_identity_expr_env_fallback(monkeypatch):
+    """When no per-source value is given, the env default applies."""
+    monkeypatch.setenv("AGGREGATION_NODE_IDENTITY_PROPERTY", "id")
+    assert mat._node_identity_expr(None) == "coalesce(n.`urn`, n.`id`)"
+
+
 # ── semantics ────────────────────────────────────────────────────────────
 
 
