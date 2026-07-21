@@ -23,28 +23,33 @@ from backend.app.services.versioning.projection import FalkorProjector
 
 @contextlib.contextmanager
 def _deep_verify_on():
-    """The per-entity deep CONTENT verify is OFF by default (its unindexed per-entity fetch is
-    O(N²+E²) and hangs a large rebuild). These holdback tests exercise that verify specifically, so
-    they opt into it; the count verify (collapse-correct) is what runs on the default hot path."""
+    """The single-scan deep CONTENT verify is ON by default now, but make it explicit for the holdback
+    tests so they still exercise it if an env var flips the default off."""
     prev = _vcfg.PROJECTION_VERIFY_DEEP
     _vcfg.PROJECTION_VERIFY_DEEP = True
     try:
         yield
     finally:
         _vcfg.PROJECTION_VERIFY_DEEP = prev
-from backend.app.services.versioning.reconcile import (
-    ProjectionReconciler,
-    _DEEP_FETCH,
-    _SCAN_EDGES,
-    _SCAN_NODES,
-)
+
+
+@contextlib.contextmanager
+def _deep_verify_cap(n: int):
+    """Temporarily set the deep-verify entity ceiling (above which the hot-path deep pass is skipped
+    and only the count verify runs)."""
+    prev = _vcfg.PROJECTION_VERIFY_DEEP_MAX_ENTITIES
+    _vcfg.PROJECTION_VERIFY_DEEP_MAX_ENTITIES = n
+    try:
+        yield
+    finally:
+        _vcfg.PROJECTION_VERIFY_DEEP_MAX_ENTITIES = prev
+from backend.app.services.versioning.reconcile import ProjectionReconciler
 from backend.app.services.versioning.service import GraphVersioningService
 
 # Reuse the projector-Cypher-interpreting fake + e2e helpers verbatim (see that module's docstring).
 from backend.tests.integration.test_versioning_projection import (
     FakeFalkor,
     FakeGraph,
-    _Result,
     _assert_matches_main,
     _edit_publish,
     _edge,
@@ -55,31 +60,10 @@ from backend.tests.integration.test_versioning_projection import (
 
 
 class ReconcileFakeGraph(FakeGraph):
-    """FakeGraph + the reconciler's read queries (ordered id scans + the deep urn fetch),
-    delegating everything else to the projector-Cypher interpreter it inherits."""
-
-    async def query(self, cypher: str, params: dict = None):
-        params = params or {}
-        if cypher == _SCAN_NODES:
-            # Mirror the scan's `entityId IS NOT NULL` guard — legacy never-versioned cache entries
-            # carry no id and are excluded from the id-diff (they surface via count drift instead).
-            rows = sorted(([n["entityId"], n.get("urn")] for n in self.nodes.values()
-                           if n.get("_label") != "_GVRollupMeta" and n.get("entityId") is not None),
-                          key=lambda r: r[0])
-            return _Result(rows[params["s"]: params["s"] + params["l"]])
-        if cypher == _SCAN_EDGES:
-            rows = sorted(([eid] for eid, e in self.edges.items()
-                           if e.get("type") != "AGGREGATED" and eid is not None),
-                          key=lambda r: r[0])
-            return _Result(rows[params["s"]: params["s"] + params["l"]])
-        if cypher == _DEEP_FETCH:
-            out = []
-            for u in params["urns"]:
-                n = self.nodes.get(u)                    # nodes are keyed by urn (MATCH semantics)
-                if n is not None:
-                    out.append([n["urn"], n["entityId"], n.get("displayName"), [n.get("_label")]])
-            return _Result(out)
-        return await super().query(cypher, params)
+    """The base FakeGraph is now reconciler-complete — its ``_SCAN_NODES`` / ``_SCAN_EDGES`` handlers
+    carry the deep fields (displayName + labels; type + confidence + properties), so the single-scan
+    content diff runs against it directly. Kept as a named subclass for the ``ReconcileFakeFalkor``
+    factory and the drift subclasses below."""
 
 
 class ReconcileFakeFalkor(FakeFalkor):
@@ -516,6 +500,35 @@ async def _run_publishes_with_parallel_edges() -> None:
     await db.dispose_engine()
 
 
+async def _run_deep_verify_size_gated() -> None:
+    """Above the deep-verify entity ceiling the hot-path deep pass is SKIPPED (only the count verify
+    runs), so a huge rebuild can't hang on the scan — the trade is that a drift only the deep check
+    sees will publish. Proven by dropping the cap below this tiny graph's size: the same edge-attr
+    drift that is held back at the default cap now PUBLISHES."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = _EdgeAttrDriftFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        {"op": "create", "entity_kind": "edge", "entity_id": "E1",
+         "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "A", "targetEntityId": "B",
+                     "confidence": 0.9, "properties": {"sql": "select 1"}}},
+    ], "seed")
+
+    with _deep_verify_cap(1):                             # 3 entities > cap → deep pass skipped
+        r = await proj.project_graph(gid)
+    assert not r.get("verify_error"), r                  # count-only → the attr drift is not caught
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is True, wm                        # published (no hang, no hold-back)
+    await db.dispose_engine()
+
+
 # --------------------------------------------------------------------------- #
 # 9. A rebuild invalidates the reader's ontology→observed alias cache so raw    #
 #    lineage edges render against the reseeded graph immediately (not after the #
@@ -587,6 +600,11 @@ def test_projection_publishes_with_parallel_edges_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_deep_verify_size_gated_e2e():
+    asyncio.run(_run_deep_verify_size_gated())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
 
@@ -626,6 +644,6 @@ if __name__ == "__main__":
                 _run_failure_honesty, _run_progress_writer,
                 _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
                 _run_holdback_on_edge_attr_drift, _run_publishes_with_parallel_edges,
-                _run_rebuild_bumps_ontology_cache):
+                _run_deep_verify_size_gated, _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

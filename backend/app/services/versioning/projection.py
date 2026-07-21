@@ -1194,7 +1194,9 @@ class FalkorProjector:
         if pg == fk:
             # Counts match — but on a full seed that is NOT sufficient (content drift keeps the
             # counts). Run the content verify; None unless it finds drift (or not a full seed).
-            return (await self._full_seed_content_error(client, graph_id, main_id, from_seq)), False
+            # Pass the entity count so the deep pass can size-gate itself (fk = node + edge counts).
+            return (await self._full_seed_content_error(
+                client, graph_id, main_id, from_seq, fk[0] + fk[1])), False
         pg_n, pg_e = pg
         f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
@@ -1249,29 +1251,36 @@ class FalkorProjector:
         return msg, False
 
     async def _full_seed_content_error(
-        self, client, graph_id, main_id, from_seq
+        self, client, graph_id, main_id, from_seq, entity_count=0
     ) -> Optional[str]:
-        """Content verify for a FULL SEED whose COUNTS already matched: id-set + deep-field diff of
-        the freshly-seeded cache vs committed main, via the reconciler's guard-free primitives
-        against the open client. Returns an error string on ANY drift (a dropped/mistyped edge, a
-        node reseeded with a wrong label or empty displayName — the class counts can't see), else
-        None. No-op off the full-seed path or when disabled. Best-effort: a diff-infra failure
-        degrades to None (counts already passed), never raises."""
+        """Content verify for a FULL SEED whose COUNTS already matched: the reconciler's single-scan
+        content diff (node displayName/label drift + edge type/confidence/properties drift) of the
+        freshly-seeded cache vs committed main. Returns an error string on ANY field drift the count
+        verify can't see, else None. No-op off the full-seed path, when disabled, or above the
+        deep-verify entity ceiling (the ordered scan's SKIP/LIMIT paging degrades on a very large
+        graph — count verify still ran; the on-demand reconcile can deep-diff any size). Best-effort:
+        a diff-infra failure degrades to None (counts already passed), never raises."""
         if from_seq > 0 or not config.PROJECTION_VERIFY_DEEP:
+            return None
+        cap = config.PROJECTION_VERIFY_DEEP_MAX_ENTITIES
+        if cap > 0 and entity_count > cap:
+            logger.info("full-seed deep verify skipped for %s (%d entities > %d cap); count verify "
+                        "already applied, on-demand reconcile can deep-diff", graph_id, entity_count, cap)
             return None
         try:
             from .reconcile import ProjectionReconciler
             rec = ProjectionReconciler(self._session, lambda name, provider_id=None: client)
-            mn, xn, me, xe, mm, em = await rec.content_drift(client, graph_id, main_id)
+            # Edge missing/extra are owned by the DISTINCT-triple count verify (collapse-noisy by id),
+            # so content_drift returns them empty; node coverage + node/edge field drift remain.
+            mn, xn, _me, _xe, mm, em = await rec.content_drift(client, graph_id, main_id)
         except Exception:                                # pragma: no cover - infra
             logger.debug("full-seed content verify skipped for %s (diff failed)",
                          graph_id, exc_info=True)
             return None
-        if mn or xn or me or xe or mm or em:
+        if mn or xn or mm or em:
             msg = (f"content drift after full seed: {len(mn)} missing node(s), "
-                   f"{len(xn)} extra node(s), {len(me)} missing edge(s), {len(xe)} extra edge(s), "
-                   f"{len(mm)} node field mismatch(es), {len(em)} edge attr mismatch(es) "
-                   f"(bounded sample) — cache NOT published")
+                   f"{len(xn)} extra node(s), {len(mm)} node field mismatch(es), "
+                   f"{len(em)} edge attr mismatch(es) (bounded sample) — cache NOT published")
             logger.error("%s for %s", msg, graph_id)
             return msg
         return None
