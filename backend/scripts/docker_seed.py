@@ -146,6 +146,12 @@ async def main():
     gen.generate()
     await seed_falkordb(gen)
 
+    # Converge read caches + the :AGGREGATED overlay after this direct FalkorDB
+    # load (best-effort; no-op if the control plane is unreachable — common at
+    # container init — or DATAVIZ_SKIP_LOAD_SIGNAL is set).
+    from backend.scripts.signal_data_changed import emit_after_load_async
+    await emit_after_load_async(graph_name=graph_name)
+
     logger.info("Demo data seeding complete!")
 
 

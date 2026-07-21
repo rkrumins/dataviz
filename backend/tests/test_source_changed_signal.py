@@ -935,12 +935,16 @@ def test_scheduler_drift_signals_with_default_env(monkeypatch):
     assert fake_svc.origins == ["drift"]
 
 
-# ── Scenario 2: flag off → neither path signals; notify-only preserved ──
+# ── Scenario 2: flag off → DRIFT path is notify-only, but the marker ────
+# reconciler STILL runs. A marker exists only because an explicit signal
+# already requested a rebuild that a cooldown deferred or an attempt failed,
+# so completing it must not hinge on AGGREGATION_DRIFT_AUTO_REBUILD.
 
 
-def test_scheduler_flag_off_disables_both_paths(monkeypatch):
+def test_scheduler_flag_off_still_reconciles_markers(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", False)
     _all_drift(monkeypatch)
+    _no_marker(monkeypatch)  # the drifted source carries no marker
 
     list_calls = []
 
@@ -956,10 +960,16 @@ def test_scheduler_flag_off_disables_both_paths(monkeypatch):
     factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
     sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
 
-    _run(sched._tick())  # drift is still logged (notify-only) — no signal
+    _run(sched._tick())
 
-    assert fake_svc.calls == []
-    assert list_calls == []
+    # DRIFT path is off: the drifted ds-1 is NOT signaled…
+    assert all(ds_id != "ds-1" for ds_id, _reason, _s in fake_svc.calls)
+    assert "drift" not in fake_svc.origins
+    # …but the reconciler still runs and re-signals the marked ds-9.
+    assert list_calls  # list_stale_sources was consulted despite the flag
+    assert [c[0] for c in fake_svc.calls] == ["ds-9"]
+    assert fake_svc.calls[0][1] == "reconcile"
+    assert fake_svc.origins == ["reconcile"]
 
 
 # ── Scenario 3: a signal failure must not abort the sweep ───────────────

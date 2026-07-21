@@ -110,6 +110,7 @@ import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
+import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -2090,6 +2091,12 @@ export function ContextViewCanvas({
 
     return () => clearTimeout(fetchDebounced)
   }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing, aggregatedCacheVersion, loadingNodes])
+
+  // Source-changed self-refresh: while the aggregated overlay is flagged
+  // `source_changed`, poll readiness and invalidate the aggregated cache once
+  // the rebuild completes so the "recomputing" banner self-clears. See
+  // hooks/useSourceChangedRefresh.
+  useSourceChangedRefresh(dataSourceId, aggregationStaleReason)
 
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
