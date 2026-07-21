@@ -576,7 +576,7 @@ describe('Freshness cockpit', () => {
         await waitFor(() => expect(refreshAll).toHaveBeenCalledWith(expect.objectContaining({ scope: 'full' })))
         // Progress polled the batch and rendered completion; the done response
         // stops the poll (no runaway refetch).
-        expect(await screen.findByText('Refresh complete')).toBeInTheDocument()
+        expect(await screen.findByText('Refresh dispatched')).toBeInTheDocument()
         expect(getBatch).toHaveBeenCalledTimes(1)
     })
 

@@ -145,6 +145,12 @@ export interface BatchItemResult {
     dataSourceId: string
     outcome: 'done' | 'error'
     jobId?: string | null
+    /** Data source label; absent on older batches still in Redis. */
+    name?: string | null
+    /** What ran for this source, from the per-source RefreshResponse. */
+    actions?: string[]
+    /** Cooldown held the rebuild off — "done" but nothing was queued. */
+    deferred?: boolean
 }
 
 export interface BatchStatus {

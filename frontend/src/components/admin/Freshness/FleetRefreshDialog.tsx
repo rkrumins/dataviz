@@ -12,13 +12,14 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, Loader2, XCircle, Zap } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Loader2, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { RefreshScope } from '@/services/freshnessService'
 import { FRESHNESS_KEYS, useRefreshBatch, useRefreshFleet } from './useFreshness'
+import { BatchResultsList } from './BatchResultsList'
 
 export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     /** Sources in the fleet, from the server ``summary.total`` (null when the
@@ -153,7 +154,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                     <div className="flex items-center justify-between mb-2 text-sm">
                                         <span className="font-semibold text-ink flex items-center gap-2">
                                             {done
-                                                ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> Refresh complete</>
+                                                ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> Refresh dispatched</>
                                                 : <><Loader2 className="w-4 h-4 animate-spin text-indigo-500" /> Refreshing…</>}
                                         </span>
                                         <span className="text-ink-muted tabular-nums">{completed} / {total}</span>
@@ -165,19 +166,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                         </p>
                                     )}
 
-                                    {batch && batch.results.length > 0 && (
-                                        <ul className="max-h-48 overflow-y-auto space-y-1 mb-4">
-                                            {batch.results.map((r) => (
-                                                <li key={r.dataSourceId} className="flex items-center gap-2 text-xs text-ink-secondary">
-                                                    {r.outcome === 'error'
-                                                        ? <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                                                        : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
-                                                    <span className="truncate">{r.dataSourceId}</span>
-                                                    {r.outcome === 'error' && <span className="text-red-500">failed</span>}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    )}
+                                    {batch && <BatchResultsList results={batch.results} />}
 
                                     <div className="flex justify-end">
                                         {/* Never disabled: closing dismisses the view, it does not
