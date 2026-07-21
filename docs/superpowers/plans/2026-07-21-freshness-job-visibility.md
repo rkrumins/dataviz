@@ -1683,7 +1683,15 @@ Reset `confirming` to `false` whenever `scope` or `force` changes, so a scope sw
 useEffect(() => { setConfirming(false) }, [scope, force])
 ```
 
-Apply the same three changes to `FleetRefreshDialog.tsx`, whose confirm copy names the fleet rather than a provider.
+**`FleetRefreshDialog.tsx` is NOT a copy of its sibling — do not assume symmetry.** Verified differences:
+
+- It offers only **three** scopes (`auto`, `clear`, `full`) at `:102-104`, not five.
+- It has **no `force` checkbox** at all — so pass `force={false}` to `RefreshImpact` and to `scopeRebuilds`.
+- Its rebuild gate is `const isFull = scope === 'full'` at `:51`, not a `rebuilds` const. Replace it with `scopeRebuilds(scope, false)`, which is exactly equivalent across its three scopes (`full`→true, `auto`/`clear`→false) — verify that equivalence yourself before relying on it.
+- Its amber warning block sits at `:125-126`; that is what `RefreshImpact` replaces.
+- Its results list is at `:168-170` (replaced in Task 8).
+
+Its confirm copy names the fleet rather than a provider. Everything else — the impact block, the two-step confirm, the reset-on-scope-change effect — is the same.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
