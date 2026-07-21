@@ -3,7 +3,7 @@
 **Branch:** `claude/falkordb-redis-connectivity-va6czv`
 **Coverage window:** 17 July 2026 → 20 July 2026
 **Prepared:** 21 July 2026
-**Size:** 50 commits · 63 files · +13,795 / −85 lines (merged up to date with `main`, conflict-free)
+**Size:** 53 commits · 75 files · +14,587 / −87 lines (merged up to date with `main`, conflict-free)
 
 ---
 
@@ -23,7 +23,8 @@ fail — an honest explanation with a resolution path.
 Five streams of work:
 
 1. **Convergence loop** — an external data load now propagates to every canvas read path, with
-   honest "recomputing" signalling while it happens.
+   honest "recomputing" signalling while it happens. The bundled seed/import loaders announce
+   themselves automatically, so a direct load converges without anyone remembering a manual step.
 2. **OPS Freshness Cockpit** — a new *Ingestion → Freshness* tab plus the API behind it: fleet and
    per-source freshness, a unified refresh verb, guarded provider/fleet batches, and an audit trail.
 3. **Cache visibility & fleet refresh** — per-provider cache-coverage rollups, per-source cache
@@ -48,16 +49,20 @@ and the aggregated lineage view could stay stale **indefinitely**. Worse, the pr
 view as fresh, so nobody knew to look twice.
 
 Now a single "this source changed" signal makes every part of the canvas converge on the real data:
-the hierarchy updates immediately, and the lineage rollups rebuild in the background. Loading
-scripts and connectors announce the change when they finish; a scheduled check acts as a safety net
-for sources configured for it.
+the hierarchy updates immediately, and the lineage rollups rebuild in the background. **The bundled
+seed and import scripts now emit that signal themselves at the end of a load**, so the common case
+needs no manual step; external connectors call the same endpoint, and a scheduled check acts as a
+safety net for sources configured for it. The signal is best-effort by design — if the application
+stack isn't running (common during container initialisation), the load still succeeds and simply
+logs a warning.
 
 ### 2. Nobody stares at a blank or lying canvas while it catches up
 
 Rebuilding lineage on a large model takes time. Rather than emptying the canvas or pretending the
 old data is current, the product now keeps serving the previous view **clearly labelled as being
-recomputed**, and swaps in the new one the moment it's ready. Everyone sees the same thing, across
-every server instance.
+recomputed**, and swaps in the new one the moment it's ready — the canvas notices completion on its
+own and refreshes, with no manual reload and no lingering banner. Everyone sees the same thing,
+across every server instance.
 
 ### 3. Operators can finally see — and fix — freshness
 
@@ -89,7 +94,14 @@ How often a source may automatically rebuild used to be fixed in environment con
 editable in the product — a global default plus an optional per-source override — and the "next
 rebuild" countdown shown in the UI is guaranteed to match the behaviour the server actually enforces.
 
-### 6. Cache correctness across multiple graph stores
+### 6. Very large models render consistently
+
+Models above the display cap show their most significant connections rather than everything. That
+selection is now **deterministic**: the same source, unchanged, shows the same set every time it is
+opened. Previously the cut-off could land differently between openings, so the picture could shift
+without the data changing — which read as flakiness rather than as a deliberate cap.
+
+### 7. Cache correctness across multiple graph stores
 
 Two different graph databases can legitimately host graphs with the *same name*. The product now
 guarantees those can never share cached results, and that re-pointing a data source at a different
@@ -137,7 +149,31 @@ job.completed → second generation bump + aggregated-LKG purge + marker cleared
 - **Not-applicable sources are never marked stale** — otherwise an unclearable marker drives a
   60-second reconcile loop that re-arms its own TTL.
 
-## 2.3 Components changed
+## 2.3 Convergence on load, and determinism
+
+Three additions close the gap between "the machinery is correct" and "the symptom is gone":
+
+- **Loaders announce themselves.** Eight bundled seed/import scripts call `emit_after_load_async`
+  at end-of-load. It is deliberately best-effort: a no-op when the control plane is unreachable
+  (routine at container init), an escape hatch via `DATAVIZ_SKIP_LOAD_SIGNAL`, and any failure logs
+  a warning instead of failing the load. Without this, convergence depended on someone remembering
+  the manual step — which is exactly how the original symptom was reproduced.
+- **The canvas notices completion.** `useSourceChangedRefresh` polls the **cheap readiness
+  endpoint** (never the expensive aggregated query, which would hammer the graph store mid-rebuild
+  on a large model) and invalidates the aggregated cache exactly once on the not-ready → ready
+  transition. Without it the stale-while-revalidate cache would keep re-serving the previous rollup,
+  and the "recomputing" banner would linger until the 5-minute client TTL.
+- **The reconciler always runs.** It is no longer gated by `AGGREGATION_DRIFT_AUTO_REBUILD`: a
+  stale marker means a rebuild was *already requested*, so deferred and failed rebuilds are retried
+  even when drift auto-rebuild is switched off. The marked-source check in the drift path became
+  unconditional at the same time, so a source that is both marked and drifting is not dropped.
+- **Truncation is deterministic.** The materialized `:AGGREGATED` read now orders by
+  `weight DESC, s.urn, t.urn` instead of weight alone. Weight is a count, so ties are pervasive and
+  the `LIMIT` cut lands mid-tie-group; combined with delete-on-oversize (a payload above the cap is
+  never cached, so every open re-runs the query) an over-cap model could return a *different* subset
+  on each canvas open. The cap still truncates and still says so — it is now stable.
+
+## 2.4 Components changed
 
 | Area | Change |
 |---|---|
@@ -150,7 +186,7 @@ job.completed → second generation bump + aggregated-LKG purge + marker cleared
 | `endpoints/graph.py`, `canvas.py` | Post-cache staleness overlay so even cached hits are flagged |
 | Frontend | Stale-source banner + unplaceable-edge count on the canvas; the entire *Freshness* cockpit tab (stat band, faceted URL-synced filters, triage sort, drawer, dialogs); honest badge; resolution guidance |
 
-## 2.4 Audit trail
+## 2.5 Audit trail
 
 New `refresh_events` table records **every** refresh — route, script, connector, drift, reconciler —
 plus job completion/failure, with `origin`, `actor`, `scope`, `gate`, `outcome` and an `actions`
@@ -158,7 +194,7 @@ payload. `actor` and `origin` are forced server-side on both the direct and prox
 can be spoofed by a client. Completion events inherit the origin of the accepted event that queued
 them, so a rebuild is attributable end-to-end.
 
-## 2.5 Failure resilience
+## 2.6 Failure resilience
 
 - **Backoff** — the reconciler skips a source whose latest rebuild failed within its cadence window
   (fail-open: a lookup error degrades to the pre-existing behaviour rather than freezing a source).
@@ -173,7 +209,7 @@ them, so a rebuild is attributable end-to-end.
 - **Escape hatch** — the `clear` scope performs the full invalidation *and* clears the stale marker,
   with no rebuild, so it is safe to run against an out-of-memory store.
 
-## 2.6 Cache correctness
+## 2.7 Cache correctness
 
 - **Physical-graph namespacing** — `CacheScope.graph_ns = sha1(host:port:graph_name)[:16]`, appended
   to response/LKG keys **only when non-empty**, so existing keys stay byte-identical (no mass
@@ -186,7 +222,7 @@ them, so a rebuild is attributable end-to-end.
   markers) always stay on the durable shared client** — this repository has already learned once that
   control state on a lossy cache corrupts silently.
 
-## 2.7 Housekeeping
+## 2.8 Housekeeping
 
 - Merged `origin/main` (168 commits) into the branch; two canvas conflicts resolved by deferring
   unresolved-edge surfacing to main's newer per-node indicators while keeping this branch's
@@ -245,16 +281,24 @@ single alembic head verified).
    Frontend dependencies also changed on `main` — run an install as part of deploy.
 2. **The change gate is counts-based.** A change that doesn't alter node/edge counts by label/type
    (a re-parent, a property edit) isn't detected automatically — use `--force` or an explicit
-   rebuild.
+   rebuild. The bundled loaders signal on every run, but a count-neutral load still passes the gate
+   as a no-op unless forced.
 3. **Graph-store capacity is a real ceiling.** Very large aggregations fail with
    `OutOfMemoryError` when the graph store is at its memory limit. This release makes that failure
    *legible, resettable and non-churning* — it does not create memory. Free space or raise the limit
    for those sources to complete.
 4. **A fleet-wide refresh can fan out heavy work.** Even the change-gated `auto` scope queues real
    rebuilds for genuinely-changed large sources; ensure headroom before exposing it broadly.
-5. **Frontend epoch lag ≤ 5 minutes.** An already-open canvas can take up to five minutes to notice
-   a completed rebuild (cross-process run-meta cache); a fresh page load is immediate.
-6. **Follow-ups tracked:** per-provider `cacheConnection` override for the *response* cache;
+5. **Frontend epoch lag (largely mitigated).** An open canvas now detects completion itself via the
+   readiness poll whenever the source is flagged `source_changed`, so the banner clears and lineage
+   refreshes without a reload. Where that flag isn't present, the older path still applies: an
+   already-open canvas can take up to five minutes to notice a completed rebuild (cross-process
+   run-meta cache); a fresh page load is always immediate.
+6. **Custom or third-party loaders must still announce themselves.** The eight bundled scripts do
+   this automatically; anything else writing straight to the graph store should call
+   `emit_after_load_async` (in-process) or `POST /api/v1/admin/data-sources/{id}/refresh`, or be
+   given a drift schedule as a backstop.
+7. **Follow-ups tracked:** per-provider `cacheConnection` override for the *response* cache;
    `refresh_events` retention/GC; physical-graph namespacing on the draft/stale-main read path;
    per-tick audit growth for a persistently failing pipeline; control-plane/worker application logs
    not surfacing via `docker logs`.
