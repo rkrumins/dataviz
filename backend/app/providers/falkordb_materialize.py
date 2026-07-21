@@ -603,16 +603,35 @@ class AggregationPipeline:
         yields no advisories at all."""
         advisories: List[Dict[str, Any]] = []
         if self._empty_directory:
+            # Report the property THIS run actually resolved on — the fix
+            # differs by case, and a hardcoded "urn" hid which one applied:
+            #   • ran as `urn` → the configured Node Identity Property did NOT
+            #     reach this run (frozen before the change, or a stale build) →
+            #     re-aggregate so the new value freezes onto the job.
+            #   • ran as e.g. `id` but still empty → the run DID use it, but no
+            #     node carries `urn` OR `id` → the property name is wrong for
+            #     THIS physical graph (case-sensitive), not merely unset.
+            _ident = str(getattr(self.p, "_node_identity_property", None) or "urn")
+            if _ident == "urn":
+                _detail = (
+                    "none carry `urn`. This run keyed identity on `urn` only — "
+                    "if this is an onboarded graph keyed by another property "
+                    "(e.g. `id`), set the data source's Node Identity Property "
+                    "and re-aggregate so the new value takes effect."
+                )
+            else:
+                _detail = (
+                    f"this run resolved identity as coalesce(urn, {_ident}) but "
+                    f"no node carries `urn` OR `{_ident}`. The Node Identity "
+                    f"Property IS applied — confirm `{_ident}` is the exact "
+                    "property (case-sensitive) that holds the node id on this "
+                    "graph, then re-aggregate."
+                )
             advisories.append({
                 "kind": "identity_unresolved",
                 "severity": "error",
-                "message": (
-                    "No node resolved a canonical identity — the graph has "
-                    "nodes but none carry `urn`. If this is an onboarded graph "
-                    "keyed by another property (e.g. `id`), set the data "
-                    "source's Node Identity Property; every aggregation pair is "
-                    "dropped until then."
-                ),
+                "identity_property": _ident,
+                "message": "No node resolved a canonical identity — " + _detail,
             })
         elif self._dropped_endpoints:
             advisories.append({

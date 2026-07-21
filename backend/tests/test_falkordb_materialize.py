@@ -537,7 +537,25 @@ def test_advisory_identity_unresolved_is_error_severity():
     advs = pipe._result(0)["run_stats"]["advisories"]
     hit = next(a for a in advs if a["kind"] == "identity_unresolved")
     assert hit["severity"] == "error"
+    assert hit["identity_property"] == "urn"
     assert "Node Identity Property" in hit["message"]
+
+
+def test_advisory_identity_unresolved_reports_configured_property():
+    """When the run DID apply a custom identity property (e.g. `id`) but still
+    resolved nothing, the advisory must report THAT property — the hardcoded
+    'none carry urn / set the property' text hid whether the setting took
+    effect, which is exactly the "I set id but it says missing" confusion."""
+    pipe = _make_pipeline()
+    pipe.p._node_identity_property = "id"
+    pipe._empty_directory = True
+    hit = next(
+        a for a in pipe._result(0)["run_stats"]["advisories"]
+        if a["kind"] == "identity_unresolved"
+    )
+    assert hit["identity_property"] == "id"
+    assert "coalesce(urn, id)" in hit["message"]
+    assert "IS applied" in hit["message"]
 
 
 def test_advisory_dropped_endpoints_reports_count():
