@@ -126,7 +126,9 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                         </div>
                                     )}
 
-                                    <RefreshImpact scope={scope} force={false} sourceCount={total > 0 ? total : null} />
+                                    {/* Fleet-wide, not provider-scoped — RefreshImpact's default
+                                        fallback text ("this provider") has no antecedent here. */}
+                                    <RefreshImpact scope={scope} force={false} emptyLabel="every live source in the fleet" />
 
                                     {refreshFleet.isError && (
                                         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-red-700 dark:text-red-300">
@@ -147,8 +149,12 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                             className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {refreshFleet.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                                            {/* No source count in the confirm label: the only pre-batch
+                                                totals are workspace/provider-filterable while the batch
+                                                itself is not, so a number here could understate what will
+                                                actually run. */}
                                             {scopeRebuilds(scope, false) && confirming
-                                                ? (total > 0 ? `Yes, rebuild ${total} sources` : 'Yes, rebuild every source')
+                                                ? 'Yes, rebuild every source'
                                                 : (scopeRebuilds(scope, false) ? 'Run full refresh' : 'Refresh all sources')}
                                         </button>
                                     </div>

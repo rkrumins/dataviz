@@ -26,21 +26,22 @@ function isChangeGated(scope: RefreshScope, force: boolean): boolean {
     return scope === 'auto' && !force
 }
 
-export function RefreshImpact({ scope, force, sourceCount }: {
+export function RefreshImpact({ scope, force, emptyLabel = 'every live source using this provider' }: {
     scope: RefreshScope
     force: boolean
-    /** null until the batch reports its authoritative total — the visible
-     *  table may be filtered, so a count derived from it would understate. */
-    sourceCount: number | null
+    /** Who "this" refers to below. There is no authoritative source count to
+     *  show instead: the only pre-batch totals available are workspace/
+     *  provider-filterable, while the batch itself enumerates every live
+     *  source with no such filter — a number here could understate what
+     *  will actually run, which is worse than no number on a destructive
+     *  confirmation. */
+    emptyLabel?: string
 }) {
     const rebuilds = scopeRebuilds(scope, force)
-    const target = sourceCount == null
-        ? 'every live source using this provider'
-        : `all ${sourceCount} live sources`
 
     return (
         <div className="mb-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2.5 text-xs text-ink-secondary">
-            <p className="mb-2 font-medium text-ink">This will, for {target}:</p>
+            <p className="mb-2 font-medium text-ink">This will, for {emptyLabel}:</p>
             <ul className="space-y-1">
                 {isChangeGated(scope, force) && (
                     <li className="flex items-start gap-2">

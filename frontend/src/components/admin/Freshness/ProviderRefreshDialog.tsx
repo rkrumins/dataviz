@@ -122,7 +122,7 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
                                         </label>
                                     )}
 
-                                    <RefreshImpact scope={scope} force={force} sourceCount={total > 0 ? total : null} />
+                                    <RefreshImpact scope={scope} force={force} />
 
                                     {refreshProvider.isError && (
                                         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-red-700 dark:text-red-300">
@@ -143,8 +143,12 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
                                             className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {refreshProvider.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                                            {/* No source count in the confirm label: the only pre-batch
+                                                totals are workspace/provider-filterable while the batch
+                                                itself is not, so a number here could understate what will
+                                                actually run. */}
                                             {scopeRebuilds(scope, force) && confirming
-                                                ? (total > 0 ? `Yes, rebuild ${total} sources` : 'Yes, rebuild every source')
+                                                ? 'Yes, rebuild every source'
                                                 : 'Start refresh'}
                                         </button>
                                     </div>

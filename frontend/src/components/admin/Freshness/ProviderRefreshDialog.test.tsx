@@ -71,20 +71,28 @@ describe('refresh impact and confirmation', () => {
     })
 
     it('spells out cache clearing, queued jobs and duration for a full refresh', () => {
-        render(<RefreshImpact scope="full" force={false} sourceCount={31} />)
+        render(<RefreshImpact scope="full" force={false} />)
         expect(screen.getByText(/clear cached canvas data/)).toBeInTheDocument()
         expect(screen.getByText(/queue a lineage rebuild job/)).toBeInTheDocument()
         expect(screen.getByText(/minutes to tens of minutes per source/)).toBeInTheDocument()
-        expect(screen.getByText(/all 31 live sources/)).toBeInTheDocument()
     })
 
-    it('does not invent a source count before the batch reports one', () => {
-        render(<RefreshImpact scope="full" force={false} sourceCount={null} />)
+    // There is no authoritative source count to show pre-batch (see
+    // RefreshImpact's emptyLabel doc), so the provider-scoped fallback is
+    // the only wording this dialog ever renders here.
+    it('falls back to the provider-scoped wording, since there is no authoritative pre-batch count', () => {
+        render(<RefreshImpact scope="full" force={false} />)
         expect(screen.getByText(/every live source using this provider/)).toBeInTheDocument()
     })
 
     it('never claims a rebuild for a cache-only scope', () => {
-        render(<RefreshImpact scope="read-caches" force={false} sourceCount={31} />)
+        render(<RefreshImpact scope="read-caches" force={false} />)
+        expect(screen.queryByText(/rebuild/i)).not.toBeInTheDocument()
+    })
+
+    it('renders a meaningful line for the change-gated auto scope instead of an empty list', () => {
+        render(<RefreshImpact scope="auto" force={false} />)
+        expect(screen.getByText(/check each source and refresh only the ones whose data changed/)).toBeInTheDocument()
         expect(screen.queryByText(/rebuild/i)).not.toBeInTheDocument()
     })
 })
