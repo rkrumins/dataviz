@@ -183,3 +183,23 @@ def test_declared_types_matching_nothing_observed_warn_loudly(caplog):
     assert "FLOWS" not in joined.replace("TRANSFORMS", ""), (
         "fold-matched types are scanned — they must not be reported as unmatched"
     )
+
+
+def test_unmatched_edge_types_surface_as_job_advisory():
+    """Phase IV: the zero-match casing gap is not only logged — it lands on the
+    job's run_stats as a structured advisory, so the job detail shows WHY a run
+    scanned fewer edges than expected."""
+    fake = _VocabFake()
+    levels = _seed_lowercase_graph(fake)
+    p = base._make_provider(fake, levels)
+
+    result = _run(mat.materialize_aggregated_edges(
+        p,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS", "TRANSFORMS"],   # TRANSFORMS: nowhere
+    ))
+
+    advisories = result["run_stats"].get("advisories", [])
+    hit = next((a for a in advisories if a["kind"] == "edge_types_unmatched"), None)
+    assert hit is not None, "unmatched declared edge type must surface as an advisory"
+    assert "TRANSFORMS" in hit["message"]

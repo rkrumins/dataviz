@@ -337,6 +337,64 @@ def test_node_identity_expr_env_fallback(monkeypatch):
     assert mat._node_identity_expr(None) == "coalesce(n.`urn`, n.`id`)"
 
 
+# ── conformance advisories (Phase IV — loud, never silent) ───────────────
+
+def _make_pipeline():
+    p = _make_provider(_FakeFalkor(), {"domain": 0})
+    return mat.AggregationPipeline(
+        p,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        last_cursor=None,
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+    )
+
+
+def test_advisory_identity_unresolved_is_error_severity():
+    pipe = _make_pipeline()
+    pipe._empty_directory = True
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "identity_unresolved")
+    assert hit["severity"] == "error"
+    assert "Node Identity Property" in hit["message"]
+
+
+def test_advisory_dropped_endpoints_reports_count():
+    pipe = _make_pipeline()
+    pipe._dropped_endpoints = 5
+    advs = pipe._result(3)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "endpoints_unresolved")
+    assert hit["dropped_pairs"] == 5
+
+
+def test_advisory_empty_directory_supersedes_dropped_count():
+    """An empty directory already means every pair was dropped — surface the
+    single actionable identity advisory, not a redundant drop count."""
+    pipe = _make_pipeline()
+    pipe._empty_directory = True
+    pipe._dropped_endpoints = 999
+    kinds = {a["kind"] for a in pipe._result(0)["run_stats"]["advisories"]}
+    assert "identity_unresolved" in kinds
+    assert "endpoints_unresolved" not in kinds
+
+
+def test_advisory_unmatched_edge_types_lists_them():
+    pipe = _make_pipeline()
+    pipe._unmatched_types = ["TRANSFORMS", "MOVES"]
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "edge_types_unmatched")
+    assert "TRANSFORMS" in hit["message"]
+    assert hit["types"] == ["TRANSFORMS", "MOVES"]
+
+
+def test_clean_run_emits_no_advisories_key():
+    """A conforming run's run_stats must be unchanged — no advisories noise."""
+    pipe = _make_pipeline()
+    assert "advisories" not in pipe._result(10)["run_stats"]
+
+
 # ── semantics ────────────────────────────────────────────────────────────
 
 

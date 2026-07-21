@@ -434,6 +434,15 @@ class AggregationPipeline:
         self._scan_subwidth: Optional[int] = None
         self._scan_success_streak = 0
 
+        # ── Conformance diagnostics (Phase IV — loud, never silent) ──
+        # Structured advisories surfaced in run_stats (and thus the job-detail
+        # UI), so a zero-edge run whose cause is a conformance gap is
+        # diagnosable WITHOUT trawling worker logs. Advisory-only: they never
+        # fail an otherwise-clean run (a genuinely flat source stays green).
+        self._dropped_endpoints = 0                 # pairs dropped: no identity
+        self._empty_directory = False               # nodes exist, none resolved
+        self._unmatched_types: List[str] = []       # declared spellings scanning 0 edges
+
     # -- tuning knob resolution ---------------------------------------------
 
     def _knob_int(self, name: str, env_default: Callable[[], int], lo: int, hi: int) -> int:
@@ -583,7 +592,56 @@ class AggregationPipeline:
             ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none",
         )
 
+    def _conformance_advisories(self) -> List[Dict[str, Any]]:
+        """Structured, operator-facing advisories for the conformance gaps that
+        silently zero out a run — identity (no resolvable node id) and casing
+        (declared edge types matching nothing observed). Recorded in run_stats
+        so the job detail shows WHY a run produced few/zero edges, instead of a
+        green ``completed`` that looks like an empty source. Advisory-only: an
+        otherwise-clean run stays ``completed`` and a genuinely flat source
+        yields no advisories at all."""
+        advisories: List[Dict[str, Any]] = []
+        if self._empty_directory:
+            advisories.append({
+                "kind": "identity_unresolved",
+                "severity": "error",
+                "message": (
+                    "No node resolved a canonical identity — the graph has "
+                    "nodes but none carry `urn`. If this is an onboarded graph "
+                    "keyed by another property (e.g. `id`), set the data "
+                    "source's Node Identity Property; every aggregation pair is "
+                    "dropped until then."
+                ),
+            })
+        elif self._dropped_endpoints:
+            advisories.append({
+                "kind": "endpoints_unresolved",
+                "severity": "warning",
+                "dropped_pairs": self._dropped_endpoints,
+                "message": (
+                    f"{self._dropped_endpoints} aggregation pair(s) were dropped "
+                    "because an endpoint had no resolvable identity (a deleted "
+                    "node, or a missing `urn`/identity property)."
+                ),
+            })
+        if self._unmatched_types:
+            advisories.append({
+                "kind": "edge_types_unmatched",
+                "severity": "warning",
+                "types": self._unmatched_types[:16],
+                "message": (
+                    f"{len(self._unmatched_types)} declared edge-type "
+                    "spelling(s) matched nothing in the graph's observed "
+                    "vocabulary and scanned zero edges: "
+                    + ", ".join(self._unmatched_types[:8])
+                    + ". Check the ontology's edge-type casing against the "
+                    "physical graph."
+                ),
+            })
+        return advisories
+
     def _result(self, affected: int = 0) -> Dict[str, Any]:
+        advisories = self._conformance_advisories()
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -624,6 +682,10 @@ class AggregationPipeline:
                     {"pairs_by_level": self._pairs_by_level}
                     if getattr(self, "_pairs_by_level", None) else {}
                 ),
+                # Conformance advisories (identity / casing gaps) — present
+                # only when a gap was detected, so a clean run's run_stats is
+                # unchanged. Advisory-only: never flips the job off "completed".
+                **({"advisories": advisories} if advisories else {}),
             },
         }
 
@@ -825,6 +887,8 @@ class AggregationPipeline:
                 and t.casefold() not in observed_folds
             )
             if unmatched:
+                # Surface on the job (run_stats advisory), not just the log.
+                self._unmatched_types = unmatched
                 logger.warning(
                     "aggregation pipeline on %s: %d edge-type spelling(s) "
                     "match NOTHING in the graph's observed vocabulary and "
@@ -1572,6 +1636,7 @@ class AggregationPipeline:
         # every node — the classic onboarded-graph symptom (nodes keyed by `id`, not `urn`, and no
         # identity mapping configured). Surface it loudly instead of silently dropping every pair.
         if not directory and max_id >= 0:
+            self._empty_directory = True            # → run_stats advisory
             logger.warning(
                 "aggregation pipeline on %s: node directory is EMPTY though the graph has nodes — "
                 "no node resolved a canonical identity via %s. If this is an onboarded graph whose "
@@ -1658,6 +1723,7 @@ class AggregationPipeline:
                 "td": td,
             })
         if dropped:
+            self._dropped_endpoints += dropped      # → run_stats advisory
             logger.warning(
                 "aggregation pipeline on %s: dropped %d pairs with "
                 "unresolvable endpoints (deleted nodes or missing urn/label).",
