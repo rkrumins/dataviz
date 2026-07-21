@@ -35,6 +35,7 @@ class _FakePS:
 
 class _FakeGraph:
     data_source_id = "ds1"
+    workspace_id = "ws1"
     fork_parent_graph_id = None
 
 

@@ -82,11 +82,17 @@ def test_children_parent_residue_keeps_unlabeled_anchor():
     assert "(p)-[r:HAS]->" in q1
 
 
-def test_children_lineage_is_typed_and_bucketed():
+def test_children_lineage_is_case_insensitive_and_bucketed():
+    """Lineage is matched CASE-INSENSITIVELY (untyped `[lr]` + `toUpper(type(lr)) IN $lineageUpper`)
+    so a rebuild's stored relationship-type spelling — or a stale ontology→observed alias — can't
+    make raw lineage edges silently vanish from the canvas. The resolved set is uppercased into the
+    param. (Containment step-1 keeps its typed alternation; see the label-seek test above.)"""
     p = _make_provider({"urn:parent": "Roots", "urn:c1": "Node", "urn:c2": "Node"})
+    seen = []
 
     async def _ro(cypher, params=None, timeout=None, op=None):
         p.recorded.append(cypher)
+        seen.append((cypher, params or {}))
         if op == "children.page":
             return _FakeResult([
                 [{"urn": "urn:c1", "displayName": "c1"}, 0, "urn:parent", "HAS", {}],
@@ -102,12 +108,14 @@ def test_children_lineage_is_typed_and_bucketed():
 
     p._extract_node_from_result = _extract
     _run(p.get_children_with_edges("urn:parent", limit=20))
-    lineage = [q for q in p.recorded if "[lr:" in q or "[lr]" in q]
+    lineage = [(q, pr) for q, pr in seen if "[lr" in q and "->(b)" in q]
     assert lineage, p.recorded
-    for q in lineage:
-        assert "[lr:FLOWS_TO]" in q, q  # resolved lineage set → typed alternation
-        assert "NOT type(lr)" not in q
-    assert any("(a:Node)" in q or "(a:Roots)" in q for q in lineage)
+    for q, pr in lineage:
+        assert "[lr]" in q and "[lr:" not in q, q                # untyped — NOT a case-sensitive alternation
+        assert "toUpper(type(lr)) IN $lineageUpper" in q, q      # case-insensitive resolved-set filter
+        assert "NOT type(lr)" not in q                            # not the pre-ontology untyped fallback
+        assert pr.get("lineageUpper") == ["FLOWS_TO"], pr         # resolved set, uppercased
+    assert any("(a:Node)" in q or "(a:Roots)" in q for q, _ in lineage)
 
 
 def test_get_edges_between_is_bucketed_typed_and_seeked():

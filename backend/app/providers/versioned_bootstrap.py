@@ -56,11 +56,16 @@ async def collect_provider_rows(provider, *, batch: int = 2000) -> List[dict]:
     while True:
         edges = await provider.get_edges(EdgeQuery(limit=batch, offset=offset))
         for e in edges:
-            rows.append({
-                "kind": "edge", "id": e.id, "edgeType": e.edge_type,
-                "source": e.source_urn, "target": e.target_urn,
-                **(e.properties or {}),
-            })
+            # Carry confidence (top-level) + properties (NESTED), NOT flattened — the downstream
+            # canonical payload builder (edge_payload_from_parts) reads exactly this. Keep
+            # source/target (urns) as the row's endpoint keys that bulk/sync_ingest resolve.
+            row = {"kind": "edge", "id": e.id, "edgeType": e.edge_type,
+                   "source": e.source_urn, "target": e.target_urn}
+            if e.confidence is not None:
+                row["confidence"] = e.confidence
+            if e.properties:
+                row["properties"] = dict(e.properties)
+            rows.append(row)
         if len(edges) < batch:
             break
         offset += batch

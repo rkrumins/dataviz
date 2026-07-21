@@ -810,6 +810,7 @@ class DriftReportModel(_ApiModel):
     missing_edges: List[str] = Field(default_factory=list, alias="missingEdges")
     extra_edges: List[str] = Field(default_factory=list, alias="extraEdges")
     mismatched: List[DriftMismatch] = Field(default_factory=list)
+    edge_mismatched: List[DriftMismatch] = Field(default_factory=list, alias="edgeMismatched")
     truncated: bool = False
     in_sync: bool = Field(alias="inSync")
     checked_at: str = Field(alias="checkedAt")
@@ -2151,7 +2152,12 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
     nodes, node_urns = [], set()
     for row in (getattr(res, "result_set", None) or []):
         props = dict(row[0].properties)
-        gn = _node_from_props(props)
+        # entityType lives on the FalkorDB LABEL, not as a property (the projector and
+        # save_custom_graph both write it label-only). Recover it from the label exactly as
+        # _extract_node_from_result does, else it collapses to "unknown" and the frontend can
+        # neither resolve the type nor apply containment rules.
+        labels = getattr(row[0], "labels", None) or []
+        gn = _node_from_props(props, labels[0] if labels else None)
         if gn is not None:
             nodes.append(gn.model_dump(by_alias=True))
             if props.get("urn"):

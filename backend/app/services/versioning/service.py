@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 
 from . import config, db
 from .changeset import Delta, materialize, net_delta, diff_states
+from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -4335,9 +4336,8 @@ class GraphVersioningService:
                     rejected.append({"row": i, "reason": "edge endpoint not found"})
                     continue
                 eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
-                payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                           **{k: v for k, v in row.items()
-                              if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+                payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                                  target_entity_id=teid, row=row)
                 edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
 
             deltas = node_deltas + edge_deltas
@@ -4413,6 +4413,52 @@ class GraphVersioningService:
                 "refusing sync for graph %s: %d entities exceeds the %d limit (~%.1f GB)",
                 graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
             raise GraphTooLargeToSync(entities, limit)
+
+    async def edge_payload_health(
+        self, graph_id: str, *, sample_limit: int = 20
+    ) -> Dict[str, object]:
+        """Flag edges on ``main`` whose durable payload is in the pre-contract FLATTENED shape
+        (user properties spread at the top level, ``confidence`` dropped) — i.e. graphs bootstrapped
+        or synced before the serialization contract. A non-zero ``flattened`` count means the graph
+        should be re-imported from its source via :meth:`resync_from_provider`
+        (``strategy='external_wins'``) to recover properties AND confidence — iff the source still
+        holds them. Keyset-paged over ``entity_heads`` (O(batch) memory). Returns
+        ``{scanned, flattened, samples}`` with ``samples`` bounded to ``sample_limit``."""
+        from .entity_serde import is_flattened_edge_payload
+        scanned = 0
+        flattened = 0
+        samples: List[dict] = []
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+        if main_id is None:
+            return {"scanned": 0, "flattened": 0, "samples": []}
+        cursor = ""
+        while True:
+            async with self._session() as s:
+                rows = (await s.execute(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.payload).join(
+                        EdgeVersionORM,
+                        (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                        & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+                    ).where(
+                        EntityHeadORM.graph_id == graph_id,
+                        EntityHeadORM.branch_id == main_id,
+                        EntityHeadORM.entity_kind == "edge",
+                        EntityHeadORM.is_tombstone.is_(False),
+                        EntityHeadORM.entity_id.collate("C") > cursor,
+                    ).order_by(EntityHeadORM.entity_id.collate("C")).limit(2000)
+                )).all()
+            for eid, payload in rows:
+                scanned += 1
+                if is_flattened_edge_payload(payload or {}):
+                    flattened += 1
+                    if len(samples) < sample_limit:
+                        samples.append({"entityId": eid,
+                                        "edgeType": (payload or {}).get("edgeType")})
+            if len(rows) < 2000:
+                break
+            cursor = rows[-1][0]
+        return {"scanned": scanned, "flattened": flattened, "samples": samples}
 
     async def sync_ingest(
         self, *, graph_id: str, rows, actor: str, source: str = "external",
@@ -4647,9 +4693,8 @@ class GraphVersioningService:
             hit = by_triple.get((seid, teid, et))
             eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
                    or f"sync:e:{seid}->{teid}:{et}")
-            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                       **{k: v for k, v in row.items()
-                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                              target_entity_id=teid, row=row)
             seen.add(eid)
             if hit and not hit[2] and hit[1] == _ch(payload):
                 continue
@@ -4779,9 +4824,8 @@ class GraphVersioningService:
                 continue
             eid = (edge_index.get((seid, teid, et)) or row.get("entity_id")
                    or row.get("id") or f"sync:e:{seid}->{teid}:{et}")
-            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
-                       **{k: v for k, v in row.items()
-                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
+                                              target_entity_id=teid, row=row)
             theirs[eid] = payload
         return theirs, rejected
 

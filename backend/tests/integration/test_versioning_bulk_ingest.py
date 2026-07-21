@@ -17,12 +17,9 @@ from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import CommitORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 R, M = "workspace:datasource:read", "workspace:datasource:manage"
-
-
-async def _noop(cypher, params=None):
-    return None
 
 
 ROWS = [
@@ -65,7 +62,9 @@ async def _run() -> None:
     assert (await svc.get_graph(gid))["main_head_commit_seq"] == 2
 
     # ── the imported graph projects + reads fresh ───────────────────────
-    proj = FalkorProjector(graph_client_factory=lambda n, provider_id=None: SimpleNamespace(query=_noop))
+    # A cypher-interpreting fake (not a no-op): the post-Layer-A projector DROPs then content-verifies
+    # the reseed and only advances the watermark when the projection faithfully equals committed main.
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
     await proj.project_graph(gid)
     assert (await svc.projection_watermark(gid))["projected"] == 2
 
