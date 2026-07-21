@@ -10,13 +10,28 @@ reader-compatible Cypher the projector emits over an in-memory graph), extended 
 scan/fetch queries the reconciler emits. The live socket is covered by the real-FalkorDB module.
 """
 import asyncio
+import contextlib
 import os
 
 import pytest
 
+from backend.app.services.versioning import config as _vcfg
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
+
+
+@contextlib.contextmanager
+def _deep_verify_on():
+    """The per-entity deep CONTENT verify is OFF by default (its unindexed per-entity fetch is
+    O(N²+E²) and hangs a large rebuild). These holdback tests exercise that verify specifically, so
+    they opt into it; the count verify (collapse-correct) is what runs on the default hot path."""
+    prev = _vcfg.PROJECTION_VERIFY_DEEP
+    _vcfg.PROJECTION_VERIFY_DEEP = True
+    try:
+        yield
+    finally:
+        _vcfg.PROJECTION_VERIFY_DEEP = prev
 from backend.app.services.versioning.reconcile import (
     ProjectionReconciler,
     _DEEP_FETCH,
@@ -423,7 +438,8 @@ async def _run_holdback_on_content_drift() -> None:
         {"op": "create", "entity_kind": "edge", "entity_id": "E1", "payload": _edge("A", "B")},
     ], "seed")
 
-    r = await proj.project_graph(gid)                    # first projection == full seed
+    with _deep_verify_on():
+        r = await proj.project_graph(gid)                # first projection == full seed
     assert r["verify_error"] and "content drift" in r["verify_error"], r
     assert r["projected"] == 0, r                        # held back — never published
     wm = await svc.projection_watermark(gid)
@@ -452,11 +468,51 @@ async def _run_holdback_on_edge_attr_drift() -> None:
                      "confidence": 0.9, "properties": {"sql": "select 1"}}},
     ], "seed")
 
-    r = await proj.project_graph(gid)                    # first projection == full seed
+    with _deep_verify_on():
+        r = await proj.project_graph(gid)                # first projection == full seed
     assert r["verify_error"] and "edge attr mismatch" in r["verify_error"], r
     assert r["projected"] == 0, r                        # held back — never published
     wm = await svc.projection_watermark(gid)
     assert wm["fresh"] is False and "content drift" in (wm["last_error"] or ""), wm
+    await db.dispose_engine()
+
+
+async def _run_publishes_with_parallel_edges() -> None:
+    """Parallel edges — same ``(src, type, tgt)`` triple, different ids — collapse to ONE
+    relationship in FalkorDB (the id-less ``MERGE``). The count verify must model that (compare
+    Postgres' DISTINCT-triple count against FalkorDB's edge count) or it reports a permanent false
+    shortfall and holds EVERY parallel-edge graph back forever — the "60058/60058 then stuck" bug."""
+    from backend.app.services.versioning.reconcile import pg_live_counts, pg_live_counts_projectable
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    # Parallel edges arrive via BOOTSTRAP (bulk import), not write-through — the versioned publish
+    # gate rejects undiscriminated duplicate triples, but a source FalkorDB can legitimately hold
+    # them and bulk_ingest imports them verbatim (this IS the 60k-entity enable-versioning path).
+    await svc.bulk_ingest(graph_id=gid, actor="alice", idempotency_key="k1", rows=[
+        {"kind": "node", "id": "A", "urn": "A", "entityType": "Dataset", "displayName": "Alpha"},
+        {"kind": "node", "id": "B", "urn": "B", "entityType": "Dataset", "displayName": "Beta"},
+        {"kind": "edge", "id": "E1", "edgeType": "FLOWS_TO", "source": "A", "target": "B"},
+        {"kind": "edge", "id": "E2", "edgeType": "FLOWS_TO", "source": "A", "target": "B"},  # same triple
+    ])
+
+    # Premise: Postgres holds BOTH edges (2 raw) but only ONE distinct triple.
+    mid = await svc.main_branch_id(gid)
+    async with db.graphver_session() as s:
+        assert (await pg_live_counts(s, gid, mid))[1] == 2, "expected two raw parallel edges"
+        assert (await pg_live_counts_projectable(s, gid, mid))[1] == 1, "expected one distinct triple"
+
+    # The reseed collapses E1/E2 to one relationship; the collapse-correct count (1 == 1) must PUBLISH.
+    assert await svc.request_projection_rebuild(gid) is True
+    r = await proj.project_graph(gid)
+    assert not r.get("verify_error"), r
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is True and wm["projected"] == wm["committed"], wm
     await db.dispose_engine()
 
 
@@ -526,6 +582,11 @@ def test_projection_holdback_on_edge_attr_drift_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_publishes_with_parallel_edges_e2e():
+    asyncio.run(_run_publishes_with_parallel_edges())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
 
@@ -564,6 +625,7 @@ if __name__ == "__main__":
     for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id,
                 _run_failure_honesty, _run_progress_writer,
                 _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
-                _run_holdback_on_edge_attr_drift, _run_rebuild_bumps_ontology_cache):
+                _run_holdback_on_edge_attr_drift, _run_publishes_with_parallel_edges,
+                _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

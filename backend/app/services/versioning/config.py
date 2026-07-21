@@ -122,13 +122,18 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # graph from Postgres once. Guards against a silently dropped delete leaving the
 # cache diverged from committed main. Disable with GRAPHVER_PROJECTION_VERIFY=0.
 PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").lower() not in ("0", "false", "no")
-# On a FULL SEED (an explicit rebuild / first seed / repin), also run a CONTENT verify
-# (the reconciler's id-set + deep-field diff) — counts alone are blind to content drift
-# (a dropped/mistyped edge that keeps the count, a node reseeded with a wrong label or an
-# empty displayName). On any drift the rebuild is held back (watermark not advanced) so
-# reads keep serving Postgres instead of a corrupt cache. Full-seed only (rare + O(graph));
-# incremental windows keep the cheap count verify. Disable with GRAPHVER_PROJECTION_VERIFY_DEEP=0.
-PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1").lower() not in ("0", "false", "no")
+# On a FULL SEED (an explicit rebuild / first seed / repin), OPTIONALLY also run a per-entity
+# CONTENT verify (the reconciler's id-set + deep-field diff). OFF BY DEFAULT: the deep diff fetches
+# each entity by an UNINDEXED lookup (`MATCH (n {urn})` / `MATCH ()-[r {id}]->()`), i.e. a full scan
+# per entity → O(N²+E²). On a 60k-entity graph that is ~10⁹ scans — the reseed applies fine, then the
+# verify hangs for many minutes, blows past the rebuild timeout, gets cancelled, and the worker
+# re-runs the whole DROP+reseed → an endless wipe-loop. The cheap count verify (below) — now
+# collapse-correct via a DISTINCT-triple comparison — catches dropped/extra entities in O(1); the
+# canonical serialization contract + the round-trip fidelity gate cover attribute/label fidelity; and
+# the on-demand reconcile ("Check sync") still runs the full deep diff when an operator asks. Enable
+# on the hot path with GRAPHVER_PROJECTION_VERIFY_DEEP=1 (only sane for small graphs until the deep
+# scan is made index-anchored / O(N+E)).
+PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "0").lower() not in ("0", "false", "no")
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):

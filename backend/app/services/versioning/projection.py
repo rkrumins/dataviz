@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import func, literal, select
 
 from . import config, db
-from .reconcile import falkor_counts, pg_live_counts
+from .reconcile import falkor_counts, pg_live_counts_projectable
 from .models import (
     EdgeVersionORM,
     EntityHeadORM,
@@ -457,6 +457,19 @@ class FalkorProjector:
                                          else str(exc)[:500])
                         ps.progress_done = None          # don't strand a stale progress bar
                         ps.progress_total = None
+                        # WIPE-LOOP GUARD — CANCELLATION only. A full seed DROPs the graph at line
+                        # ~374; if it is then CANCELLED by the rebuild's `wait_for` timeout (a verify
+                        # or apply too slow to finish in the budget), re-selecting it just re-DROPs and
+                        # re-times-out — an endless DROP→reseed→cancel→repeat that wipes the cache every
+                        # cycle (edges visibly vanish). Pin target to the un-advanced seq (as the clean
+                        # verify-failure path does at ~431) so project_pending (projected < target)
+                        # stops re-running it; a manual rebuild (re-arms target=head) or a new commit
+                        # retries it. ONLY on cancel + full seed: a plain EXCEPTION (e.g. a transient
+                        # FalkorDB blip, or a failed synchronous rebuild that deliberately "defers to
+                        # the async worker") MUST stay retryable — pinning it there would strand the
+                        # graph un-projected. An incremental window never DROPs, so it is never pinned.
+                        if cancelled and from_seq <= 0:
+                            ps.target_commit_seq = ps.projected_commit_seq
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the
@@ -1124,19 +1137,23 @@ class FalkorProjector:
         return urn, label
 
     async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
-        """Live (non-tombstone) node/edge counts on ``main`` from ``entity_heads`` —
-        O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` only for a NON-fork
-        main that is fully caught up (``main_head == to_seq``); ``None`` otherwise
-        (a fork's composed count is O(graph); a lagging head verifies on catch-up)."""
+        """Node count + the count a FAITHFUL FalkorDB projection should hold, from ``entity_heads``,
+        for a NON-fork main fully caught up (``main_head == to_seq``); ``None`` otherwise (a fork's
+        composed count is O(graph); a lagging head verifies on catch-up).
+
+        Edges are counted as DISTINCT ``(source, type, target)`` TRIPLES, not raw ids: the projector
+        MERGEs edges id-lessly, so parallel edges (same triple, different ids) collapse to one
+        relationship in FalkorDB. Comparing against the raw edge count would flag that legitimate
+        collapse as a shortfall and hold every parallel-edge graph back forever."""
         if is_fork:
             return None
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.main_head_commit_seq != to_seq:
                 return None
-            # The count SQL lives in reconcile.pg_live_counts (single source, shared with the
-            # reconciler); the fork / lagging-head gate above is this verify path's own concern.
-            return await pg_live_counts(s, graph_id, main_id)
+            # Collapse-correct count (reconcile.pg_live_counts_projectable): distinct edge triples ==
+            # what falkor_counts sees after the id-less MERGE. Single source, shared semantics.
+            return await pg_live_counts_projectable(s, graph_id, main_id)
 
     @staticmethod
     async def _falkor_counts(client):

@@ -68,7 +68,8 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 async def pg_live_counts(session, graph_id: str, branch_id: str) -> Tuple[int, int]:
     """Live (non-tombstone) node/edge counts on *branch_id* from ``entity_heads`` —
-    O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)``."""
+    O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` — the TRUE counts (every distinct
+    edge id), for the drift report the operator reads."""
     pg_nodes = (await session.execute(
         select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
@@ -80,6 +81,38 @@ async def pg_live_counts(session, graph_id: str, branch_id: str) -> Tuple[int, i
             EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
         ))).scalar_one()
     return int(pg_nodes), int(pg_edges)
+
+
+async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> Tuple[int, int]:
+    """Node count + DISTINCT edge-TRIPLE count — what a FAITHFUL FalkorDB projection actually holds,
+    so it can be compared 1:1 with :func:`falkor_counts`.
+
+    The projector writes edges id-lessly (``MERGE (a)-[r:TYPE]->(b)``), so N Postgres edges that share
+    a ``(source, type, target)`` triple collapse to ONE relationship in FalkorDB (the model's
+    parallel-edge invariant). Comparing FalkorDB's edge count against the TRUE edge count
+    (:func:`pg_live_counts`) therefore reports a false shortfall on ANY graph with parallel edges and
+    holds the rebuild back forever. Counting DISTINCT triples models the collapse exactly: a genuine
+    dropped triple still shows as a shortfall, an extra still shows as a surplus. Nodes never collapse,
+    so the node count is unchanged. O(E) — one indexed aggregation, not per-edge."""
+    pg_nodes = (await session.execute(
+        select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(False),
+        ))).scalar_one()
+    triples = (await session.execute(
+        select(func.count(func.distinct(func.concat(
+            EdgeVersionORM.source_entity_id, "\x1f",
+            EdgeVersionORM.edge_type, "\x1f",
+            EdgeVersionORM.target_entity_id,
+        )))).select_from(EntityHeadORM).join(
+            EdgeVersionORM,
+            (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+            & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+        ).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
+        ))).scalar_one()
+    return int(pg_nodes), int(triples)
 
 
 async def falkor_counts(client) -> Tuple[int, int]:

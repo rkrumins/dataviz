@@ -99,6 +99,13 @@ class FakeGraph:
                 # Label-anchored MATCH: BOTH endpoints must exist WITH the anchored label, else the
                 # row binds nothing and the edge is silently not created (models the real drop).
                 if a and b and a.get("_label") == slb and b.get("_label") == tlb:
+                    # id-less MERGE collapses parallel edges: FalkorDB keys a relationship on the
+                    # (src, type, tgt) TRIPLE, so N edges sharing a triple become ONE (r.id = last
+                    # writer). Drop any existing same-triple edge before (re-)adding — a no-op for a
+                    # graph with no parallel edges, faithful for one that has them.
+                    for _k in [k for k, e in self.edges.items()
+                               if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
+                        self.edges.pop(_k, None)
                     self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
                                              "props": it.get("props"), "conf": it.get("conf")}
             return None
