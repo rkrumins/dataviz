@@ -20,6 +20,7 @@ import { mapWithConcurrency } from '@/lib/concurrency'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
+import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { AggregationFleetPanel } from './AggregationFleetPanel'
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -297,6 +298,7 @@ export function WorkspaceAggregationDashboard({
                                                         {ds.projectionMode}
                                                     </span>
                                                 )}
+                                                <NodeIdentityBadge value={ds.identityProperty} />
                                             </div>
                                         </div>
                                     </div>

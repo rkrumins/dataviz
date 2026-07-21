@@ -31,6 +31,7 @@ import {
 import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
+import { NodeIdentityField, isIdentityOverridden } from '@/components/dataSource/NodeIdentity'
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -64,6 +65,7 @@ export function AddDataSourceWizard({
     const [catalogItemId, setCatalogItemId] = useState('')
     const [label, setLabel] = useState('')
     const [ontologyId, setOntologyId] = useState('')
+    const [identityProperty, setIdentityProperty] = useState('')
 
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
@@ -168,7 +170,7 @@ export function AddDataSourceWizard({
         : null
 
     const reset = useCallback(() => {
-        setStep('source'); setCatalogItemId(''); setLabel(''); setOntologyId('')
+        setStep('source'); setCatalogItemId(''); setLabel(''); setOntologyId(''); setIdentityProperty('')
         setPhase('steps'); setError(null); setPickedOntology(false)
     }, [])
 
@@ -192,10 +194,11 @@ export function AddDataSourceWizard({
                 )
                 // Label/ontology are per-data-source and survive the move; apply any
                 // change the user made here on top.
-                if (label.trim() || ontologyId) {
+                if (label.trim() || ontologyId || isIdentityOverridden(identityProperty)) {
                     await workspaceService.updateDataSource(workspaceId, selected.boundDataSourceId, {
                         label: label.trim() || undefined,
                         ontologyId: ontologyId || undefined,
+                        identityProperty: identityProperty || undefined,
                     })
                 }
             } else {
@@ -203,6 +206,7 @@ export function AddDataSourceWizard({
                     catalogItemId,
                     label: label.trim() || undefined,
                     ontologyId: ontologyId || undefined,
+                    identityProperty: identityProperty || undefined,
                 })
             }
             setPhase('success')
@@ -213,7 +217,7 @@ export function AddDataSourceWizard({
             setPhase('steps')
             setStep('review')
         }
-    }, [workspaceId, catalogItemId, label, ontologyId, isMove, selected])
+    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, isMove, selected])
 
     if (!isOpen) return null
 
@@ -470,6 +474,14 @@ export function AddDataSourceWizard({
                             )}
                         </div>
                     )}
+                    {/* Node Identity Property (URN-equivalent) for the attached source. */}
+                    <NodeIdentityField
+                        variant="compact"
+                        value={identityProperty}
+                        onChange={setIdentityProperty}
+                        providerId={selected?.providerId}
+                        graphName={selected?.sourceIdentifier || selected?.name}
+                    />
                 </div>
             )}
 

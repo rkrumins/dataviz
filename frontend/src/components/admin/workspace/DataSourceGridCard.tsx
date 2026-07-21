@@ -5,6 +5,7 @@ import type { DataSourceResponse } from '@/services/workspaceService'
 import { resolveSourceMode } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { getProviderLogo } from '../ProviderLogos'
+import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 function compactNum(n: number): string {
@@ -154,6 +155,7 @@ function DataSourceGridCardBase({
                             {ds.isActive ? 'Active' : 'Inactive'}
                         </span>
                         <SourceModeChip mode={resolveSourceMode(ds)} />
+                        <NodeIdentityBadge value={ds.identityProperty} />
                     </div>
                     {ontologyName && (
                         <span className="flex items-center gap-1 text-[11px] text-ink-muted">
