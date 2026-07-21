@@ -34,7 +34,7 @@ The OPS Freshness Cockpit (2026-07-18 design) made freshness *legible* but left 
 - Phase label absent/unrecognized → fall back to today's bare `Recomputing` with no bar, never a guess.
 - The badge links to Job History (§2). The rest of the badge cascade (`failed`, `queued`, `stale`, drift, cooldown) is untouched.
 
-**Expandable detail panel.** A rebuilding row expands in place (chevron in the source cell, same interaction as Job History's rows) to a panel carrying the **four-phase stepper** and a full-width progress bar:
+**Expandable detail panel.** A rebuilding row expands in place — via the `recomputing` state's primary action (§3), NOT a chevron: the source cell's name block is already a button that opens the freshness drawer, and a competing affordance in the same cell would be worse than one clear labelled button. The panel carries the **four-phase stepper** and a full-width progress bar:
 
 ```text
 Computing rollups                                62%

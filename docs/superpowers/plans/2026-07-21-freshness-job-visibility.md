@@ -897,6 +897,8 @@ and pass to `FreshnessRow`:
 
 Single-open accordion: expanding one row collapses another, so the table never grows unboundedly while 21 sources rebuild.
 
+**Expected intermediate state — do not "fix" this.** After this task nothing in the UI triggers expansion: the panel is purely prop-driven and these tests drive `expanded` directly. The trigger arrives in Task 6, where the `recomputing` state's primary action ("View progress") calls `onToggleExpand`. Deliberately no chevron in the source cell — that cell's whole name block is already a button opening the freshness drawer, so a second competing affordance there would be worse than one labelled button.
+
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd frontend && npx vitest run src/components/admin/Freshness/`
