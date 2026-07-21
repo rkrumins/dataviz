@@ -352,7 +352,7 @@ git commit -m "feat: jobHistoryPath deep-link helper and a Job History link in t
 **Interfaces:**
 - Consumes: `aggregationService.listJobsGlobal(filters)`, `AggregationJobResponse`, `PaginatedJobsResponse` from `@/services/aggregationService`.
 - Produces:
-  - `ACTIVE_JOB_CAP = 200`
+  - `ACTIVE_JOB_CAP = 100`
   - `ACTIVE_JOBS_KEY: readonly ['freshness', 'activeJobs']`
   - `useActiveJobs(enabled?: boolean): { byDataSource: Map<string, AggregationJobResponse>; truncated: boolean }`
 
@@ -462,9 +462,12 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { aggregationService, type AggregationJobResponse } from '@/services/aggregationService'
 
-/** One generous page. Past this we stop claiming to know a row's phase
- *  rather than showing a stale one. */
-export const ACTIVE_JOB_CAP = 200
+/** The jobs endpoint validates `limit` with `Query(25, ge=1, le=100)`
+ *  (aggregation.py `list_jobs_global`) — asking for more is a hard 422
+ *  before the handler runs, which would silently kill this whole feature.
+ *  Past this we stop claiming to know a row's phase rather than showing a
+ *  stale one. */
+export const ACTIVE_JOB_CAP = 100
 
 /** Matches the fleet query's cadence (useFreshness FLEET_POLL_MS). */
 const ACTIVE_JOBS_POLL_MS = 30_000

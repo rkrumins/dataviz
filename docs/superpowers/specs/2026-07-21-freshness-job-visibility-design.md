@@ -19,7 +19,7 @@ The OPS Freshness Cockpit (2026-07-18 design) made freshness *legible* but left 
 
 **One request, not one per row.** `JobRow` opens an SSE stream per active row (`useJob`), which its own comment flags as capped by HTTP/1.1's ~6 connections per host. With 21 rebuilding rows that is a non-starter, and Freshness does not need per-second fidelity — poll cadence is sufficient for a badge.
 
-**No silent truncation.** `listJobsGlobal` is paginated (`PaginatedJobsResponse` = `{items, total, limit, offset}`). Request `ACTIVE_JOB_CAP = 200`; when `total > items.length`, log once and let un-joined rows fall back to the plain `Recomputing` badge. A row never displays a *stale* phase or a percentage it cannot substantiate.
+**No silent truncation.** `listJobsGlobal` is paginated (`PaginatedJobsResponse` = `{items, total, limit, offset}`). Request `ACTIVE_JOB_CAP = 100` — **the endpoint's hard ceiling, not an arbitrary page size**: `list_jobs_global` validates `limit` with `Query(25, ge=1, le=100)`, so a larger value is a 422 before the handler runs and would silently kill the whole join. When `total > items.length`, log once and let un-joined rows fall back to the plain `Recomputing` badge. A row never displays a *stale* phase or a percentage it cannot substantiate.
 
 **Degradation.** If the jobs query fails or 403s for this operator, every row falls back to the plain badge. The Freshness tab must not break because a secondary query failed.
 
