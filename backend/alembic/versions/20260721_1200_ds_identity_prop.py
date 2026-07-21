@@ -1,6 +1,6 @@
 """Node-identity property (URN-equivalent) on data sources + aggregation jobs.
 
-Revision ID: 20260721_1200_ds_identity_property
+Revision ID: 20260721_1200_ds_identity_prop
 Revises: 20260719_1400_product_events
 Create Date: 2026-07-21 12:00
 
@@ -34,7 +34,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260721_1200_ds_identity_property"
+revision: str = "20260721_1200_ds_identity_prop"
 down_revision: Union[str, None] = "20260719_1400_product_events"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

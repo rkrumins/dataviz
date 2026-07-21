@@ -104,7 +104,7 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
                 # Node-identity property (URN-equivalent) frozen at trigger
                 # time (2026-07-21), mirrored in alembic
-                # 20260721_1200_ds_identity_property. NULL → "urn" in the
+                # 20260721_1200_ds_identity_prop. NULL → "urn" in the
                 # worker, so every legacy row keeps the canonical behaviour.
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS identity_property TEXT NULL",
