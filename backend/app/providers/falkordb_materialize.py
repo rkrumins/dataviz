@@ -154,6 +154,27 @@ def _scan_timeout_s() -> float:
     return _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
 
 
+def _node_identity_expr(identity_property: Optional[str]) -> str:
+    """Cypher expression for a node's canonical identity: the platform ``urn``, falling back to the
+    source's configured URN-equivalent property when a node has no ``urn``.
+
+    Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
+    (or ``name``/another key), not ``urn`` — and the node directory was hardcoded to ``n.urn`` with
+    no fallback (unlike the read path/projector, which fall back to ``gv:``). Without this, the
+    directory drops every such node and aggregation silently computes pairs then discards 100% of
+    them ("unresolvable endpoints"). ``coalesce(urn, …)`` keeps conforming graphs unchanged (they
+    have ``urn``) while resolving identity for onboarded graphs via their declared URN-equivalent.
+
+    ``identity_property`` comes from the per-source conformance config; when unset it falls back to
+    ``AGGREGATION_NODE_IDENTITY_PROPERTY``. Default is ``urn`` (OPT-IN — no behavior change for
+    conforming graphs); an operator/source sets it to the graph's URN-equivalent (e.g. ``id``)."""
+    prop = identity_property or os.getenv("AGGREGATION_NODE_IDENTITY_PROPERTY", "urn")
+    safe = str(prop).replace("`", "")
+    if not safe or safe == "urn":
+        return "n.`urn`"
+    return f"coalesce(n.`urn`, n.`{safe}`)"
+
+
 def _extract_concurrency() -> int:
     """Concurrent read-only range scans (extract/reconcile/node directory).
     Bounded well below the server's THREAD_COUNT so interactive readers
@@ -1482,6 +1503,10 @@ class AggregationPipeline:
         # node set.
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
+        # Canonical identity per node: `urn`, or the source's configured URN-equivalent (e.g. `id`)
+        # for onboarded third-party graphs whose nodes carry no `urn`.
+        ident_prop = getattr(self, "_identity_property", None) or getattr(self.p, "_node_identity_property", None)
+        ident_expr = _node_identity_expr(ident_prop)
         res = await self.p._ro_query(
             "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
         )
@@ -1492,7 +1517,7 @@ class AggregationPipeline:
         async def run_one(lo: int, hi: int):
             res = await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-                "RETURN ID(n), n.urn, labels(n)",
+                f"RETURN ID(n), {ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
@@ -1507,15 +1532,26 @@ class AggregationPipeline:
             wave = lows[start:start + conc]
             for rows in await asyncio.gather(*(fetch(lo) for lo in wave)):
                 for row in rows:
-                    nid, urn, labels = row[0], row[1], row[2] or []
-                    if nid is None or not urn or not labels:
+                    nid, identity, labels = row[0], row[1], row[2] or []
+                    if nid is None or not identity or not labels:
                         continue
-                    directory[int(nid)] = (urn, sys.intern(str(labels[0])))
+                    directory[int(nid)] = (identity, sys.intern(str(labels[0])))
         self._node_dir = directory
         logger.info(
-            "aggregation pipeline on %s: node directory loaded — %d entries.",
-            self.p._graph_name, len(directory),
+            "aggregation pipeline on %s: node directory loaded — %d entries (identity=%s).",
+            self.p._graph_name, len(directory), _node_identity_expr(ident_prop),
         )
+        # A totally empty directory on a graph that HAS nodes means identity resolution failed for
+        # every node — the classic onboarded-graph symptom (nodes keyed by `id`, not `urn`, and no
+        # identity mapping configured). Surface it loudly instead of silently dropping every pair.
+        if not directory and max_id >= 0:
+            logger.warning(
+                "aggregation pipeline on %s: node directory is EMPTY though the graph has nodes — "
+                "no node resolved a canonical identity via %s. If this is an onboarded graph whose "
+                "nodes are identified by a property other than `urn`, set the source's identity "
+                "property (URN-equivalent). Every aggregation pair will be dropped until then.",
+                self.p._graph_name, _node_identity_expr(ident_prop),
+            )
         return directory
 
     async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
