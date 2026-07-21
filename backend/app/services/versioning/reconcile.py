@@ -33,16 +33,16 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select
 
+from .falkor_query import _q, _READ_TIMEOUT_MS
+
 
 def _bounded_query(client, cypher: str, params=None):
     """The projector's bounded query helper: a server-side kill budget AND a
     client-side asyncio.wait_for. Reconcile's queries used to be BARE
     ``await client.query(...)``, bounded only by the pool's 75s socket hang-net — and
     ResilientGraph retries once, so a black-holed socket could stall a single
-    reconcile query for ~150s. Imported lazily: projection imports this module during
-    its own init, so a module-level import is circular."""
-    from .projection import _READ_TIMEOUT_MS, _q
-
+    reconcile query for ~150s. ``_q`` lives in the leaf ``falkor_query`` module (shared with
+    the projector) so this import is a plain module-level one, no longer circular."""
     return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
 
 from .models import (

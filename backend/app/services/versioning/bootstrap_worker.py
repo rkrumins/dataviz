@@ -78,7 +78,7 @@ from .models import (
     ProjectionStateORM,
     _now,
 )
-from .projection import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
+from .falkor_query import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
 from .service import (
     ConcurrencyError,
     GraphVersioningService,
