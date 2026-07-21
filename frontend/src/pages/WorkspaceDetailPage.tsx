@@ -590,10 +590,10 @@ export function WorkspaceDetailPage() {
                 the copy stops hedging. Friction proportional to consequence. */}
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Offboard data source'}
                 subtitle={deletion.target?.label}
                 confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
-                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Offboard'}
                 sections={impactSections(deletion.target?.impact ?? null,
                                          deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}
@@ -620,6 +620,9 @@ export function WorkspaceDetailPage() {
                 onSaveEdit={handleEditDsSave}
                 onDelete={workspace.dataSources.length > 1 && selectedDs
                     ? () => deletion.open(selectedDs.id, selectedDs.label || selectedDs.id)
+                    : undefined}
+                onDeletePermanent={workspace.dataSources.length > 1 && selectedDs
+                    ? () => deletion.openPermanent(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}

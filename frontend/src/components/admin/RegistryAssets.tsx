@@ -35,6 +35,7 @@ import {
     PROVIDER_CATALOG_QUERY_KEY,
 } from '@/hooks/useProviderAssets'
 import { workspaceService } from '@/services/workspaceService'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
@@ -906,6 +907,12 @@ export function RegistryAssets() {
             await catalogService.delete(unregisterTarget.id, true)
             queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, selectedProviderId] })
             queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, selectedProviderId] })
+            // Off-boarding force-soft-deletes the catalog item's workspace data sources.
+            // Refresh the workspace-backed surfaces (View Wizard reads the store; the
+            // paged workspace rail reads the ['workspaces'] query) so the source
+            // disappears immediately instead of lingering until the next reload.
+            queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+            await useWorkspacesStore.getState().loadWorkspaces()
             setUnregisterTarget(null)
             setUnregisterImpact(null)
         } catch { /* swallow */ } finally {
