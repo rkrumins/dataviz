@@ -70,6 +70,25 @@ def _complex_graph():
     return nodes, edges
 
 
+def _recursive_graph():
+    """A SELF-NESTING type — ``Folder ⊃ Folder ⊃ … N deep`` — the exact recursive shape the
+    containment tree reconstructs edge-by-edge: every node shares ONE entity type (and therefore one
+    ontology level), so depth lives ENTIRELY in the edges, not in any per-node attribute. Proves the
+    rebuild handles arbitrary nesting depth of a self-referential type, plus a cross-depth lineage
+    edge (same type, different depths) carrying confidence + properties so attribute fidelity is
+    exercised inside the recursion too."""
+    DEPTH = 6
+    nodes = [GraphNode(urn=f"urn:folder:{i}", entityType="Folder", displayName=f"F{i}",
+                       properties={"depth_hint": i}) for i in range(1, DEPTH + 1)]
+    # a chain of CONTAINS edges of the SAME type, one per level of nesting
+    edges = [GraphEdge(id=f"c{i}", sourceUrn=f"urn:folder:{i}", targetUrn=f"urn:folder:{i + 1}",
+                       edgeType="CONTAINS") for i in range(1, DEPTH)]
+    # lineage between the deepest node and a shallow one — both `Folder`, different depths
+    edges.append(GraphEdge(id="l1", sourceUrn=f"urn:folder:{DEPTH}", targetUrn="urn:folder:2",
+                           edgeType="DERIVES_FROM", confidence=0.55, properties={"note": "deep-ref"}))
+    return nodes, edges
+
+
 def _reconstruct_props(node_item: dict) -> dict:
     """Rebuild a node's user properties from how the projector stored them (native scalars +
     a JSON `propertiesRaw` residual) — mirrors the reader `_node_from_props`."""
@@ -79,11 +98,12 @@ def _reconstruct_props(node_item: dict) -> dict:
     return {**native, **residual}
 
 
-async def _run_roundtrip() -> None:
+async def _assert_roundtrip(nodes, edges) -> None:
+    """Bootstrap the SOURCE graph into Postgres, reseed it back into FalkorDB, and assert G2 ≡ G1 on
+    every edge (type/direction/endpoints/confidence/properties) and node (label/displayName/props)."""
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     fake_falkor = FakeFalkor()
-    nodes, edges = _complex_graph()
 
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
@@ -120,11 +140,27 @@ async def _run_roundtrip() -> None:
     await db.dispose_engine()
 
 
+async def _run_roundtrip() -> None:
+    nodes, edges = _complex_graph()
+    await _assert_roundtrip(nodes, edges)
+
+
+async def _run_recursive_roundtrip() -> None:
+    nodes, edges = _recursive_graph()
+    await _assert_roundtrip(nodes, edges)
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_roundtrip_fidelity_e2e():
     asyncio.run(_run_roundtrip())
 
 
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_recursive_roundtrip_fidelity_e2e():
+    asyncio.run(_run_recursive_roundtrip())
+
+
 if __name__ == "__main__":
     asyncio.run(_run_roundtrip())
+    asyncio.run(_run_recursive_roundtrip())
     print("versioning round-trip fidelity: OK")
