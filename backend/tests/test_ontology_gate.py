@@ -172,6 +172,23 @@ def test_no_lineage_blocks():
     assert report.has_lineage is False
 
 
+def test_array_only_lineage_does_not_block():
+    """A lineage type that lives ONLY in the top-level ``lineage_edge_types``
+    list (no rich per-def flag) must NOT trigger ``no_lineage`` — the resolver
+    and aggregation worker BOTH union the arrays and would run it, so the gate
+    cannot be stricter than the engine it guards."""
+    report = check_resolution(**_kwargs(
+        relationship_type_definitions_raw={
+            "HAS_COL": _make_relationship(is_containment=True, is_lineage=False),
+        },
+        containment_edge_types=["HAS_COL"],
+        lineage_edge_types=["FLOWS"],   # array-only — no declared def, no flag
+    ))
+    assert "no_lineage" not in report.blocking_reasons
+    assert report.has_lineage is True
+    assert report.resolved is True
+
+
 def test_has_lineage_uses_full_ontology_not_just_introspected():
     # Stats cache miss → introspected lists are empty. The ontology has
     # a lineage relationship, so the gate should NOT block on

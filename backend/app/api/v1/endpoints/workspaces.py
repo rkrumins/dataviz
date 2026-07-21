@@ -537,12 +537,23 @@ async def update_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
 
+    # A change to the URN-equivalent node-identity property makes the existing
+    # materialization stale (edges were resolved under the old identity) — and
+    # the urn stamp is NULL-only idempotent, so a re-run is REQUIRED, not
+    # optional. Detect the real change so we can flag it stale + force a re-run.
+    identity_changed = (
+        req.identity_property is not None
+        and (getattr(old_ds, "identity_property", None) or "urn")
+        != ((req.identity_property or "").strip() or "urn")
+    )
+
     # Track whether schema-invalidating fields changed so we know whether
     # to re-seed the stats cache below.
     schema_invalidating_change = (
         req.projection_mode is not None
         or req.dedicated_graph_name is not None
         or req.ontology_id is not None
+        or identity_changed
     )
 
     # Evict old cache entry if provider/graph config changed
@@ -570,6 +581,36 @@ async def update_data_source(
         # resolve — invalidate the process-wide resolved-ontology cache.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
         await bump_ontology_generation(workspace_id, ds_id)
+
+    # An identity change makes the materialized AGGREGATED edges stale. Force a
+    # re-run to be required, not optional: (1) clear the replay guard so the next
+    # trigger can't short-circuit onto the stale job, and (2) stamp a sentinel
+    # onto the aggregation-owned drift fingerprint so readiness reports drift and
+    # the UI prompts re-aggregation. Best-effort + guarded — the aggregation
+    # schema isn't loaded in every context (e.g. some tests).
+    if identity_changed:
+        try:
+            from sqlalchemy import update as _sa_update
+            from backend.app.services.aggregation.models import (
+                AggregationJobORM, AggregationDataSourceStateORM,
+            )
+            await session.execute(
+                _sa_update(AggregationJobORM)
+                .where(AggregationJobORM.data_source_id == ds_id)
+                .where(AggregationJobORM.ontology_fingerprint.isnot(None))
+                .values(ontology_fingerprint=None)
+            )
+            await session.execute(
+                _sa_update(AggregationDataSourceStateORM)
+                .where(AggregationDataSourceStateORM.data_source_id == ds_id)
+                .values(graph_fingerprint="stale:identity_property_changed")
+            )
+            await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "Data source %s: aggregation invalidation after identity change "
+                "skipped (%s)", ds_id, exc,
+            )
 
     return ds
 

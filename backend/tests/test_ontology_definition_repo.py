@@ -450,3 +450,31 @@ async def test_write_syncs_entity_hierarchy_from_containment_rels(db_session: As
     column_hier = resp.entity_type_definitions["column"]["hierarchy"]
     assert table_hier["can_contain"] == ["column"]
     assert set(column_hier["can_be_contained_by"]) == {"partition", "table"}
+
+
+async def test_get_ontology_heals_case_variant_dupes_at_rest(db_session: AsyncSession):
+    """A corrupted-at-rest ontology (two case-variant declared keys, e.g. `To`
+    next to `TO`) must self-heal on read: the response folds to one canonical
+    key with unioned classification, AND the stored row is persisted healed."""
+    import json
+    created = await ontology_definition_repo.create_ontology(db_session, _make_create_req())
+
+    # Corrupt at rest, bypassing the write-path guard (endpoint-level).
+    row = await ontology_definition_repo.get_ontology_orm(db_session, created.id)
+    row.relationship_type_definitions = json.dumps({
+        "To": {"name": "To", "is_lineage": False},
+        "TO": {"name": "To", "is_lineage": True},
+    })
+    row.lineage_edge_types = json.dumps(["TO"])
+    await db_session.commit()
+
+    resp = await ontology_definition_repo.get_ontology(db_session, created.id)
+    to_keys = [k for k in resp.relationship_type_definitions if k.lower() == "to"]
+    assert len(to_keys) == 1, "case-variant dupes must fold to one key on read"
+    survivor = resp.relationship_type_definitions[to_keys[0]]
+    assert survivor.get("is_lineage") is True, "classification unions onto the survivor"
+
+    # Persisted at rest — not merely folded in the response.
+    healed = await ontology_definition_repo.get_ontology_orm(db_session, created.id)
+    stored = json.loads(healed.relationship_type_definitions)
+    assert len([k for k in stored if k.lower() == "to"]) == 1

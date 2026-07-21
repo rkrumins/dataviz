@@ -82,6 +82,11 @@ class AggregationJobORM(Base):
     # up the new value while an in-flight run keeps its own frozen value.
     identity_property = Column(Text, nullable=True)
 
+    # Node display-name property frozen at trigger time — the physical graph
+    # property holding the human name (default "name"). Stamped onto
+    # `displayName` by the aggregation run so the read stack renders it.
+    name_property = Column(Text, nullable=True)
+
     # ── Progress tracking (cursor-based checkpoint) ──────────────────
     progress = Column(Integer, nullable=False, default=0)  # 0-100
     total_edges = Column(Integer, nullable=False, default=0)

@@ -25,6 +25,7 @@ import { StatusChip } from '@/components/insights/StatusChip'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { aggregationService } from '@/services/aggregationService'
 import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
+import { isIdentityOverridden, normalizeIdentity, isNameOverridden, normalizeName } from '@/components/dataSource/NodeIdentity'
 import { PhysicalAlignmentSection } from './PhysicalAlignmentSection'
 
 export interface DataSourceProfileContext {
@@ -32,6 +33,10 @@ export interface DataSourceProfileContext {
     dataSourceId: string
     ontologyId?: string | null
     ontologyName?: string | null
+    /** URN-equivalent node-identity property (default "urn"); shown when mapped. */
+    identityProperty?: string | null
+    /** Node display-name property (default "name"); shown when mapped. */
+    nameProperty?: string | null
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -457,6 +462,12 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                     <DetailRow label="Provider" value={provider?.name ?? '—'} />
                     <DetailRow label="Source identifier" mono value={item?.sourceIdentifier ?? '—'} />
                     <DetailRow label="Registered" value={item ? timeAgo(item.createdAt) : '—'} />
+                    {isIdentityOverridden(context?.identityProperty) && (
+                        <DetailRow label="Node identity" mono value={normalizeIdentity(context?.identityProperty)} />
+                    )}
+                    {isNameOverridden(context?.nameProperty) && (
+                        <DetailRow label="Display name" mono value={normalizeName(context?.nameProperty)} />
+                    )}
                     {item?.description && <DetailRow label="Description" value={item.description} />}
                 </dl>
             </Card>

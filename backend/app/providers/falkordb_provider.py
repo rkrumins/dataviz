@@ -647,7 +647,19 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
         return GraphNode(
             urn=props["urn"],
             entityType=str(entity_type),
-            displayName=props.get("displayName", ""),
+            # Onboarded third-party graphs often store the human name under
+            # `name`/`title`/`label` rather than the platform's `displayName`,
+            # which would otherwise render a BLANK node label. Fall back through
+            # the common keys. A source with a truly custom name property sets
+            # its `name_property`, which the aggregation stamp copies onto
+            # `displayName` server-side (see stamp_identity_urns).
+            displayName=(
+                props.get("displayName")
+                or props.get("name")
+                or props.get("title")
+                or props.get("label")
+                or ""
+            ),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
             properties=user_props,
@@ -1972,6 +1984,87 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
+    async def stamp_identity_urns(self) -> int:
+        """Stamp per-source CONFORMANCE properties onto every node that lacks them, so the entire
+        urn-keyed write / index / read / trace stack works for an onboarded graph that keys nodes
+        by e.g. ``id`` and names them under e.g. ``name`` instead of the platform's ``urn`` /
+        ``displayName``.
+
+        This is THE definitive fix. The AGGREGATED write and every read filter on the ``urn``
+        PROPERTY (a ``MERGE`` cannot key on a ``coalesce`` expression), and the read stack renders
+        ``displayName`` verbatim — so resolving identity only in the aggregation directory left
+        in-source aggregation attaching ZERO edges, and a non-``displayName`` name rendered blank.
+        Stamping both up front makes all of it work unchanged.
+
+        * ``urn`` ← ``identity_property``  (only when it's a non-default property)
+        * ``displayName`` ← ``name_property``  (piggybacks on the urn pass, or runs standalone only
+          for a CUSTOM name property — a fully conforming source stays a complete no-op)
+
+        Safe: in-source projection only (never mutates a possibly read-only source behind a
+        dedicated projection); ``coalesce`` SETs only fill a MISSING value, never overwrite; batched
+        by internal ID range (no property index needed); best-effort per batch. Idempotent — a
+        re-run only touches nodes added since the last run. Returns nodes stamped.
+        """
+        ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
+        name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
+        stamp_urn = bool(ident) and ident != "urn"
+        # Name-stamp piggybacks on a urn stamp, or runs standalone only for a non-default name
+        # property — so a conforming (urn/displayName) source never triggers a write pass.
+        stamp_name = bool(name_prop) and name_prop != "displayName" and (stamp_urn or name_prop != "name")
+        if not stamp_urn and not stamp_name:
+            return 0
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            return 0  # projection is separate; don't write to the (maybe read-only) source
+        await self._ensure_connected()
+        try:
+            res = await self._ro_query("MATCH (n) RETURN max(ID(n))", op="identity.max_id")
+            rows = res.result_set or []
+            max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        except Exception as exc:
+            logger.warning(
+                "FalkorDB %s: conformance stamp skipped — max-id probe failed: %s",
+                self._graph_name, exc,
+            )
+            return 0
+        if max_id < 0:
+            return 0
+
+        sets, wheres = [], []
+        if stamp_urn:
+            sets.append(f"n.`urn` = coalesce(n.`urn`, n.`{ident}`)")
+            wheres.append(f"(n.`urn` IS NULL AND n.`{ident}` IS NOT NULL)")
+        if stamp_name:
+            sets.append(f"n.`displayName` = coalesce(n.`displayName`, n.`{name_prop}`)")
+            wheres.append(f"(n.`displayName` IS NULL AND n.`{name_prop}` IS NOT NULL)")
+        set_clause = ", ".join(sets)
+        where_clause = " OR ".join(wheres)
+
+        width = 50_000
+        stamped = 0
+        lo = 0
+        while lo <= max_id:
+            hi = lo + width
+            try:
+                r = await self._query(
+                    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
+                    f"SET {set_clause}",
+                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                )
+                stamped += int(getattr(r, "properties_set", 0) or 0)
+            except Exception as exc:
+                logger.warning(
+                    "FalkorDB %s: conformance stamp batch [%d,%d) failed (continuing): %s",
+                    self._graph_name, lo, hi, exc,
+                )
+            lo = hi
+        if stamped:
+            logger.info(
+                "FalkorDB %s: conformance stamp set %d propert(y/ies) (urn←%s, displayName←%s).",
+                self._graph_name, stamped, ident if stamp_urn else "—",
+                name_prop if stamp_name else "—",
+            )
+        return stamped
+
     async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
         """Create indices for node labels and properties.
 
@@ -1991,6 +2084,13 @@ class FalkorDBProvider(GraphDataProvider):
         self._indexed_entity_type_ids = list(entity_type_ids or [])
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
+        # Index the source's URN-equivalent too, so the identity-urn stamp's
+        # NULL-urn lookup and any direct property access are index-backed rather
+        # than full label scans. No-op when the source uses the default `urn`
+        # (already in INDEXED_NODE_PROPS).
+        _ident = getattr(self, "_node_identity_property", None)
+        if _ident and _ident != "urn" and _ident not in properties:
+            properties.append(_ident)
 
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         # Failure accounting: "already indexed" is success (idempotent DDL);

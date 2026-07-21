@@ -350,3 +350,50 @@ async def test_no_progress_exhausts_retry_budget(
 
     assert call_count["n"] == 3  # max_attempts, then give up
     assert sleep_mock.await_count == 2  # slept between the 3 attempts
+
+
+# ── self-heal recovers the node-identity property from the data source ───────
+
+
+def test_refreeze_recovers_identity_property_from_data_source():
+    """The empty-frozen-types self-heal must also re-derive identity_property
+    from the DATA SOURCE. Otherwise a legacy/partial job row on an id-keyed
+    source heals its edge types yet keeps identity_property NULL → "urn", so the
+    urn stamp/directory still drops every id-keyed node (an asymmetric heal)."""
+    import json as _json
+    from backend.app.db.models import OntologyORM, WorkspaceDataSourceORM
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    ont = OntologyORM(
+        id="ont_heal",
+        entity_type_definitions="{}",
+        relationship_type_definitions=_json.dumps({"FLOWS": {"is_lineage": True}}),
+    )
+    ds = WorkspaceDataSourceORM(id="ds_heal", identity_property="id", name_property="title")
+    job = AggregationJobORM(
+        id="agg_heal", ontology_id="ont_heal", data_source_id="ds_heal",
+        trigger_source="manual",
+    )
+
+    class _GetSession:
+        def __init__(self, objs):
+            self._objs = objs
+            self.committed = False
+
+        async def get(self, model, key):
+            return self._objs.get((model.__name__, key))
+
+        async def commit(self):
+            self.committed = True
+
+    session = _GetSession({
+        ("OntologyORM", "ont_heal"): ont,
+        ("WorkspaceDataSourceORM", "ds_heal"): ds,
+    })
+
+    worker = _make_worker()
+    asyncio.run(worker._refreeze_edge_types(session, job))
+
+    assert job.identity_property == "id", "self-heal must recover identity from the DS"
+    assert job.name_property == "title", "self-heal must recover display-name from the DS"
+    assert _json.loads(job.lineage_edge_types) == ["FLOWS"], "edge types still heal"

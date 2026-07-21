@@ -240,7 +240,17 @@ def check_resolution(
     # lineage is independent of any specific graph's current contents.
     # Without this, a stats-cache miss (which produces empty
     # introspected_edge_ids) would spuriously block re-triggers.
-    has_lineage = any(rel_def.is_lineage for rel_def in user_rel_defs.values())
+    # Also honor a lineage type that lives ONLY in the top-level list with no
+    # rich def (a legitimate "legacy vocabulary" state the repo preserves): the
+    # reconcile loop above can only flag ids that exist in ``user_rel_defs``, so
+    # an array-only id would be missed here and spuriously block — even though
+    # resolve_ontology and the aggregation worker BOTH union the raw arrays and
+    # would run it. Reconcile the gate against the arrays too, so the preflight
+    # can never be stricter than the engine it guards.
+    has_lineage = (
+        any(rel_def.is_lineage for rel_def in user_rel_defs.values())
+        or bool(_lineage_upper)
+    )
     if not has_lineage:
         blocking_reasons.append("no_lineage")
 
@@ -250,7 +260,10 @@ def check_resolution(
     # endpoints (no ancestor-to-ancestor propagation). Aggregation will
     # technically run, but the user won't see the cross-tier roll-up
     # they expect.
-    has_containment = any(rel_def.is_containment for rel_def in user_rel_defs.values())
+    has_containment = (
+        any(rel_def.is_containment for rel_def in user_rel_defs.values())
+        or bool(_containment_upper)
+    )
     if not has_containment:
         advisory_warnings.append("no_containment_edges")
 

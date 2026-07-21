@@ -201,6 +201,9 @@ class AggregationWorker:
                 # coalesce(n.urn, n[identity_property]) for onboarded graphs
                 # that key nodes by e.g. "id" instead of the canonical urn.
                 identity_property = getattr(job, "identity_property", None) or "urn"
+                # Node display-name property, frozen likewise (default "name").
+                # Stamped onto `displayName` so the whole read stack renders it.
+                name_property = getattr(job, "name_property", None) or "name"
 
                 if not lineage_types:
                     # Self-heal instead of failing a doomed row: re-freeze
@@ -212,6 +215,12 @@ class AggregationWorker:
                     containment_types, lineage_types, entity_type_levels = (
                         await self._refreeze_edge_types(session, job)
                     )
+                    # The self-heal also re-derived identity_property and
+                    # name_property from the data source — pick up the refreshed
+                    # values (read above from the un-frozen row, which would have
+                    # been the defaults "urn"/"name").
+                    identity_property = getattr(job, "identity_property", None) or "urn"
+                    name_property = getattr(job, "name_property", None) or "name"
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -278,6 +287,7 @@ class AggregationWorker:
                 # attribute the provider reads at directory-build time.
                 try:
                     provider._node_identity_property = identity_property
+                    provider._name_property = name_property
                 except Exception:
                     pass
 
@@ -334,6 +344,21 @@ class AggregationWorker:
                             "Aggregation job %s: ensure_indices failed "
                             "(continuing; first query will surface a missing "
                             "index if any): %s", job.id, exc,
+                        )
+
+                # Onboarded-graph identity: copy the source's URN-equivalent
+                # (e.g. `id`) onto `urn` for any node missing one, AFTER the
+                # indexes exist, so the urn-keyed write/read/trace stack actually
+                # attaches AGGREGATED edges to the real nodes. No-op for
+                # conforming (urn) sources and dedicated projections; best-effort
+                # (a failure degrades to the directory-only coalesce).
+                if hasattr(provider, "stamp_identity_urns"):
+                    try:
+                        await provider.stamp_identity_urns()
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: identity-urn stamp failed "
+                            "(continuing): %s", job.id, exc,
                         )
 
                 # Distributed write-admission control: N workers × M pods
@@ -830,6 +855,26 @@ class AggregationWorker:
         job.lineage_edge_types = json.dumps(lineage_types)
         if hasattr(job, "entity_type_levels"):
             job.entity_type_levels = json.dumps(levels)
+        # Re-derive the node-identity property from the DATA SOURCE too (identity
+        # is a per-source property, not an ontology one). Without this, a
+        # legacy/partial row on an id-keyed source would self-heal its edge types
+        # yet keep identity_property NULL → "urn", so the urn stamp/directory
+        # would still drop every id-keyed node — an asymmetric half-heal.
+        if hasattr(job, "identity_property"):
+            try:
+                from backend.app.db.models import WorkspaceDataSourceORM
+                ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+                if ds is not None:
+                    job.identity_property = getattr(ds, "identity_property", None) or "urn"
+                    # Display-name property is per-source too — re-derive it in
+                    # the same pass so the label stamp heals symmetrically.
+                    if hasattr(job, "name_property"):
+                        job.name_property = getattr(ds, "name_property", None) or "name"
+            except Exception as exc:
+                logger.warning(
+                    "Aggregation job %s: identity_property re-derive failed "
+                    "during self-heal (keeping frozen value): %s", job.id, exc,
+                )
         job.updated_at = _now()
         await session.commit()
         logger.warning(

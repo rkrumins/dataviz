@@ -159,16 +159,17 @@ def _node_identity_expr(identity_property: Optional[str]) -> str:
     source's configured URN-equivalent property when a node has no ``urn``.
 
     Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
-    (or ``name``/another key), not ``urn`` — and the node directory was hardcoded to ``n.urn`` with
-    no fallback (unlike the read path/projector, which fall back to ``gv:``). Without this, the
-    directory drops every such node and aggregation silently computes pairs then discards 100% of
-    them ("unresolvable endpoints"). ``coalesce(urn, …)`` keeps conforming graphs unchanged (they
-    have ``urn``) while resolving identity for onboarded graphs via their declared URN-equivalent.
+    (or ``name``), not ``urn``. The DEFINITIVE fix is :meth:`FalkorDBProvider.stamp_identity_urns`,
+    which copies the identity property onto ``urn`` for every node at aggregation start — after it
+    runs, the whole urn-keyed write / index / read / trace stack works unchanged. This expression is
+    defense-in-depth for the directory scans: it still resolves identity if the stamp was skipped
+    (e.g. a read-only source) or hasn't reached a freshly-added node yet. It does NOT fix the
+    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a coalesce expression) —
+    the stamp is what makes writes attach.
 
-    ``identity_property`` comes from the per-source conformance config; when unset it falls back to
-    ``AGGREGATION_NODE_IDENTITY_PROPERTY``. Default is ``urn`` (OPT-IN — no behavior change for
-    conforming graphs); an operator/source sets it to the graph's URN-equivalent (e.g. ``id``)."""
-    prop = identity_property or os.getenv("AGGREGATION_NODE_IDENTITY_PROPERTY", "urn")
+    Default is ``urn`` (OPT-IN — no behavior change for conforming graphs); a source sets it to its
+    URN-equivalent (e.g. ``id``)."""
+    prop = identity_property or "urn"
     safe = str(prop).replace("`", "")
     if not safe or safe == "urn":
         return "n.`urn`"
@@ -1495,10 +1496,14 @@ class AggregationPipeline:
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
 
+        # Identity-aware (parity with the full-mode directory): resolve `urn`, or the source's
+        # URN-equivalent for onboarded graphs whose containers carry no `urn`.
+        _ident_expr = _node_identity_expr(getattr(self.p, "_node_identity_property", None))
+
         async def run_one(lo: int, hi: int):
             r = await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-                "RETURN ID(n), n.urn, labels(n)",
+                f"RETURN ID(n), {_ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
@@ -1595,8 +1600,9 @@ class AggregationPipeline:
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         # Canonical identity per node: `urn`, or the source's configured URN-equivalent (e.g. `id`)
-        # for onboarded third-party graphs whose nodes carry no `urn`.
-        ident_prop = getattr(self, "_identity_property", None) or getattr(self.p, "_node_identity_property", None)
+        # for onboarded third-party graphs whose nodes carry no `urn` (stamp_identity_urns normally
+        # populates `urn` first; this coalesce covers any node it hasn't reached).
+        ident_prop = getattr(self.p, "_node_identity_property", None)
         ident_expr = _node_identity_expr(ident_prop)
         res = await self.p._ro_query(
             "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),

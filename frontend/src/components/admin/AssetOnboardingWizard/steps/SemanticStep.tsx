@@ -33,6 +33,7 @@ import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import { useToast } from '@/components/ui/toast'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
+import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -806,6 +807,25 @@ export function SemanticStep({
                                                     ontologyId={itemOntologyId}
                                                     providerId={providerId}
                                                     assetName={item.sourceIdentifier || item.name}
+                                                />
+                                            )}
+
+                                            {/* Node Identity Property (URN-equivalent) — per source.
+                                                Onboarded graphs keyed by a non-`urn` property (e.g. `id`)
+                                                map it here; suggestions come from the graph's real props. */}
+                                            {!state.skipped && state.phase === 'recommendations' && (
+                                                <NodeIdentityField
+                                                    variant="compact"
+                                                    value={formData.identityProperties[item.id] || ''}
+                                                    onChange={v => updateFormData(prev => ({
+                                                        identityProperties: { ...prev.identityProperties, [item.id]: v },
+                                                    }))}
+                                                    providerId={providerId}
+                                                    graphName={item.sourceIdentifier || item.name}
+                                                    nameValue={formData.nameProperties[item.id] || ''}
+                                                    onNameChange={v => updateFormData(prev => ({
+                                                        nameProperties: { ...prev.nameProperties, [item.id]: v },
+                                                    }))}
                                                 />
                                             )}
                                         </div>

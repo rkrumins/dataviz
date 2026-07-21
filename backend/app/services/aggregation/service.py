@@ -355,6 +355,7 @@ class AggregationService:
                 # A change to the data source's identity_property is picked up
                 # on the next trigger; in-flight jobs keep their frozen value.
                 identity_property=ontology_data.get("identity_property") or "urn",
+                name_property=ontology_data.get("name_property") or "name",
                 status="pending",
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
@@ -1392,6 +1393,8 @@ class AggregationService:
             # mid-lifecycle change to the data source's identity_property is
             # picked up by the NEXT run. Default "urn" for every existing source.
             "identity_property": getattr(ds, "identity_property", None) or "urn",
+            # Node display-name property, frozen likewise. Default "name".
+            "name_property": getattr(ds, "name_property", None) or "name",
         }
 
     async def _replay_fingerprint_matches(
