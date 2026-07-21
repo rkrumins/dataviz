@@ -32,6 +32,14 @@ import {
   relSchemaToBackend,
   humanizeId,
 } from '@/features/ontology/lib/ontology-parsers'
+import {
+  foldEdgeStats,
+  foldSimpleStats,
+  foldRelTypeRows,
+  foldEntityTypeRows,
+  canonicalizeRelDefsForSave,
+  canonicalizeEntityDefsForSave,
+} from '@/features/ontology/lib/caseFold'
 import { DEFAULT_REL_VISUAL, type OntologyTab, type EditorPanel, type RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
 
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
@@ -266,13 +274,15 @@ export function OntologySchemaPage() {
     return (selectedOntology?.relationshipTypeDefinitions as Record<string, unknown>) ?? {}
   }, [workingRelDefs, selectedOntology])
 
-  const entityTypes = useMemo((): EntityTypeSchema[] => {
+  // Raw rows straight from the ontology defs — folded below (after graph stats load) so that
+  // case-variant keys collapse into one canonical row.
+  const entityTypesRaw = useMemo((): EntityTypeSchema[] => {
     return Object.entries(effectiveEntityDefs as Record<string, Record<string, unknown>>)
       .map(([id, def]) => entityDefToSchema(id, def))
       .sort((a, b) => a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name))
   }, [effectiveEntityDefs])
 
-  const relTypes = useMemo((): RelTypeWithClassifications[] => {
+  const relTypesRaw = useMemo((): RelTypeWithClassifications[] => {
     return Object.entries(effectiveRelDefs as Record<string, Record<string, unknown>>)
       .map(([id, def]) => relDefToSchema(id, def))
       .sort((a, b) => a.name.localeCompare(b.name))
@@ -456,17 +466,35 @@ export function OntologySchemaPage() {
     setIsSaving(true)
     try {
       const req: Record<string, unknown> = {}
-      if (workingEntityDefs) req.entityTypeDefinitions = workingEntityDefs
+      if (workingEntityDefs) {
+        // Collapse any case-variant entity keys to one canonical key (rewriting hierarchy
+        // references) so the payload can't trip the backend's case-insensitive collision guard.
+        req.entityTypeDefinitions = canonicalizeEntityDefsForSave(workingEntityDefs, entityStatFold).entityDefs
+      }
       if (workingRelDefs) {
         // Built-in edges (e.g. AGGREGATED) are injected on read, marked is_system, and
         // shown read-only. Never send them back — the backend strips them too, but keeping
         // the payload clean avoids a pointless round-trip and any reconciliation on them.
-        req.relationshipTypeDefinitions = Object.fromEntries(
+        const nonSystem = Object.fromEntries(
           Object.entries(workingRelDefs).filter(([, def]) => !(def as Record<string, unknown>)?.is_system)
         )
+        // Fold case-variant declared keys into ONE canonical key (the design's canonical fold),
+        // OR-ing classification and aligning the containment/lineage list casing. Without this an
+        // ontology that still carries both `TO` and `To` would 422 on the case-insensitive guard the
+        // moment the (now-unblocked) editor lets the user save.
+        const canon = canonicalizeRelDefsForSave(
+          nonSystem,
+          workingContainment ?? selectedOntology.containmentEdgeTypes ?? [],
+          workingLineage ?? selectedOntology.lineageEdgeTypes ?? [],
+          edgeFold,
+        )
+        req.relationshipTypeDefinitions = canon.relDefs
+        req.containmentEdgeTypes = canon.containment
+        req.lineageEdgeTypes = canon.lineage
+      } else {
+        if (workingContainment) req.containmentEdgeTypes = workingContainment
+        if (workingLineage) req.lineageEdgeTypes = workingLineage
       }
-      if (workingContainment) req.containmentEdgeTypes = workingContainment
-      if (workingLineage) req.lineageEdgeTypes = workingLineage
       if (workingDetails) {
         req.name = workingDetails.name
         // Empty string is a valid value — the user cleared the description.
@@ -573,16 +601,42 @@ export function OntologySchemaPage() {
     return () => { cancelled = true }
   }, [evalWorkspaceId, evalDataSourceId])
 
+  // Fold physical graph stats by case-fold. FalkorDB is case-sensitive, so `To`/`to`/`TO` arrive as
+  // separate stats even though they are ONE ontology type; summing here gives each declared type its
+  // true total and preserves every spelling for the "also seen as" merge badge.
+  const edgeFold = useMemo(() => foldEdgeStats(graphStats?.edgeTypeStats ?? []), [graphStats])
+  const entityStatFold = useMemo(() => foldSimpleStats(graphStats?.entityTypeStats ?? []), [graphStats])
+
   const entityStatMap = useMemo((): Map<string, EntityTypeSummary> => {
     const m = new Map<string, EntityTypeSummary>()
-    for (const s of graphStats?.entityTypeStats ?? []) m.set(s.id.toLowerCase(), s)
+    const byId = new Map((graphStats?.entityTypeStats ?? []).map(s => [s.id, s]))
+    for (const [key, e] of entityStatFold) {
+      const rep = [...e.spellings].sort((a, b) => b.count - a.count)[0]?.spelling ?? key
+      const base = byId.get(rep)
+      m.set(key, { ...(base ?? { id: rep, name: rep, sampleNames: [] }), id: rep, name: rep, count: e.total })
+    }
     return m
-  }, [graphStats])
+  }, [entityStatFold, graphStats])
+
   const edgeStatMap = useMemo((): Map<string, EdgeTypeSummary> => {
     const m = new Map<string, EdgeTypeSummary>()
-    for (const s of graphStats?.edgeTypeStats ?? []) m.set(s.id.toLowerCase(), s)
+    for (const [key, e] of edgeFold) {
+      const rep = [...e.spellings].sort((a, b) => b.count - a.count)[0]?.spelling ?? key
+      m.set(key, { id: rep, name: rep, count: e.total, sourceTypes: e.sourceTypes, targetTypes: e.targetTypes })
+    }
     return m
-  }, [graphStats])
+  }, [edgeFold])
+
+  // Canonical fold: collapse case-variant rows into one row per declared type and carry the merged
+  // spellings (declared duplicates + physical graph spellings) for the "also seen as" badge.
+  const { rows: entityTypes, variantsById: entityVariants } = useMemo(
+    () => foldEntityTypeRows(entityTypesRaw, entityStatFold),
+    [entityTypesRaw, entityStatFold],
+  )
+  const { rows: relTypes, variantsById: relVariants } = useMemo(
+    () => foldRelTypeRows(relTypesRaw, edgeFold),
+    [relTypesRaw, edgeFold],
+  )
 
 
   // Resolved eval context objects for display
@@ -964,6 +1018,73 @@ export function OntologySchemaPage() {
     }
     // A picked-but-failed assignment already surfaced an error toast above —
     // don't paper over it with a success message.
+
+    // Don't throw away the classification Suggest computed: if this layer leaves edges in "Other"
+    // that Suggest classified, offer a one-click patch (the whole point of onboarding an existing
+    // graph is a working setup, not just matching type names).
+    void offerApplySuggestedClassification(ontologyId)
+  }
+
+  /** After "Use This existing", if Suggest classified edges the picked layer leaves uncategorized
+   *  AND the layer is editable, offer to apply that classification instead of discarding it. */
+  async function offerApplySuggestedClassification(ontologyId: string) {
+    const response = suggestResponseRef.current
+    const match = response?.matchingOntologies.find(m => m.ontologyId === ontologyId)
+    const uncategorized = match?.uncategorizedRelationshipTypes ?? []
+    if (!response || uncategorized.length === 0) return
+
+    // What did Suggest classify for those edges? (case-insensitive lookup — the suggested draft may
+    // key the physical spelling while the layer declares another casing.)
+    const suggestedByCf = new Map(
+      Object.entries(response.suggested.relationshipTypeDefinitions ?? {})
+        .map(([k, v]) => [k.toLowerCase(), v as Record<string, unknown>]),
+    )
+    const toClassify = uncategorized
+      .map(rid => {
+        const sd = suggestedByCf.get(rid.toLowerCase())
+        const isC = !!(sd?.is_containment ?? sd?.isContainment)
+        const isL = !!(sd?.is_lineage ?? sd?.isLineage)
+        return isC || isL ? { rid, isC, isL } : null
+      })
+      .filter((x): x is { rid: string; isC: boolean; isL: boolean } => x !== null)
+    if (toClassify.length === 0) return
+
+    let target
+    try {
+      target = await ontologyDefinitionService.get(ontologyId)
+    } catch { return }
+    // Only in-place patch an editable draft — a published/system layer must be cloned first.
+    if (target.isSystem || target.isPublished) return
+
+    const n = toClassify.length
+    showToast('info',
+      `This layer leaves ${n} edge${n !== 1 ? 's' : ''} the graph uses in "Other" — apply the suggested classification?`,
+      {
+        label: 'Apply',
+        onClick: async () => {
+          try {
+            const relDefs = { ...(target.relationshipTypeDefinitions as Record<string, Record<string, unknown>>) }
+            const containment = [...target.containmentEdgeTypes]
+            const lineage = [...target.lineageEdgeTypes]
+            for (const { rid, isC, isL } of toClassify) {
+              relDefs[rid] = { ...(relDefs[rid] ?? {}), is_containment: isC, is_lineage: isL }
+              if (isC && !containment.includes(rid)) containment.push(rid)
+              if (isL && !lineage.includes(rid)) lineage.push(rid)
+            }
+            const req: Record<string, unknown> = {
+              relationshipTypeDefinitions: relDefs,
+              containmentEdgeTypes: containment,
+              lineageEdgeTypes: lineage,
+            }
+            await mutations.update.mutateAsync({ id: ontologyId, req })
+            invalidateGraphSchema()
+            showToast('success', `Classified ${n} edge${n !== 1 ? 's' : ''} — aggregation and lineage will use them now`)
+          } catch (err: unknown) {
+            showToast('error', `Could not apply classification: ${err instanceof Error ? err.message : 'unknown error'}`)
+          }
+        },
+      },
+    )
   }
 
   /** User chose "Clone & Extend" — clone, assign to target DS, navigate. */
@@ -1609,6 +1730,8 @@ export function OntologySchemaPage() {
                         <SchemaPanel
                           entityTypes={entityTypes}
                           relTypes={relTypes}
+                          entityVariants={entityVariants}
+                          relVariants={relVariants}
                           isLocked={isLocked}
                           search={search}
                           editorPanel={editorPanel}

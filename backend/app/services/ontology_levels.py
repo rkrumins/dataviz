@@ -68,6 +68,17 @@ def _derive_from_containment(defs: Mapping[str, Any]) -> Dict[str, int]:
     max(parent_levels) + 1, iterated to a fixed point. Cycle-safe via an
     iteration cap = ``len(all_types) + 1`` — any non-cyclic containment
     DAG converges within the length of its longest chain.
+
+    IMPORTANT — type level is DEGENERATE for self-nesting types and is NOT the source of
+    truth for aggregation depth. A self-containment link (``Node can_contain Node``,
+    ``Container can_contain Container``) is deliberately skipped below (a self-loop cannot be a
+    level relation), so every instance of a self-nesting type collapses onto ONE type level even
+    though the instances sit at different STRUCTURAL depths (My Database ⊃ My Table ⊃ My Column
+    are all type-level 1). Aggregation therefore keys its rollups on structural containment DEPTH
+    (``r.sourceDepth``/``r.targetDepth`` + the ``_AggMeta`` stamp written by the materialize
+    pipeline), never on this type level. Do not add a read path that filters self-nested
+    granularity by type level — it will mix every depth into one wave. See
+    ``AggregationPipeline`` and ``common/providers/pair_rules.py``.
     """
     all_types: Set[str] = set(defs.keys())
     parents: Dict[str, Set[str]] = {}

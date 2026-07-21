@@ -123,3 +123,32 @@ export function MergedVariantsAdvisory({ variants }: { variants: Record<string, 
     </div>
   )
 }
+
+/**
+ * MergedVariantsChip — compact inline "also seen as" indicator for ONE declared type, for the
+ * Schema page rows. Same canonical-green / case-drift-amber vocabulary as MergedVariantsAdvisory,
+ * sized for a row. `variants[0]` is the canonical spelling; the rest are the case-drift spellings
+ * folded into it. Renders nothing when the type is spelled only one way.
+ */
+export function MergedVariantsChip({ variants }: { variants: MergedVariantSpelling[] }) {
+  if (!variants || variants.length <= 1) return null
+  const [canonical, ...rest] = variants
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400"
+      title={`FalkorDB is case-sensitive; these spellings are the same declared type "${canonical.spelling}". Only the canonical spelling hits FalkorDB's index — the Health tab tracks the rest as case drift.`}
+    >
+      <AlertTriangle className="w-2.5 h-2.5 flex-shrink-0" />
+      <span className="text-ink-muted">also seen as</span>
+      {rest.map(s => (
+        <span
+          key={s.spelling}
+          className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded font-mono bg-amber-500/10 border border-amber-500/20 line-through decoration-amber-500/40"
+        >
+          {s.spelling}
+          {s.count > 0 && <span className="opacity-60 no-underline">{compactCount(s.count)}</span>}
+        </span>
+      ))}
+    </span>
+  )
+}

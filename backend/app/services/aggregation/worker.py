@@ -784,7 +784,23 @@ class AggregationWorker:
             json.loads(pinned.relationship_type_definitions or "{}")
         )
         flat = derive_flat_lists(entity_defs, rel_defs)
-        if not flat.lineage_edge_types:
+        # Union the ontology's PERSISTED containment/lineage lists with the per-rel flags, matching
+        # both resolver.resolve_ontology and AggregationService._resolve_ontology. derive_flat_lists
+        # reads only the per-rel flags, so a list-only classification would otherwise re-freeze an
+        # empty hierarchy and roll up nothing.
+        containment_types = list(flat.containment_edge_types)
+        lineage_types = list(flat.lineage_edge_types)
+        _seen_containment = {t.upper() for t in containment_types}
+        _seen_lineage = {t.upper() for t in lineage_types}
+        for t in json.loads(pinned.containment_edge_types or "[]"):
+            if t and t.upper() not in _seen_containment:
+                containment_types.append(t)
+                _seen_containment.add(t.upper())
+        for t in json.loads(pinned.lineage_edge_types or "[]"):
+            if t and t.upper() not in _seen_lineage:
+                lineage_types.append(t)
+                _seen_lineage.add(t.upper())
+        if not lineage_types:
             raise ValueError(
                 "No lineage edge types configured — the pinned ontology "
                 f"{job.ontology_id!r} classifies no relationship as "
@@ -794,8 +810,8 @@ class AggregationWorker:
         levels = derive_level_map(
             SimpleNamespace(entity_type_definitions=entity_defs)
         )
-        job.containment_edge_types = json.dumps(list(flat.containment_edge_types))
-        job.lineage_edge_types = json.dumps(list(flat.lineage_edge_types))
+        job.containment_edge_types = json.dumps(containment_types)
+        job.lineage_edge_types = json.dumps(lineage_types)
         if hasattr(job, "entity_type_levels"):
             job.entity_type_levels = json.dumps(levels)
         job.updated_at = _now()
@@ -805,7 +821,7 @@ class AggregationWorker:
             "(trigger_source=%r) — re-froze from pinned ontology %s "
             "(%d lineage, %d containment types)",
             job.id, job.trigger_source, job.ontology_id,
-            len(flat.lineage_edge_types), len(flat.containment_edge_types),
+            len(lineage_types), len(containment_types),
         )
         return (
             list(flat.containment_edge_types),

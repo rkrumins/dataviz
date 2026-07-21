@@ -747,6 +747,16 @@ class OntologyResolutionResponse(BaseModel):
         populate_by_name = True
 
 
+class TypeCaseDrift(BaseModel):
+    """One physical spelling that drifts from its declared spelling by case only."""
+    id: str          # the physical spelling observed in the graph
+    declared: str    # the declared spelling it should match
+    count: int = 0
+
+    class Config:
+        populate_by_name = True
+
+
 class OntologyMatchResult(BaseModel):
     ontology_id: str = Field(alias="ontologyId")
     ontology_name: str = Field(alias="ontologyName")
@@ -758,6 +768,21 @@ class OntologyMatchResult(BaseModel):
     uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
     total_entity_types: int = Field(0, alias="totalEntityTypes")
     total_relationship_types: int = Field(0, alias="totalRelationshipTypes")
+    # Relationship types the graph USES that this ontology declares but leaves UNCLASSIFIED
+    # (neither containment nor lineage — i.e. stuck in "Other"). The name-overlap jaccardScore
+    # ignores classification, so a 100% match can still be non-functional for aggregation; this
+    # qualifies it so the UI can warn "N edges uncategorized" instead of implying a working setup.
+    uncategorized_relationship_types: List[str] = Field(
+        default_factory=list, alias="uncategorizedRelationshipTypes"
+    )
+    # Edge types the graph uses that match a declared type case-INSENSITIVELY but not exactly
+    # (physical `To` vs declared `TO`). They resolve via the alias map but do NOT hit FalkorDB's
+    # per-label index, so a "100% name match" can still be case-drifted. Same signal Health's
+    # adoption view shows (backend.app.ontology.adoption case_drift) — surfaced here so onboarding
+    # sees it before assigning.
+    case_drift_relationship_types: List[TypeCaseDrift] = Field(
+        default_factory=list, alias="caseDriftRelationshipTypes"
+    )
 
     class Config:
         populate_by_name = True

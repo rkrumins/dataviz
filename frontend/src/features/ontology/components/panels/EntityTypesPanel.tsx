@@ -4,6 +4,8 @@ import { cn } from '@/lib/utils'
 
 import type { EntityTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary } from '@/providers/GraphDataProvider'
+import type { MergedVariantSpelling } from '@/services/ontologyDefinitionService'
+import { MergedVariantsChip } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { EmptyState } from '../EmptyState'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { formatCount } from '../../lib/ontology-parsers'
@@ -16,6 +18,7 @@ import type { EditorPanel } from '../../lib/ontology-types'
 export function EntityTypeRow({
   entityType: et,
   graphCount,
+  variants,
   isLocked,
   isEditing,
   isChanged,
@@ -25,6 +28,8 @@ export function EntityTypeRow({
 }: {
   entityType: EntityTypeSchema
   graphCount?: number
+  /** Case-variant spellings folded into this declared node label ("also seen as" badge). */
+  variants?: MergedVariantSpelling[]
   isLocked: boolean
   isEditing: boolean
   isChanged?: boolean
@@ -64,6 +69,7 @@ export function EntityTypeRow({
             {isChanged && (
               <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Modified" />
             )}
+            {variants && <MergedVariantsChip variants={variants} />}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             {et.description && (
@@ -159,6 +165,7 @@ export function EntityTypeRow({
 export function EntityTypesPanel({
   entityTypes,
   entityStatMap,
+  variants,
   isLocked,
   search,
   validationResult,
@@ -174,6 +181,8 @@ export function EntityTypesPanel({
 }: {
   entityTypes: EntityTypeSchema[]
   entityStatMap: Map<string, EntityTypeSummary>
+  /** canonical node label -> merged case-variant spellings ("also seen as" badge). */
+  variants?: Map<string, MergedVariantSpelling[]>
   isLocked: boolean
   search: string
   validationResult: { isValid: boolean; issues: Array<{ severity: string; message: string; code?: string; affected?: string }> } | null
@@ -346,6 +355,7 @@ export function EntityTypesPanel({
               key={et.id}
               entityType={et}
               graphCount={entityStatMap.get(et.id.toLowerCase())?.count}
+              variants={variants?.get(et.id)}
               isLocked={isLocked}
               isEditing={editorPanel?.kind === 'entity' && editorPanel.data?.id === et.id}
               isChanged={changedIds?.has(et.id)}

@@ -31,6 +31,7 @@ from backend.common.models.management import (
     OntologyDefinitionResponse,
     OntologyCoverageResponse,
     OntologyMatchResult,
+    TypeCaseDrift,
     OntologyResolutionResponse,
     OntologyResolutionRelGap,
     OntologyResolutionHierarchyGap,
@@ -998,6 +999,8 @@ async def check_ontology_resolution(
         relationship_type_definitions_raw=_json.loads(orm.relationship_type_definitions or "{}"),
         introspected_entity_ids=introspected_entity_ids,
         introspected_edge_ids=introspected_edge_ids,
+        containment_edge_types=_json.loads(orm.containment_edge_types or "[]"),
+        lineage_edge_types=_json.loads(orm.lineage_edge_types or "[]"),
     )
 
     return OntologyResolutionResponse(
@@ -1326,7 +1329,14 @@ async def import_ontology_into(
     - System target → rejected (clone first).
     - No changes detected → returns status="no_changes" without modification.
     """
+    # Run the SAME normalization pipeline as create / update / import-new. Skipping
+    # _strip_system_types and _normalize_edge_type_references here let an import persist a
+    # case-drifted containment/lineage reference list or a leaked system edge id, producing an
+    # internally inconsistent ontology (and a fresh source of the very case-variant drift the
+    # canonical fold exists to prevent).
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     try:
@@ -1382,6 +1392,7 @@ async def suggest_ontology(
     graph_types = graph_entity_ids | graph_rel_ids
 
     from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+    from backend.app.ontology import adoption
 
     matches = []
     if graph_types:
@@ -1398,6 +1409,39 @@ async def suggest_ontology(
             jaccard = len(intersection) / len(union) if union else 0.0
 
             if jaccard >= min_score:
+                # Which graph-used edge types does this ontology DECLARE but leave UNCLASSIFIED
+                # (neither containment nor lineage — stuck in "Other")? The jaccard above scores
+                # name overlap only, so a 100% match whose edges all sit in "Other" still can't
+                # drive aggregation. Compute it so the UI can qualify the score honestly.
+                rel_defs = ont.relationship_type_definitions or {}
+                _containment_upper = {str(t).upper() for t in (getattr(ont, "containment_edge_types", None) or [])}
+                _lineage_upper = {str(t).upper() for t in (getattr(ont, "lineage_edge_types", None) or [])}
+                uncategorized_rels = []
+                for _rid, _d in rel_defs.items():
+                    if not isinstance(_d, dict) or _rid.upper() not in graph_rel_ids:
+                        continue
+                    _up = _rid.upper()
+                    _classified = bool(
+                        _d.get("is_containment") or _d.get("isContainment")
+                        or _d.get("is_lineage") or _d.get("isLineage")
+                        or _up in _containment_upper or _up in _lineage_upper
+                    )
+                    if not _classified:
+                        uncategorized_rels.append(_rid)
+                uncategorized_rels.sort()
+
+                # Case-drift: physical edge spellings that match a declared type case-INSENSITIVELY
+                # but not exactly (`To` vs declared `TO`) — present but missing FalkorDB's per-label
+                # index. Reuse the SAME engine Health's adoption view uses so the two never disagree.
+                _edge_drift = adoption.classify_dimension(
+                    declared=list(rel_defs.keys()),
+                    physical=[{"id": s.id, "count": getattr(s, "count", 0)} for s in stats.edge_type_stats],
+                )
+                case_drift_rels = [
+                    TypeCaseDrift(id=d.id, declared=d.declared, count=d.count)
+                    for d in _edge_drift.case_drift
+                ]
+
                 matches.append(OntologyMatchResult(
                     ontologyId=ont.id,
                     ontologyName=ont.name,
@@ -1409,6 +1453,8 @@ async def suggest_ontology(
                     uncoveredRelationshipTypes=sorted(graph_rel_ids - ont_rel_ids),
                     totalEntityTypes=len(ont_entity_ids),
                     totalRelationshipTypes=len(ont_rel_ids),
+                    uncategorizedRelationshipTypes=uncategorized_rels,
+                    caseDriftRelationshipTypes=case_drift_rels,
                 ))
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)

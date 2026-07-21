@@ -5,6 +5,7 @@ import type { EntityTypeSchema, EntityVisualConfig, EntityFieldDefinition } from
 import { cn } from '@/lib/utils'
 import { generateId } from '@/lib/utils'
 import { toEntityTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
+import { caseFold } from '@/features/ontology/lib/caseFold'
 import { IconPicker } from '@/components/ui/IconPicker'
 import { NodePreview } from '@/components/schema/NodePreview'
 import { ColorInput } from '@/components/ui/ColorInput'
@@ -80,12 +81,16 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
     setForm((prev) => ({ ...prev, visual: { ...prev.visual, [key]: value } }))
   }
 
-  // Uniqueness is scoped to THIS ontology, excluding the type being edited.
+  // Uniqueness is scoped to THIS ontology, excluding the type being edited (case-insensitively —
+  // a node label and its case variants are the same declared type).
   const otherIds = useMemo(
-    () => availableEntityTypes.map((t) => t.id).filter((id) => id !== entityType?.id),
+    () => availableEntityTypes.map((t) => t.id).filter((id) => caseFold(id) !== caseFold(entityType?.id ?? '')),
     [availableEntityTypes, entityType?.id],
   )
-  const collision = findCaseInsensitiveCollision(form.id, otherIds)
+  // The node-label id is frozen once created, so a pre-existing case-variant duplicate is not
+  // resolvable from this dialog. Only a NEW type's id can collide in a way renaming would fix — so
+  // the collision only blocks new types, never a pure edit of an existing one.
+  const collision = isNew ? findCaseInsensitiveCollision(form.id, otherIds) : null
   const canSave = !!form.name.trim() && !!form.id.trim() && !collision
 
   return (

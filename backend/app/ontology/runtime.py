@@ -99,4 +99,6 @@ async def build_resolution_report(
         relationship_type_definitions_raw=json.loads(orm.relationship_type_definitions or "{}"),
         introspected_entity_ids=entity_ids,
         introspected_edge_ids=edge_ids,
+        containment_edge_types=json.loads(orm.containment_edge_types or "[]"),
+        lineage_edge_types=json.loads(orm.lineage_edge_types or "[]"),
     )

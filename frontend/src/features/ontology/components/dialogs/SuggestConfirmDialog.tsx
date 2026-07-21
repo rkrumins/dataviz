@@ -656,6 +656,29 @@ export function SuggestConfirmDialog({
                                     {assignCount} data source{assignCount !== 1 ? 's' : ''}
                                   </span>
                                 )}
+                                {/* Honest qualifier: a high name-match % says nothing about whether the
+                                    graph's edges are CLASSIFIED. Edges left in "Other" won't drive
+                                    aggregation or lineage — surface that so 100% never misleads. */}
+                                {(match.uncategorizedRelationshipTypes?.length ?? 0) > 0 && (
+                                  <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20"
+                                    title={`Declared but left in "Other" (not classified as containment or lineage), so aggregation and lineage won't use them: ${match.uncategorizedRelationshipTypes!.join(', ')}. Classify them on the Schema page after assigning.`}
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    {match.uncategorizedRelationshipTypes!.length} edge{match.uncategorizedRelationshipTypes!.length !== 1 ? 's' : ''} uncategorized
+                                  </span>
+                                )}
+                                {/* Case drift: the graph spells an edge differently than this ontology
+                                    declares — present but missing FalkorDB's index (same signal as Health). */}
+                                {(match.caseDriftRelationshipTypes?.length ?? 0) > 0 && (
+                                  <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20"
+                                    title={`Your graph spells these differently than this layer declares, so they won't hit FalkorDB's index until the casing is aligned: ${match.caseDriftRelationshipTypes!.map(d => `${d.id} → ${d.declared}`).join(', ')}. The Health tab tracks this as case drift.`}
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    {match.caseDriftRelationshipTypes!.length} case-drifted
+                                  </span>
+                                )}
                               </div>
 
                               {/* Type counts */}
