@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 
 import type { EntityTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
+import type { MergedVariantSpelling } from '@/services/ontologyDefinitionService'
 import type { EditorPanel, RelTypeWithClassifications } from '../../lib/ontology-types'
 
 import { EntityTypesPanel } from './EntityTypesPanel'
@@ -32,6 +33,9 @@ interface SchemaPanelProps {
   // Shared
   entityTypes: EntityTypeSchema[]
   relTypes: RelTypeWithClassifications[]
+  /** canonical type id -> merged case-variant spellings ("also seen as"), for the row badge. */
+  entityVariants?: Map<string, MergedVariantSpelling[]>
+  relVariants?: Map<string, MergedVariantSpelling[]>
   isLocked: boolean
   search: string
   editorPanel: EditorPanel
@@ -69,6 +73,8 @@ interface SchemaPanelProps {
 export function SchemaPanel({
   entityTypes,
   relTypes,
+  entityVariants,
+  relVariants,
   isLocked,
   search,
   editorPanel,
@@ -160,6 +166,7 @@ export function SchemaPanel({
         <EntityTypesPanel
           entityTypes={entityTypes}
           entityStatMap={entityStatMap}
+          variants={entityVariants}
           isLocked={isLocked}
           search={search}
           validationResult={validationResult}
@@ -179,6 +186,7 @@ export function SchemaPanel({
         <RelationshipsPanel
           relTypes={relTypes}
           edgeStatMap={edgeStatMap}
+          variants={relVariants}
           isLocked={isLocked}
           search={search}
           editorPanel={editorPanel}

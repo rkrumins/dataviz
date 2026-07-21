@@ -3,6 +3,8 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 import type { EdgeTypeSummary } from '@/providers/GraphDataProvider'
+import type { MergedVariantSpelling } from '@/services/ontologyDefinitionService'
+import { MergedVariantsChip } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 
 import { EmptyState } from '../EmptyState'
 import { formatCount } from '../../lib/ontology-parsers'
@@ -16,6 +18,7 @@ export function RelTypeRow({
   relType: rt,
   graphCount,
   graphSourceTargets,
+  variants,
   isLocked,
   isEditing,
   isChanged,
@@ -25,6 +28,8 @@ export function RelTypeRow({
   relType: RelTypeWithClassifications
   graphCount?: number
   graphSourceTargets?: EdgeTypeSummary
+  /** Case-variant spellings folded into this declared type ("also seen as" badge). */
+  variants?: MergedVariantSpelling[]
   isLocked: boolean
   isEditing: boolean
   isChanged?: boolean
@@ -81,6 +86,8 @@ export function RelTypeRow({
             <p className="text-[11px] text-ink-muted/80 italic mb-1">{rt.description}</p>
           )}
           <div className="flex items-center gap-1.5 flex-wrap">
+            {/* Case-drift: physical spellings folded into this declared type */}
+            {variants && <MergedVariantsChip variants={variants} />}
             {/* Source -> Target type chips */}
             {(rt.sourceTypes?.length > 0 || rt.targetTypes?.length > 0) && (
               <div className="flex items-center gap-1 flex-wrap">
@@ -225,6 +232,7 @@ function CollapsibleGroup({
 export function RelationshipsPanel({
   relTypes,
   edgeStatMap,
+  variants,
   isLocked,
   search,
   editorPanel,
@@ -238,6 +246,8 @@ export function RelationshipsPanel({
 }: {
   relTypes: RelTypeWithClassifications[]
   edgeStatMap: Map<string, EdgeTypeSummary>
+  /** canonical type id -> merged case-variant spellings ("also seen as" badge). */
+  variants?: Map<string, MergedVariantSpelling[]>
   isLocked: boolean
   search: string
   editorPanel: EditorPanel
@@ -372,8 +382,9 @@ export function RelationshipsPanel({
                   <RelTypeRow
                     key={rt.id}
                     relType={rt}
-                    graphCount={edgeStatMap.get(rt.id)?.count}
-                    graphSourceTargets={edgeStatMap.get(rt.id)}
+                    graphCount={edgeStatMap.get(rt.id.toLowerCase())?.count}
+                    graphSourceTargets={edgeStatMap.get(rt.id.toLowerCase())}
+                    variants={variants?.get(rt.id)}
                     isLocked={isLocked}
                     isEditing={editorPanel?.kind === 'rel' && editorPanel.data?.id === rt.id}
                     isChanged={changedIds?.has(rt.id)}
