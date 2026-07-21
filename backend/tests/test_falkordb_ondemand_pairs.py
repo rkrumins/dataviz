@@ -1270,6 +1270,132 @@ def test_materialized_read_truncates_on_a_stable_key_not_weight_alone():
     agg_reads = [c for c in seen if ":AGGREGATED]->" in c and "LIMIT" in c]
     assert agg_reads, f"expected the materialized :AGGREGATED read, saw: {seen}"
     for cypher in agg_reads:
-        assert "ORDER BY r.weight DESC, s.urn, t.urn" in cypher, (
-            f"truncation must be deterministic, got: {cypher}"
+        assert "ORDER BY weight DESC, sUrn, tUrn" in cypher, (
+            f"page boundaries must be deterministic, got: {cypher}"
         )
+        # A bare r.weight is unordered against null, which would strand
+        # null-weight cells after the first page.
+        assert "coalesce(r.weight, 0) AS weight" in cypher, (
+            f"page ordering must be null-safe, got: {cypher}"
+        )
+
+
+def test_materialized_read_pages_until_the_match_set_is_exhausted(monkeypatch):
+    """The Cypher LIMIT is a page size, not the answer size. A match set
+    larger than one page must come back in FULL — the old single-LIMIT read
+    silently dropped everything past the cap, which is how a large model
+    could serve less lineage than FalkorDB actually holds."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+    from backend.app.config import resilience
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    page_size = 5
+    monkeypatch.setattr(resilience, "AGGREGATED_EDGE_PAGE_SIZE", page_size)
+    # Two full pages plus a short one. Every row shares one weight, so the
+    # resume predicate has nothing but (sUrn, tUrn) to walk the boundary.
+    total = page_size * 2 + 2
+    all_rows = [
+        [f"urn:s{i:08d}", f"urn:t{i:08d}", 5, ["X"]] for i in range(total)
+    ]
+    pages_served: list = []
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if ":AGGREGATED]->" not in cypher or "LIMIT" not in cypher:
+            return _Result([])
+        params = params or {}
+        if "lastSourceUrn" not in params:
+            start = 0
+            assert "$lastWeight" not in cypher, "first page must not resume"
+        else:
+            assert "$lastWeight" in cypher, "resume page must carry the keyset"
+            start = int(params["lastSourceUrn"].removeprefix("urn:s")) + 1
+        page = all_rows[start:start + page_size]
+        pages_served.append(len(page))
+        return _Result([list(r) for r in page])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a"], [],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert pages_served == [page_size, page_size, 2], (
+        f"expected paging until a short page, got {pages_served}"
+    )
+    assert len(result.aggregated_edges) == total, (
+        f"paged read must return every cell, got {len(result.aggregated_edges)}"
+    )
+    # Every pair distinct: no page overlap, no gap.
+    pairs = {(e.source_urn, e.target_urn) for e in result.aggregated_edges}
+    assert len(pairs) == total
+    assert not result.truncated, "a complete paged read is not truncated"
+
+
+def test_materialized_read_keeps_prefix_and_flags_when_a_page_fails(monkeypatch):
+    """A mid-paging failure must surface as degraded/stale rather than a
+    silently short answer that gets cached as if it were complete."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+    from backend.app.config import resilience
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    page_size = 5
+    monkeypatch.setattr(resilience, "AGGREGATED_EDGE_PAGE_SIZE", page_size)
+    calls = {"n": 0}
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if ":AGGREGATED]->" not in cypher or "LIMIT" not in cypher:
+            return _Result([])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _Result([
+                [f"urn:s{i:08d}", f"urn:t{i:08d}", 5, ["X"]]
+                for i in range(page_size)
+            ])
+        raise RuntimeError("connection reset mid-page")
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a"], [],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert len(result.aggregated_edges) == page_size, "prefix must be kept"
+    assert result.stale is True
+    assert result.stale_reason == "degraded"
+    assert result.truncated is True

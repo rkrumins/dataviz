@@ -70,10 +70,23 @@ FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGA
 # (no clamping).
 FALKORDB_SERVER_TIMEOUT_MAX_MS: int = int(os.getenv("FALKORDB_SERVER_TIMEOUT_MAX_MS", "180000"))
 
-# Soft cap on aggregated-edge result rows. When a response reaches this
-# count it is flagged ``truncated=true`` so the caller can render a
-# "narrow your selection" hint instead of silently showing partial data.
-AGGREGATED_EDGE_RESULT_CAP: int = int(os.getenv("AGGREGATED_EDGE_RESULT_CAP", "100000"))
+# Runaway guard on aggregated-edge result rows — NOT the normal stopping
+# point. The materialized-cell read pages to completeness (keyset over
+# weight DESC, sUrn, tUrn), so a legitimate result of any size is returned
+# in full; this ceiling only stops a pathological read from exhausting the
+# web tier, and hitting it is logged at WARNING and flagged
+# ``truncated=true`` so partial data is never presented as complete.
+# Raised from 100k (where it was a routine, silent cliff — a >100k model
+# rendered an arbitrary subset) to a value no realistic view reaches.
+# The on-demand synth queries below still use it as a plain LIMIT: their
+# RETURNs aggregate (``collect(DISTINCT type(r))``), the shape where
+# FalkorDB silently discards ORDER BY, so they cannot take the same
+# keyset treatment without a separate redesign.
+AGGREGATED_EDGE_RESULT_CAP: int = int(os.getenv("AGGREGATED_EDGE_RESULT_CAP", "1000000"))
+# Rows fetched per keyset page of the materialized-cell read. Bounds
+# per-query server work and client memory churn; total rows returned are
+# unbounded by this value (the reader loops until a short page arrives).
+AGGREGATED_EDGE_PAGE_SIZE: int = int(os.getenv("AGGREGATED_EDGE_PAGE_SIZE", "50000"))
 # Max source URNs sent to a single aggregated-edge Cypher; oversized
 # requests are split and gathered. Hard upper bound at 100k is enforced
 # by the provider with a 413 response.

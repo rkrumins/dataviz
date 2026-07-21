@@ -411,11 +411,37 @@ index now covers only ACTIVE rows (same migration as #1) and a
 concurrent-trigger race replays the winner's job instead of surfacing
 an IntegrityError.
 
-**10. Unbounded read sorts.** The `get_aggregated_edges_between` main
-queries carried `ORDER BY r.weight DESC` with no LIMIT — every 5k-urn
-batch materialized and sorted its full match set server-side before
-Python truncated. The existing `AGGREGATED_EDGE_RESULT_CAP` now rides
-in the Cypher; response semantics are unchanged (top-N by weight).
+**10. Unbounded read sorts, then silent truncation.** The
+`get_aggregated_edges_between` main queries carried `ORDER BY
+r.weight DESC` with no LIMIT — every 5k-urn batch materialized and
+sorted its full match set server-side before Python truncated. Putting
+`AGGREGATED_EDGE_RESULT_CAP` in the Cypher bounded that work but made
+the cap the *answer size*: anything past 100k rows was dropped, and
+because `weight` is a COUNT, ties are pervasive and the cut landed
+mid-tie-group — with delete-on-oversize (a >1MiB payload is never
+cached, so every open re-runs the query) a large model could render a
+*different* arbitrary lineage subset each time it was opened.
+
+The read now **pages to completeness**: the LIMIT is a page size
+(`AGGREGATED_EDGE_PAGE_SIZE`, default 50k) and the reader walks a
+keyset over the total order `coalesce(r.weight, 0) DESC, sUrn, tUrn`
+until a short page arrives. `coalesce`, not a bare `r.weight`, because
+a null weight compares as null against every integer — a bare column
+would strand null-weight cells after page 1 permanently. `(sUrn, tUrn)`
+is what makes a mid-tie boundary exact; the materializer keys cells by
+pair, so that triple is a unique total order.
+`AGGREGATED_EDGE_RESULT_CAP` (default raised to 1M) is now only a
+runaway guard: tripping it logs at WARNING and flags `truncated=true`,
+and a failure mid-paging keeps the correct prefix while flagging
+`degraded`/`stale` so a partial is never cached as complete.
+*Verified against FalkorDB v4.18.11: 2452 cells over 5 pages returned
+2452 distinct pairs, zero gaps or overlaps, across mid-tie boundaries
+and null-weight rows.*
+
+The on-demand synth queries in the same file still use the cap as a
+plain LIMIT — their RETURNs aggregate (`collect(DISTINCT type(r))`),
+the shape where FalkorDB silently discards `ORDER BY`, so they need a
+separate redesign before they can page.
 
 **11. The instance itself had no memory ceiling.** `QUERY_MEM_CAPACITY`
 bounds one query; nothing bounded the dataset, so graph growth still
