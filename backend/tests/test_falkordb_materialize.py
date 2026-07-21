@@ -393,6 +393,95 @@ def test_stamp_identity_urns_noop_for_default_and_dedicated():
     assert _run(p.stamp_identity_urns()) == 0
 
 
+# ── end-to-end: an id-keyed graph aggregates once urn is stamped ─────────────
+
+class _IdKeyedFake(_FakeFalkor):
+    """A graph whose nodes carry an `id` property and NO `urn`, until
+    stamp_identity_urns copies id→urn — the onboarded-third-party-graph case."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids = {}
+
+    def add_id_node(self, nid, id_value, label):
+        self.nodes[nid] = (None, label)   # urn absent until stamped
+        self.ids[nid] = id_value
+
+    async def write_query(self, cypher, params=None, **kw):
+        # The identity stamp: SET n.urn = n.id for NULL-urn nodes in an ID range.
+        if "SET n.`urn` = n.`id`" in cypher:
+            lo, hi = params["lo"], params["hi"]
+            n = 0
+            for nid, (urn, label) in list(self.nodes.items()):
+                if lo <= nid < hi and urn is None and self.ids.get(nid) is not None:
+                    idv = self.ids[nid]
+                    self.nodes[nid] = (idv, label)      # now carries urn == id
+                    self._urn_ids[idv] = nid
+                    n += 1
+            r = _Result()
+            r.properties_set = n
+            return r
+        raise AssertionError(f"unhandled write query: {cypher}")
+
+
+def _seed_id_keyed_two_chain(fake):
+    """Domain⊃Table⊃Column, two chains, lineage col_a→col_b (×2) — but nodes are
+    keyed by `id` with no `urn` (mirrors _seed_two_chain_graph)."""
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_id_node(1, "id:domain_abc", "domain")
+    fake.add_id_node(2, "id:table_a", "table")
+    fake.add_id_node(3, "id:col_a", "column")
+    fake.add_id_node(11, "id:domain_def", "domain")
+    fake.add_id_node(12, "id:table_b", "table")
+    fake.add_id_node(13, "id:col_b", "column")
+    fake.add_edge("CONTAINS", 0, 1, 2)
+    fake.add_edge("CONTAINS", 1, 2, 3)
+    fake.add_edge("CONTAINS", 2, 11, 12)
+    fake.add_edge("CONTAINS", 3, 12, 13)
+    fake.add_edge("FLOWS", 10, 3, 13)
+    fake.add_edge("FLOWS", 11, 3, 13)
+    return levels
+
+
+def test_id_keyed_graph_aggregates_end_to_end_after_urn_stamp():
+    """The whole point of the identity feature: a graph keyed by `id` (no `urn`)
+    must aggregate into AGGREGATED edges once stamp_identity_urns runs."""
+    fake = _IdKeyedFake()
+    levels = _seed_id_keyed_two_chain(fake)
+    p = _make_provider(fake, levels)
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+
+    async def _noop():
+        return None
+    p._ensure_connected = _noop
+    p._query = fake.write_query
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped == 6, "every id-keyed node must be stamped with a urn"
+
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {(2, 12): 2, (1, 11): 2}, (
+        "an id-keyed graph must roll up like any urn-keyed one once stamped"
+    )
+    # Edges are keyed by the id VALUES (the stamped urn), not a synthetic urn.
+    key = fake.agg[(1, 11)]["aggKey"]
+    assert "id:domain_abc" in key and "id:domain_def" in key
+
+
+def test_id_keyed_graph_without_stamp_writes_nothing():
+    """Proves the stamp is load-bearing: with no urn, the directory is empty and
+    zero AGGREGATED edges are written (the silent failure the stamp fixes)."""
+    fake = _IdKeyedFake()
+    levels = _seed_id_keyed_two_chain(fake)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(p))       # no stamp
+    assert result["errors"] == 0
+    assert fake.agg == {}
+
+
 # ── conformance advisories (Phase IV — loud, never silent) ───────────────
 
 def _make_pipeline():

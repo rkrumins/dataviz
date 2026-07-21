@@ -212,6 +212,10 @@ class AggregationWorker:
                     containment_types, lineage_types, entity_type_levels = (
                         await self._refreeze_edge_types(session, job)
                     )
+                    # The self-heal also re-derived identity_property from the
+                    # data source — pick up the refreshed value (was read above
+                    # from the un-frozen row, which would have been "urn").
+                    identity_property = getattr(job, "identity_property", None) or "urn"
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -845,6 +849,22 @@ class AggregationWorker:
         job.lineage_edge_types = json.dumps(lineage_types)
         if hasattr(job, "entity_type_levels"):
             job.entity_type_levels = json.dumps(levels)
+        # Re-derive the node-identity property from the DATA SOURCE too (identity
+        # is a per-source property, not an ontology one). Without this, a
+        # legacy/partial row on an id-keyed source would self-heal its edge types
+        # yet keep identity_property NULL → "urn", so the urn stamp/directory
+        # would still drop every id-keyed node — an asymmetric half-heal.
+        if hasattr(job, "identity_property"):
+            try:
+                from backend.app.db.models import WorkspaceDataSourceORM
+                ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+                if ds is not None:
+                    job.identity_property = getattr(ds, "identity_property", None) or "urn"
+            except Exception as exc:
+                logger.warning(
+                    "Aggregation job %s: identity_property re-derive failed "
+                    "during self-heal (keeping frozen value): %s", job.id, exc,
+                )
         job.updated_at = _now()
         await session.commit()
         logger.warning(
