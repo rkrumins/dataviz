@@ -998,6 +998,8 @@ async def check_ontology_resolution(
         relationship_type_definitions_raw=_json.loads(orm.relationship_type_definitions or "{}"),
         introspected_entity_ids=introspected_entity_ids,
         introspected_edge_ids=introspected_edge_ids,
+        containment_edge_types=_json.loads(orm.containment_edge_types or "[]"),
+        lineage_edge_types=_json.loads(orm.lineage_edge_types or "[]"),
     )
 
     return OntologyResolutionResponse(

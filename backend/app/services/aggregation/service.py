@@ -1327,6 +1327,42 @@ class AggregationService:
         )
         flat = derive_flat_lists(entity_defs, rel_defs)
 
+        # Honor the ontology's PERSISTED containment/lineage lists in addition to the per-rel flags,
+        # mirroring resolver.resolve_ontology (the read/canvas path). derive_flat_lists reads ONLY the
+        # per-rel is_containment/is_lineage flags; an ontology that recorded containment in its
+        # top-level list but left the flag at its False default (Hierarchy-panel edit, blank/custom
+        # ontology, older data) would otherwise freeze an EMPTY containment list and the pipeline would
+        # silently roll up nothing. Union case-insensitively, preserving the declared casing already in
+        # `flat`, so a list-only classification still drives aggregation. This does not perturb the job
+        # fingerprint (computed from the raw defs, not these derived lists).
+        containment_types = list(flat.containment_edge_types)
+        lineage_types = list(flat.lineage_edge_types)
+        _seen_containment = {t.upper() for t in containment_types}
+        _seen_lineage = {t.upper() for t in lineage_types}
+        for t in json.loads(ontology_orm.containment_edge_types or "[]"):
+            if t and t.upper() not in _seen_containment:
+                containment_types.append(t)
+                _seen_containment.add(t.upper())
+        for t in json.loads(ontology_orm.lineage_edge_types or "[]"):
+            if t and t.upper() not in _seen_lineage:
+                lineage_types.append(t)
+                _seen_lineage.add(t.upper())
+
+        # Loud, actionable diagnostic for the silent-no-op failure mode: lineage edges to roll up but
+        # NO containment hierarchy to roll them up over. The materialize pipeline would take its
+        # leaf-mirror cube branch and write zero cross-tier AGGREGATED edges while the job still
+        # reports "completed" — undiagnosable from the outside. Surfacing it here (with full ontology
+        # context) points the operator straight at the fix: classify the parent/child edge as
+        # containment. Not raised — a genuinely flat source with no hierarchy is legitimately empty.
+        if lineage_types and not containment_types:
+            logger.warning(
+                "Aggregation resolve for ds=%s: %d lineage edge type(s) configured but NO containment "
+                "edge types — the rollup has no hierarchy to ascend and will produce zero cross-tier "
+                "AGGREGATED edges. Classify the parent/child edge (e.g. HAS) as containment in the "
+                "ontology so the hierarchy can be walked.",
+                ds_id, len(lineage_types),
+            )
+
         # Entity-type → hierarchy level map. Frozen onto the job so the
         # worker can inject it into the provider (set_entity_type_levels)
         # and drive per-label indexing (ensure_indices) without importing
@@ -1345,8 +1381,8 @@ class AggregationService:
             "provider_id": ds.provider_id,
             "graph_name": ds.graph_name,
             "data_source_label": getattr(ds, "label", None),
-            "containment_edge_types": flat.containment_edge_types,
-            "lineage_edge_types": flat.lineage_edge_types,
+            "containment_edge_types": containment_types,
+            "lineage_edge_types": lineage_types,
             "entity_type_levels": entity_type_levels,
         }
 

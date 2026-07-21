@@ -120,6 +120,8 @@ def check_resolution(
     relationship_type_definitions_raw: Dict[str, Any],
     introspected_entity_ids: List[str],
     introspected_edge_ids: List[str],
+    containment_edge_types: Optional[List[str]] = None,
+    lineage_edge_types: Optional[List[str]] = None,
 ) -> ResolutionReport:
     """Evaluate the resolution gate against an ontology + a graph schema snapshot.
 
@@ -156,6 +158,21 @@ def check_resolution(
     user_rel_defs: Dict[str, RelationshipTypeDefEntry] = parse_relationship_definitions(
         relationship_type_definitions_raw or {}
     )
+
+    # Honor the ontology's PERSISTED containment/lineage lists, not ONLY the per-rel
+    # is_containment/is_lineage flags. Save-time does not always keep the two in sync — a type
+    # classified via the Hierarchy panel, or a blank/custom ontology, records the top-level LIST but
+    # leaves the flag at its False default — and resolver.resolve_ontology already unions them for
+    # the read/canvas path. Reconciling the parsed flags here (in-memory only; the fingerprint is
+    # computed from the raw defs, so this cannot perturb idempotency) means a list-only lineage
+    # classification still satisfies criterion 4 instead of spuriously blocking with ``no_lineage``.
+    _containment_upper = {str(t).upper() for t in (containment_edge_types or [])}
+    _lineage_upper = {str(t).upper() for t in (lineage_edge_types or [])}
+    for _rid, _rd in user_rel_defs.items():
+        if _rid.upper() in _containment_upper:
+            _rd.is_containment = True
+        if _rid.upper() in _lineage_upper:
+            _rd.is_lineage = True
 
     blocking_reasons: List[str] = []
     advisory_warnings: List[str] = []
