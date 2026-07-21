@@ -19,7 +19,8 @@
 - **Never render a phase or percentage the data doesn't support.** An unrecognized `currentPhase`, a missing job, or a failed jobs query all fall back to the plain `Recomputing` badge with no progress bar.
 - **Frontend tests:** run from `frontend/` with `npx vitest run <path>`.
 - **Backend tests:** run in the dev container: `docker exec synodic-dev-viz-service-1 sh -lc 'cd /app && PYTHONPATH=/app python -m pytest <path> -q'`.
-- **TypeScript baseline must not regress:** `cd frontend && npx tsc --noEmit` before and after.
+- **TypeScript baseline must not regress:** `cd frontend && npx tsc --noEmit` before and after. The known baseline is exactly **79** `error TS` lines.
+- **`tsconfig` sets `noUnusedParameters` and `noUnusedLocals`.** An unused destructured prop or local is a hard TS *error*, not a lint warning. A prop may sit in a `Props` interface unused (Task 5 leaves `onToggleExpand` there for Task 6), but the moment you destructure it you must use it.
 
 ---
 
