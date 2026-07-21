@@ -1045,6 +1045,23 @@ function overflowActions(state: FreshnessState): RowAction[] {
 const actions = overflowActions(freshnessState(row))
 ```
 
+**A `recomputing` row cannot always expand — degrade the primary instead of offering a dead click.** `primaryAction('recomputing')` returns `kind: 'expand'`, but Task 5's `canExpand` requires a *joined job with a recognized phase*. Those diverge whenever the fleet row's `runningJobId` is set while the job feed has nothing for it: the jobs query 403'd, the active-job cap truncated, the job just went terminal, or the two polls simply haven't converged. Clicking "View progress" would then expand a row with nothing in it.
+
+Keep `primaryAction(state)` pure — it is unit-tested on state alone — and handle the degradation at the render site: when the action is `expand` but `canExpand` is false, render the same label as a **link to Job History** instead of a toggle. The operator still gets to the job detail; it just costs a navigation instead of an inline panel.
+
+```tsx
+const p = primaryAction(freshnessState(row))
+const primaryClass = 'px-2.5 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
+
+// Expand only when there is a panel to open; otherwise send them to the
+// full job view rather than toggling an empty row.
+if (p.kind === 'expand' && !canExpand) {
+    return <Link to={jobHistoryPath({ dataSourceId: row.dataSourceId })} className={primaryClass}>{p.label}</Link>
+}
+```
+
+Add a test pinning this: a `recomputing` row with NO joined job renders "View progress" as a link to Job History, not as a button.
+
 Render the primary in the Actions cell, before the existing `DropdownMenu.Root`:
 
 ```tsx
