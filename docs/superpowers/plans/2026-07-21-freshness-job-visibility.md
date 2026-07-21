@@ -1254,7 +1254,35 @@ Change `_run_provider_batch`'s signature from `ds_ids: List[str]` to `ds_rows: L
         await asyncio.gather(*(_run_one(d, n) for d, n in ds_rows))
 ```
 
-Update `_start_guarded_batch` to take `ds_rows` and use `total=len(ds_rows)`, and update both routes to call `_live_ds_rows(...)` and pass the result through. Search the file for any remaining `_live_ds_ids` reference and update it.
+Update `_start_guarded_batch` to take `ds_rows` and use `total=len(ds_rows)`, and update both routes (`controlplane.py:878` and `:908`) to call `_live_ds_rows(...)` and pass the result through. Also update the stale docstring mention at `controlplane.py:723`.
+
+**Two EXISTING tests call this helper directly and will break — they are in a different file, so grepping `controlplane.py` alone will not find them.** In `backend/tests/test_fleet_refresh_batch.py:214-232`, both `test_live_ds_ids_unscoped_has_no_provider_filter_but_excludes_tombstones` and `test_live_ds_ids_scoped_to_one_provider_adds_exactly_one_predicate` call `cp._live_ds_ids(...)` and assert `ids == ["ds-a1", ...]`. Their `_RecordingSession` rows are already 1-tuples (`("ds-a1",)`), so widen them to 2-tuples and update the rename, the assertions and the section header:
+
+```python
+# ── Enumeration: `_live_ds_rows` ──────────────────────────────────────
+
+
+def test_live_ds_rows_unscoped_has_no_provider_filter_but_excludes_tombstones():
+    session = _RecordingSession([("ds-a1", "A1"), ("ds-b1", "B1"), ("ds-a2", None)])
+    rows = _run(cp._live_ds_rows(session))
+    assert rows == [("ds-a1", "A1"), ("ds-b1", "B1"), ("ds-a2", None)]
+
+    sql = _compiled(session.executed[0])
+    assert "deleted_at IS NULL" in sql
+    assert "provider_id" not in sql  # unscoped: no provider predicate at all
+
+
+def test_live_ds_rows_scoped_to_one_provider_adds_exactly_one_predicate():
+    session = _RecordingSession([("ds-a1", "A1")])
+    rows = _run(cp._live_ds_rows(session, provider_id="prov-a"))
+    assert rows == [("ds-a1", "A1")]
+
+    sql = _compiled(session.executed[0])
+    assert "deleted_at IS NULL" in sql
+    assert "provider_id = 'prov-a'" in sql
+```
+
+The `("ds-a2", None)` row is deliberate: `label` is a nullable column, so a source with no label must survive enumeration and reach the batch item as `name: None` (where the frontend falls back to the id). Also update the file's module docstring reference at `test_fleet_refresh_batch.py:9`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
