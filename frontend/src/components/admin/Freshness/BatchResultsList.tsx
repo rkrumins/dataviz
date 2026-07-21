@@ -58,7 +58,7 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
                                 ? 'failed to start'
                                 : r.deferred
                                     ? 'deferred — in cooldown, no rebuild queued'
-                                    : describeActions(r.actions ?? [])}
+                                    : r.actions?.length ? describeActions(r.actions) : r.jobId ? 'rebuild queued' : 'no changes needed'}
                         </span>
                         {r.jobId && (
                             <Link

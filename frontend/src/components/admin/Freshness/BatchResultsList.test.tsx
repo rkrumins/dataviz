@@ -43,6 +43,18 @@ describe('BatchResultsList', () => {
         render(<BatchResultsList results={results} />, { wrapper: MemoryRouter })
         expect(screen.getByText(/in cooldown/)).toBeInTheDocument()
     })
+
+    it('reads a legacy item with a job id as queued, not as no changes needed', () => {
+        // Shape a batch item still sitting in Redis from before this task can
+        // have: outcome + jobId, but no actions/deferred. The row must not
+        // contradict its own "View job" link and the summary's queued count.
+        const legacy = [
+            { dataSourceId: 'ds_5', name: 'Legacy Source', outcome: 'done' as const, jobId: 'job_5' },
+        ]
+        render(<BatchResultsList results={legacy} />, { wrapper: MemoryRouter })
+        expect(screen.getByText('rebuild queued')).toBeInTheDocument()
+        expect(screen.queryByText('no changes needed')).not.toBeInTheDocument()
+    })
 })
 
 describe('describeActions', () => {
