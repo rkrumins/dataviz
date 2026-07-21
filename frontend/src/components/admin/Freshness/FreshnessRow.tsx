@@ -10,7 +10,7 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
-    Activity, AlertTriangle, CheckCircle2, Clock, Database, Eraser, Hammer, Loader2,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, Hammer, Loader2,
     Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -20,7 +20,7 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
-import { PHASE_LABELS, jobHistoryPath } from '../job-history/shared'
+import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
 import { freshnessState, isNeverBuilt } from './freshnessTriage'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
@@ -99,9 +99,10 @@ function Badge({ tone, Icon, spin, label, title }: {
  *  signals, plus additive "Drift detected" / "Next rebuild in Xm" badges. The
  *  primary state comes from ``freshnessState`` so a source that FAILED with the
  *  stale marker still set never masquerades as "Recomputing". */
-export function FreshnessBadges({ row, job }: {
+export function FreshnessBadges({ row, job, showProgressBar = true }: {
     row: FreshnessRowData
     job?: AggregationJobResponse
+    showProgressBar?: boolean
 }) {
     const badges: React.ReactNode[] = []
     const state = freshnessState(row)
@@ -173,7 +174,7 @@ export function FreshnessBadges({ row, job }: {
         )
     }
 
-    if (pct != null && state === 'recomputing') {
+    if (pct != null && state === 'recomputing' && showProgressBar) {
         badges.push(
             <ProgressBar key="bar" value={pct} className="w-full h-1 mt-1"
                 label={`Rebuild progress for ${row.name || row.dataSourceId}`} />,
@@ -201,6 +202,8 @@ interface Props {
     onOpenDrawer: (dsId: string) => void
     onRefresh: (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => void
     busy?: boolean
+    expanded?: boolean
+    onToggleExpand?: (dsId: string) => void
 }
 
 type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean; hint?: string }
@@ -218,7 +221,7 @@ const NEVER_BUILT_ACTIONS: RowAction[] = [
     { scope: 'rollups', label: 'Build lineage', Icon: Hammer, iconClass: 'text-indigo-500', firstBuild: true },
 ]
 
-export function FreshnessRow({ row, job, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
+export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded }: Props) {
     const running = !!row.runningJobId
     const actionsDisabled = busy || running
     const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS
@@ -227,7 +230,16 @@ export function FreshnessRow({ row, job, workspaceName, onOpenDrawer, onRefresh,
     // a disabled item would just 403 on click.
     const canManage = usePermission('workspace:datasource:manage', row.workspaceId)
 
+    // Only a row with a joined running job has anything to expand. No job,
+    // no panel — an empty expander would be a dead affordance.
+    const canExpand = !!job && !!job.currentPhase && PHASE_LABELS[job.currentPhase] != null
+    const pct = job && typeof job.progress === 'number'
+        ? Math.min(100, Math.max(0, Math.round(job.progress)))
+        : 0
+
     return (
+        <>
+        {/* The existing row, unchanged — same className, same six cells. */}
         <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
             {/* Source */}
             <td className="px-3 py-2 align-top">
@@ -264,7 +276,7 @@ export function FreshnessRow({ row, job, workspaceName, onOpenDrawer, onRefresh,
 
             {/* Freshness */}
             <td className="px-3 py-2 align-top">
-                <FreshnessBadges row={row} job={job} />
+                <FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
             </td>
 
             {/* Last activity */}
@@ -318,5 +330,36 @@ export function FreshnessRow({ row, job, workspaceName, onOpenDrawer, onRefresh,
                 )}
             </td>
         </tr>
+        {expanded && canExpand && job && (
+            <tr>
+                <td colSpan={colSpan} className="p-0">
+                    <div className="mx-3 my-2 rounded-xl border border-indigo-500/20 bg-canvas-elevated p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold text-ink">
+                                {phaseLabel(job.currentPhase)}
+                            </span>
+                            <span className="text-[12px] font-bold text-indigo-400 tabular-nums">{pct}%</span>
+                        </div>
+                        <ProgressBar value={pct} className="h-2"
+                            label={`Rebuild progress for ${row.name || row.dataSourceId}`} />
+                        <PhaseStepper
+                            currentPhase={job.currentPhase}
+                            runStats={job.runStats}
+                            status={job.status}
+                        />
+                        <div className="flex justify-end">
+                            <Link
+                                to={jobHistoryPath({ dataSourceId: row.dataSourceId })}
+                                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                            >
+                                Open in Job History
+                                <ArrowUpRight className="w-3 h-3" />
+                            </Link>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        )}
+        </>
     )
 }

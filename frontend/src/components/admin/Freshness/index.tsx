@@ -111,6 +111,7 @@ export function Freshness() {
     const [fleetDialogOpen, setFleetDialogOpen] = useState(false)
     const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
+    const [expandedRow, setExpandedRow] = useState<string | null>(null)
 
     // ── Data ──────────────────────────────────────────────────────────
     // No server-side provider/workspace/stale filter: those are client facets
@@ -375,6 +376,8 @@ export function Freshness() {
                                                 onOpenDrawer={setDrawerDsId}
                                                 onRefresh={onRefresh}
                                                 busy={busyDsId === row.dataSourceId}
+                                                expanded={expandedRow === row.dataSourceId}
+                                                onToggleExpand={(dsId) => setExpandedRow(cur => (cur === dsId ? null : dsId))}
                                             />
                                         ))}
                                     </Fragment>

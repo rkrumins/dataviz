@@ -670,4 +670,43 @@ describe('live rebuild progress in the row', () => {
         expect(screen.getByRole('link', { name: /Computing rollups/ }))
             .toHaveAttribute('href', '/ingestion?tab=jobs&dataSourceId=ds_live')
     })
+
+    const runningJob = { id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                         currentPhase: 'computing', progress: 62,
+                         runStats: { extract_s: 62 } } as never
+
+    function renderRow(props: Record<string, unknown> = {}) {
+        return render(
+            <table><tbody>
+                <FreshnessRow row={rebuildingRow} job={runningJob} colSpan={6}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} {...props} />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+    }
+
+    it('renders the four-phase stepper when expanded', () => {
+        renderRow({ expanded: true })
+        for (const label of ['Extract', 'Compute', 'Reconcile', 'Apply']) {
+            expect(screen.getByText(label)).toBeInTheDocument()
+        }
+        expect(screen.getByRole('link', { name: /Open in Job History/ }))
+            .toHaveAttribute('href', '/ingestion?tab=jobs&dataSourceId=ds_live')
+    })
+
+    it('renders no panel when collapsed', () => {
+        renderRow({ expanded: false })
+        expect(screen.queryByText('Reconcile')).not.toBeInTheDocument()
+    })
+
+    it('is not expandable without a joined job', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow row={rebuildingRow} colSpan={6} expanded
+                    onOpenDrawer={() => {}} onRefresh={() => {}} />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.queryByText('Reconcile')).not.toBeInTheDocument()
+    })
 })
