@@ -148,7 +148,7 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
                                                 itself is not, so a number here could understate what will
                                                 actually run. */}
                                             {scopeRebuilds(scope, force) && confirming
-                                                ? 'Yes, rebuild every source'
+                                                ? "Yes, rebuild this provider's sources"
                                                 : 'Start refresh'}
                                         </button>
                                     </div>

@@ -121,6 +121,15 @@ export function Freshness() {
     const activeJobs = useActiveJobs()
     const refreshSource = useRefreshSource()
 
+    // The panel already disappears once its job leaves the feed (canExpand
+    // goes false), but `expandedRow` itself would stay set — re-opening the
+    // panel unasked the moment a later, unrelated job joins for that source.
+    useEffect(() => {
+        if (expandedRow && !activeJobs.byDataSource.has(expandedRow)) {
+            setExpandedRow(null)
+        }
+    }, [expandedRow, activeJobs.byDataSource])
+
     const qc = useQueryClient()
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
         try {

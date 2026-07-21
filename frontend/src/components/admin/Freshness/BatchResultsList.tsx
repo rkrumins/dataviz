@@ -53,7 +53,7 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
                                 ? <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                                 : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
                         <span className="truncate font-medium text-ink">{r.name || r.dataSourceId}</span>
-                        <span className="truncate text-ink-muted">
+                        <span className="truncate text-ink-muted" title={describeActions(r.actions ?? [])}>
                             {r.outcome === 'error'
                                 ? 'failed to start'
                                 : r.deferred

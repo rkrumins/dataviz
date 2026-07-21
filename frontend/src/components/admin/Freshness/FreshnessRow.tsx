@@ -5,9 +5,12 @@
  * Each row promotes one state-driven primary action (``primaryAction``)
  * next to a `⋯` overflow (``overflowActions``); the overflow never repeats
  * the primary and never offers another rebuild to a row that is already
- * rebuilding. Both are disabled only while this row's own refresh mutation
- * is in flight (``busy``) — a rebuild running elsewhere for the source does
- * not block the row.
+ * rebuilding. The overflow trigger and the button-rendered primary are
+ * disabled only while this row's own refresh mutation is in flight
+ * (``busy``) — a rebuild running elsewhere for the source does not block
+ * the row. The link-rendered primary (the ``recomputing`` + ``!canExpand``
+ * degradation) is a plain anchor, so it has no disabled state and ignores
+ * ``busy``.
  *
  * Copy is plain-language and white-label: the row actions read "Refresh
  * caches" / "Rebuild lineage" / "Full refresh", never the internal scope
@@ -364,6 +367,8 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
                                     : onRefresh(row.dataSourceId, p.scope as RefreshScope,
                                         p.firstBuild ? { firstBuild: true } : undefined)}
                                 disabled={busy}
+                                aria-expanded={p.kind === 'expand' ? !!expanded : undefined}
+                                aria-controls={p.kind === 'expand' ? `freshness-panel-${row.dataSourceId}` : undefined}
                                 className={primaryClass}
                             >
                                 {p.label}
@@ -373,7 +378,7 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
                     <DropdownMenu.Root modal={false}>
                         <DropdownMenu.Trigger asChild>
                             <button
-                                aria-label={`Refresh actions for ${row.name || row.dataSourceId}`}
+                                aria-label={`More actions for ${row.name || row.dataSourceId}`}
                                 disabled={busy}
                                 className="p-1.5 rounded-lg text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
                             >
@@ -422,7 +427,7 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
             </td>
         </tr>
         {expanded && canExpand && job && (
-            <tr>
+            <tr id={`freshness-panel-${row.dataSourceId}`}>
                 <td colSpan={colSpan} className="p-0">
                     <div className="mx-3 my-2 rounded-xl border border-indigo-500/20 bg-canvas-elevated p-4 space-y-3">
                         <div className="flex items-center justify-between">

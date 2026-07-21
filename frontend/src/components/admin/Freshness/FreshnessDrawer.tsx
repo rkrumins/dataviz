@@ -22,6 +22,7 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { jobHistoryPath } from '../job-history/shared'
 import { useRefreshSource, useSetFreshnessSettings, useSourceFreshness } from './useFreshness'
+import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
 import type { FailureCategory, FreshnessDoc } from '@/services/freshnessService'
 
@@ -375,6 +376,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
 
     const { data: doc, isLoading, isFetching, error } = useSourceFreshness(dsId, probe, isOpen)
     const probing = probe && isFetching
+    const { byDataSource } = useActiveJobs()
 
     const { showToast } = useToast()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
@@ -457,7 +459,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                     {/* Status + badges */}
                                     <div className="flex flex-wrap items-center gap-2">
                                         <AggStatusPill status={doc.aggregationStatus} />
-                                        <FreshnessBadges row={doc} />
+                                        <FreshnessBadges row={doc} job={byDataSource.get(dsId ?? '')} />
                                     </div>
 
                                     {/* Resolution guidance — leads for a failed source. */}

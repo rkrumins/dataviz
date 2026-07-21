@@ -25,6 +25,7 @@ import {
     type RefreshResponse,
     type RefreshScope,
 } from '@/services/freshnessService'
+import { ACTIVE_JOBS_KEY } from './useActiveJobs'
 
 /** One generous page — the cockpit is a bounded operator surface, so a
  *  single fetch covers the common fleet size without pagination controls. */
@@ -94,6 +95,10 @@ export function useRefreshSource(): UseMutationResult<RefreshResponse, Error, Re
             // The drawer's resolution guidance reads this source's doc — refetch
             // it so a Clear-cache/Retry from the drawer reflects immediately.
             void qc.invalidateQueries({ queryKey: ['freshness', 'doc', dsId] })
+            // A rollups/full scope can start a job; keep the joined-job feed
+            // from lagging the fleet feed (shortens the divergence window
+            // behind the row's own state === 'recomputing' gate).
+            void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         },
     })
 }

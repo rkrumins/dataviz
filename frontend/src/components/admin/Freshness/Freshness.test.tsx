@@ -138,7 +138,7 @@ describe('Freshness cockpit', () => {
 
         // "Refresh caches" is also Customers Graph's primary action (it's
         // upToDate), so scope by role to hit this row's own dropdown item.
-        await user.click(screen.getByRole('button', { name: /refresh actions for orders graph/i }))
+        await user.click(screen.getByRole('button', { name: /more actions for orders graph/i }))
         await user.click(await screen.findByRole('menuitem', { name: 'Refresh caches' }))
 
         await waitFor(() => {
@@ -181,8 +181,8 @@ describe('Freshness cockpit', () => {
         renderTab()
 
         await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
-        expect(screen.getByRole('button', { name: /refresh actions for orders graph/i })).toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: /refresh actions for customers graph/i })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /more actions for orders graph/i })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /more actions for customers graph/i })).not.toBeInTheDocument()
     })
 
     // ── R5.1 — stat band counts + tile filtering ─────────────────────
@@ -283,7 +283,7 @@ describe('Freshness cockpit', () => {
 
         await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
 
-        await user.click(screen.getByRole('button', { name: /refresh actions for orders graph/i }))
+        await user.click(screen.getByRole('button', { name: /more actions for orders graph/i }))
         await user.click(await screen.findByText('Clear cache'))
 
         // No confirm dialog — clear is non-destructive, it runs at once.
@@ -305,8 +305,9 @@ describe('Freshness cockpit', () => {
         })
         renderTab()
 
-        // Bravo has a marker → expanded: its row is visible. (The group-header
-        // toggle is the only button carrying aria-expanded.)
+        // Bravo has a marker → expanded: its row is visible. (Scoped by name to
+        // hit the group-header toggle — a row's own primary button can also
+        // carry aria-expanded when its state is "recomputing".)
         await waitFor(() => expect(screen.getByText('Bravo One')).toBeInTheDocument())
         expect(screen.getByRole('button', { name: /bravo/i, expanded: true })).toBeInTheDocument()
 
@@ -587,6 +588,12 @@ describe('Freshness cockpit', () => {
     // tests below construct the `job` prop by hand directly on FreshnessRow,
     // so this is the only test that exercises the real map lookup.
     it('joins a live job from useActiveJobs onto its row through the real dataSourceId map', async () => {
+        // ds-1's job IS in the response (joins). ds-2 is ALSO eligible
+        // (runningJobId set → recomputing) but its own job is OMITTED from
+        // the response — the fixture used to have only one eligible row, so
+        // a mutation that hands the map's only entry to every row (instead
+        // of keying by dataSourceId) had nothing to catch it: ds-2 must NOT
+        // pick up ds-1's phase/percent.
         listJobsGlobal.mockResolvedValue({
             items: [{
                 id: 'job-1', dataSourceId: 'ds-1', status: 'running', triggerSource: 'api',
@@ -597,13 +604,25 @@ describe('Freshness cockpit', () => {
         })
         listFleet.mockResolvedValue({
             total: 2,
-            rows: [{ ...fleet.rows[0], runningJobId: 'job-1' }, fleet.rows[1]],
+            rows: [
+                { ...fleet.rows[0], runningJobId: 'job-1' },
+                { ...fleet.rows[1], runningJobId: 'job-2' },
+            ],
         })
         renderTab()
 
         await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
-        expect(screen.getByText(/Computing rollups/)).toBeInTheDocument()
-        expect(screen.getByText(/62%/)).toBeInTheDocument()
+
+        const ds1Row = screen.getByText('Orders Graph').closest('tr') as HTMLElement
+        expect(within(ds1Row).getByText(/Computing rollups/)).toBeInTheDocument()
+        expect(within(ds1Row).getByText(/62%/)).toBeInTheDocument()
+
+        // ds-2 is recomputing but unjoined → a bare "Recomputing" badge,
+        // never ds-1's phase or percent.
+        const ds2Row = screen.getByText('Customers Graph').closest('tr') as HTMLElement
+        expect(within(ds2Row).getByText('Recomputing')).toBeInTheDocument()
+        expect(within(ds2Row).queryByText(/Computing rollups/)).not.toBeInTheDocument()
+        expect(within(ds2Row).queryByText(/62%/)).not.toBeInTheDocument()
     })
 })
 
