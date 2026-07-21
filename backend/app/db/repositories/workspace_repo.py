@@ -52,6 +52,13 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        # Mirror data_source_repo._to_response — this parallel serializer backs
+        # the workspace list/detail reads, so omitting these made a saved
+        # identity/name mapping silently read back as the default on refresh
+        # (same duplicated-serializer drift the aggregationStatus note below hit).
+        # NULL / unset → the platform defaults so clients never special-case them.
+        identityProperty=(getattr(row, "identity_property", None) or "urn"),
+        nameProperty=(getattr(row, "name_property", None) or "name"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         # The column existed and was never mapped, so DataSourceResponse fell back to
