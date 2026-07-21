@@ -32,6 +32,7 @@ import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
 import { useFleetFreshness, useRefreshSource } from './useFreshness'
+import { useActiveJobs } from './useActiveJobs'
 import {
     compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
 } from './freshnessTriage'
@@ -115,6 +116,7 @@ export function Freshness() {
     // No server-side provider/workspace/stale filter: those are client facets
     // now, so one broad fetch feeds both the table and a fleet-wide summary.
     const fleet = useFleetFreshness()
+    const activeJobs = useActiveJobs()
     const refreshSource = useRefreshSource()
 
     const workspacesQ = useQuery({
@@ -367,6 +369,8 @@ export function Freshness() {
                                             <FreshnessRow
                                                 key={row.dataSourceId}
                                                 row={row}
+                                                job={activeJobs.byDataSource.get(row.dataSourceId)}
+                                                colSpan={COLS}
                                                 workspaceName={row.workspaceId ? workspaceName.get(row.workspaceId) : undefined}
                                                 onOpenDrawer={setDrawerDsId}
                                                 onRefresh={onRefresh}

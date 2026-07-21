@@ -52,6 +52,7 @@ beforeAll(() => {
 })
 
 import { Freshness } from './index'
+import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { compareSeverity, freshnessState, severityRank } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
@@ -571,5 +572,74 @@ describe('Freshness cockpit', () => {
         // stops the poll (no runaway refetch).
         expect(await screen.findByText('Refresh complete')).toBeInTheDocument()
         expect(getBatch).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe('live rebuild progress in the row', () => {
+    const rebuildingRow: FreshnessRowData = {
+        dataSourceId: 'ds_live', workspaceId: 'ws1', providerId: 'p1',
+        name: 'Nexus Lineage', providerName: 'Sandbox',
+        aggregationStatus: 'ready', staleReason: 'source_changed',
+        runningJobId: 'job_1', lastAggregatedAt: recent,
+    }
+
+    it('shows the phase and percentage when a job is joined', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'computing', progress: 62 } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText(/Computing rollups/)).toBeInTheDocument()
+        expect(screen.getByText(/62%/)).toBeInTheDocument()
+        expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '62')
+    })
+
+    it('falls back to a bare badge with no bar when no job is joined', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow row={rebuildingRow} onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6} />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText('Recomputing')).toBeInTheDocument()
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    })
+
+    it('never guesses at an unrecognized phase', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'teleporting', progress: 62 } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText('Recomputing')).toBeInTheDocument()
+        expect(screen.queryByText(/62%/)).not.toBeInTheDocument()
+    })
+
+    it('links the badge to Job History for this source', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'computing', progress: 62 } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByRole('link', { name: /Computing rollups/ }))
+            .toHaveAttribute('href', '/ingestion?tab=jobs&dataSourceId=ds_live')
     })
 })

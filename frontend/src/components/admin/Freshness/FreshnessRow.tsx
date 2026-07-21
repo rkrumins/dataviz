@@ -8,6 +8,7 @@
  * source (``runningJobId``) or while this row's own mutation is in flight.
  */
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { Link } from 'react-router-dom'
 import {
     Activity, AlertTriangle, CheckCircle2, Clock, Database, Eraser, Hammer, Loader2,
     Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
@@ -16,7 +17,10 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { usePermission } from '@/store/auth'
 import { TimeStamp } from '@/components/ui/TimeStamp'
+import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
+import type { AggregationJobResponse } from '@/services/aggregationService'
+import { PHASE_LABELS, jobHistoryPath } from '../job-history/shared'
 import { freshnessState, isNeverBuilt } from './freshnessTriage'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
@@ -95,9 +99,19 @@ function Badge({ tone, Icon, spin, label, title }: {
  *  signals, plus additive "Drift detected" / "Next rebuild in Xm" badges. The
  *  primary state comes from ``freshnessState`` so a source that FAILED with the
  *  stale marker still set never masquerades as "Recomputing". */
-export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
+export function FreshnessBadges({ row, job }: {
+    row: FreshnessRowData
+    job?: AggregationJobResponse
+}) {
     const badges: React.ReactNode[] = []
     const state = freshnessState(row)
+    // Only a RECOGNIZED phase earns a phase name and a bar. An unknown
+    // phase id, a missing job, or a failed jobs query all fall back to the
+    // bare badge — never a percentage we cannot substantiate.
+    const phase = job?.currentPhase ? PHASE_LABELS[job.currentPhase] : undefined
+    const pct = phase && typeof job?.progress === 'number'
+        ? Math.min(100, Math.max(0, Math.round(job.progress)))
+        : null
 
     if (state === 'failed') {
         badges.push(
@@ -109,11 +123,15 @@ export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
         )
     } else if (state === 'recomputing') {
         badges.push(
-            <Badge key="recomputing"
-                tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
-                Icon={Loader2} spin label="Recomputing"
-                title="A lineage rebuild is running now."
-            />,
+            <Link key="recomputing" to={jobHistoryPath({ dataSourceId: row.dataSourceId })}
+                className="outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded-full">
+                <Badge
+                    tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
+                    Icon={Loader2} spin
+                    label={pct != null ? `Recomputing · ${phase} · ${pct}%` : 'Recomputing'}
+                    title="A lineage rebuild is running now. Open Job History for the full detail."
+                />
+            </Link>,
         )
     } else if (state === 'queued') {
         const since = deriveStaleSince(row)
@@ -155,6 +173,13 @@ export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
         )
     }
 
+    if (pct != null && state === 'recomputing') {
+        badges.push(
+            <ProgressBar key="bar" value={pct} className="w-full h-1 mt-1"
+                label={`Rebuild progress for ${row.name || row.dataSourceId}`} />,
+        )
+    }
+
     if (badges.length === 0) {
         // "Up to date" is an assertion — only make it for a source that has
         // actually been built. Never-built sources say so plainly.
@@ -170,6 +195,8 @@ export function FreshnessBadges({ row }: { row: FreshnessRowData }) {
 
 interface Props {
     row: FreshnessRowData
+    job?: AggregationJobResponse
+    colSpan: number
     workspaceName?: string
     onOpenDrawer: (dsId: string) => void
     onRefresh: (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => void
@@ -191,7 +218,7 @@ const NEVER_BUILT_ACTIONS: RowAction[] = [
     { scope: 'rollups', label: 'Build lineage', Icon: Hammer, iconClass: 'text-indigo-500', firstBuild: true },
 ]
 
-export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
+export function FreshnessRow({ row, job, workspaceName, onOpenDrawer, onRefresh, busy }: Props) {
     const running = !!row.runningJobId
     const actionsDisabled = busy || running
     const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS
@@ -237,7 +264,7 @@ export function FreshnessRow({ row, workspaceName, onOpenDrawer, onRefresh, busy
 
             {/* Freshness */}
             <td className="px-3 py-2 align-top">
-                <FreshnessBadges row={row} />
+                <FreshnessBadges row={row} job={job} />
             </td>
 
             {/* Last activity */}
