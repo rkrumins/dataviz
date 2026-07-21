@@ -10,13 +10,14 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, Loader2, Zap } from 'lucide-react'
+import { CheckCircle2, Loader2, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { RefreshScope } from '@/services/freshnessService'
 import { FRESHNESS_KEYS, useRefreshBatch, useRefreshProvider } from './useFreshness'
 import { BatchResultsList } from './BatchResultsList'
+import { RefreshImpact, scopeRebuilds } from './RefreshImpact'
 
 const SCOPES: { scope: RefreshScope; label: string; desc: string }[] = [
     { scope: 'auto', label: 'Only changed sources', desc: 'Refresh sources whose data changed since their last run.' },
@@ -37,6 +38,7 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
     // these defaults — no reset effect needed.
     const [scope, setScope] = useState<RefreshScope>('auto')
     const [force, setForce] = useState(false)
+    const [confirming, setConfirming] = useState(false)
     const [batchId, setBatchId] = useState<string | null>(null)
 
     const refreshProvider = useRefreshProvider()
@@ -48,9 +50,11 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
         if (done) void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
     }, [done, qc])
 
+    // A scope switch can never inherit a prior confirmation.
+    useEffect(() => { setConfirming(false) }, [scope, force])
+
     if (!isOpen || !providerId) return null
 
-    const rebuilds = scope === 'rollups' || scope === 'full' || (scope === 'auto' && force)
     // The batch enumerates ALL live sources under the provider fleet-wide — a
     // count derived from the (possibly filtered) table would understate it, so
     // we only show the authoritative total once the batch reports it.
@@ -118,12 +122,7 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
                                         </label>
                                     )}
 
-                                    {rebuilds && (
-                                        <div className="flex items-start gap-2 mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200">
-                                            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                                            Rebuilding lineage across these sources can take several minutes and adds load on the provider.
-                                        </div>
-                                    )}
+                                    <RefreshImpact scope={scope} force={force} sourceCount={total > 0 ? total : null} />
 
                                     {refreshProvider.isError && (
                                         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-red-700 dark:text-red-300">
@@ -136,12 +135,17 @@ export function ProviderRefreshDialog({ providerId, providerName, isOpen, onClos
                                             Cancel
                                         </button>
                                         <button
-                                            onClick={start}
+                                            onClick={() => {
+                                                if (scopeRebuilds(scope, force) && !confirming) { setConfirming(true); return }
+                                                start()
+                                            }}
                                             disabled={refreshProvider.isPending}
                                             className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {refreshProvider.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                                            Start refresh
+                                            {scopeRebuilds(scope, force) && confirming
+                                                ? (total > 0 ? `Yes, rebuild ${total} sources` : 'Yes, rebuild every source')
+                                                : 'Start refresh'}
                                         </button>
                                     </div>
                                 </>

@@ -572,6 +572,8 @@ describe('Freshness cockpit', () => {
         await user.click(await screen.findByRole('button', { name: /advanced options/i }))
         await user.click(screen.getByText('Full refresh'))
         await user.click(screen.getByRole('button', { name: /run full refresh/i }))
+        // Full refresh rebuilds every source, so it now takes an explicit confirm.
+        await user.click(await screen.findByRole('button', { name: /yes, rebuild/i }))
 
         await waitFor(() => expect(refreshAll).toHaveBeenCalledWith(expect.objectContaining({ scope: 'full' })))
         // Progress polled the batch and rendered completion; the done response

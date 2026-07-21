@@ -19,6 +19,7 @@ vi.mock('./useFreshness', async () => {
 })
 
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
+import { RefreshImpact, scopeRebuilds } from './RefreshImpact'
 
 function renderDialog(onClose = vi.fn()) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -56,5 +57,34 @@ describe('ProviderRefreshDialog', () => {
         expect(close).toBeEnabled()
         await user.click(close)
         await waitFor(() => expect(onClose).toHaveBeenCalled())
+    })
+})
+
+describe('refresh impact and confirmation', () => {
+    it('knows which scopes rebuild', () => {
+        expect(scopeRebuilds('rollups', false)).toBe(true)
+        expect(scopeRebuilds('full', false)).toBe(true)
+        expect(scopeRebuilds('auto', true)).toBe(true)
+        expect(scopeRebuilds('auto', false)).toBe(false)
+        expect(scopeRebuilds('read-caches', false)).toBe(false)
+        expect(scopeRebuilds('clear', false)).toBe(false)
+    })
+
+    it('spells out cache clearing, queued jobs and duration for a full refresh', () => {
+        render(<RefreshImpact scope="full" force={false} sourceCount={31} />)
+        expect(screen.getByText(/clear cached canvas data/)).toBeInTheDocument()
+        expect(screen.getByText(/queue a lineage rebuild job/)).toBeInTheDocument()
+        expect(screen.getByText(/minutes to tens of minutes per source/)).toBeInTheDocument()
+        expect(screen.getByText(/all 31 live sources/)).toBeInTheDocument()
+    })
+
+    it('does not invent a source count before the batch reports one', () => {
+        render(<RefreshImpact scope="full" force={false} sourceCount={null} />)
+        expect(screen.getByText(/every live source using this provider/)).toBeInTheDocument()
+    })
+
+    it('never claims a rebuild for a cache-only scope', () => {
+        render(<RefreshImpact scope="read-caches" force={false} sourceCount={31} />)
+        expect(screen.queryByText(/rebuild/i)).not.toBeInTheDocument()
     })
 })

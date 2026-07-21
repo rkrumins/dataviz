@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, Loader2, Zap } from 'lucide-react'
+import { CheckCircle2, Loader2, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -20,6 +20,7 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { RefreshScope } from '@/services/freshnessService'
 import { FRESHNESS_KEYS, useRefreshBatch, useRefreshFleet } from './useFreshness'
 import { BatchResultsList } from './BatchResultsList'
+import { RefreshImpact, scopeRebuilds } from './RefreshImpact'
 
 export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     /** Sources in the fleet, from the server ``summary.total`` (null when the
@@ -34,6 +35,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     // defaults — no reset effect needed.
     const [scope, setScope] = useState<RefreshScope>('auto')
     const [showAdvanced, setShowAdvanced] = useState(false)
+    const [confirming, setConfirming] = useState(false)
     const [batchId, setBatchId] = useState<string | null>(null)
 
     const refreshFleet = useRefreshFleet()
@@ -47,9 +49,11 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
         showToast('success', 'Fleet refresh complete.')
     }, [done, qc, showToast])
 
+    // A scope switch can never inherit a prior confirmation.
+    useEffect(() => { setConfirming(false) }, [scope])
+
     if (!isOpen) return null
 
-    const isFull = scope === 'full'
     const total = batch?.total ?? 0
     const completed = batch?.done ?? 0
     const pct = total > 0 ? (completed / total) * 100 : 0
@@ -122,12 +126,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                         </div>
                                     )}
 
-                                    {isFull && (
-                                        <div className="flex items-start gap-2 mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200">
-                                            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                                            A full rebuild across the whole fleet can take a long time and adds significant load on every provider.
-                                        </div>
-                                    )}
+                                    <RefreshImpact scope={scope} force={false} sourceCount={total > 0 ? total : null} />
 
                                     {refreshFleet.isError && (
                                         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-red-700 dark:text-red-300">
@@ -140,12 +139,17 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                             Cancel
                                         </button>
                                         <button
-                                            onClick={start}
+                                            onClick={() => {
+                                                if (scopeRebuilds(scope, false) && !confirming) { setConfirming(true); return }
+                                                start()
+                                            }}
                                             disabled={refreshFleet.isPending}
                                             className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {refreshFleet.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                                            {isFull ? 'Run full refresh' : 'Refresh all sources'}
+                                            {scopeRebuilds(scope, false) && confirming
+                                                ? (total > 0 ? `Yes, rebuild ${total} sources` : 'Yes, rebuild every source')
+                                                : (scopeRebuilds(scope, false) ? 'Run full refresh' : 'Refresh all sources')}
                                         </button>
                                     </div>
                                 </>
