@@ -763,10 +763,18 @@ class BatchRefreshRequestInternal(BatchRefreshRequest):
 
 
 class BatchItemResult(BaseModel):
-    """One data source's outcome within a refresh batch."""
+    """One data source's outcome within a refresh batch.
+
+    ``name``/``actions``/``deferred`` exist so the completion dialog can say
+    WHAT it did to each source instead of listing opaque ids with a tick.
+    All three default, because the error branch has no ``RefreshResponse``
+    to read and an exception there would strand the batch at "running"."""
     data_source_id: str = Field(alias="dataSourceId")
     outcome: Literal["done", "error"]
     job_id: Optional[str] = Field(None, alias="jobId")
+    name: Optional[str] = None
+    actions: List[str] = Field(default_factory=list)
+    deferred: bool = False
 
     class Config:
         populate_by_name = True

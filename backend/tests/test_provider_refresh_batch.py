@@ -140,7 +140,7 @@ class _FailNthCommitSessionFactory:
 
 
 def _resp(job_id="job-1"):
-    return types.SimpleNamespace(job_id=job_id)
+    return types.SimpleNamespace(job_id=job_id, actions=[], deferred=False)
 
 
 class _AllSucceedSvc:
@@ -215,7 +215,7 @@ def test_batch_records_outcome_for_every_ds_and_completes():
     redis = _FakeRedis()
     ds_ids = [f"ds-{i}" for i in range(5)]
     _run(cp._run_provider_batch(
-        "batch-1", "prov-1", ds_ids, _req(),
+        "batch-1", "prov-1", [(d, None) for d in ds_ids], _req(),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     hash_ = redis.hashes["refreshbatch:batch-1"]
@@ -233,7 +233,7 @@ def test_batch_item_failure_recorded_as_error_batch_still_completes():
     svc = _MixedOutcomeSvc(fail_ids={"ds-b"})
     redis = _FakeRedis()
     _run(cp._run_provider_batch(
-        "batch-2", "prov-1", ["ds-a", "ds-b", "ds-c"], _req(),
+        "batch-2", "prov-1", [("ds-a", None), ("ds-b", None), ("ds-c", None)], _req(),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     hash_ = redis.hashes["refreshbatch:batch-2"]
@@ -256,7 +256,7 @@ def test_session_commit_failure_recorded_as_error_batch_still_completes():
     ds_ids = ["ds-a", "ds-b", "ds-c"]
     session_factory = _FailNthCommitSessionFactory(fail_at_call=2)
     _run(cp._run_provider_batch(
-        "batch-commit-fail", "prov-1", ds_ids, _req(),
+        "batch-commit-fail", "prov-1", [(d, None) for d in ds_ids], _req(),
         svc=_AllSucceedSvc(), session_factory=session_factory, redis=redis,
     ))
     hash_ = redis.hashes["refreshbatch:batch-commit-fail"]
@@ -273,7 +273,7 @@ def test_batch_forwards_clear_scope_to_every_source():
     redis = _FakeRedis()
     ds_ids = ["ds-a", "ds-b", "ds-c"]
     _run(cp._run_provider_batch(
-        "batch-clear", "prov-1", ds_ids, _req(scope="clear"),
+        "batch-clear", "prov-1", [(d, None) for d in ds_ids], _req(scope="clear"),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     assert svc.scopes == {d: "clear" for d in ds_ids}
@@ -289,7 +289,7 @@ def test_concurrency_bounded_by_requested_max():
     redis = _FakeRedis()
     ds_ids = [f"ds-{i}" for i in range(8)]
     _run(cp._run_provider_batch(
-        "batch-3", "prov-1", ds_ids, _req(max_concurrent=3),
+        "batch-3", "prov-1", [(d, None) for d in ds_ids], _req(max_concurrent=3),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     assert svc.peak <= 3
@@ -301,7 +301,7 @@ def test_concurrency_capped_at_four_even_if_more_requested():
     redis = _FakeRedis()
     ds_ids = [f"ds-{i}" for i in range(10)]
     _run(cp._run_provider_batch(
-        "batch-4", "prov-1", ds_ids, _req(max_concurrent=10),
+        "batch-4", "prov-1", [(d, None) for d in ds_ids], _req(max_concurrent=10),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     assert svc.peak <= 4
@@ -314,7 +314,7 @@ def test_lock_released_on_clean_completion():
     redis = _FakeRedis()
     redis.strings["refreshbatch:lock:prov-1"] = "1"  # simulate route having set it
     _run(cp._run_provider_batch(
-        "batch-5", "prov-1", ["ds-a"], _req(),
+        "batch-5", "prov-1", [("ds-a", None)], _req(),
         svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
     ))
     assert "refreshbatch:lock:prov-1" not in redis.strings
@@ -324,7 +324,7 @@ def test_lock_released_when_an_item_fails():
     redis = _FakeRedis()
     redis.strings["refreshbatch:lock:prov-1"] = "1"
     _run(cp._run_provider_batch(
-        "batch-6", "prov-1", ["ds-a", "ds-b"], _req(),
+        "batch-6", "prov-1", [("ds-a", None), ("ds-b", None)], _req(),
         svc=_MixedOutcomeSvc(fail_ids={"ds-a"}),
         session_factory=_session_factory, redis=redis,
     ))
@@ -336,7 +336,7 @@ def test_lock_released_on_runner_crash_outside_any_single_item():
     redis.strings["refreshbatch:lock:prov-1"] = "1"
     with pytest.raises(RuntimeError):
         _run(cp._run_provider_batch(
-            "batch-7", "prov-1", ["ds-a"], _req(),
+            "batch-7", "prov-1", [("ds-a", None)], _req(),
             svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
         ))
     assert "refreshbatch:lock:prov-1" not in redis.strings
@@ -348,7 +348,7 @@ def test_lock_released_on_external_cancellation():
 
     async def _scenario():
         task = asyncio.create_task(cp._run_provider_batch(
-            "batch-8", "prov-1", ["ds-a"], _req(),
+            "batch-8", "prov-1", [("ds-a", None)], _req(),
             svc=_SlowSvc(), session_factory=_session_factory, redis=redis,
         ))
         await asyncio.sleep(0.01)  # let it start and acquire the "lock"
@@ -430,7 +430,7 @@ def test_route_409_when_lock_already_held(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _run(cp.start_refresh_batch(
             "prov-1", _fake_request(), body=_req(),
-            svc=_AllSucceedSvc(), session=_FakeSession([("ds-a",)]),
+            svc=_AllSucceedSvc(), session=_FakeSession([("ds-a", None)]),
         ))
     assert ei.value.status_code == 409
     assert captured == []  # no task scheduled over an existing run
@@ -448,7 +448,7 @@ def test_route_success_enumerates_acquires_lock_and_schedules_task(monkeypatch):
     svc = _AllSucceedSvc()
     resp = _run(cp.start_refresh_batch(
         "prov-1", _fake_request(), body=_req(),
-        svc=svc, session=_FakeSession([("ds-a",), ("ds-b",)]),
+        svc=svc, session=_FakeSession([("ds-a", None), ("ds-b", None)]),
     ))
 
     assert isinstance(resp, BatchStatus)
@@ -489,6 +489,38 @@ def test_get_refresh_batch_404_when_unknown(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _run(cp.get_refresh_batch("nope"))
     assert ei.value.status_code == 404
+
+
+def test_batch_item_reports_name_actions_and_deferral():
+    """"Refresh complete" listing opaque ds_ ids tells an operator nothing.
+    RefreshResponse already knows what ran and whether the rebuild was
+    deferred by cooldown — the batch item must carry both, plus the label,
+    or the dialog cannot say what it did."""
+    from backend.app.services.aggregation.schemas import BatchItemResult
+
+    item = BatchItemResult(
+        dataSourceId="ds_1",
+        name="Solidatus Perf Xlarge",
+        outcome="done",
+        jobId="job_9",
+        actions=["content_cleared", "hierarchy_invalidated", "rebuild_queued"],
+        deferred=False,
+    )
+    assert item.name == "Solidatus Perf Xlarge"
+    assert "rebuild_queued" in item.actions
+    assert item.deferred is False
+
+
+def test_batch_item_defaults_stay_well_formed_for_the_error_branch():
+    """The error path has no RefreshResponse to read, so the new fields must
+    default rather than being required — otherwise a failing item raises
+    inside the runner and strands the batch at state 'running'."""
+    from backend.app.services.aggregation.schemas import BatchItemResult
+
+    item = BatchItemResult(dataSourceId="ds_2", outcome="error")
+    assert item.actions == []
+    assert item.deferred is False
+    assert item.name is None
 
 
 if __name__ == "__main__":

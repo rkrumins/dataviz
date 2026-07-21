@@ -6,7 +6,7 @@ with fakes — no TestClient, no real Redis/Postgres.
 
 What is under test:
 
-  * enumeration — ``_live_ds_ids`` with no ``provider_id`` builds an
+  * enumeration — ``_live_ds_rows`` with no ``provider_id`` builds an
     UNSCOPED query (still ``deleted_at IS NULL``), so the fleet route's
     total spans every provider's live sources; scoped to one provider it
     adds exactly one predicate.
@@ -114,7 +114,7 @@ def _session_factory():
 
 
 def _resp(job_id="job-1"):
-    return types.SimpleNamespace(job_id=job_id)
+    return types.SimpleNamespace(job_id=job_id, actions=[], deferred=False)
 
 
 class _AllSucceedSvc:
@@ -208,23 +208,23 @@ def _patch_create_task(monkeypatch):
     return captured
 
 
-# ── Enumeration: `_live_ds_ids` ───────────────────────────────────────
+# ── Enumeration: `_live_ds_rows` ──────────────────────────────────────
 
 
-def test_live_ds_ids_unscoped_has_no_provider_filter_but_excludes_tombstones():
-    session = _RecordingSession([("ds-a1",), ("ds-b1",), ("ds-a2",)])
-    ids = _run(cp._live_ds_ids(session))
-    assert ids == ["ds-a1", "ds-b1", "ds-a2"]
+def test_live_ds_rows_unscoped_has_no_provider_filter_but_excludes_tombstones():
+    session = _RecordingSession([("ds-a1", "A1"), ("ds-b1", "B1"), ("ds-a2", None)])
+    rows = _run(cp._live_ds_rows(session))
+    assert rows == [("ds-a1", "A1"), ("ds-b1", "B1"), ("ds-a2", None)]
 
     sql = _compiled(session.executed[0])
     assert "deleted_at IS NULL" in sql
     assert "provider_id" not in sql  # unscoped: no provider predicate at all
 
 
-def test_live_ds_ids_scoped_to_one_provider_adds_exactly_one_predicate():
-    session = _RecordingSession([("ds-a1",)])
-    ids = _run(cp._live_ds_ids(session, provider_id="prov-a"))
-    assert ids == ["ds-a1"]
+def test_live_ds_rows_scoped_to_one_provider_adds_exactly_one_predicate():
+    session = _RecordingSession([("ds-a1", "A1")])
+    rows = _run(cp._live_ds_rows(session, provider_id="prov-a"))
+    assert rows == [("ds-a1", "A1")]
 
     sql = _compiled(session.executed[0])
     assert "deleted_at IS NULL" in sql
@@ -241,7 +241,7 @@ def test_fleet_route_enumerates_across_providers_mixed(monkeypatch):
     redis = _FakeRedis()
     monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
 
-    session = _RecordingSession([("ds-a1",), ("ds-b1",), ("ds-a2",)])
+    session = _RecordingSession([("ds-a1", None), ("ds-b1", None), ("ds-a2", None)])
     resp = _run(cp.start_fleet_refresh_batch(
         _fake_request(), body=_req(), svc=_AllSucceedSvc(), session=session,
     ))
@@ -263,7 +263,7 @@ def test_fleet_route_409_when_global_lock_already_held(monkeypatch):
     redis.strings["refreshbatch:lock:__fleet__"] = "1"  # already running
     monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
 
-    session = _RecordingSession([("ds-a1",)])
+    session = _RecordingSession([("ds-a1", None)])
     with pytest.raises(HTTPException) as ei:
         _run(cp.start_fleet_refresh_batch(
             _fake_request(), body=_req(), svc=_AllSucceedSvc(), session=session,
@@ -286,7 +286,7 @@ def test_fleet_route_end_to_end_records_per_source_outcomes(monkeypatch):
         return types.SimpleNamespace()
     monkeypatch.setattr(cp.asyncio, "create_task", _run_inline)
 
-    session = _RecordingSession([("ds-a",), ("ds-b",)])
+    session = _RecordingSession([("ds-a", None), ("ds-b", None)])
     resp = _run(cp.start_fleet_refresh_batch(
         _fake_request(), body=_req(), svc=_AllSucceedSvc(), session=session,
     ))
@@ -314,8 +314,8 @@ def test_fleet_and_provider_batch_overlap_on_same_source_both_proceed(monkeypatc
         return types.SimpleNamespace(id=provider_id)
     monkeypatch.setattr(provider_repo_mod, "get_provider_orm", _get_provider_orm)
 
-    provider_session = _RecordingSession([("ds-shared",)])
-    fleet_session = _RecordingSession([("ds-shared",), ("ds-other",)])
+    provider_session = _RecordingSession([("ds-shared", None)])
+    fleet_session = _RecordingSession([("ds-shared", None), ("ds-other", None)])
 
     provider_resp = _run(cp.start_refresh_batch(
         "prov-1", _fake_request(), body=_req(),
@@ -342,8 +342,8 @@ def test_two_fleet_batches_do_collide(monkeypatch):
     redis = _FakeRedis()
     monkeypatch.setattr(redis_client_mod, "get_redis", lambda: redis)
 
-    session_1 = _RecordingSession([("ds-a",)])
-    session_2 = _RecordingSession([("ds-a",)])
+    session_1 = _RecordingSession([("ds-a", None)])
+    session_2 = _RecordingSession([("ds-a", None)])
 
     _run(cp.start_fleet_refresh_batch(
         _fake_request(), body=_req(), svc=_AllSucceedSvc(), session=session_1,
@@ -363,7 +363,7 @@ def test_fleet_scope_lock_released_on_clean_completion():
     redis = _FakeRedis()
     redis.strings["refreshbatch:lock:__fleet__"] = "1"  # simulate route having set it
     _run(cp._run_provider_batch(
-        "batch-f1", "__fleet__", ["ds-a", "ds-b"], _req(),
+        "batch-f1", "__fleet__", [("ds-a", None), ("ds-b", None)], _req(),
         svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
     ))
     assert "refreshbatch:lock:__fleet__" not in redis.strings
@@ -376,7 +376,7 @@ def test_fleet_scope_item_failure_recorded_error_batch_still_done():
     svc = _MixedOutcomeSvc(fail_ids={"ds-b"})
     redis = _FakeRedis()
     _run(cp._run_provider_batch(
-        "batch-f2", "__fleet__", ["ds-a", "ds-b", "ds-c"], _req(),
+        "batch-f2", "__fleet__", [("ds-a", None), ("ds-b", None), ("ds-c", None)], _req(),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     hash_ = redis.hashes["refreshbatch:batch-f2"]
@@ -393,7 +393,7 @@ def test_fleet_scope_concurrency_bounded_by_requested_max():
     redis = _FakeRedis()
     ds_ids = [f"ds-{i}" for i in range(8)]
     _run(cp._run_provider_batch(
-        "batch-f3", "__fleet__", ds_ids, _req(max_concurrent=3),
+        "batch-f3", "__fleet__", [(d, None) for d in ds_ids], _req(max_concurrent=3),
         svc=svc, session_factory=_session_factory, redis=redis,
     ))
     assert svc.peak <= 3
@@ -405,7 +405,7 @@ def test_fleet_scope_lock_released_on_runner_crash():
     redis.strings["refreshbatch:lock:__fleet__"] = "1"
     with pytest.raises(RuntimeError):
         _run(cp._run_provider_batch(
-            "batch-f4", "__fleet__", ["ds-a"], _req(),
+            "batch-f4", "__fleet__", [("ds-a", None)], _req(),
             svc=_AllSucceedSvc(), session_factory=_session_factory, redis=redis,
         ))
     assert "refreshbatch:lock:__fleet__" not in redis.strings
