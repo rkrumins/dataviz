@@ -84,7 +84,19 @@ def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
 # ------------------------------------------------------------------ #
 
 def _ws_query():
-    return select(WorkspaceORM).options(selectinload(WorkspaceORM.data_sources))
+    # A soft-deleted data source is in the trash: it must never be embedded in a
+    # workspace's dataSources (that leak kept off-boarded sources alive in the
+    # Workspaces list and the View Wizard). Same predicate as
+    # data_source_repo._live() and the get_workspace_impact query below — one
+    # predicate, one meaning. Filtered at the eager load so no other read path,
+    # present or future, has to remember to re-apply it.
+    return select(WorkspaceORM).options(
+        selectinload(
+            WorkspaceORM.data_sources.and_(
+                WorkspaceDataSourceORM.deleted_at.is_(None)
+            )
+        )
+    )
 
 
 async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
