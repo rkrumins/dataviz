@@ -1935,7 +1935,7 @@ class AggregationService:
         )
 
         row = (await session.execute(
-            select(WorkspaceDataSourceORM, ProviderORM.name)
+            select(WorkspaceDataSourceORM, ProviderORM.name)  # noqa: cross-domain (freshness cockpit: read-only admin view needs the provider NAME to label/group sources; one bounded query, no hot path)
             .join(
                 ProviderORM,
                 ProviderORM.id == WorkspaceDataSourceORM.provider_id,
@@ -2568,7 +2568,7 @@ async def assemble_fleet_freshness(
             return FreshnessFleetResponse(rows=[], total=0)
 
     base = (
-        select(WorkspaceDataSourceORM, ProviderORM.name)
+        select(WorkspaceDataSourceORM, ProviderORM.name)  # noqa: cross-domain (freshness cockpit: read-only admin view needs the provider NAME to label/group sources; one bounded query, no hot path)
         .join(
             ProviderORM,
             ProviderORM.id == WorkspaceDataSourceORM.provider_id,
@@ -2699,7 +2699,7 @@ async def _assemble_fleet_summary(
             return None, None
 
         query = (
-            select(
+            select(  # noqa: cross-domain (freshness cockpit: read-only admin view needs the provider NAME to label/group sources; one bounded query, no hot path)
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.workspace_id,
                 WorkspaceDataSourceORM.aggregation_status,

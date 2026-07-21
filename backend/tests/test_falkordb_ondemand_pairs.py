@@ -1220,3 +1220,56 @@ def test_all_materialized_batches_succeed_leaves_flags_unset():
     assert result.stale is False
     assert result.stale_reason is None
     assert result.truncated is False
+
+
+def test_materialized_read_truncates_on_a_stable_key_not_weight_alone():
+    """The :AGGREGATED read caps at AGGREGATED_EDGE_RESULT_CAP rows, and
+    ``weight`` is a COUNT — so ties are pervasive and the LIMIT cut lands
+    in the middle of a tie group. Ordering by weight ALONE leaves the
+    surviving subset arbitrary and free to differ between executions;
+    combined with delete-on-oversize (a >1MiB payload is never cached, so
+    every canvas open re-runs the query) a large model would render a
+    DIFFERENT lineage subset each time it is opened. Pin the keyset the
+    same way the paged reads do: weight DESC, then (s.urn, t.urn).
+    """
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    seen: list = []
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        seen.append(cypher)
+        return _Result([])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    # Both shapes of the materialized read: target-scoped and source-only.
+    for targets in (["urn:target"], []):
+        _run(p.get_aggregated_edges_between(
+            ["urn:a"], targets,
+            granularity=None,
+            containment_edges=["CONTAINS"],
+            lineage_edges=[],
+        ))
+
+    agg_reads = [c for c in seen if ":AGGREGATED]->" in c and "LIMIT" in c]
+    assert agg_reads, f"expected the materialized :AGGREGATED read, saw: {seen}"
+    for cypher in agg_reads:
+        assert "ORDER BY r.weight DESC, s.urn, t.urn" in cypher, (
+            f"truncation must be deterministic, got: {cypher}"
+        )

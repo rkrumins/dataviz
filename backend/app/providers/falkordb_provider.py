@@ -5539,7 +5539,15 @@ class FalkorDBProvider(GraphDataProvider):
                     "AND s.urn <> t.urn "
                     "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                     "r.weight AS weight, r.sourceEdgeTypes AS types "
-                    f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                    # Stable tiebreaker: weight is a COUNT, so ties are
+                    # pervasive and the LIMIT cut lands mid-tie-group. Without
+                    # (s.urn, t.urn) the surviving subset is arbitrary and can
+                    # differ per execution — and an oversized payload is never
+                    # cached (delete-on-oversize), so a >cap model would render
+                    # a DIFFERENT subset on every canvas open. Same keyset
+                    # discipline the paged reads above already use.
+                    f"ORDER BY r.weight DESC, s.urn, t.urn "
+                    f"LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
                 )
             return (
                 f"MATCH {anchor}-[r:AGGREGATED]->(t) "
@@ -5547,7 +5555,9 @@ class FalkorDBProvider(GraphDataProvider):
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                # Same stable tiebreaker as the target-scoped variant above.
+                f"ORDER BY r.weight DESC, s.urn, t.urn "
+                f"LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
 
         batch_failed = False
