@@ -1328,7 +1328,14 @@ async def import_ontology_into(
     - System target → rejected (clone first).
     - No changes detected → returns status="no_changes" without modification.
     """
+    # Run the SAME normalization pipeline as create / update / import-new. Skipping
+    # _strip_system_types and _normalize_edge_type_references here let an import persist a
+    # case-drifted containment/lineage reference list or a leaked system edge id, producing an
+    # internally inconsistent ontology (and a fresh source of the very case-variant drift the
+    # canonical fold exists to prevent).
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     try:
