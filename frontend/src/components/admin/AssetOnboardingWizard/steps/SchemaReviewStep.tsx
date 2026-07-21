@@ -375,14 +375,16 @@ export function SchemaReviewStep({
         onStatusChange(next)
 
         try {
-            // If the assigned ontology is published, create a fresh draft
-            // version first and re-point the wizard at it. The
-            // /new-version endpoint enforces "one draft per schema_id"
-            // so we get the existing draft if one is already open.
-            let workingId = status.ontologyId
-            if (status.resolution.ontologyIsPublished) {
-                const draft = await ontologyDefinitionService.createNewVersion(workingId)
-                workingId = draft.id
+            // Resolve an editable draft for the assigned ontology. ensureDraftFor
+            // handles every case from the live server state: an unpublished
+            // ontology is used as-is; a published one gets a fresh draft, or the
+            // already-open draft when /new-version 409s ("one draft per schema").
+            // This is more robust than trusting the possibly-stale
+            // resolution.ontologyIsPublished flag + a bare createNewVersion, which
+            // 409'd (and failed the whole save) when a draft already existed.
+            const draftRef = await ensureDraftFor(status.ontologyId)
+            const workingId = draftRef.id
+            if (workingId !== status.ontologyId) {
                 updateFormData(prev => ({
                     ontologySelections: {
                         ...prev.ontologySelections,
