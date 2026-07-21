@@ -25,7 +25,7 @@ The OPS Freshness Cockpit (2026-07-18 design) made freshness *legible* but left 
 
 **Rendering in the row.** In `FreshnessRow.tsx`, `FreshnessBadges` extends only the `recomputing` branch — badge line plus a slim progress bar, so a rebuilding row grows by one line and no more:
 
-```
+```text
 ⟳ Recomputing · Computing rollups · 62%        →
 ████████████████░░░░░░░░░
 ```
@@ -36,7 +36,7 @@ The OPS Freshness Cockpit (2026-07-18 design) made freshness *legible* but left 
 
 **Expandable detail panel.** A rebuilding row expands in place (chevron in the source cell, same interaction as Job History's rows) to a panel carrying the **four-phase stepper** and a full-width progress bar:
 
-```
+```text
 Computing rollups                                62%
 ██████████████████████████░░░░░░░░░░░░░░░
 ✓ EXTRACT 1m2s   ● COMPUTE   ○ RECONCILE   ○ APPLY
@@ -91,7 +91,7 @@ Preserved from today: the whole cluster is hidden when the operator lacks `works
 
 `ProviderRefreshDialog.tsx` and its sibling `FleetRefreshDialog.tsx` replace the single generic amber line (`ProviderRefreshDialog.tsx:120-125`) with a per-scope impact block:
 
-```
+```text
 Scope: Full refresh
 This will, for all 31 live sources:
   ⌧ clear cached canvas data      (users see slower first loads)
@@ -115,7 +115,7 @@ This will, for all 31 live sources:
 
 **Frontend** — the results list (`ProviderRefreshDialog.tsx:164-176`, and the same list in `FleetRefreshDialog.tsx`) shows name, what happened, and a link (`jobId` is already in the payload today). The list is extracted into one shared component so the provider and fleet dialogs cannot drift:
 
-```
+```text
 ✓ Solidatus Perf Xlarge   cache cleared · rebuild queued     View job →
 ✓ Nexus Lineage           caches refreshed
 ◷ Manual Lineage          deferred — in cooldown, no rebuild queued
