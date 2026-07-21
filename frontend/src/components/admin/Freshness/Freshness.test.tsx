@@ -54,7 +54,7 @@ beforeAll(() => {
 })
 
 import { Freshness } from './index'
-import { FreshnessRow } from './FreshnessRow'
+import { FreshnessRow, primaryAction, overflowActions } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { compareSeverity, freshnessState, severityRank } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
@@ -136,8 +136,10 @@ describe('Freshness cockpit', () => {
 
         await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
 
+        // "Refresh caches" is also Customers Graph's primary action (it's
+        // upToDate), so scope by role to hit this row's own dropdown item.
         await user.click(screen.getByRole('button', { name: /refresh actions for orders graph/i }))
-        await user.click(await screen.findByText('Refresh caches'))
+        await user.click(await screen.findByRole('menuitem', { name: 'Refresh caches' }))
 
         await waitFor(() => {
             expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'read-caches' }))
@@ -150,8 +152,9 @@ describe('Freshness cockpit', () => {
 
         await waitFor(() => expect(screen.getByText('Orders Graph')).toBeInTheDocument())
 
-        await user.click(screen.getByRole('button', { name: /refresh actions for orders graph/i }))
-        await user.click(await screen.findByText('Rebuild lineage'))
+        // Orders Graph is queued, so the rebuild is its promoted primary
+        // action ("Rebuild now") — no need to open the overflow for it.
+        await user.click(screen.getByRole('button', { name: 'Rebuild now' }))
 
         // A confirm dialog gates the rebuild — no mutation yet.
         expect(refreshSource).not.toHaveBeenCalled()
@@ -708,5 +711,60 @@ describe('live rebuild progress in the row', () => {
             { wrapper: MemoryRouter },
         )
         expect(screen.queryByText('Reconcile')).not.toBeInTheDocument()
+    })
+})
+
+describe('state-driven row actions', () => {
+    // Own fixture — this describe cannot see the one scoped to the
+    // "live rebuild progress" block above.
+    const actionRow: FreshnessRowData = {
+        dataSourceId: 'ds_live', workspaceId: 'ws1', providerId: 'p1',
+        name: 'Nexus Lineage', providerName: 'Sandbox',
+        aggregationStatus: 'ready', staleReason: 'source_changed',
+        runningJobId: 'job_1', lastAggregatedAt: recent,
+    }
+
+    it('maps every state to the action that state calls for', () => {
+        expect(primaryAction('failed')).toMatchObject({ label: 'Retry rebuild', kind: 'refresh', scope: 'rollups', force: true })
+        expect(primaryAction('recomputing')).toMatchObject({ label: 'View progress', kind: 'expand' })
+        expect(primaryAction('queued')).toMatchObject({ label: 'Rebuild now', kind: 'refresh', scope: 'rollups' })
+        expect(primaryAction('stale')).toMatchObject({ label: 'Rebuild now', kind: 'refresh', scope: 'rollups' })
+        expect(primaryAction('neverBuilt')).toMatchObject({ label: 'Build lineage', kind: 'refresh', scope: 'rollups', firstBuild: true })
+        expect(primaryAction('upToDate')).toMatchObject({ label: 'Refresh caches', kind: 'refresh', scope: 'read-caches' })
+    })
+
+    it('never repeats the primary action in the overflow, and offers no rebuild mid-rebuild', () => {
+        expect(overflowActions('neverBuilt')).toEqual([])
+        expect(overflowActions('recomputing').map(a => a.scope)).toEqual(['read-caches'])
+        expect(overflowActions('upToDate').map(a => a.scope)).not.toContain('read-caches')
+        expect(overflowActions('failed').map(a => a.scope)).not.toContain('rollups')
+    })
+
+    // A recomputing row's primaryAction is 'expand', but with no joined job
+    // there is no panel to open (403'd jobs query, active-job cap, the two
+    // polls not yet converged, ...) — the click must never be dead.
+    it('degrades "View progress" to a Job History link when the row cannot expand', () => {
+        permissionFn.mockReturnValue(true)
+        render(
+            <table><tbody>
+                <FreshnessRow row={actionRow} colSpan={6} onOpenDrawer={() => {}} onRefresh={() => {}} />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.queryByRole('button', { name: 'View progress' })).not.toBeInTheDocument()
+        expect(screen.getByRole('link', { name: 'View progress' }))
+            .toHaveAttribute('href', '/ingestion?tab=jobs&dataSourceId=ds_live')
+    })
+
+    it('hides the whole action cluster without manage permission', () => {
+        permissionFn.mockReturnValue(false)
+        render(
+            <table><tbody>
+                <FreshnessRow row={actionRow} colSpan={6} onOpenDrawer={() => {}} onRefresh={() => {}} />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.queryByRole('button', { name: /View progress/ })).not.toBeInTheDocument()
+        permissionFn.mockReturnValue(true)
     })
 })

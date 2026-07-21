@@ -10,8 +10,8 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
-    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, Hammer, Loader2,
-    Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, Loader2,
+    Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles, StopCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -21,7 +21,8 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState, isNeverBuilt } from './freshnessTriage'
+import { freshnessState } from './freshnessTriage'
+import type { FreshnessState } from './freshnessTriage'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -204,6 +205,7 @@ interface Props {
     busy?: boolean
     expanded?: boolean
     onToggleExpand?: (dsId: string) => void
+    onCancelJob?: (dsId: string, jobId: string) => void
 }
 
 type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean; hint?: string }
@@ -215,16 +217,56 @@ const BUILT_ACTIONS: RowAction[] = [
     { scope: 'full', label: 'Full refresh', Icon: Sparkles, iconClass: 'text-emerald-500' },
 ]
 
-// A never-built source has nothing to refresh yet — its one honest action is
-// the first build (rollups, F3 semantics), which the parent confirms.
-const NEVER_BUILT_ACTIONS: RowAction[] = [
-    { scope: 'rollups', label: 'Build lineage', Icon: Hammer, iconClass: 'text-indigo-500', firstBuild: true },
-]
+/**
+ * The one action a row's state calls for, promoted out of the overflow so
+ * an operator never hunts for it. ``recomputing`` deliberately maps to
+ * "View progress" (opens the in-place panel) rather than "Cancel": Cancel
+ * is destructive and must not be the easiest target on a table where 20+
+ * rows can be rebuilding at once. It stays in the overflow.
+ */
+export function primaryAction(state: FreshnessState): {
+    label: string
+    kind: 'refresh' | 'expand'
+    scope?: RefreshScope
+    force?: boolean
+    firstBuild?: boolean
+} {
+    switch (state) {
+        case 'failed': return { label: 'Retry rebuild', kind: 'refresh', scope: 'rollups', force: true }
+        case 'recomputing': return { label: 'View progress', kind: 'expand' }
+        case 'queued':
+        case 'stale': return { label: 'Rebuild now', kind: 'refresh', scope: 'rollups' }
+        case 'neverBuilt': return { label: 'Build lineage', kind: 'refresh', scope: 'rollups', firstBuild: true }
+        case 'upToDate':
+        default: return { label: 'Refresh caches', kind: 'refresh', scope: 'read-caches' }
+    }
+}
 
-export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded }: Props) {
+/** Overflow scopes per state — the primary action's own scope is never
+ *  repeated here, and a rebuilding row is not offered another rebuild
+ *  (the backend would collapse it onto the running job anyway, so the
+ *  menu item would be a lie). */
+export function overflowActions(state: FreshnessState): RowAction[] {
+    const byScope = (s: RefreshScope) => BUILT_ACTIONS.find(a => a.scope === s)!
+    switch (state) {
+        case 'neverBuilt':
+            return []
+        case 'recomputing':
+            return [byScope('read-caches')]
+        case 'upToDate':
+            return [byScope('clear'), byScope('rollups'), byScope('full')]
+        case 'failed':
+        case 'queued':
+        case 'stale':
+        default:
+            return [byScope('read-caches'), byScope('clear'), byScope('full')]
+    }
+}
+
+export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded, onToggleExpand, onCancelJob }: Props) {
     const running = !!row.runningJobId
-    const actionsDisabled = busy || running
-    const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS
+    const actionsDisabled = busy
+    const actions = overflowActions(freshnessState(row))
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
     // who can't manage this row's workspace (RegistryConnections convention) —
     // a disabled item would just 403 on click.
@@ -296,37 +338,79 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
             {/* Actions */}
             <td className="px-3 py-2 align-top text-right" onClick={(e) => e.stopPropagation()}>
                 {canManage && (
-                <DropdownMenu.Root modal={false}>
-                    <DropdownMenu.Trigger asChild>
-                        <button
-                            aria-label={`Refresh actions for ${row.name || row.dataSourceId}`}
-                            disabled={actionsDisabled}
-                            title={running ? 'A rebuild is already running for this source' : undefined}
-                            className="p-1.5 rounded-lg text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
-                        >
-                            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreHorizontal className="w-4 h-4" />}
-                        </button>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                        <DropdownMenu.Content
-                            align="end"
-                            sideOffset={4}
-                            className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
-                        >
-                            {actions.map(({ scope, label, Icon, iconClass, firstBuild, hint }) => (
-                                <DropdownMenu.Item
-                                    key={label}
-                                    title={hint}
-                                    onSelect={() => onRefresh(row.dataSourceId, scope, firstBuild ? { firstBuild: true } : undefined)}
+                <div className="flex items-center justify-end gap-1">
+                    {(() => {
+                        const p = primaryAction(freshnessState(row))
+                        const primaryClass = 'px-2.5 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
+
+                        // Expand only when there is a panel to open; otherwise send them to the
+                        // full job view rather than toggling an empty row.
+                        if (p.kind === 'expand' && !canExpand) {
+                            return <Link to={jobHistoryPath({ dataSourceId: row.dataSourceId })} className={primaryClass}>{p.label}</Link>
+                        }
+
+                        return (
+                            <button
+                                onClick={() => p.kind === 'expand'
+                                    ? onToggleExpand?.(row.dataSourceId)
+                                    : onRefresh(row.dataSourceId, p.scope as RefreshScope,
+                                        p.firstBuild ? { firstBuild: true } : undefined)}
+                                disabled={busy}
+                                className={primaryClass}
+                            >
+                                {p.label}
+                            </button>
+                        )
+                    })()}
+                    <DropdownMenu.Root modal={false}>
+                        <DropdownMenu.Trigger asChild>
+                            <button
+                                aria-label={`Refresh actions for ${row.name || row.dataSourceId}`}
+                                disabled={actionsDisabled}
+                                title={running ? 'A rebuild is already running for this source' : undefined}
+                                className="p-1.5 rounded-lg text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
+                            >
+                                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreHorizontal className="w-4 h-4" />}
+                            </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Portal>
+                            <DropdownMenu.Content
+                                align="end"
+                                sideOffset={4}
+                                className="z-[9999] w-44 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                            >
+                                {actions.map(({ scope, label, Icon, iconClass, firstBuild, hint }) => (
+                                    <DropdownMenu.Item
+                                        key={label}
+                                        title={hint}
+                                        onSelect={() => onRefresh(row.dataSourceId, scope, firstBuild ? { firstBuild: true } : undefined)}
+                                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                                    >
+                                        <Icon className={cn('w-3.5 h-3.5', iconClass)} />
+                                        {label}
+                                    </DropdownMenu.Item>
+                                ))}
+                                {job?.id && (
+                                    <DropdownMenu.Item
+                                        onSelect={() => onCancelJob?.(row.dataSourceId, job.id)}
+                                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
+                                    >
+                                        <StopCircle className="w-3.5 h-3.5" />
+                                        Cancel job
+                                    </DropdownMenu.Item>
+                                )}
+                                <DropdownMenu.Item asChild
                                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
                                 >
-                                    <Icon className={cn('w-3.5 h-3.5', iconClass)} />
-                                    {label}
+                                    <Link to={jobHistoryPath({ dataSourceId: row.dataSourceId })}>
+                                        <ArrowUpRight className="w-3.5 h-3.5 text-ink-muted" />
+                                        Open in Job History
+                                    </Link>
                                 </DropdownMenu.Item>
-                            ))}
-                        </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
-                </DropdownMenu.Root>
+                            </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                </div>
                 )}
             </td>
         </tr>

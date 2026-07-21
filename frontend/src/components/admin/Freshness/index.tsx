@@ -14,7 +14,7 @@
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock, RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -22,6 +22,7 @@ import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
+import { aggregationService } from '@/services/aggregationService'
 import type { FreshnessRow as FreshnessRowData, ProviderFreshnessSummary, RefreshScope } from '@/services/freshnessService'
 import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
@@ -31,8 +32,8 @@ import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
-import { useFleetFreshness, useRefreshSource } from './useFreshness'
-import { useActiveJobs } from './useActiveJobs'
+import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
+import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
     compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
 } from './freshnessTriage'
@@ -119,6 +120,13 @@ export function Freshness() {
     const fleet = useFleetFreshness()
     const activeJobs = useActiveJobs()
     const refreshSource = useRefreshSource()
+
+    const qc = useQueryClient()
+    const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
+        await aggregationService.cancelJob(dsId, jobId)
+        void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
+        void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+    }, [qc])
 
     const workspacesQ = useQuery({
         queryKey: ['freshness', 'workspaces'],
@@ -378,6 +386,7 @@ export function Freshness() {
                                                 busy={busyDsId === row.dataSourceId}
                                                 expanded={expandedRow === row.dataSourceId}
                                                 onToggleExpand={(dsId) => setExpandedRow(cur => (cur === dsId ? null : dsId))}
+                                                onCancelJob={onCancelJob}
                                             />
                                         ))}
                                     </Fragment>
