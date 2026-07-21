@@ -853,7 +853,29 @@ so the return becomes:
 
 Extend `Props` with `expanded?: boolean` and `onToggleExpand?: (dsId: string) => void`.
 
-Note: the row-level progress bar from Task 4 and this panel bar both render when expanded — that is intended (the row keeps its at-a-glance state while the panel gives the detail).
+**Suppress the row-level bar while expanded** — two bars for one job is noise. Give `FreshnessBadges` a third prop and have `FreshnessRow` pass it:
+
+```tsx
+export function FreshnessBadges({ row, job, showProgressBar = true }: {
+    row: FreshnessRowData
+    job?: AggregationJobResponse
+    showProgressBar?: boolean
+}) {
+```
+
+Guard the bar push added in Task 4 with it:
+
+```tsx
+    if (pct != null && state === 'recomputing' && showProgressBar) {
+```
+
+and in the row's Freshness cell:
+
+```tsx
+<FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
+```
+
+The badge keeps its phase and percentage either way — only the duplicated bar goes.
 
 - [ ] **Step 4: Hold expansion state in `index.tsx`**
 
@@ -895,7 +917,7 @@ git commit -m "feat: expandable freshness row with the shared four-phase stepper
 
 **Interfaces:**
 - Consumes: `freshnessState` (`./freshnessTriage`), `aggregationService.cancelJob(dataSourceId, jobId)`.
-- Produces: `primaryAction(state: FreshnessState): { label: string; kind: 'refresh' | 'expand'; scope?: RefreshScope; force?: boolean; firstBuild?: boolean }` exported from `FreshnessRow.tsx`; `FreshnessRow` gains `onCancelJob?: (dsId: string, jobId: string) => void`.
+- Produces: `overflowActions(state: FreshnessState): RowAction[]` (exported for test); `primaryAction(state: FreshnessState): { label: string; kind: 'refresh' | 'expand'; scope?: RefreshScope; force?: boolean; firstBuild?: boolean }` exported from `FreshnessRow.tsx`; `FreshnessRow` gains `onCancelJob?: (dsId: string, jobId: string) => void`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -921,6 +943,13 @@ describe('state-driven row actions', () => {
         expect(primaryAction('upToDate')).toMatchObject({ label: 'Refresh caches', kind: 'refresh', scope: 'read-caches' })
     })
 
+    it('never repeats the primary action in the overflow, and offers no rebuild mid-rebuild', () => {
+        expect(overflowActions('neverBuilt')).toEqual([])
+        expect(overflowActions('recomputing').map(a => a.scope)).toEqual(['read-caches'])
+        expect(overflowActions('upToDate').map(a => a.scope)).not.toContain('read-caches')
+        expect(overflowActions('failed').map(a => a.scope)).not.toContain('rollups')
+    })
+
     it('hides the whole action cluster without manage permission', () => {
         permissionFn.mockReturnValue(false)
         render(
@@ -935,7 +964,7 @@ describe('state-driven row actions', () => {
 })
 ```
 
-Add `primaryAction` to the `./FreshnessRow` import in the test file.
+Add `primaryAction` and `overflowActions` to the `./FreshnessRow` import in the test file.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -975,7 +1004,34 @@ export function primaryAction(state: FreshnessState): {
 }
 ```
 
-Render it in the Actions cell, before the existing `DropdownMenu.Root`:
+**The overflow must not repeat the primary, and must not offer a rebuild to a row that is already rebuilding.** Replace the current `const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS` with a state-derived list matching the spec's table:
+
+```tsx
+/** Overflow scopes per state — the primary action's own scope is never
+ *  repeated here, and a rebuilding row is not offered another rebuild
+ *  (the backend would collapse it onto the running job anyway, so the
+ *  menu item would be a lie). */
+function overflowActions(state: FreshnessState): RowAction[] {
+    const byScope = (s: RefreshScope) => BUILT_ACTIONS.find(a => a.scope === s)!
+    switch (state) {
+        case 'neverBuilt':
+            return []
+        case 'recomputing':
+            return [byScope('read-caches')]
+        case 'upToDate':
+            return [byScope('clear'), byScope('rollups'), byScope('full')]
+        case 'failed':
+        case 'queued':
+        case 'stale':
+        default:
+            return [byScope('read-caches'), byScope('clear'), byScope('full')]
+    }
+}
+...
+const actions = overflowActions(freshnessState(row))
+```
+
+Render the primary in the Actions cell, before the existing `DropdownMenu.Root`:
 
 ```tsx
 {(() => {
