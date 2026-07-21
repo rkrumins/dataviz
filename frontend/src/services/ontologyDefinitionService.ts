@@ -5,6 +5,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { foldRequestTypeDefs } from '@/features/ontology/lib/caseFold'
 
 const ADMIN_API = '/api/v1/admin/ontologies'
 
@@ -169,16 +170,18 @@ export const ontologyDefinitionService = {
     },
 
     create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {
+        // Fold case-variant type-id keys so no caller can send e.g. `Has`+`HAS` (which the backend's
+        // case-insensitive collision guard 422s). Single choke point for every write path.
         return request<OntologyDefinitionResponse>(ADMIN_API, {
             method: 'POST',
-            body: JSON.stringify(req),
+            body: JSON.stringify(foldRequestTypeDefs(req as unknown as Record<string, unknown>)),
         })
     },
 
     update(id: string, req: OntologyUpdateRequest): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`, {
             method: 'PUT',
-            body: JSON.stringify(req),
+            body: JSON.stringify(foldRequestTypeDefs(req as Record<string, unknown>)),
         })
     },
 
@@ -298,7 +301,7 @@ export const ontologyDefinitionService = {
     importNew(data: Record<string, unknown>): Promise<OntologyImportResponse> {
         return request<OntologyImportResponse>(`${ADMIN_API}/import`, {
             method: 'POST',
-            body: JSON.stringify(data),
+            body: JSON.stringify(foldRequestTypeDefs(data)),
         })
     },
 
@@ -310,7 +313,7 @@ export const ontologyDefinitionService = {
     importInto(id: string, data: Record<string, unknown>): Promise<OntologyImportResponse> {
         return request<OntologyImportResponse>(`${ADMIN_API}/${id}/import`, {
             method: 'POST',
-            body: JSON.stringify(data),
+            body: JSON.stringify(foldRequestTypeDefs(data)),
         })
     },
 

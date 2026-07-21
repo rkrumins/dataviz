@@ -212,21 +212,24 @@ export function WorkspaceDetailPage() {
      */
     const handleSaveAggregationConfig = async (
         dsId: string,
-        pending: { projectionMode: string; dedicatedGraphName: string },
-        original: { projectionMode: string; dedicatedGraphName: string },
+        pending: { projectionMode: string; dedicatedGraphName: string; identityProperty: string },
+        original: { projectionMode: string; dedicatedGraphName: string; identityProperty: string },
     ) => {
         if (!wsId) return
         const modeChanged = pending.projectionMode !== original.projectionMode
         const nameChanged = pending.dedicatedGraphName !== original.dedicatedGraphName
+        const identityChanged = pending.identityProperty !== original.identityProperty
         if (modeChanged) {
             await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
         }
-        if (nameChanged) {
+        if (nameChanged || identityChanged) {
             await workspaceService.updateDataSource(wsId, dsId, {
-                dedicatedGraphName: pending.dedicatedGraphName || undefined,
+                ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
+                // Empty string clears back to the default "urn" server-side.
+                ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
             })
         }
-        if (modeChanged || nameChanged) {
+        if (modeChanged || nameChanged || identityChanged) {
             showToast('success', 'Aggregation settings saved')
             reload()
         }

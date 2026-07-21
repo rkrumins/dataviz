@@ -296,6 +296,77 @@ async def test_update_data_source_returns_none_for_missing(db_session: AsyncSess
     assert result is None
 
 
+# ── identity_property (URN-equivalent) ───────────────────────────────
+
+async def test_identity_property_defaults_to_urn(db_session: AsyncSession):
+    """Unset identity_property stores NULL but the response echoes 'urn' so
+    clients never special-case the default (every legacy row behaves this way)."""
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    created = await data_source_repo.create_data_source(
+        db_session, ws_id, _make_direct_req(prov_id)
+    )
+    assert created.identity_property == "urn"
+
+    orm = await data_source_repo.get_data_source_orm(db_session, created.id)
+    assert orm.identity_property is None  # NULL on disk = default
+
+
+async def test_create_data_source_with_identity_property(db_session: AsyncSession):
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    req = _make_direct_req(prov_id, identity_property="id")
+    resp = await data_source_repo.create_data_source(db_session, ws_id, req)
+    assert resp.identity_property == "id"
+
+    orm = await data_source_repo.get_data_source_orm(db_session, resp.id)
+    assert orm.identity_property == "id"
+
+
+async def test_create_accepts_identity_property_camelcase_alias(db_session: AsyncSession):
+    """The request accepts the camelCase alias the frontend sends verbatim."""
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    req = DataSourceCreateRequest.model_validate(
+        {"providerId": prov_id, "graphName": "g", "identityProperty": "id"}
+    )
+    resp = await data_source_repo.create_data_source(db_session, ws_id, req)
+    assert resp.identity_property == "id"
+
+
+async def test_update_sets_identity_property(db_session: AsyncSession):
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    created = await data_source_repo.create_data_source(
+        db_session, ws_id, _make_direct_req(prov_id)
+    )
+    updated = await data_source_repo.update_data_source(
+        db_session, created.id, DataSourceUpdateRequest(identity_property="id")
+    )
+    assert updated.identity_property == "id"
+
+
+async def test_update_identity_property_empty_clears_to_default(db_session: AsyncSession):
+    """An explicit empty string resets a mapping back to the default 'urn'."""
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    created = await data_source_repo.create_data_source(
+        db_session, ws_id, _make_direct_req(prov_id, identity_property="id")
+    )
+    updated = await data_source_repo.update_data_source(
+        db_session, created.id, DataSourceUpdateRequest(identity_property="")
+    )
+    assert updated.identity_property == "urn"
+
+
+async def test_update_without_identity_property_leaves_it_untouched(db_session: AsyncSession):
+    """A partial update that omits identity_property must not reset a mapping."""
+    prov_id, ws_id, _ = await _seed_all(db_session)
+    created = await data_source_repo.create_data_source(
+        db_session, ws_id, _make_direct_req(prov_id, identity_property="id")
+    )
+    updated = await data_source_repo.update_data_source(
+        db_session, created.id, DataSourceUpdateRequest(label="Renamed")
+    )
+    assert updated.label == "Renamed"
+    assert updated.identity_property == "id"  # untouched
+
+
 # ── delete ────────────────────────────────────────────────────────────
 
 async def test_delete_data_source_success(db_session: AsyncSession):

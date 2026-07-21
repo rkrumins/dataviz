@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, type FC } from 'react'
-import { Database, Plus, Trash2, CheckCircle, AlertCircle, Server, Shield, Layers, Edit2, Check } from 'lucide-react'
+import { Database, Plus, Trash2, CheckCircle, AlertCircle, Server, Shield, Layers, Edit2, Check, Fingerprint, ChevronDown, ShieldAlert } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import {
     workspaceService,
@@ -34,6 +35,8 @@ interface DataSourceFormRow {
     graphName: string
     ontologyId: string
     label: string
+    /** URN-equivalent node-identity property. '' or 'urn' = platform default. */
+    identityProperty: string
 }
 
 const EMPTY_DS_ROW: DataSourceFormRow = {
@@ -41,6 +44,7 @@ const EMPTY_DS_ROW: DataSourceFormRow = {
     graphName: '',
     ontologyId: '',
     label: '',
+    identityProperty: '',
 }
 
 // ============================================================
@@ -64,6 +68,13 @@ export const DSRowEditor: FC<DSRowEditorProps> = ({
 }) => {
     const [availableGraphs, setAvailableGraphs] = useState<string[]>([])
     const [graphsLoading, setGraphsLoading] = useState(false)
+    // Node-identity mapping is an expert control — keep it collapsed unless the
+    // source already has a non-default mapping (then reveal it so it's visible).
+    const [identityOpen, setIdentityOpen] = useState(
+        !!row.identityProperty && row.identityProperty !== 'urn'
+    )
+    const normalizedIdentity = row.identityProperty.trim() || 'urn'
+    const identityOverridden = normalizedIdentity !== 'urn'
 
     // Ensure we load graphs if providerId is present initially (like on edit)
     useEffect(() => {
@@ -195,6 +206,64 @@ export const DSRowEditor: FC<DSRowEditorProps> = ({
                     </select>
                 </label>
             </div>
+
+            {/* ── Advanced: Node Identity Property (URN-equivalent) ──
+                Expert-only. Onboarded graphs that key nodes by e.g. `id` instead
+                of the platform's canonical `urn` map it here so aggregation/lineage
+                can resolve node identity without rewriting the graph. */}
+            <div className="mt-1 rounded-xl border border-glass-border overflow-hidden bg-canvas">
+                <button
+                    type="button"
+                    onClick={() => setIdentityOpen(o => !o)}
+                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                >
+                    <Fingerprint className="w-4 h-4 text-violet-500 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <span className="text-xs font-semibold text-ink-secondary uppercase tracking-wider">Node Identity</span>
+                        <span className="ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-violet-500/10 text-violet-500 tracking-wider align-middle">ADVANCED</span>
+                        {identityOverridden && (
+                            <span className="ml-1.5 px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider align-middle">
+                                {normalizedIdentity}
+                            </span>
+                        )}
+                    </div>
+                    <ChevronDown className={cn("w-4 h-4 text-ink-muted transition-transform flex-shrink-0", identityOpen && "rotate-180")} />
+                </button>
+
+                {identityOpen && (
+                    <div className="px-4 pb-4 pt-1 space-y-3 border-t border-glass-border">
+                        <p className="text-[11px] text-ink-secondary leading-relaxed">
+                            The platform identifies every node by a universal <strong className="text-ink">URN</strong>, used by
+                            aggregation, lineage and trace. If this graph identifies nodes by a differently-named property
+                            (and has no <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code>),
+                            map it here — identity resolves as <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">coalesce(n.urn, n.&lt;property&gt;)</code> at
+                            read time, leaving your graph untouched.
+                        </p>
+                        <label className="flex flex-col gap-1.5 text-[11px] font-medium text-ink-muted">
+                            URN-EQUIVALENT PROPERTY
+                            <input
+                                type="text"
+                                value={row.identityProperty}
+                                onChange={(e) => update('identityProperty', e.target.value)}
+                                placeholder="urn (default)"
+                                spellCheck={false}
+                                autoCapitalize="none"
+                                autoCorrect="off"
+                                className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm font-mono text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 transition-all duration-200"
+                            />
+                        </label>
+                        {identityOverridden && (
+                            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/[0.07] border border-amber-500/20">
+                                <ShieldAlert className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                                <div className="text-[11px] text-amber-600/90 dark:text-amber-400/90 leading-relaxed">
+                                    The property must be <strong>unique per node</strong> and stable — it becomes this source's
+                                    identity everywhere. Takes effect on the next aggregation run.
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     )
 }
@@ -236,6 +305,9 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     graphName: rowState.graphName,
                     ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
+                    // Sent verbatim (incl. '' to clear back to default 'urn');
+                    // the edit form pre-fills it, so unchanged rows are a no-op.
+                    identityProperty: rowState.identityProperty,
                 }
                 await workspaceService.updateDataSource(workspace.id, editingDsId, req)
                 setEditingDsId(null)
@@ -245,6 +317,8 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     graphName: rowState.graphName,
                     ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
+                    // Only carried when the operator maps a non-default identity.
+                    identityProperty: rowState.identityProperty || undefined,
                 }
                 await workspaceService.addDataSource(workspace.id, req)
                 setAdding(false)
@@ -265,6 +339,9 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
             graphName: ds.graphName || '',
             ontologyId: ds.ontologyId || '',
             label: ds.label || '',
+            // Server always echoes "urn" by default; keep it verbatim so a
+            // no-op save doesn't accidentally reset a real mapping.
+            identityProperty: ds.identityProperty || 'urn',
         })
         setAdding(false) // make sure adding is off
         setError(null)

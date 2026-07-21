@@ -195,6 +195,12 @@ class AggregationWorker:
                 entity_type_levels = json.loads(
                     getattr(job, "entity_type_levels", None) or "{}"
                 )
+                # URN-equivalent node-identity property frozen at trigger time.
+                # NULL on legacy rows → "urn" (no behaviour change). Injected
+                # into the provider below so endpoint resolution reads
+                # coalesce(n.urn, n[identity_property]) for onboarded graphs
+                # that key nodes by e.g. "id" instead of the canonical urn.
+                identity_property = getattr(job, "identity_property", None) or "urn"
 
                 if not lineage_types:
                     # Self-heal instead of failing a doomed row: re-freeze
@@ -264,6 +270,16 @@ class AggregationWorker:
                 # types, so a change in classification automatically routes reads to
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
+
+                # Inject the frozen node-identity property so the provider's
+                # directory build resolves endpoints as
+                # coalesce(n.urn, n[identity_property]). Default "urn" is a
+                # no-op (the historical hardcoded behaviour). Set as a plain
+                # attribute the provider reads at directory-build time.
+                try:
+                    provider._node_identity_property = identity_property
+                except Exception:
+                    pass
 
                 # Per-source vocabulary alignment (Task E): the frozen containment/lineage
                 # types carry the ontology's DECLARED casing, but this graph may spell them

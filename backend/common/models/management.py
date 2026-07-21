@@ -818,6 +818,10 @@ class DataSourceCreateRequest(BaseModel):
     label: Optional[str] = None
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
+    # Node-identity property — the URN-equivalent for this physical graph.
+    # None → "urn" (default). Set to e.g. "id" for onboarded graphs that key
+    # nodes by a differently-named property.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
 
     class Config:
         populate_by_name = True
@@ -843,6 +847,11 @@ class DataSourceUpdateRequest(BaseModel):
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
+    # Node-identity property — the URN-equivalent for this physical graph.
+    # None → field untouched on update (partial-update semantics); an explicit
+    # value (incl. "urn") overwrites it. Editable across the data source's whole
+    # lifecycle; the next aggregation run freezes and uses the current value.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
 
     class Config:
         populate_by_name = True
@@ -868,6 +877,9 @@ class DataSourceResponse(BaseModel):
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
+    # Node-identity property (URN-equivalent). Always populated on the way out —
+    # legacy/unset rows echo "urn" so the client never has to special-case NULL.
+    identity_property: str = Field("urn", alias="identityProperty")
     # Provenance: "managed" = in-app writable graph (blank/versioned models),
     # "federated" = external system of record. None on legacy rows — clients
     # derive from shape (no catalog item → managed), mirroring the ORM comment.
