@@ -1018,6 +1018,73 @@ export function OntologySchemaPage() {
     }
     // A picked-but-failed assignment already surfaced an error toast above —
     // don't paper over it with a success message.
+
+    // Don't throw away the classification Suggest computed: if this layer leaves edges in "Other"
+    // that Suggest classified, offer a one-click patch (the whole point of onboarding an existing
+    // graph is a working setup, not just matching type names).
+    void offerApplySuggestedClassification(ontologyId)
+  }
+
+  /** After "Use This existing", if Suggest classified edges the picked layer leaves uncategorized
+   *  AND the layer is editable, offer to apply that classification instead of discarding it. */
+  async function offerApplySuggestedClassification(ontologyId: string) {
+    const response = suggestResponseRef.current
+    const match = response?.matchingOntologies.find(m => m.ontologyId === ontologyId)
+    const uncategorized = match?.uncategorizedRelationshipTypes ?? []
+    if (!response || uncategorized.length === 0) return
+
+    // What did Suggest classify for those edges? (case-insensitive lookup — the suggested draft may
+    // key the physical spelling while the layer declares another casing.)
+    const suggestedByCf = new Map(
+      Object.entries(response.suggested.relationshipTypeDefinitions ?? {})
+        .map(([k, v]) => [k.toLowerCase(), v as Record<string, unknown>]),
+    )
+    const toClassify = uncategorized
+      .map(rid => {
+        const sd = suggestedByCf.get(rid.toLowerCase())
+        const isC = !!(sd?.is_containment ?? sd?.isContainment)
+        const isL = !!(sd?.is_lineage ?? sd?.isLineage)
+        return isC || isL ? { rid, isC, isL } : null
+      })
+      .filter((x): x is { rid: string; isC: boolean; isL: boolean } => x !== null)
+    if (toClassify.length === 0) return
+
+    let target
+    try {
+      target = await ontologyDefinitionService.get(ontologyId)
+    } catch { return }
+    // Only in-place patch an editable draft — a published/system layer must be cloned first.
+    if (target.isSystem || target.isPublished) return
+
+    const n = toClassify.length
+    showToast('info',
+      `This layer leaves ${n} edge${n !== 1 ? 's' : ''} the graph uses in "Other" — apply the suggested classification?`,
+      {
+        label: 'Apply',
+        onClick: async () => {
+          try {
+            const relDefs = { ...(target.relationshipTypeDefinitions as Record<string, Record<string, unknown>>) }
+            const containment = [...target.containmentEdgeTypes]
+            const lineage = [...target.lineageEdgeTypes]
+            for (const { rid, isC, isL } of toClassify) {
+              relDefs[rid] = { ...(relDefs[rid] ?? {}), is_containment: isC, is_lineage: isL }
+              if (isC && !containment.includes(rid)) containment.push(rid)
+              if (isL && !lineage.includes(rid)) lineage.push(rid)
+            }
+            const req: Record<string, unknown> = {
+              relationshipTypeDefinitions: relDefs,
+              containmentEdgeTypes: containment,
+              lineageEdgeTypes: lineage,
+            }
+            await mutations.update.mutateAsync({ id: ontologyId, req })
+            invalidateGraphSchema()
+            showToast('success', `Classified ${n} edge${n !== 1 ? 's' : ''} — aggregation and lineage will use them now`)
+          } catch (err: unknown) {
+            showToast('error', `Could not apply classification: ${err instanceof Error ? err.message : 'unknown error'}`)
+          }
+        },
+      },
+    )
   }
 
   /** User chose "Clone & Extend" — clone, assign to target DS, navigate. */
