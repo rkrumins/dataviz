@@ -110,7 +110,7 @@ This will, for all 31 live sources:
 
 - `BatchItemResult` (`schemas.py:765`) gains `name: Optional[str]`, `actions: List[str] = []`, `deferred: bool = False`.
 - `_run_one` (`controlplane.py:785`) already holds the `RefreshResponse`; carry `resp.actions` and `resp.deferred` into the item instead of discarding them. The error branch (`:790`) keeps its shape with empty actions.
-- `_live_ds_ids` (`controlplane.py:800`) selects `name` alongside `id` and the runner threads an `id → name` map into the item — no extra per-item query.
+- `_live_ds_ids` is renamed `_live_ds_rows` and selects **`label`** alongside `id`, returning `List[Tuple[str, Optional[str]]]`; the runner threads the label through as the item's `name` — no extra per-item query. (`WorkspaceDataSourceORM` has no `name` column, and `label` is nullable, so an unlabelled source arrives as `name: None` and the frontend falls back to the id.)
 - Mirror the three fields in `freshnessService.ts:144`.
 
 **Frontend** — the results list (`ProviderRefreshDialog.tsx:164-176`, and the same list in `FleetRefreshDialog.tsx`) shows name, what happened, and a link (`jobId` is already in the payload today). The list is extracted into one shared component so the provider and fleet dialogs cannot drift:
