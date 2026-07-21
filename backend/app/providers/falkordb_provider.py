@@ -8902,13 +8902,16 @@ class FalkorDBProvider(GraphDataProvider):
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
                     MERGE (a)-[r:{rel_type}]->(b)
-                    SET r.id = $eid, r.confidence = $conf
+                    SET r.id = $eid, r.confidence = $conf, r.properties = $props
                     """,
                     params={
                         "src": containment_edge.source_urn,
                         "tgt": containment_edge.target_urn,
                         "eid": containment_edge.id,
                         "conf": containment_edge.confidence,
+                        # Write r.properties like every other edge writer — it was omitted here, so a
+                        # containment edge created with properties lost them until the next rebuild.
+                        "props": json.dumps(containment_edge.properties or {}),
                     },
                 )
             return True
@@ -8932,7 +8935,11 @@ class FalkorDBProvider(GraphDataProvider):
                     "src": edge.source_urn,
                     "tgt": edge.target_urn,
                     "eid": edge.id,
-                    "conf": edge.confidence or 1.0,
+                    # Pass confidence through RAW (may be None) — matching save_custom_graph, the
+                    # projector reseed, and create_node's containment edge. `edge.confidence or 1.0`
+                    # silently rewrote a legitimate 0.0 (and None) to 1.0, fabricating a value the
+                    # rebuild round-trip would then treat as real.
+                    "conf": edge.confidence,
                     "props": json.dumps(edge.properties or {}),
                 },
             )
