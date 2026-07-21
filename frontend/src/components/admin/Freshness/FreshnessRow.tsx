@@ -2,10 +2,16 @@
  * FreshnessRow — one data source's row in the fleet table, plus the small
  * status/badge primitives the drawer reuses.
  *
+ * Each row promotes one state-driven primary action (``primaryAction``)
+ * next to a `⋯` overflow (``overflowActions``); the overflow never repeats
+ * the primary and never offers another rebuild to a row that is already
+ * rebuilding. Both are disabled only while this row's own refresh mutation
+ * is in flight (``busy``) — a rebuild running elsewhere for the source does
+ * not block the row.
+ *
  * Copy is plain-language and white-label: the row actions read "Refresh
  * caches" / "Rebuild lineage" / "Full refresh", never the internal scope
- * names. Actions are disabled while a rebuild is already running for the
- * source (``runningJobId``) or while this row's own mutation is in flight.
+ * names.
  */
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
