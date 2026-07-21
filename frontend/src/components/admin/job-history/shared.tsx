@@ -547,3 +547,17 @@ export function PhaseStepper({ currentPhase, runStats, status }: {
         </div>
     )
 }
+
+/**
+ * Deep link into Ingestion → Job History. Emits exactly the params
+ * ``paramsToFilters`` reads, so a link and the filter state it produces
+ * cannot drift. No new routing: IngestionPage already drives tabs off
+ * ``?tab=``.
+ */
+export function jobHistoryPath(opts: { dataSourceId?: string; status?: string[] } = {}): string {
+    const p = new URLSearchParams()
+    p.set('tab', 'jobs')
+    if (opts.dataSourceId) p.append('dataSourceId', opts.dataSourceId)
+    for (const s of opts.status ?? []) p.append('status', s)
+    return `/ingestion?${p.toString()}`
+}

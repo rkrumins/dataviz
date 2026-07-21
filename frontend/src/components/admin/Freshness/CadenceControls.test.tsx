@@ -7,6 +7,7 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -43,7 +44,11 @@ import { CadenceSettingsDialog } from './CadenceSettingsDialog'
 
 function wrap(node: React.ReactNode) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    return render(<QueryClientProvider client={qc}>{node}</QueryClientProvider>)
+    return render(
+        <QueryClientProvider client={qc}>
+            <MemoryRouter>{node}</MemoryRouter>
+        </QueryClientProvider>,
+    )
 }
 
 function makeDoc(over: Record<string, unknown> = {}) {

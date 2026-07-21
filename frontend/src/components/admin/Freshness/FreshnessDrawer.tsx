@@ -8,9 +8,10 @@
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
+import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
-    Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, Database, Eraser,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser,
     RefreshCw, Radar, RotateCcw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -19,6 +20,7 @@ import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
+import { jobHistoryPath } from '../job-history/shared'
 import { useRefreshSource, useSetFreshnessSettings, useSourceFreshness } from './useFreshness'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
 import type { FailureCategory, FreshnessDoc } from '@/services/freshnessService'
@@ -418,6 +420,15 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                 <h2 className="text-base font-bold text-ink truncate">
                                     {doc?.name || dsId}
                                 </h2>
+                                {dsId && (
+                                    <Link
+                                        to={jobHistoryPath({ dataSourceId: dsId })}
+                                        className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                                    >
+                                        Open in Job History
+                                        <ArrowUpRight className="w-3 h-3" />
+                                    </Link>
+                                )}
                                 <p className="text-[11px] text-ink-muted truncate">
                                     {doc?.providerName || 'Unknown provider'}
                                     {workspaceName ? ` · ${workspaceName}` : ''}

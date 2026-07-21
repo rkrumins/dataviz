@@ -436,7 +436,9 @@ describe('Freshness cockpit', () => {
         const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
         return render(
             <QueryClientProvider client={qc}>
-                <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+                <MemoryRouter>
+                    <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+                </MemoryRouter>
             </QueryClientProvider>,
         )
     }
