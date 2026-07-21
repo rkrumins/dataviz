@@ -85,7 +85,7 @@ describe('the versioned blast radius', () => {
 describe('the caveat', () => {
     it('leads with the undo window when the delete is reversible', () => {
         const c = deleteCaveat(VERSIONED, false)
-        expect(c).toContain('Nothing is deleted today')
+        expect(c).toContain('Offboarded, not deleted')
         expect(c).toContain('30 days')
     })
 
@@ -103,7 +103,7 @@ describe('the caveat', () => {
                           falkorGraphName: 'gv_abc123' },
         }
         const c = deleteCaveat(owned, true)
-        expect(c).toContain('also deletes the graph')
+        expect(c).toContain('also deletes the managed graph')
         expect(c).not.toContain('safe')
     })
 })
@@ -140,10 +140,10 @@ describe('a failed impact probe', () => {
     })
 })
 
-describe('remove vs delete permanently', () => {
+describe('offboard vs delete permanently', () => {
     beforeEach(() => vi.clearAllMocks())
 
-    it('remove is reversible, and hands the user an Undo', async () => {
+    it('offboard is reversible, and hands the user an Undo', async () => {
         vi.mocked(workspaceService.getDataSourceImpact).mockResolvedValue(VERSIONED)
         const onChanged = vi.fn()
         const { result } = renderHook(() => useDataSourceDeletion('ws1', onChanged))
@@ -158,7 +158,7 @@ describe('remove vs delete permanently', () => {
         // The undo is IN the toast. Most undos happen seconds after the mistake, long before
         // anyone thinks to go hunting for a trash can — so the trash comes to them.
         const [, msg, action] = toast.mock.calls.at(-1)!
-        expect(msg).toBe('Finance removed')
+        expect(msg).toBe('Finance offboarded')
         expect(action.label).toBe('Undo')
 
         await act(async () => { action.onClick() })

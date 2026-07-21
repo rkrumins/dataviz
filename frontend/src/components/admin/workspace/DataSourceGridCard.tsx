@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { Database, Star, GitBranch, ChevronRight, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
+import { resolveSourceMode } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { getProviderLogo } from '../ProviderLogos'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
@@ -10,6 +11,35 @@ function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
     if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
     return String(n)
+}
+
+/**
+ * Provenance at a glance — the "will Delete touch the underlying data?" cue.
+ *
+ * Managed: a graph we generated; a permanent Delete drops it. External: pinned to the customer's
+ * own graph; Delete only removes our overlay/version history and never touches their data. (The
+ * authoritative, per-graph verdict is the delete dialog's ownership caveat; this is the provenance
+ * shorthand.)
+ */
+function SourceModeChip({ mode }: { mode: 'managed' | 'federated' }) {
+    const managed = mode === 'managed'
+    return (
+        <span
+            title={
+                managed
+                    ? 'Managed graph — we generated it. Deleting this source can drop the graph.'
+                    : 'External graph — belongs to your provider. Deleting this source never touches its data.'
+            }
+            className={cn(
+                'px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full border',
+                managed
+                    ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20'
+                    : 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+            )}
+        >
+            {managed ? 'Managed' : 'External'}
+        </span>
+    )
 }
 
 interface DataSourceGridCardProps {
@@ -118,10 +148,13 @@ function DataSourceGridCardBase({
                 {/* Status + Ontology — operational status (not the opt-in
                     aggregation state, which is a per-source detail). */}
                 <div className="flex items-center justify-between mb-3">
-                    <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold', ds.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted')}>
-                        <span className={cn('w-2 h-2 rounded-full', ds.isActive ? 'bg-emerald-400' : 'bg-gray-400')} />
-                        {ds.isActive ? 'Active' : 'Inactive'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                        <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold', ds.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted')}>
+                            <span className={cn('w-2 h-2 rounded-full', ds.isActive ? 'bg-emerald-400' : 'bg-gray-400')} />
+                            {ds.isActive ? 'Active' : 'Inactive'}
+                        </span>
+                        <SourceModeChip mode={resolveSourceMode(ds)} />
+                    </div>
                     {ontologyName && (
                         <span className="flex items-center gap-1 text-[11px] text-ink-muted">
                             <GitBranch className="w-3 h-3" />

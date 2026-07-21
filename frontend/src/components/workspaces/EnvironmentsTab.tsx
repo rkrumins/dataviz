@@ -16,6 +16,7 @@ import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import {
     useDataSourceDeletion, impactSections, deleteCaveat,
 } from '@/components/admin/workspace/useDataSourceDeletion'
+import { DataSourceActionMenu } from '@/components/admin/workspace/DataSourceActionMenu'
 import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 
 // ============================================================
@@ -395,14 +396,11 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                                                 </button>
                                             )}
                                             {dataSources.length > 1 && (
-                                                <button
-                                                    onClick={() => deletion.open(ds.id, ds.label || ds.id)}
+                                                <DataSourceActionMenu
                                                     disabled={loading}
-                                                    className="p-1.5 text-red-500 bg-canvas border border-transparent hover:bg-red-500/10 hover:border-red-500/20 rounded transition-colors disabled:opacity-50"
-                                                    title="Remove Data Source"
-                                                >
-                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                </button>
+                                                    onOffboard={() => deletion.open(ds.id, ds.label || ds.id)}
+                                                    onDelete={() => deletion.openPermanent(ds.id, ds.label || ds.id)}
+                                                />
                                             )}
                                         </div>
                                         <div className="w-px h-5 bg-glass-border mx-1 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -469,10 +467,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
 
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Offboard data source'}
                 subtitle={deletion.target?.label}
                 confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
-                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Offboard'}
                 sections={impactSections(deletion.target?.impact ?? null,
                                          deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}

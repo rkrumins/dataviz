@@ -26,6 +26,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 
@@ -56,7 +57,10 @@ interface DataSourceDetailPanelProps {
     /** Persist an inline metadata edit (label + ontology). Replaces the old
      *  separate Edit-Data-Source modal. */
     onSaveEdit: (label: string, ontologyId: string | undefined) => Promise<void> | void
+    /** Offboard — reversible; moves the source to Recently deleted. */
     onDelete?: () => void
+    /** Delete permanently — irreversible; only the guarded direct path offers it. */
+    onDeletePermanent?: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
@@ -127,6 +131,7 @@ export function DataSourceDetailPanel({
     ontologies,
     onSaveEdit,
     onDelete,
+    onDeletePermanent,
     onReaggregate,
     onPurge,
     onSaveAggregationConfig,
@@ -315,6 +320,7 @@ export function DataSourceDetailPanel({
                                     wsId={wsId}
                                     onEdit={startEditing}
                                     onDelete={onDelete}
+                                    onDeletePermanent={onDeletePermanent}
                                 />
                                 {/* DataSourceActions handles permission gating per
                                     workspace; falls back to hidden buttons if the
@@ -624,11 +630,14 @@ export function DataSourceDetailPanel({
 // workspace; without it the buttons are hidden so a viewer doesn't
 // click into a 403 toast.
 function DataSourceActions({
-    wsId, onEdit, onDelete,
+    wsId, onEdit, onDelete, onDeletePermanent,
 }: {
     wsId: string
     onEdit: () => void
+    /** Offboard (reversible). */
     onDelete?: () => void
+    /** Delete permanently (irreversible). */
+    onDeletePermanent?: () => void
 }) {
     const isPlatformAdmin = usePermission('system:admin')
     const canManage = isPlatformAdmin || usePermission('workspace:datasource:manage', wsId)
@@ -638,10 +647,12 @@ function DataSourceActions({
             <button onClick={onEdit} className="p-2 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Edit">
                 <Edit2 className="w-3.5 h-3.5" />
             </button>
-            {onDelete && (
-                <button onClick={onDelete} className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Remove">
-                    <Trash2 className="w-3.5 h-3.5" />
-                </button>
+            {onDelete && onDeletePermanent && (
+                <DataSourceActionMenu
+                    align="right"
+                    onOffboard={onDelete}
+                    onDelete={onDeletePermanent}
+                />
             )}
         </>
     )

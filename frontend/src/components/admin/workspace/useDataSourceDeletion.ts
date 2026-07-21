@@ -95,7 +95,7 @@ export function deleteCaveat(
     if (!permanent) {
         // The single most important sentence in the dialog. It is what makes the list above
         // something to read rather than something to click past.
-        return `Nothing is deleted today. You can restore this — and everything above — from `
+        return `Offboarded, not deleted. You can restore this — and everything above — from `
             + `Recently deleted for ${days} days.`
     }
     if (!v?.versioned) {
@@ -108,8 +108,8 @@ export function deleteCaveat(
             + 'the version history we kept on top of it.'
     }
     // We minted this graph, so the purge really will drop it. Warn; do not reassure.
-    return 'This cannot be undone, and it also deletes the graph we generated for this source. '
-        + 'The version history and the graph both go.'
+    return 'This cannot be undone, and it also deletes the managed graph we generated for this '
+        + 'source. The version history and the graph both go.'
 }
 
 export interface DeletionTarget {
@@ -171,7 +171,7 @@ export function useDataSourceDeletion(wsId: string | undefined, onChanged: () =>
         }
         // THE UNDO. Most undos happen within seconds of the mistake, long before anyone thinks
         // to go looking for a trash can — so the trash comes to them.
-        showToast('success', `${label} removed`, {
+        showToast('success', `${label} offboarded`, {
             label: 'Undo',
             onClick: () => { void restore(id, label) },
         })
