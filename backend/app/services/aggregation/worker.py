@@ -336,6 +336,21 @@ class AggregationWorker:
                             "index if any): %s", job.id, exc,
                         )
 
+                # Onboarded-graph identity: copy the source's URN-equivalent
+                # (e.g. `id`) onto `urn` for any node missing one, AFTER the
+                # indexes exist, so the urn-keyed write/read/trace stack actually
+                # attaches AGGREGATED edges to the real nodes. No-op for
+                # conforming (urn) sources and dedicated projections; best-effort
+                # (a failure degrades to the directory-only coalesce).
+                if hasattr(provider, "stamp_identity_urns"):
+                    try:
+                        await provider.stamp_identity_urns()
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: identity-urn stamp failed "
+                            "(continuing): %s", job.id, exc,
+                        )
+
                 # Distributed write-admission control: N workers × M pods
                 # share one write budget per FalkorDB endpoint (per-graph
                 # lease + per-endpoint slots) instead of each pod throttling

@@ -1972,6 +1972,71 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
+    async def stamp_identity_urns(self) -> int:
+        """Copy the source's identity property onto ``urn`` for every node that lacks one, so the
+        entire urn-keyed write / index / read / trace stack works for an onboarded graph keyed by
+        e.g. ``id`` instead of the canonical ``urn``.
+
+        This is THE definitive fix for such graphs. The AGGREGATED write and every read filter on
+        the ``urn`` PROPERTY (a ``MERGE`` cannot key on a ``coalesce`` expression), so resolving
+        identity only inside the aggregation directory left in-source aggregation attaching ZERO
+        edges to the real nodes. Stamping ``urn`` up front makes all of it work unchanged.
+
+        Opt-in and safe:
+          * No-op unless the source declares a non-default identity property.
+          * In-source projection only — that source is writable anyway; a dedicated projection is
+            self-consistent and must not mutate a possibly read-only source.
+          * Idempotent: only NULL-``urn`` nodes are set, so a re-run only stamps nodes added since
+            the last run (satisfies "the source updates independently").
+          * Batched by internal ID range (no property index needed); best-effort per batch.
+
+        Returns the number of nodes stamped.
+        """
+        prop = getattr(self, "_node_identity_property", None) or "urn"
+        safe = str(prop).replace("`", "")
+        if not safe or safe == "urn":
+            return 0
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            return 0  # projection is separate; don't write to the (maybe read-only) source
+        await self._ensure_connected()
+        try:
+            res = await self._ro_query("MATCH (n) RETURN max(ID(n))", op="identity.max_id")
+            rows = res.result_set or []
+            max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        except Exception as exc:
+            logger.warning(
+                "FalkorDB %s: identity-urn stamp skipped — max-id probe failed: %s",
+                self._graph_name, exc,
+            )
+            return 0
+        if max_id < 0:
+            return 0
+        width = 50_000
+        stamped = 0
+        lo = 0
+        while lo <= max_id:
+            hi = lo + width
+            try:
+                r = await self._query(
+                    "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
+                    f"AND n.`urn` IS NULL AND n.`{safe}` IS NOT NULL "
+                    f"SET n.`urn` = n.`{safe}`",
+                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                )
+                stamped += int(getattr(r, "properties_set", 0) or 0)
+            except Exception as exc:
+                logger.warning(
+                    "FalkorDB %s: identity-urn stamp batch [%d,%d) failed (continuing): %s",
+                    self._graph_name, lo, hi, exc,
+                )
+            lo = hi
+        if stamped:
+            logger.info(
+                "FalkorDB %s: stamped urn from `%s` onto %d node(s) missing urn.",
+                self._graph_name, safe, stamped,
+            )
+        return stamped
+
     async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
         """Create indices for node labels and properties.
 
@@ -1991,6 +2056,13 @@ class FalkorDBProvider(GraphDataProvider):
         self._indexed_entity_type_ids = list(entity_type_ids or [])
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
+        # Index the source's URN-equivalent too, so the identity-urn stamp's
+        # NULL-urn lookup and any direct property access are index-backed rather
+        # than full label scans. No-op when the source uses the default `urn`
+        # (already in INDEXED_NODE_PROPS).
+        _ident = getattr(self, "_node_identity_property", None)
+        if _ident and _ident != "urn" and _ident not in properties:
+            properties.append(_ident)
 
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         # Failure accounting: "already indexed" is success (idempotent DDL);

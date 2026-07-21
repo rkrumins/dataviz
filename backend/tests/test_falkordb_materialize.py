@@ -331,10 +331,66 @@ def test_node_identity_expr_strips_backticks_to_prevent_injection():
     assert mat._node_identity_expr("id`") == "coalesce(n.`urn`, n.`id`)"
 
 
-def test_node_identity_expr_env_fallback(monkeypatch):
-    """When no per-source value is given, the env default applies."""
+def test_node_identity_expr_ignores_global_env_var(monkeypatch):
+    """The old AGGREGATION_NODE_IDENTITY_PROPERTY global was a footgun (it would
+    silently affect every source) and has been removed — identity is per-source
+    only. Setting the env var must have NO effect; None resolves to plain urn."""
     monkeypatch.setenv("AGGREGATION_NODE_IDENTITY_PROPERTY", "id")
-    assert mat._node_identity_expr(None) == "coalesce(n.`urn`, n.`id`)"
+    assert mat._node_identity_expr(None) == "n.`urn`"
+
+
+# ── identity-urn stamp (P0: make id-keyed graphs work end-to-end) ────────────
+
+def test_stamp_identity_urns_sets_urn_from_identity_property():
+    """An in-source id-keyed graph must get `urn` stamped from `id` so the
+    urn-keyed AGGREGATED write/read stack attaches edges to the real nodes."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[100]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 3
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped >= 3
+    assert any(
+        "SET n.`urn` = n.`id`" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
+        for c in calls
+    ), "stamp must copy id → urn only for nodes missing urn"
+
+
+def test_stamp_identity_urns_noop_for_default_and_dedicated():
+    """No write for a conforming (urn) source, nor for a dedicated projection
+    (which is self-consistent and must not mutate a possibly read-only source)."""
+    p = _make_provider(_FakeFalkor())
+
+    async def _boom(*a, **k):
+        raise AssertionError("stamp must not issue any query in the no-op cases")
+    p._ensure_connected = _boom
+    p._ro_query = _boom
+    p._query = _boom
+
+    p._node_identity_property = "urn"
+    p._projection_mode = "in_source"
+    assert _run(p.stamp_identity_urns()) == 0
+
+    p._node_identity_property = "id"
+    p._projection_mode = "dedicated"
+    assert _run(p.stamp_identity_urns()) == 0
 
 
 # ── conformance advisories (Phase IV — loud, never silent) ───────────────
