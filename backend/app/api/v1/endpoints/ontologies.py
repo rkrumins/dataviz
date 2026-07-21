@@ -1407,6 +1407,27 @@ async def suggest_ontology(
             jaccard = len(intersection) / len(union) if union else 0.0
 
             if jaccard >= min_score:
+                # Which graph-used edge types does this ontology DECLARE but leave UNCLASSIFIED
+                # (neither containment nor lineage — stuck in "Other")? The jaccard above scores
+                # name overlap only, so a 100% match whose edges all sit in "Other" still can't
+                # drive aggregation. Compute it so the UI can qualify the score honestly.
+                rel_defs = ont.relationship_type_definitions or {}
+                _containment_upper = {str(t).upper() for t in (getattr(ont, "containment_edge_types", None) or [])}
+                _lineage_upper = {str(t).upper() for t in (getattr(ont, "lineage_edge_types", None) or [])}
+                uncategorized_rels = []
+                for _rid, _d in rel_defs.items():
+                    if not isinstance(_d, dict) or _rid.upper() not in graph_rel_ids:
+                        continue
+                    _up = _rid.upper()
+                    _classified = bool(
+                        _d.get("is_containment") or _d.get("isContainment")
+                        or _d.get("is_lineage") or _d.get("isLineage")
+                        or _up in _containment_upper or _up in _lineage_upper
+                    )
+                    if not _classified:
+                        uncategorized_rels.append(_rid)
+                uncategorized_rels.sort()
+
                 matches.append(OntologyMatchResult(
                     ontologyId=ont.id,
                     ontologyName=ont.name,
@@ -1418,6 +1439,7 @@ async def suggest_ontology(
                     uncoveredRelationshipTypes=sorted(graph_rel_ids - ont_rel_ids),
                     totalEntityTypes=len(ont_entity_ids),
                     totalRelationshipTypes=len(ont_rel_ids),
+                    uncategorizedRelationshipTypes=uncategorized_rels,
                 ))
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)

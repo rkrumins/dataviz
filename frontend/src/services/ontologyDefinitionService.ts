@@ -46,6 +46,10 @@ export interface OntologyMatchResult {
     uncoveredRelationshipTypes: string[]
     totalEntityTypes: number
     totalRelationshipTypes: number
+    /** Edge types the graph uses that this ontology declares but leaves UNCLASSIFIED (stuck in
+     *  "Other"). A 100% name match with these non-empty is not a working setup — aggregation and
+     *  lineage need containment/lineage classification. */
+    uncategorizedRelationshipTypes?: string[]
 }
 
 /** One physical spelling folded into a canonical suggested type id. */

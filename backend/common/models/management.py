@@ -758,6 +758,13 @@ class OntologyMatchResult(BaseModel):
     uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
     total_entity_types: int = Field(0, alias="totalEntityTypes")
     total_relationship_types: int = Field(0, alias="totalRelationshipTypes")
+    # Relationship types the graph USES that this ontology declares but leaves UNCLASSIFIED
+    # (neither containment nor lineage — i.e. stuck in "Other"). The name-overlap jaccardScore
+    # ignores classification, so a 100% match can still be non-functional for aggregation; this
+    # qualifies it so the UI can warn "N edges uncategorized" instead of implying a working setup.
+    uncategorized_relationship_types: List[str] = Field(
+        default_factory=list, alias="uncategorizedRelationshipTypes"
+    )
 
     class Config:
         populate_by_name = True

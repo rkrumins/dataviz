@@ -656,6 +656,18 @@ export function SuggestConfirmDialog({
                                     {assignCount} data source{assignCount !== 1 ? 's' : ''}
                                   </span>
                                 )}
+                                {/* Honest qualifier: a high name-match % says nothing about whether the
+                                    graph's edges are CLASSIFIED. Edges left in "Other" won't drive
+                                    aggregation or lineage — surface that so 100% never misleads. */}
+                                {(match.uncategorizedRelationshipTypes?.length ?? 0) > 0 && (
+                                  <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20"
+                                    title={`Declared but left in "Other" (not classified as containment or lineage), so aggregation and lineage won't use them: ${match.uncategorizedRelationshipTypes!.join(', ')}. Classify them on the Schema page after assigning.`}
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    {match.uncategorizedRelationshipTypes!.length} edge{match.uncategorizedRelationshipTypes!.length !== 1 ? 's' : ''} uncategorized
+                                  </span>
+                                )}
                               </div>
 
                               {/* Type counts */}
