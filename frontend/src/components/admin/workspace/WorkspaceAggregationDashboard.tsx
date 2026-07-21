@@ -30,6 +30,10 @@ interface WorkspaceAggregationDashboardProps {
     readinessMap: Record<string, DataSourceReadinessResponse>
     onReaggregate: (ds: DataSourceResponse) => Promise<void>
     onPurge: (ds: DataSourceResponse) => Promise<void>
+    /** Bulk strategic rebuild: re-trigger aggregation for every aggregatable
+     *  data source (heals pre-depth-stamp graphs so self-nesting hierarchies
+     *  resolve). Optional — the button hides when not provided. */
+    onReaggregateAll?: () => Promise<void>
 }
 
 type StatusFilter = 'all' | 'ready' | 'running' | 'pending' | 'failed' | 'skipped' | 'none'
@@ -77,12 +81,15 @@ export function WorkspaceAggregationDashboard({
     readinessMap,
     onReaggregate,
     onPurge,
+    onReaggregateAll,
 }: WorkspaceAggregationDashboardProps) {
     const [activeFilter, setActiveFilter] = useState<StatusFilter>('all')
     const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null)
     const [purging, setPurging] = useState<string | null>(null)
     const [triggering, setTriggering] = useState<string | null>(null)
     const [expandedId, setExpandedId] = useState<string | null>(null)
+    const [confirmRebuildAll, setConfirmRebuildAll] = useState(false)
+    const [rebuildingAll, setRebuildingAll] = useState(false)
 
     // Live readiness state — starts from parent's map, then polled locally
     const [liveReadiness, setLiveReadiness] = useState<Record<string, DataSourceReadinessResponse>>(readinessMap)
@@ -170,19 +177,67 @@ export function WorkspaceAggregationDashboard({
         }
     }
 
+    const handleRebuildAll = async () => {
+        if (!onReaggregateAll) return
+        setRebuildingAll(true)
+        try {
+            await onReaggregateAll()
+            setTimeout(pollReadiness, 500)
+        } finally {
+            setRebuildingAll(false)
+            setConfirmRebuildAll(false)
+        }
+    }
+
+    // Sources eligible for a bulk rebuild (need an ontology to aggregate).
+    const rebuildableCount = dataSources.filter(ds => ds.isActive !== false && ds.ontologyId).length
+
     const totalCount = dataSources.length
 
     return (
         <div className="space-y-5">
             {/* ─── Header ───────────────────────────────────────────── */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
                 <h3 className="text-lg font-bold text-ink">Aggregation Overview</h3>
-                {hasActiveJobs && (
-                    <span className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        Live — polling every 4s
-                    </span>
-                )}
+                <div className="flex items-center gap-3">
+                    {hasActiveJobs && (
+                        <span className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            Live — polling every 4s
+                        </span>
+                    )}
+                    {onReaggregateAll && rebuildableCount > 0 && (
+                        confirmRebuildAll ? (
+                            <span className="flex items-center gap-2 text-xs">
+                                <span className="text-ink-muted">Rebuild all {rebuildableCount}?</span>
+                                <button
+                                    onClick={handleRebuildAll}
+                                    disabled={rebuildingAll}
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                                >
+                                    {rebuildingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                                    {rebuildingAll ? 'Triggering…' : 'Confirm'}
+                                </button>
+                                <button
+                                    onClick={() => setConfirmRebuildAll(false)}
+                                    disabled={rebuildingAll}
+                                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                            </span>
+                        ) : (
+                            <button
+                                onClick={() => setConfirmRebuildAll(true)}
+                                title={`Re-run aggregation for all ${rebuildableCount} data source(s) in this workspace. Heals graphs materialized before the depth-stamp contract so nested (self-referencing) hierarchies resolve.`}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                            >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                Rebuild all aggregations
+                            </button>
+                        )
+                    )}
+                </div>
             </div>
 
             {/* ─── Worker fleet + global tuning defaults ─────────────── */}

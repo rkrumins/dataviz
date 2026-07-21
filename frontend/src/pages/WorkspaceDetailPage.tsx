@@ -267,6 +267,38 @@ export function WorkspaceDetailPage() {
         }
     }
 
+    // Bulk strategic rebuild: re-trigger aggregation for every aggregatable
+    // data source in the workspace. A re-run heals graphs materialized before
+    // the depth-stamp contract (reconcile rewrites depth-null cells and bumps
+    // _AggMeta.stampVersion to 2), fixing self-nesting hierarchies that read
+    // degenerate on legacy generations. Per-source failures (e.g. 409 when a
+    // job is already running, or a gate rejection) are tolerated and summarised
+    // — one toast, one reload — rather than aborting the whole sweep.
+    const handleReaggregateAll = async () => {
+        if (!wsId) return
+        const targets = (workspace?.dataSources ?? []).filter(
+            ds => ds.isActive !== false && ds.ontologyId,
+        )
+        if (targets.length === 0) {
+            showToast('info', 'No aggregatable data sources (each needs an assigned ontology).')
+            return
+        }
+        const results = await Promise.allSettled(
+            targets.map(ds => aggregationService.triggerAggregation(ds.id, {
+                projectionMode: ds.projectionMode || 'in_source',
+                batchSize: 1000,
+            }, 'manual')),
+        )
+        const triggered = results.filter(r => r.status === 'fulfilled').length
+        const skipped = results.length - triggered
+        showToast(
+            skipped ? 'warning' : 'success',
+            `Rebuild triggered for ${triggered}/${targets.length} data source(s)`
+            + (skipped ? ` — ${skipped} skipped (already running or gated)` : ''),
+        )
+        reload()
+    }
+
     const handlePurge = async (ds: DataSourceResponse) => {
         try {
             const result = await aggregationService.purgeAggregation(ds.id)
@@ -539,6 +571,7 @@ export function WorkspaceDetailPage() {
                         readinessMap={readinessMap}
                         onReaggregate={handleReaggregate}
                         onPurge={handlePurge}
+                        onReaggregateAll={handleReaggregateAll}
                     />
                 </>
             )}
