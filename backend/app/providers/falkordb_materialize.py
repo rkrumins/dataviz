@@ -639,6 +639,29 @@ class AggregationPipeline:
                     "physical graph."
                 ),
             })
+        # Containment was declared but the DAG came back EMPTY (maxDepth 0):
+        # aggregation degenerates to a flat leaf-only cube — the roll-up the
+        # user expects never happens, and on a FRESH graph this was silent
+        # (no precondition failure since there were no stored cells to wipe).
+        # Surface WHY: either the containment type isn't classified/frozen, or
+        # its physical spelling differs from the declared one and wasn't folded.
+        _struct = getattr(self, "_struct_parents", None)
+        if self._containment and _struct is not None and not _struct:
+            advisories.append({
+                "kind": "containment_empty",
+                "severity": "warning",
+                "types": sorted(self._containment)[:16],
+                "message": (
+                    "Containment edge type(s) "
+                    + ", ".join(sorted(self._containment)[:8])
+                    + " were declared but matched ZERO edges in the graph, so "
+                    "the containment hierarchy is empty (maxDepth 0) and edges "
+                    "do not roll up past the leaf level. Confirm the type is "
+                    "classified as Containment AND spelled as the physical graph "
+                    "has it (FalkorDB is case-sensitive — declared HAS vs "
+                    "physical Has)."
+                ),
+            })
         return advisories
 
     def _result(self, affected: int = 0) -> Dict[str, Any]:
@@ -876,6 +899,20 @@ class AggregationPipeline:
         # across restarts of the same run.
         self._effective_types = sorted({str(t) for t in effective if t})
         self._type_bit = {t: 1 << i for i, t in enumerate(self._effective_types)}
+        # Observability: the ACTUAL physical spellings this run will scan, after
+        # alias translation + case-fold expansion. If the graph spells a type
+        # differently from the ontology (declared HAS, physical Has), the folded
+        # set MUST include the physical spelling or that type scans nothing.
+        # "declared" is what froze on the job; the folded lists are what runs.
+        logger.info(
+            "aggregation pipeline on %s: scanning containment=%s lineage=%s "
+            "(declared containment=%s lineage=%s; %d rel type(s) observed in graph)",
+            self.p._graph_name,
+            sorted(self._containment), self._effective_types,
+            sorted(str(t) for t in (self._containment_arg or [])),
+            sorted(str(t) for t in (self._lineage_arg or []) if t and t != "AGGREGATED"),
+            len(self._observed_rels or ()),
+        )
         # Completeness diagnosability: a declared/derived spelling that
         # matches NOTHING observed (not exact, not alias, not case-fold)
         # scans zero edges — silently missing aggregations would look

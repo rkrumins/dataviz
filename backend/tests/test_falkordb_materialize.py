@@ -568,6 +568,31 @@ def test_advisory_unmatched_edge_types_lists_them():
     assert hit["types"] == ["TRANSFORMS", "MOVES"]
 
 
+def test_advisory_empty_containment_when_declared_but_no_dag():
+    """Declared containment that matched ZERO edges (maxDepth 0) must surface a
+    loud advisory instead of silently producing a flat leaf-only cube — the
+    'no aggregated edges roll up' failure on a case-drifted / unclassified
+    containment type. _struct_parents is the computed DAG (empty set here)."""
+    pipe = _make_pipeline()
+    pipe._containment = ["HAS", "Has"]   # resolved physical spellings this run
+    pipe._struct_parents = set()          # DAG computed, but empty
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "containment_empty")
+    assert hit["severity"] == "warning"
+    assert "HAS" in hit["message"]
+    assert hit["types"] == ["HAS", "Has"]
+
+
+def test_no_containment_empty_advisory_when_dag_present():
+    """A real containment DAG must NOT trip the empty-containment advisory."""
+    pipe = _make_pipeline()
+    pipe._containment = ["HAS"]
+    pipe._struct_parents = {1, 2}         # non-empty DAG
+    stats = pipe._result(5)["run_stats"]
+    kinds = {a["kind"] for a in stats.get("advisories", [])}
+    assert "containment_empty" not in kinds
+
+
 def test_clean_run_emits_no_advisories_key():
     """A conforming run's run_stats must be unchanged — no advisories noise."""
     pipe = _make_pipeline()
