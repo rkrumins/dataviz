@@ -201,6 +201,9 @@ class AggregationWorker:
                 # coalesce(n.urn, n[identity_property]) for onboarded graphs
                 # that key nodes by e.g. "id" instead of the canonical urn.
                 identity_property = getattr(job, "identity_property", None) or "urn"
+                # Node display-name property, frozen likewise (default "name").
+                # Stamped onto `displayName` so the whole read stack renders it.
+                name_property = getattr(job, "name_property", None) or "name"
 
                 if not lineage_types:
                     # Self-heal instead of failing a doomed row: re-freeze
@@ -212,10 +215,12 @@ class AggregationWorker:
                     containment_types, lineage_types, entity_type_levels = (
                         await self._refreeze_edge_types(session, job)
                     )
-                    # The self-heal also re-derived identity_property from the
-                    # data source — pick up the refreshed value (was read above
-                    # from the un-frozen row, which would have been "urn").
+                    # The self-heal also re-derived identity_property and
+                    # name_property from the data source — pick up the refreshed
+                    # values (read above from the un-frozen row, which would have
+                    # been the defaults "urn"/"name").
                     identity_property = getattr(job, "identity_property", None) or "urn"
+                    name_property = getattr(job, "name_property", None) or "name"
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -282,6 +287,7 @@ class AggregationWorker:
                 # attribute the provider reads at directory-build time.
                 try:
                     provider._node_identity_property = identity_property
+                    provider._name_property = name_property
                 except Exception:
                     pass
 
@@ -860,6 +866,10 @@ class AggregationWorker:
                 ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
                 if ds is not None:
                     job.identity_property = getattr(ds, "identity_property", None) or "urn"
+                    # Display-name property is per-source too — re-derive it in
+                    # the same pass so the label stamp heals symmetrically.
+                    if hasattr(job, "name_property"):
+                        job.name_property = getattr(ds, "name_property", None) or "name"
             except Exception as exc:
                 logger.warning(
                     "Aggregation job %s: identity_property re-derive failed "

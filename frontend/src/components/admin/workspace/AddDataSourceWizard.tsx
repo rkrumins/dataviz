@@ -31,7 +31,7 @@ import {
 import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
-import { NodeIdentityField, isIdentityOverridden } from '@/components/dataSource/NodeIdentity'
+import { NodeIdentityField, isIdentityOverridden, isNameOverridden } from '@/components/dataSource/NodeIdentity'
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -66,6 +66,7 @@ export function AddDataSourceWizard({
     const [label, setLabel] = useState('')
     const [ontologyId, setOntologyId] = useState('')
     const [identityProperty, setIdentityProperty] = useState('')
+    const [nameProperty, setNameProperty] = useState('')
 
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
@@ -194,11 +195,12 @@ export function AddDataSourceWizard({
                 )
                 // Label/ontology are per-data-source and survive the move; apply any
                 // change the user made here on top.
-                if (label.trim() || ontologyId || isIdentityOverridden(identityProperty)) {
+                if (label.trim() || ontologyId || isIdentityOverridden(identityProperty) || isNameOverridden(nameProperty)) {
                     await workspaceService.updateDataSource(workspaceId, selected.boundDataSourceId, {
                         label: label.trim() || undefined,
                         ontologyId: ontologyId || undefined,
                         identityProperty: identityProperty || undefined,
+                        nameProperty: nameProperty || undefined,
                     })
                 }
             } else {
@@ -207,6 +209,7 @@ export function AddDataSourceWizard({
                     label: label.trim() || undefined,
                     ontologyId: ontologyId || undefined,
                     identityProperty: identityProperty || undefined,
+                    nameProperty: nameProperty || undefined,
                 })
             }
             setPhase('success')
@@ -217,7 +220,7 @@ export function AddDataSourceWizard({
             setPhase('steps')
             setStep('review')
         }
-    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, isMove, selected])
+    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, nameProperty, isMove, selected])
 
     if (!isOpen) return null
 
@@ -481,6 +484,8 @@ export function AddDataSourceWizard({
                         onChange={setIdentityProperty}
                         providerId={selected?.providerId}
                         graphName={selected?.sourceIdentifier || selected?.name}
+                        nameValue={nameProperty}
+                        onNameChange={setNameProperty}
                     />
                 </div>
             )}

@@ -54,6 +54,9 @@ export interface OnboardingFormData {
     // Per-source URN-equivalent node-identity property ('' / 'urn' = default).
     // Onboarded third-party graphs that key nodes by e.g. `id` map it here.
     identityProperties: Record<string, string>
+    // Per-source node display-name property ('' / 'name' = default). Graphs that
+    // store their human node name under e.g. `title` map it here.
+    nameProperties: Record<string, string>
 }
 
 type WizardStep = 'workspace' | 'aggregation' | 'semantic' | 'schemaReview' | 'review'
@@ -103,6 +106,7 @@ export function AssetOnboardingWizard({
             catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
         ),
         identityProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
+        nameProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
     }))
 
     // ─── Navigation State ─────────────────────────────────────────────────────
@@ -162,6 +166,7 @@ export function AssetOnboardingWizard({
                     catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
                 ),
                 identityProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
+                nameProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
             })
         }
     }, [isOpen, catalogItems])
@@ -393,6 +398,7 @@ export function AssetOnboardingWizard({
                             ontologyId: formData.ontologySelections[group.placeholderIds[i]]?.ontologyId || undefined,
                             label: c.name || c.sourceIdentifier || undefined,
                             identityProperty: formData.identityProperties[group.placeholderIds[i]] || undefined,
+                            nameProperty: formData.nameProperties[group.placeholderIds[i]] || undefined,
                         })),
                     })
                     wsId = ws.id
@@ -428,6 +434,7 @@ export function AssetOnboardingWizard({
                             ontologyId: formData.ontologySelections[placeholderId]?.ontologyId || undefined,
                             label: c.name || c.sourceIdentifier || undefined,
                             identityProperty: formData.identityProperties[placeholderId] || undefined,
+                            nameProperty: formData.nameProperties[placeholderId] || undefined,
                         })
                         allCreatedDsIds.push(ds.id)
                         if (!firstWsId) {

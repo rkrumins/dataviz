@@ -37,6 +37,8 @@ interface DataSourceFormRow {
     label: string
     /** URN-equivalent node-identity property. '' or 'urn' = platform default. */
     identityProperty: string
+    /** Node display-name property. '' or 'name' = platform default. */
+    nameProperty: string
 }
 
 const EMPTY_DS_ROW: DataSourceFormRow = {
@@ -45,6 +47,7 @@ const EMPTY_DS_ROW: DataSourceFormRow = {
     ontologyId: '',
     label: '',
     identityProperty: '',
+    nameProperty: '',
 }
 
 // ============================================================
@@ -208,6 +211,8 @@ export const DSRowEditor: FC<DSRowEditorProps> = ({
                 onChange={(v) => update('identityProperty', v)}
                 providerId={row.providerId || undefined}
                 graphName={row.graphName || undefined}
+                nameValue={row.nameProperty}
+                onNameChange={(v) => update('nameProperty', v)}
             />
         </div>
     )
@@ -253,6 +258,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     // Sent verbatim (incl. '' to clear back to default 'urn');
                     // the edit form pre-fills it, so unchanged rows are a no-op.
                     identityProperty: rowState.identityProperty,
+                    nameProperty: rowState.nameProperty,
                 }
                 await workspaceService.updateDataSource(workspace.id, editingDsId, req)
                 setEditingDsId(null)
@@ -264,6 +270,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     label: rowState.label || undefined,
                     // Only carried when the operator maps a non-default identity.
                     identityProperty: rowState.identityProperty || undefined,
+                    nameProperty: rowState.nameProperty || undefined,
                 }
                 await workspaceService.addDataSource(workspace.id, req)
                 setAdding(false)
@@ -284,9 +291,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
             graphName: ds.graphName || '',
             ontologyId: ds.ontologyId || '',
             label: ds.label || '',
-            // Server always echoes "urn" by default; keep it verbatim so a
+            // Server always echoes "urn"/"name" by default; keep verbatim so a
             // no-op save doesn't accidentally reset a real mapping.
             identityProperty: ds.identityProperty || 'urn',
+            nameProperty: ds.nameProperty || 'name',
         })
         setAdding(false) // make sure adding is off
         setError(null)
@@ -605,6 +613,7 @@ export const EnvironmentsTab: FC = () => {
                             // Was silently dropped here — a Node Identity set during
                             // initial workspace creation never reached the backend.
                             identityProperty: ds.identityProperty || undefined,
+                            nameProperty: ds.nameProperty || undefined,
                         })),
                 }
                 const ws = await workspaceService.create(req)

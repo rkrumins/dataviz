@@ -40,6 +40,8 @@ export interface AggregationConfigSnapshot {
     dedicatedGraphName: string
     /** URN-equivalent node-identity property. "urn" is the default. */
     identityProperty: string
+    /** Node display-name property. "name" is the default. */
+    nameProperty: string
 }
 
 interface DataSourceDetailPanelProps {
@@ -180,9 +182,11 @@ export function DataSourceDetailPanel({
     // Node-identity property (URN-equivalent). Server always echoes "urn" by
     // default, so a missing value on legacy responses folds to "urn" too.
     const originalIdentityProperty = ds?.identityProperty || 'urn'
+    const originalNameProperty = ds?.nameProperty || 'name'
     const [pendingMode, setPendingMode] = useState(originalMode)
     const [pendingDedicatedName, setPendingDedicatedName] = useState(originalDedicatedName)
     const [pendingIdentityProperty, setPendingIdentityProperty] = useState(originalIdentityProperty)
+    const [pendingNameProperty, setPendingNameProperty] = useState(originalNameProperty)
     const [isSaving, setIsSaving] = useState(false)
 
     // Reset pending state whenever the drawer points at a different DS, or when
@@ -191,15 +195,18 @@ export function DataSourceDetailPanel({
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
         setPendingIdentityProperty(originalIdentityProperty)
+        setPendingNameProperty(originalNameProperty)
         setIsSaving(false)
-    }, [ds?.id, originalMode, originalDedicatedName, originalIdentityProperty])
+    }, [ds?.id, originalMode, originalDedicatedName, originalIdentityProperty, originalNameProperty])
 
-    // Normalise for comparison/save: trim, and treat empty as the default "urn".
+    // Normalise for comparison/save: trim, and treat empty as the default.
     const normalizedIdentityProperty = pendingIdentityProperty.trim() || 'urn'
+    const normalizedNameProperty = pendingNameProperty.trim() || 'name'
     const isDirty =
         pendingMode !== originalMode ||
         pendingDedicatedName !== originalDedicatedName ||
-        normalizedIdentityProperty !== originalIdentityProperty
+        normalizedIdentityProperty !== originalIdentityProperty ||
+        normalizedNameProperty !== originalNameProperty
     const isOverridden = !!pendingMode
 
     const handleSelectInherit = () => setPendingMode('')
@@ -216,8 +223,8 @@ export function DataSourceDetailPanel({
         setIsSaving(true)
         try {
             await onSaveAggregationConfig(
-                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName, identityProperty: normalizedIdentityProperty },
-                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName, identityProperty: originalIdentityProperty },
+                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName, identityProperty: normalizedIdentityProperty, nameProperty: normalizedNameProperty },
+                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName, identityProperty: originalIdentityProperty, nameProperty: originalNameProperty },
             )
             // The parent triggers a reload after save. The useEffect above will
             // resync pending state when the new originals arrive.
@@ -230,6 +237,7 @@ export function DataSourceDetailPanel({
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
         setPendingIdentityProperty(originalIdentityProperty)
+        setPendingNameProperty(originalNameProperty)
     }
 
     // Last-aggregated timestamp prefers the live readiness over the persisted
@@ -399,7 +407,7 @@ export function DataSourceDetailPanel({
                                 ds.catalogItemId ? (
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
-                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty } satisfies DataSourceProfileContext}
+                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty, nameProperty: ds.nameProperty } satisfies DataSourceProfileContext}
                                         embedded
                                         onNavigate={onClose}
                                     />
@@ -505,6 +513,8 @@ export function DataSourceDetailPanel({
                                         canEdit={canManageDs}
                                         providerId={ds.providerId}
                                         graphName={ds.graphName}
+                                        nameValue={pendingNameProperty}
+                                        onNameChange={setPendingNameProperty}
                                     />
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}

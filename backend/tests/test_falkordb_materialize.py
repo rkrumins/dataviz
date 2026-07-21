@@ -368,9 +368,9 @@ def test_stamp_identity_urns_sets_urn_from_identity_property():
     stamped = _run(p.stamp_identity_urns())
     assert stamped >= 3
     assert any(
-        "SET n.`urn` = n.`id`" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
+        "coalesce(n.`urn`, n.`id`)" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
         for c in calls
-    ), "stamp must copy id → urn only for nodes missing urn"
+    ), "stamp must fill urn from id only for nodes missing urn (coalesce, never overwrite)"
 
 
 def test_stamp_identity_urns_noop_for_default_and_dedicated():
@@ -393,6 +393,38 @@ def test_stamp_identity_urns_noop_for_default_and_dedicated():
     assert _run(p.stamp_identity_urns()) == 0
 
 
+def test_stamp_display_name_from_custom_name_property():
+    """A custom name_property (identity conforming) still triggers a standalone
+    displayName stamp, so a non-`displayName` node name renders across the whole
+    read stack — not just the node-detail serializer's fallback."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "urn"       # identity conforming → no urn stamp
+    p._name_property = "title"              # custom name property
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[10]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 2
+        return r
+
+    p._ensure_connected = _noop
+    p._ro_query = _ro
+    p._query = _wq
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped >= 2
+    assert any("coalesce(n.`displayName`, n.`title`)" in c for c in calls)
+    assert all("n.`urn`" not in c for c in calls), "identity conforming → no urn stamp"
+
+
 # ── end-to-end: an id-keyed graph aggregates once urn is stamped ─────────────
 
 class _IdKeyedFake(_FakeFalkor):
@@ -408,8 +440,10 @@ class _IdKeyedFake(_FakeFalkor):
         self.ids[nid] = id_value
 
     async def write_query(self, cypher, params=None, **kw):
-        # The identity stamp: SET n.urn = n.id for NULL-urn nodes in an ID range.
-        if "SET n.`urn` = n.`id`" in cypher:
+        # The conformance stamp fills urn (from id) for NULL-urn nodes in an ID
+        # range. These fake nodes carry no `name`, so the displayName clause of
+        # the combined SET is a no-op here.
+        if "SET" in cypher and "n.`urn`" in cypher:
             lo, hi = params["lo"], params["hi"]
             n = 0
             for nid, (urn, label) in list(self.nodes.items()):

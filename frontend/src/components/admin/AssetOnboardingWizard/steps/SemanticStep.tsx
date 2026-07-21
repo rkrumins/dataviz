@@ -822,6 +822,10 @@ export function SemanticStep({
                                                     }))}
                                                     providerId={providerId}
                                                     graphName={item.sourceIdentifier || item.name}
+                                                    nameValue={formData.nameProperties[item.id] || ''}
+                                                    onNameChange={v => updateFormData(prev => ({
+                                                        nameProperties: { ...prev.nameProperties, [item.id]: v },
+                                                    }))}
                                                 />
                                             )}
                                         </div>

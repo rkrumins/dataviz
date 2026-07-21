@@ -587,6 +587,13 @@ class WorkspaceDataSourceORM(Base):
     # property; resolved at read time as coalesce(n.urn, n[identity_property]) so
     # the source can keep updating independently without a rewrite.
     identity_property = Column(Text, nullable=True)
+    # Node display-name property — the physical graph property that holds the
+    # human-readable node name. NULL means "name" (the default). Set when an
+    # onboarded graph stores its name under a differently-named property (e.g.
+    # "title"); the aggregation run stamps it onto `displayName` so the whole
+    # read stack renders it, and the serializer falls back through name/title/
+    # label meanwhile. Symmetric to identity_property.
+    name_property = Column(Text, nullable=True)
     # ── Versioning source model ───────────────────────────────
     # None = derive from provider capability (managed if writable & not external).
     source_mode = Column(Text, nullable=True)              # "managed" | "federated"

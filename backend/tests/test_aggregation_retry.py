@@ -369,7 +369,7 @@ def test_refreeze_recovers_identity_property_from_data_source():
         entity_type_definitions="{}",
         relationship_type_definitions=_json.dumps({"FLOWS": {"is_lineage": True}}),
     )
-    ds = WorkspaceDataSourceORM(id="ds_heal", identity_property="id")
+    ds = WorkspaceDataSourceORM(id="ds_heal", identity_property="id", name_property="title")
     job = AggregationJobORM(
         id="agg_heal", ontology_id="ont_heal", data_source_id="ds_heal",
         trigger_source="manual",
@@ -395,4 +395,5 @@ def test_refreeze_recovers_identity_property_from_data_source():
     asyncio.run(worker._refreeze_edge_types(session, job))
 
     assert job.identity_property == "id", "self-heal must recover identity from the DS"
+    assert job.name_property == "title", "self-heal must recover display-name from the DS"
     assert _json.loads(job.lineage_edge_types) == ["FLOWS"], "edge types still heal"

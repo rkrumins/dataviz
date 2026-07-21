@@ -822,6 +822,9 @@ class DataSourceCreateRequest(BaseModel):
     # None → "urn" (default). Set to e.g. "id" for onboarded graphs that key
     # nodes by a differently-named property.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
+    # Node display-name property. None → "name" (default). Set when the graph
+    # stores its human name under a differently-named property (e.g. "title").
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -852,6 +855,9 @@ class DataSourceUpdateRequest(BaseModel):
     # value (incl. "urn") overwrites it. Editable across the data source's whole
     # lifecycle; the next aggregation run freezes and uses the current value.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
+    # Node display-name property. None → field untouched on update; "" resets to
+    # the default "name".
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -880,6 +886,8 @@ class DataSourceResponse(BaseModel):
     # Node-identity property (URN-equivalent). Always populated on the way out —
     # legacy/unset rows echo "urn" so the client never has to special-case NULL.
     identity_property: str = Field("urn", alias="identityProperty")
+    # Node display-name property; unset rows echo "name" (the default).
+    name_property: str = Field("name", alias="nameProperty")
     # Provenance: "managed" = in-app writable graph (blank/versioned models),
     # "federated" = external system of record. None on legacy rows — clients
     # derive from shape (no catalog item → managed), mirroring the ORM comment.

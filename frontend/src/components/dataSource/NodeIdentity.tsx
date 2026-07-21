@@ -35,7 +35,24 @@ export const identityCoalesceExpr = (v: string | null | undefined): string => {
     return n === 'urn' ? 'n.urn' : `coalesce(n.urn, n.${n})`
 }
 
+// ── display-name property (symmetric to identity; lower-stakes) ──────────────
+
+/** Trim and treat empty as the platform default "name". */
+export const normalizeName = (v: string | null | undefined): string =>
+    (v ?? '').trim() || 'name'
+
+/** True when the source maps the display name to something other than the default. */
+export const isNameOverridden = (v: string | null | undefined): boolean =>
+    normalizeName(v) !== 'name'
+
+/** The read-time Cypher resolution the display-name mapping produces. */
+export const nameCoalesceExpr = (v: string | null | undefined): string => {
+    const n = normalizeName(v)
+    return n === 'name' ? 'n.name' : `coalesce(n.displayName, n.${n})`
+}
+
 const PRESETS = ['urn', 'id', 'name']
+const NAME_PRESETS = ['name', 'title', 'label']
 // Property names most likely to BE the identity — surfaced first in suggestions.
 const IDENTITY_PRIORITY = ['id', 'urn', 'name', 'key', 'uuid', 'guid', 'qualifiedname']
 
@@ -123,6 +140,10 @@ interface NodeIdentityFieldProps {
     graphName?: string
     /** Force the disclosure open initially (defaults to open only when mapped). */
     defaultOpen?: boolean
+    /** Optional symmetric display-name mapping. When onNameChange is provided,
+     *  a second section for the node display-name property is rendered. */
+    nameValue?: string
+    onNameChange?: (v: string) => void
 }
 
 export function NodeIdentityField({
@@ -133,12 +154,19 @@ export function NodeIdentityField({
     providerId,
     graphName,
     defaultOpen,
+    nameValue,
+    onNameChange,
 }: NodeIdentityFieldProps) {
-    const [open, setOpen] = useState(defaultOpen ?? isIdentityOverridden(value))
+    const nameEnabled = typeof onNameChange === 'function'
+    const nameOverridden = isNameOverridden(nameValue)
+    const [open, setOpen] = useState(
+        defaultOpen ?? (isIdentityOverridden(value) || nameOverridden),
+    )
     const { suggestions, loading } = useNodeIdentitySuggestions(providerId, graphName, open)
 
     const normalized = normalizeIdentity(value)
     const overridden = isIdentityOverridden(value)
+    const normalizedName = normalizeName(nameValue)
     // Real graph properties that aren't already offered as a static preset.
     const detected = suggestions.filter(s => !PRESETS.includes(s.toLowerCase()))
 
@@ -172,9 +200,9 @@ export function NodeIdentityField({
                 </div>
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-medium text-ink">Node Identity Property</span>
+                        <span className="text-sm font-medium text-ink">{nameEnabled ? 'Node Identity & Display Name' : 'Node Identity Property'}</span>
                         <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-violet-500/10 text-violet-500 tracking-wider">ADVANCED</span>
-                        {overridden && (
+                        {(overridden || nameOverridden) && (
                             <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
                         )}
                     </div>
@@ -250,6 +278,55 @@ export function NodeIdentityField({
                             {identityCoalesceExpr(value)}
                         </code>
                     </div>
+
+                    {/* Display-name property — symmetric, lower-stakes mapping */}
+                    {nameEnabled && (
+                        <div className="pt-3 border-t border-glass-border space-y-2">
+                            <div>
+                                <div className="flex items-center gap-2 mb-1">
+                                    <label className="block text-[11px] font-medium text-ink-secondary">Display-name property</label>
+                                    {nameOverridden && (
+                                        <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
+                                    )}
+                                </div>
+                                <p className="text-[11px] text-ink-muted mb-2 leading-relaxed">
+                                    The label the platform shows for a node comes from <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code>.
+                                    If your graph stores its human-readable name under a different property, map it here so nodes don't render blank.
+                                </p>
+                                <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                                    {NAME_PRESETS.map(preset =>
+                                        chip(preset === 'name' ? 'name (default)' : preset, normalizedName === preset, () => onNameChange!(preset)))}
+                                </div>
+
+                                {detected.length > 0 && (
+                                    <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                                        {detected.slice(0, 12).map(s => chip(s, normalizedName === s, () => onNameChange!(s), true))}
+                                    </div>
+                                )}
+
+                                <div className="relative">
+                                    <KeyRound className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted pointer-events-none" />
+                                    <input
+                                        type="text"
+                                        value={nameValue ?? ''}
+                                        disabled={!canEdit}
+                                        onChange={e => onNameChange!(e.target.value)}
+                                        placeholder="name"
+                                        spellCheck={false}
+                                        autoCapitalize="none"
+                                        autoCorrect="off"
+                                        className="w-full pl-8 pr-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-sm font-mono text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 disabled:opacity-50"
+                                    />
+                                </div>
+                            </div>
+                            <div className="rounded-lg bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border px-3 py-2">
+                                <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-muted mb-1">Node label resolved as</div>
+                                <code className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono break-all">
+                                    {nameCoalesceExpr(nameValue)}
+                                </code>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Risk callout — only when diverging from the default */}
                     {overridden && (

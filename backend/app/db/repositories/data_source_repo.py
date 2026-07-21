@@ -52,6 +52,7 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         extraConfig=redact_extra_config(json.loads(row.extra_config) if row.extra_config else None),
         # NULL / unset → "urn" so clients never special-case the default.
         identityProperty=(getattr(row, "identity_property", None) or "urn"),
+        nameProperty=(getattr(row, "name_property", None) or "name"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         createdAt=row.created_at,
@@ -213,6 +214,10 @@ async def create_data_source(
             (req.identity_property.strip() or None)
             if req.identity_property else None
         ),
+        name_property=(
+            (req.name_property.strip() or None)
+            if getattr(req, "name_property", None) else None
+        ),
     )
     session.add(row)
     await session.flush()
@@ -248,6 +253,9 @@ async def update_data_source(
         # Editable across the whole lifecycle. Empty string clears back to the
         # default ("urn") rather than persisting a meaningless empty identity.
         row.identity_property = req.identity_property.strip() or "urn"
+    if getattr(req, "name_property", None) is not None:
+        # Empty string clears back to the default "name".
+        row.name_property = req.name_property.strip() or "name"
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
