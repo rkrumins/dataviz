@@ -333,11 +333,10 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText('Never built')).toBeInTheDocument()
         expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
 
-        await user.click(screen.getByRole('button', { name: /refresh actions for fresh source/i }))
-        // Never-built menu offers Build lineage, not Rebuild lineage.
-        expect(await screen.findByText('Build lineage')).toBeInTheDocument()
-        expect(screen.queryByText('Rebuild lineage')).not.toBeInTheDocument()
-        await user.click(screen.getByText('Build lineage'))
+        // Never-built rows promote "Build lineage" straight to the primary
+        // button — overflowActions('neverBuilt') is empty, so the dropdown
+        // has nothing to offer and isn't part of this flow.
+        await user.click(screen.getByRole('button', { name: 'Build lineage' }))
 
         const dialog = await screen.findByRole('dialog')
         await user.click(within(dialog).getByRole('button', { name: /build lineage/i }))
@@ -725,7 +724,7 @@ describe('state-driven row actions', () => {
     }
 
     it('maps every state to the action that state calls for', () => {
-        expect(primaryAction('failed')).toMatchObject({ label: 'Retry rebuild', kind: 'refresh', scope: 'rollups', force: true })
+        expect(primaryAction('failed')).toMatchObject({ label: 'Retry rebuild', kind: 'refresh', scope: 'rollups' })
         expect(primaryAction('recomputing')).toMatchObject({ label: 'View progress', kind: 'expand' })
         expect(primaryAction('queued')).toMatchObject({ label: 'Rebuild now', kind: 'refresh', scope: 'rollups' })
         expect(primaryAction('stale')).toMatchObject({ label: 'Rebuild now', kind: 'refresh', scope: 'rollups' })

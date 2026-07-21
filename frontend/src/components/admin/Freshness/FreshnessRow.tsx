@@ -228,11 +228,14 @@ export function primaryAction(state: FreshnessState): {
     label: string
     kind: 'refresh' | 'expand'
     scope?: RefreshScope
-    force?: boolean
     firstBuild?: boolean
 } {
     switch (state) {
-        case 'failed': return { label: 'Retry rebuild', kind: 'refresh', scope: 'rollups', force: true }
+        // No `force` here: the `rollups` scope already bypasses the
+        // cooldown/dedup gate by construction (a fresh idempotency key on
+        // every call) — `force` only has meaning for the change-gated
+        // `auto` scope, which this action never sends.
+        case 'failed': return { label: 'Retry rebuild', kind: 'refresh', scope: 'rollups' }
         case 'recomputing': return { label: 'View progress', kind: 'expand' }
         case 'queued':
         case 'stale': return { label: 'Rebuild now', kind: 'refresh', scope: 'rollups' }
@@ -264,8 +267,6 @@ export function overflowActions(state: FreshnessState): RowAction[] {
 }
 
 export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded, onToggleExpand, onCancelJob }: Props) {
-    const running = !!row.runningJobId
-    const actionsDisabled = busy
     const actions = overflowActions(freshnessState(row))
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
     // who can't manage this row's workspace (RegistryConnections convention) —
@@ -366,8 +367,7 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
                         <DropdownMenu.Trigger asChild>
                             <button
                                 aria-label={`Refresh actions for ${row.name || row.dataSourceId}`}
-                                disabled={actionsDisabled}
-                                title={running ? 'A rebuild is already running for this source' : undefined}
+                                disabled={busy}
                                 className="p-1.5 rounded-lg text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed data-[state=open]:bg-black/[0.04] dark:data-[state=open]:bg-white/[0.04]"
                             >
                                 {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreHorizontal className="w-4 h-4" />}
