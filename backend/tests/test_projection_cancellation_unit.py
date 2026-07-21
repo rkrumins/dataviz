@@ -23,11 +23,11 @@ from backend.app.services.versioning.projection import FalkorProjector
 
 
 class _FakePS:
-    def __init__(self):
+    def __init__(self, projected=3, target=5):
         self.status = "idle"
         self.last_error = None
-        self.projected_commit_seq = 3
-        self.target_commit_seq = 5
+        self.projected_commit_seq = projected
+        self.target_commit_seq = target
         self.falkor_graph_name = "real_pinned_graph"   # != default_graph_name → not "unpinned"
         self.falkor_provider = None
         self.last_projected_at = None
@@ -37,6 +37,16 @@ class _FakeGraph:
     data_source_id = "ds1"
     workspace_id = "ws1"
     fork_parent_graph_id = None
+
+
+class _MinClient:
+    """Just enough FalkorDB client for the full-seed path to reach _apply: the RETURN-1 connectivity
+    probe and the GRAPH.DELETE drop both need to succeed so the run suspends at the (hung) apply."""
+    async def query(self, *a, **k):
+        return None
+
+    async def delete(self):
+        return None
 
 
 class _FakeSession:
@@ -69,14 +79,15 @@ def _fake_session_factory(ps, graph):
     return _session
 
 
-async def _run(monkeypatch, hang_at: str) -> _FakePS:
+async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
     """Cancel ``project_graph`` while it is suspended at ``hang_at`` — ``"apply"`` (mid
     FalkorDB apply, the original timeout bug) or ``"client"`` (the provider-lookup/handle
-    build, a suspension point OUTSIDE the try until this fix moved it in)."""
-    ps = _FakePS()
+    build, a suspension point OUTSIDE the try until this fix moved it in). ``projected``/``target``
+    default to an incremental window (3→5); pass ``projected=0`` for a full-seed rebuild."""
+    ps = _FakePS(projected, target)
     graph = _FakeGraph()
     proj = FalkorProjector(
-        graph_client_factory=lambda name, provider_id=None: object(),
+        graph_client_factory=lambda name, provider_id=None: _MinClient(),
         session_factory=_fake_session_factory(ps, graph),
     )
 
@@ -97,7 +108,7 @@ async def _run(monkeypatch, hang_at: str) -> _FakePS:
 
     task = asyncio.ensure_future(proj.project_graph("g1"))
     await asyncio.wait_for(started.wait(), timeout=1)   # cancel at the suspension point, not before/after
-    assert ps.status == "projecting"                    # sanity: status IS committed before cancellation
+    assert ps.status in ("projecting", "rebuilding")    # sanity: status IS committed before cancellation
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -119,3 +130,21 @@ def test_cancelled_during_client_acquisition_does_not_strand_status(monkeypatch)
     ps = asyncio.run(_run(monkeypatch, hang_at="client"))
     assert ps.status == "idle", ps.status
     assert ps.last_error == "projection cancelled (timeout)", ps.last_error
+
+
+def test_cancelled_full_seed_stays_retryable(monkeypatch):
+    # A full seed (projected=0) cancelled by a SHORT-budget caller (project_now's 10s interactive
+    # ceiling, e.g. a first-import / post-eviction reseed) must NOT pin target — it DEFERS to the
+    # async worker, which re-runs with the 900s budget. Pinning would strand the graph un-projected
+    # (the nudge/worker could never rescue it). The wipe-loop is prevented by the now-fast verify, not
+    # by pinning here.
+    ps = asyncio.run(_run(monkeypatch, hang_at="apply", projected=0, target=5))
+    assert ps.status == "idle", ps.status                    # not stranded at "rebuilding"
+    assert ps.target_commit_seq == 5, ps.target_commit_seq   # untouched → project_pending re-selects
+
+
+def test_cancelled_incremental_stays_retryable(monkeypatch):
+    # An incremental window is likewise left retryable (the worker re-projects it on the next poll).
+    ps = asyncio.run(_run(monkeypatch, hang_at="apply", projected=3, target=5))
+    assert ps.status == "idle", ps.status
+    assert ps.target_commit_seq == 5, ps.target_commit_seq

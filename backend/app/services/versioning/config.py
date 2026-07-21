@@ -122,13 +122,20 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # graph from Postgres once. Guards against a silently dropped delete leaving the
 # cache diverged from committed main. Disable with GRAPHVER_PROJECTION_VERIFY=0.
 PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").lower() not in ("0", "false", "no")
-# On a FULL SEED (an explicit rebuild / first seed / repin), also run a CONTENT verify
-# (the reconciler's id-set + deep-field diff) — counts alone are blind to content drift
-# (a dropped/mistyped edge that keeps the count, a node reseeded with a wrong label or an
-# empty displayName). On any drift the rebuild is held back (watermark not advanced) so
-# reads keep serving Postgres instead of a corrupt cache. Full-seed only (rare + O(graph));
-# incremental windows keep the cheap count verify. Disable with GRAPHVER_PROJECTION_VERIFY_DEEP=0.
+# On a FULL SEED (an explicit rebuild / first seed / repin), also run a CONTENT verify that catches
+# what the count verify can't: an edge reseeded with a dropped confidence / blanked properties / wrong
+# type, or a node with a drifted displayName or label. It rides the SAME single ordered scan the
+# id-set diff already streams (comparing fields on matched ids), so it is O(N+E) — NOT the O(N²+E²)
+# per-entity fetch it used to do, which hung a 60k rebuild for minutes and drove a DROP+reseed
+# wipe-loop. On any drift the rebuild is held back (watermark not advanced) so reads keep serving
+# Postgres. Disable with GRAPHVER_PROJECTION_VERIFY_DEEP=0 (the collapse-correct DISTINCT-triple count
+# verify still runs and holds back on a dropped/extra entity).
 PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1").lower() not in ("0", "false", "no")
+# Scale ceiling for the deep field verify on the hot path. The scan pages with SKIP/LIMIT (~O(N²/batch)
+# to re-sort each page on the unindexed entityId ordering), so above this many entities the deep pass
+# is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
+# can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
+PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):

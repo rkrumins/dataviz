@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import func, literal, select
 
 from . import config, db
-from .reconcile import falkor_counts, pg_live_counts
+from .reconcile import falkor_counts, pg_live_counts_projectable
 from .models import (
     EdgeVersionORM,
     EntityHeadORM,
@@ -457,6 +457,16 @@ class FalkorProjector:
                                          else str(exc)[:500])
                         ps.progress_done = None          # don't strand a stale progress bar
                         ps.progress_total = None
+                        # NB: do NOT pin target on a cancel here. The original "Rebuild fast read layer"
+                        # wipe-loop was driven by the O(N²) verify blowing past the 900s rebuild budget
+                        # and being cancelled — that root cause is fixed (the verify is now an O(N+E)
+                        # single scan, size-gated), so a full seed completes well inside the budget and
+                        # is not cancelled. A cancel now means a SHORT-budget caller gave up
+                        # (project_now's 10s interactive ceiling — common for a first-import / post-
+                        # eviction full seed) and DEFERS to the async worker, which re-runs with the
+                        # 900s budget. Pinning target here would strand that graph un-projected (the
+                        # nudge/worker could never rescue it) — the very regression an adversarial
+                        # review caught. Leave projected<target so project_pending re-selects it.
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the
@@ -1124,19 +1134,23 @@ class FalkorProjector:
         return urn, label
 
     async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
-        """Live (non-tombstone) node/edge counts on ``main`` from ``entity_heads`` —
-        O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` only for a NON-fork
-        main that is fully caught up (``main_head == to_seq``); ``None`` otherwise
-        (a fork's composed count is O(graph); a lagging head verifies on catch-up)."""
+        """Node count + the count a FAITHFUL FalkorDB projection should hold, from ``entity_heads``,
+        for a NON-fork main fully caught up (``main_head == to_seq``); ``None`` otherwise (a fork's
+        composed count is O(graph); a lagging head verifies on catch-up).
+
+        Edges are counted as DISTINCT ``(source, type, target)`` TRIPLES, not raw ids: the projector
+        MERGEs edges id-lessly, so parallel edges (same triple, different ids) collapse to one
+        relationship in FalkorDB. Comparing against the raw edge count would flag that legitimate
+        collapse as a shortfall and hold every parallel-edge graph back forever."""
         if is_fork:
             return None
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.main_head_commit_seq != to_seq:
                 return None
-            # The count SQL lives in reconcile.pg_live_counts (single source, shared with the
-            # reconciler); the fork / lagging-head gate above is this verify path's own concern.
-            return await pg_live_counts(s, graph_id, main_id)
+            # Collapse-correct count (reconcile.pg_live_counts_projectable): distinct edge triples ==
+            # what falkor_counts sees after the id-less MERGE. Single source, shared semantics.
+            return await pg_live_counts_projectable(s, graph_id, main_id)
 
     @staticmethod
     async def _falkor_counts(client):
@@ -1177,7 +1191,9 @@ class FalkorProjector:
         if pg == fk:
             # Counts match — but on a full seed that is NOT sufficient (content drift keeps the
             # counts). Run the content verify; None unless it finds drift (or not a full seed).
-            return (await self._full_seed_content_error(client, graph_id, main_id, from_seq)), False
+            # Pass the entity count so the deep pass can size-gate itself (fk = node + edge counts).
+            return (await self._full_seed_content_error(
+                client, graph_id, main_id, from_seq, fk[0] + fk[1])), False
         pg_n, pg_e = pg
         f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
@@ -1232,29 +1248,36 @@ class FalkorProjector:
         return msg, False
 
     async def _full_seed_content_error(
-        self, client, graph_id, main_id, from_seq
+        self, client, graph_id, main_id, from_seq, entity_count=0
     ) -> Optional[str]:
-        """Content verify for a FULL SEED whose COUNTS already matched: id-set + deep-field diff of
-        the freshly-seeded cache vs committed main, via the reconciler's guard-free primitives
-        against the open client. Returns an error string on ANY drift (a dropped/mistyped edge, a
-        node reseeded with a wrong label or empty displayName — the class counts can't see), else
-        None. No-op off the full-seed path or when disabled. Best-effort: a diff-infra failure
-        degrades to None (counts already passed), never raises."""
+        """Content verify for a FULL SEED whose COUNTS already matched: the reconciler's single-scan
+        content diff (node displayName/label drift + edge type/confidence/properties drift) of the
+        freshly-seeded cache vs committed main. Returns an error string on ANY field drift the count
+        verify can't see, else None. No-op off the full-seed path, when disabled, or above the
+        deep-verify entity ceiling (the ordered scan's SKIP/LIMIT paging degrades on a very large
+        graph — count verify still ran; the on-demand reconcile can deep-diff any size). Best-effort:
+        a diff-infra failure degrades to None (counts already passed), never raises."""
         if from_seq > 0 or not config.PROJECTION_VERIFY_DEEP:
+            return None
+        cap = config.PROJECTION_VERIFY_DEEP_MAX_ENTITIES
+        if cap > 0 and entity_count > cap:
+            logger.info("full-seed deep verify skipped for %s (%d entities > %d cap); count verify "
+                        "already applied, on-demand reconcile can deep-diff", graph_id, entity_count, cap)
             return None
         try:
             from .reconcile import ProjectionReconciler
             rec = ProjectionReconciler(self._session, lambda name, provider_id=None: client)
-            mn, xn, me, xe, mm, em = await rec.content_drift(client, graph_id, main_id)
+            # Edge missing/extra are owned by the DISTINCT-triple count verify (collapse-noisy by id),
+            # so content_drift returns them empty; node coverage + node/edge field drift remain.
+            mn, xn, _me, _xe, mm, em = await rec.content_drift(client, graph_id, main_id)
         except Exception:                                # pragma: no cover - infra
             logger.debug("full-seed content verify skipped for %s (diff failed)",
                          graph_id, exc_info=True)
             return None
-        if mn or xn or me or xe or mm or em:
+        if mn or xn or mm or em:
             msg = (f"content drift after full seed: {len(mn)} missing node(s), "
-                   f"{len(xn)} extra node(s), {len(me)} missing edge(s), {len(xe)} extra edge(s), "
-                   f"{len(mm)} node field mismatch(es), {len(em)} edge attr mismatch(es) "
-                   f"(bounded sample) — cache NOT published")
+                   f"{len(xn)} extra node(s), {len(mm)} node field mismatch(es), "
+                   f"{len(em)} edge attr mismatch(es) (bounded sample) — cache NOT published")
             logger.error("%s for %s", msg, graph_id)
             return msg
         return None

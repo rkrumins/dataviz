@@ -21,8 +21,6 @@ from backend.app.services.versioning.projection import (
     _DELETE_EDGES_FALLBACK,
 )
 from backend.app.services.versioning.reconcile import (
-    _DEEP_FETCH,
-    _DEEP_FETCH_EDGES,
     _SCAN_EDGES,
     _SCAN_NODES,
 )
@@ -59,29 +57,20 @@ class FakeGraph:
         # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
         # / rollup exclusion mirror the real scan's guards.
         if cypher == _SCAN_NODES:
-            rows = sorted(([n["entityId"], n.get("urn")] for n in self.nodes.values()
+            # RETURN n.entityId, n.urn, n.displayName, labels(n) — the scan now carries the deep fields
+            rows = sorted(([n["entityId"], n.get("urn"), n.get("displayName"), [n.get("_label")]]
+                           for n in self.nodes.values()
                            if n.get("_label") != "_GVRollupMeta" and n.get("entityId") is not None),
                           key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
         if cypher == _SCAN_EDGES:
-            rows = sorted(([eid] for eid, e in self.edges.items()
+            # RETURN r.id, type(r), r.confidence, r.properties (r.id == eid; parallel edges already
+            # collapsed to one entry in self.edges by the MERGE interpreter above)
+            rows = sorted(([eid, e.get("type"), e.get("conf"), e.get("props")]
+                           for eid, e in self.edges.items()
                            if e.get("type") != "AGGREGATED" and eid is not None),
                           key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
-        if cypher == _DEEP_FETCH:
-            out = []
-            for u in params["urns"]:                     # nodes are keyed by urn (MATCH semantics)
-                n = self.nodes.get(u)
-                if n is not None:
-                    out.append([n["urn"], n["entityId"], n.get("displayName"), [n.get("_label")]])
-            return _Result(out)
-        if cypher == _DEEP_FETCH_EDGES:
-            out = []
-            for i in params["ids"]:                       # edges are keyed by entity-id (== r.id)
-                e = self.edges.get(i)
-                if e is not None:
-                    out.append([i, e.get("type"), e.get("conf"), e.get("props")])
-            return _Result(out)
         # Node upsert: UNWIND $batch AS item MERGE (n:{label} {urn: item.urn}) SET ... REMOVE ...
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
             label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
@@ -99,6 +88,13 @@ class FakeGraph:
                 # Label-anchored MATCH: BOTH endpoints must exist WITH the anchored label, else the
                 # row binds nothing and the edge is silently not created (models the real drop).
                 if a and b and a.get("_label") == slb and b.get("_label") == tlb:
+                    # id-less MERGE collapses parallel edges: FalkorDB keys a relationship on the
+                    # (src, type, tgt) TRIPLE, so N edges sharing a triple become ONE (r.id = last
+                    # writer). Drop any existing same-triple edge before (re-)adding — a no-op for a
+                    # graph with no parallel edges, faithful for one that has them.
+                    for _k in [k for k, e in self.edges.items()
+                               if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
+                        self.edges.pop(_k, None)
                     self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
                                              "props": it.get("props"), "conf": it.get("conf")}
             return None
