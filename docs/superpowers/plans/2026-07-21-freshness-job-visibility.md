@@ -1011,6 +1011,14 @@ export function primaryAction(state: FreshnessState): {
 
 **The overflow must not repeat the primary, and must not offer a rebuild to a row that is already rebuilding.** Replace the current `const actions = isNeverBuilt(row) ? NEVER_BUILT_ACTIONS : BUILT_ACTIONS` with a state-derived list matching the spec's table:
 
+**Clean up the three orphans this replacement creates** (they are orphaned BY this change, so removing them is in scope; do not touch any other unused code):
+
+- `NEVER_BUILT_ACTIONS` (`FreshnessRow.tsx:217-219`) — its only consumer was the line you are replacing. The never-built row's "Build lineage" is now the *primary* action.
+- the `isNeverBuilt` import (`:24`) — same, its only use was that line. Keep the `freshnessState` import from the same module. Note the badge branch tests `state === 'neverBuilt'`, not `isNeverBuilt(row)`, so it is unaffected.
+- the `Hammer` icon import (`:13`) — only `NEVER_BUILT_ACTIONS` used it, and the primary button renders a text label with no icon.
+
+Verify with `npx tsc --noEmit` (unused imports surface) and by grepping each symbol before you delete it.
+
 ```tsx
 /** Overflow scopes per state — the primary action's own scope is never
  *  repeated here, and a rebuilding row is not offered another rebuild
