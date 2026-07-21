@@ -41,6 +41,11 @@ export interface SchemaReviewSourceStatus {
     resolution: OntologyResolutionResponse | null
     /** User's pending classifications, keyed by relationship id. */
     classifications: Record<string, Classification>
+    /** Relationships ALREADY classified on the ontology (containment/lineage) —
+     *  derived from its relationship_type_definitions so the user can review and
+     *  change them in-wizard (incl. ones a create-from-graph classified for them),
+     *  not just the unclassified gaps the gate surfaces. */
+    classifiedRels?: OntologyResolutionRelGap[]
     /** Loading flags. */
     loading: boolean
     saving: boolean
@@ -135,6 +140,29 @@ function buildSeedRelDef(id: string): Record<string, unknown> {
     }
 }
 
+/** The classification a relationship currently carries on the ontology. */
+function relBaselineChoice(rel: OntologyResolutionRelGap): Classification {
+    if (rel.isContainment) return 'containment'
+    if (rel.isLineage) return 'lineage'
+    return 'neither'
+}
+
+/** Pull the already-classified relationships (containment or lineage) out of a
+ *  relationship_type_definitions map. Tolerates snake_case and camelCase flags
+ *  since defs come from several producers (suggest, create-from-graph, manual). */
+function deriveClassifiedRels(
+    relDefs: Record<string, any>,
+): OntologyResolutionRelGap[] {
+    return Object.entries(relDefs)
+        .map(([id, d]) => ({
+            id,
+            name: (d && (d.name as string)) || id,
+            isContainment: !!(d?.is_containment ?? d?.isContainment),
+            isLineage: !!(d?.is_lineage ?? d?.isLineage),
+        }))
+        .filter(r => r.isContainment || r.isLineage)
+}
+
 async function ensureDraftFor(
     ontologyId: string,
 ): Promise<{ id: string; isPublished: boolean }> {
@@ -227,12 +255,24 @@ export function SchemaReviewStep({
                     seeded[rel.id] = 'neither'
                 }
             }
+            // Also surface the relationships this ontology has ALREADY classified
+            // so a wrong containment/lineage pick (incl. ones a create-from-graph
+            // set) can be corrected in-wizard, not just the unclassified gaps.
+            // Best-effort — the reclassify section simply stays hidden on failure.
+            let classifiedRels: OntologyResolutionRelGap[] = statusMap[item.id]?.classifiedRels ?? []
+            try {
+                const def = await ontologyDefinitionService.get(ontologyId)
+                classifiedRels = deriveClassifiedRels(
+                    (def.relationshipTypeDefinitions ?? {}) as Record<string, any>,
+                )
+            } catch { /* keep prior value */ }
             onStatusChange({
                 ...next,
                 [item.id]: {
                     ontologyId,
                     resolution,
                     classifications: seeded,
+                    classifiedRels,
                     loading: false,
                     saving: false,
                     error: null,
@@ -345,6 +385,7 @@ export function SchemaReviewStep({
                     ontologyId: draftRef.id,
                     resolution: refreshed,
                     classifications: seeded,
+                    classifiedRels: deriveClassifiedRels(relDefs),
                     loading: false,
                     saving: false,
                     error: null,
@@ -425,12 +466,18 @@ export function SchemaReviewStep({
                 workingId,
                 transformStatsForCheck(envelope.data ?? {}),
             )
+            // Reset pending choices to the freshly-persisted baseline: the just-
+            // classified rels now live in classifiedRels (derived from the patched
+            // defs), and only the still-unclassified gaps seed back to "neither".
+            const reseeded: Record<string, Classification> = {}
+            for (const rel of refreshed.unclassifiedRelationships) reseeded[rel.id] = 'neither'
             onStatusChange({
                 ...next,
                 [item.id]: {
                     ontologyId: workingId,
                     resolution: refreshed,
-                    classifications: status.classifications,
+                    classifications: reseeded,
+                    classifiedRels: deriveClassifiedRels(relDefs),
                     loading: false,
                     saving: false,
                     error: null,
@@ -486,6 +533,17 @@ export function SchemaReviewStep({
                         ?.filter(w => SUMMARY_ADVISORIES.includes(w)).length ?? 0
                     const isOpen = expanded[item.id] ?? (!resolution?.resolved || advisoryCount > 0)
                     const coverage = resolution?.coveragePercent ?? null
+
+                    // Relationship editing state: the gate's unclassified gaps plus
+                    // the ontology's already-classified rels (so wrong picks can be
+                    // fixed too). "Dirty" = any choice diverges from what's persisted.
+                    const classifications = status?.classifications ?? {}
+                    const unclassifiedRels = resolution?.unclassifiedRelationships ?? []
+                    const classifiedRels = status?.classifiedRels ?? []
+                    const editableRels = [...unclassifiedRels, ...classifiedRels]
+                    const classifyDirty = editableRels.some(
+                        r => (classifications[r.id] ?? relBaselineChoice(r)) !== relBaselineChoice(r),
+                    )
 
                     return (
                         <div
@@ -630,14 +688,35 @@ export function SchemaReviewStep({
                                         </div>
                                     )}
 
-                                    {resolution?.unclassifiedRelationships && resolution.unclassifiedRelationships.length > 0 && (
-                                        <Section title={`Classify ${resolution.unclassifiedRelationships.length} relationship${resolution.unclassifiedRelationships.length !== 1 ? 's' : ''}`}>
+                                    {editableRels.length > 0 && <ClassificationGuidance />}
+
+                                    {unclassifiedRels.length > 0 && (
+                                        <Section title={`Classify ${unclassifiedRels.length} relationship${unclassifiedRels.length !== 1 ? 's' : ''}`}>
                                             <div className="space-y-2">
-                                                {resolution.unclassifiedRelationships.map(rel => (
+                                                {unclassifiedRels.map(rel => (
                                                     <RelClassifier
                                                         key={rel.id}
                                                         rel={rel}
-                                                        choice={status?.classifications[rel.id] ?? 'neither'}
+                                                        choice={classifications[rel.id] ?? 'neither'}
+                                                        onChange={(choice) => setClassification(item.id, rel.id, choice)}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </Section>
+                                    )}
+
+                                    {classifiedRels.length > 0 && (
+                                        <Section title={`Reclassify ${classifiedRels.length} already-classified relationship${classifiedRels.length !== 1 ? 's' : ''}`}>
+                                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-2">
+                                                These are already mapped on the ontology (including any a "Create from graph"
+                                                classified for you). Change one if it's wrong, then Save.
+                                            </p>
+                                            <div className="space-y-2">
+                                                {classifiedRels.map(rel => (
+                                                    <RelClassifier
+                                                        key={rel.id}
+                                                        rel={rel}
+                                                        choice={classifications[rel.id] ?? relBaselineChoice(rel)}
                                                         onChange={(choice) => setClassification(item.id, rel.id, choice)}
                                                     />
                                                 ))}
@@ -680,17 +759,18 @@ export function SchemaReviewStep({
                                                 <RefreshCw className={cn("w-3.5 h-3.5", status?.loading && "animate-spin")} />
                                                 Refresh
                                             </button>
-                                            {resolution.unclassifiedRelationships.length > 0 && (
+                                            {editableRels.length > 0 && (
                                                 <button
                                                     type="button"
                                                     onClick={() => saveClassifications(item)}
-                                                    disabled={status?.saving || !Object.values(status?.classifications ?? {}).some(v => v !== 'neither')}
+                                                    disabled={status?.saving || !classifyDirty}
                                                     className={cn(
                                                         "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium",
-                                                        status?.saving
+                                                        status?.saving || !classifyDirty
                                                             ? "bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed"
                                                             : "bg-indigo-600 text-white hover:bg-indigo-700",
                                                     )}
+                                                    title={classifyDirty ? undefined : 'Change a relationship above to enable saving'}
                                                 >
                                                     {status?.saving ? (
                                                         <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving</>
@@ -737,6 +817,39 @@ function Section({ title, children }: { title: string; children: React.ReactNode
                 {title}
             </h4>
             {children}
+        </div>
+    )
+}
+
+/** Compact, always-on explainer for what the three classification choices mean —
+ *  the wizard's inline guidance so users don't have to guess Containment vs
+ *  Lineage. Aggregation depends on this split, so a wrong pick is consequential. */
+function ClassificationGuidance() {
+    const rows: { label: string; tone: string; blurb: string }[] = [
+        {
+            label: 'Containment',
+            tone: 'text-indigo-600 dark:text-indigo-400',
+            blurb: 'parent contains child (e.g. schema → table). Drives the hierarchy roll-up so aggregated edges propagate up the tree.',
+        },
+        {
+            label: 'Lineage',
+            tone: 'text-emerald-600 dark:text-emerald-400',
+            blurb: 'data flows source → target. These are the edges aggregation materializes — at least one is required or the source is blocked.',
+        },
+        {
+            label: 'Neither',
+            tone: 'text-slate-500 dark:text-slate-400',
+            blurb: 'ignored by aggregation. Pick this for associative edges that are neither structural nor flow.',
+        },
+    ]
+    return (
+        <div className="px-3 py-2 rounded-md bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 space-y-1">
+            {rows.map(r => (
+                <div key={r.label} className="text-[11px] leading-snug text-slate-600 dark:text-slate-300">
+                    <span className={cn('font-semibold', r.tone)}>{r.label}</span>
+                    <span className="text-slate-400"> — {r.blurb}</span>
+                </div>
+            ))}
         </div>
     )
 }
