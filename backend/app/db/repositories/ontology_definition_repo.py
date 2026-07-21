@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import OntologyORM, OntologyAuditLogORM
 from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+from backend.app.ontology.repair import canonicalize_case_variants
 from backend.app.ontology.resolver import (
     derive_flat_lists,
     parse_relationship_definitions,
@@ -198,15 +199,30 @@ async def get_audit_log(
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
+def _canonicalize_row(row: OntologyORM):
+    """Fold any case-variant duplicate DECLARED keys (``To`` next to ``TO``) to
+    a single canonical key — the same fold the write-path guard and the frontend
+    apply on save — so a corrupted-at-rest ontology never surfaces as split rows
+    or split classification. A clean ontology folds to itself (``.changed`` is
+    False). Pure; used for both the response shape and the on-read persist."""
+    return canonicalize_case_variants(
+        json.loads(row.entity_type_definitions or "{}"),
+        json.loads(row.relationship_type_definitions or "{}"),
+        json.loads(row.containment_edge_types or "[]"),
+        json.loads(row.lineage_edge_types or "[]"),
+    )
+
+
 def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
+    healed = _canonicalize_row(row)
     return OntologyDefinitionResponse(
         id=row.id,
         name=row.name,
         description=getattr(row, "description", None),
         version=row.version,
         evolutionPolicy=getattr(row, "evolution_policy", "reject") or "reject",
-        containmentEdgeTypes=json.loads(row.containment_edge_types or "[]"),
-        lineageEdgeTypes=json.loads(row.lineage_edge_types or "[]"),
+        containmentEdgeTypes=healed.containment_edge_types,
+        lineageEdgeTypes=healed.lineage_edge_types,
         edgeTypeMetadata=json.loads(row.edge_type_metadata or "{}"),
         entityTypeHierarchy=json.loads(row.entity_type_hierarchy or "{}"),
         rootEntityTypes=json.loads(row.root_entity_types or "[]"),
@@ -214,12 +230,8 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         # aggregation :AGGREGATED rollup edge — and any future built-in node), injected here
         # marked ``is_system`` so the UI can always show them — clearly labelled and
         # read-only — without persisting them.
-        entityTypeDefinitions=with_system_entity_types(
-            json.loads(row.entity_type_definitions or "{}")
-        ),
-        relationshipTypeDefinitions=with_system_edge_types(
-            json.loads(row.relationship_type_definitions or "{}")
-        ),
+        entityTypeDefinitions=with_system_entity_types(healed.entity_type_definitions),
+        relationshipTypeDefinitions=with_system_edge_types(healed.relationship_type_definitions),
         isPublished=bool(row.is_published),
         isSystem=bool(row.is_system) if row.is_system is not None else False,
         scope=row.scope or "universal",
@@ -315,6 +327,31 @@ async def list_latest_ontologies(session: AsyncSession, include_deleted: bool = 
     return [_to_response(r) for r in result.scalars().all()]
 
 
+async def _heal_case_variants_at_rest(session: AsyncSession, row: OntologyORM) -> None:
+    """Self-heal a corrupted-at-rest ontology (case-variant duplicate declared
+    keys) on read: collapse to canonical form and persist ONCE. The frontend
+    already folds for display and the write-path guard rejects new dupes, but an
+    ontology nobody edits would otherwise keep its split rows forever. Idempotent
+    (a clean ontology is untouched) and best-effort (a failure never breaks the
+    read; the response is folded regardless via ``_to_response``)."""
+    try:
+        healed = _canonicalize_row(row)
+        if not healed.changed:
+            return
+        row.relationship_type_definitions = json.dumps(healed.relationship_type_definitions)
+        row.entity_type_definitions = json.dumps(healed.entity_type_definitions)
+        row.containment_edge_types = json.dumps(healed.containment_edge_types)
+        row.lineage_edge_types = json.dumps(healed.lineage_edge_types)
+        await session.commit()
+        logger.info(
+            "Ontology %s: healed case-variant duplicate type ids at rest on read "
+            "(%d relationship, %d entity group(s) merged).",
+            row.id, len(healed.merged_relationships), len(healed.merged_entities),
+        )
+    except Exception as exc:
+        logger.warning("Ontology %s: case-variant heal-on-read skipped: %s", row.id, exc)
+
+
 async def get_ontology(
     session: AsyncSession, ontology_id: str
 ) -> Optional[OntologyDefinitionResponse]:
@@ -322,7 +359,10 @@ async def get_ontology(
         select(OntologyORM).where(OntologyORM.id == ontology_id)
     )
     row = result.scalar_one_or_none()
-    return _to_response(row) if row else None
+    if not row:
+        return None
+    await _heal_case_variants_at_rest(session, row)
+    return _to_response(row)
 
 
 async def get_ontology_orm(
