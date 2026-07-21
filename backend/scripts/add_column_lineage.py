@@ -320,6 +320,11 @@ def main():
             edge_models = [GraphEdge(**e) for e in new_edges]
             asyncio.run(provider.save_custom_graph([], edge_models))
             print(f"Pushed {len(edge_models)} edges to FalkorDB")
+            # Converge read caches + the :AGGREGATED overlay after this direct
+            # FalkorDB load (best-effort; no-op if the control plane is
+            # unreachable or DATAVIZ_SKIP_LOAD_SIGNAL is set).
+            from backend.scripts.signal_data_changed import emit_after_load
+            emit_after_load(graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus"))
         except Exception as e:
             print(f"FalkorDB push failed: {e}")
             sys.exit(1)

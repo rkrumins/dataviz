@@ -1537,6 +1537,12 @@ Examples:
             import traceback; traceback.print_exc()
             sys.exit(1)
 
+        # Converge read caches + the :AGGREGATED overlay after this direct
+        # FalkorDB load (best-effort; no-op if the control plane is
+        # unreachable or DATAVIZ_SKIP_LOAD_SIGNAL is set).
+        from backend.scripts.signal_data_changed import emit_after_load
+        emit_after_load(graph_name=args.graph)
+
         if args.materialize:
             try:
                 asyncio.run(materialize_aggregated(graph_name=args.graph))

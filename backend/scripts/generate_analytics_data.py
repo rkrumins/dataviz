@@ -388,6 +388,11 @@ if __name__ == "__main__":
     
     try:
         asyncio.run(push_to_falkordb(gen, args.graph))
+        # Converge read caches + the :AGGREGATED overlay after this direct
+        # FalkorDB load (best-effort; no-op if the control plane is
+        # unreachable or DATAVIZ_SKIP_LOAD_SIGNAL is set).
+        from backend.scripts.signal_data_changed import emit_after_load
+        emit_after_load(graph_name=args.graph)
     except Exception as e:
         logger.error(f"Failed to push to FalkorDB: {e}")
         import traceback
