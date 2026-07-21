@@ -190,6 +190,8 @@ def _reset_stale_alembic_version(connection) -> None:
         # _ensure_wide_alembic_version_column) DID record the long id, so they
         # must be translated rather than reset to baseline.
         "20260712_1730_view_activity_data_changed": "20260712_1730_val_data_changed",
+        # 38 chars — over the default VARCHAR(32); shortened 2026-07-21.
+        "20260719_1200_rebrand_default_branding": "20260719_1200_rebrand_branding",
     }
     renamed_to = _RENAMED_REVISIONS.get(current_version)
     if renamed_to:
