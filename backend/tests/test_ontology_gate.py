@@ -459,3 +459,19 @@ def test_list_reconciliation_is_case_insensitive():
     ))
     assert report.has_lineage is True
     assert "no_lineage" not in report.blocking_reasons
+
+
+def test_missing_types_fold_case_variants():
+    """A graph that spells one type several ways yields ONE canonical missing type, so the
+    one-click 'add missing types' fix seeds a single canonical declaration instead of a
+    case-colliding pair (Has+HAS) the write-path guard would 422."""
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={},
+        relationship_type_definitions_raw={"FLOWS": _make_relationship(is_lineage=True)},
+        introspected_entity_ids=["Node", "node", "NODE", "Roots"],
+        introspected_edge_ids=["Has", "HAS", "has", "FLOWS"],
+    ))
+    # Has/HAS/has collapse to one canonical; FLOWS is declared so not missing.
+    assert report.missing_edge_types == ["HAS"]
+    # Node/node/NODE collapse to one; Roots is its own.
+    assert report.missing_entity_types == ["NODE", "Roots"]

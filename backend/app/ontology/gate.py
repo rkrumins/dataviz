@@ -73,6 +73,18 @@ class ResolutionReport:
     fingerprint: Optional[str] = None
 
 
+def _fold_case_variants(ids) -> List[str]:
+    """Collapse case-variant ids to ONE canonical per case-fold, sorted (uppercase-first, matching
+    the UPPER_SNAKE edge / PascalCase node conventions). A graph that spells one type several ways
+    (``Has``/``HAS``/``has``) yields ONE missing type — so the one-click "add missing types" fix
+    seeds a single canonical declaration instead of a case-colliding pair the write-path guard
+    (``case_insensitive_type_id_collisions``) would then reject with a 422."""
+    seen: Dict[str, str] = {}
+    for i in sorted(ids):
+        seen.setdefault(str(i).lower(), i)
+    return sorted(seen.values())
+
+
 def _was_explicitly_classified(raw: Dict[str, Any]) -> bool:
     """Check if both is_containment and is_lineage were explicitly set in the
     raw JSON dict (not just defaulted to false by the parser).
@@ -181,7 +193,7 @@ def check_resolution(
     # Case-insensitive match: graph providers return labels like "Person"
     # while ontologies may key them differently. Same convention as resolver.
     defined_entity_keys = {k.upper() for k in entity_defs}
-    missing_entity_types = sorted(
+    missing_entity_types = _fold_case_variants(
         {eid for eid in introspected_entity_ids if eid.upper() not in defined_entity_keys}
     )
     if missing_entity_types:
@@ -189,7 +201,7 @@ def check_resolution(
 
     # Criterion 2 (advisory) — every introspected edge type defined.
     defined_rel_keys = {k.upper() for k in rel_defs}
-    missing_edge_types = sorted(
+    missing_edge_types = _fold_case_variants(
         {eid for eid in introspected_edge_ids if eid.upper() not in defined_rel_keys}
     )
     if missing_edge_types:

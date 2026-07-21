@@ -9,6 +9,7 @@ import {
   foldRelTypeRows,
   canonicalizeRelDefsForSave,
   canonicalizeEntityDefsForSave,
+  foldRequestTypeDefs,
 } from './caseFold'
 
 const edge = (id: string, count: number, sourceTypes: string[] = [], targetTypes: string[] = []): EdgeTypeSummary =>
@@ -108,6 +109,33 @@ describe('canonicalizeRelDefsForSave', () => {
     const out = canonicalizeRelDefsForSave(relDefs, ['HAS'], ['FLOWS'])
     expect(Object.keys(out.relDefs).sort()).toEqual(['FLOWS', 'HAS'])
     expect(out.merged).toEqual({})
+  })
+})
+
+describe('foldRequestTypeDefs', () => {
+  it('folds case-variant relationship keys in a write request so the guard can never fire', () => {
+    const req = {
+      relationshipTypeDefinitions: {
+        Has: { name: 'Has', is_containment: false },
+        HAS: { name: 'Has', is_containment: true },
+      },
+      containmentEdgeTypes: ['HAS'],
+    }
+    const out = foldRequestTypeDefs(req)
+    const keys = Object.keys(out.relationshipTypeDefinitions)
+    expect(keys).toHaveLength(1)
+    expect(keys[0].toLowerCase()).toBe('has')
+    expect((out.relationshipTypeDefinitions as Record<string, Record<string, unknown>>)[keys[0]].is_containment).toBe(true)
+  })
+
+  it('does not add empty containment/lineage lists on a partial update', () => {
+    const out = foldRequestTypeDefs({ relationshipTypeDefinitions: { Has: {}, HAS: {} } })
+    expect('containmentEdgeTypes' in out).toBe(false)
+    expect('lineageEdgeTypes' in out).toBe(false)
+  })
+
+  it('is a no-op for a request with no type-def keys', () => {
+    expect(foldRequestTypeDefs({ name: 'x', description: 'y' })).toEqual({ name: 'x', description: 'y' })
   })
 })
 

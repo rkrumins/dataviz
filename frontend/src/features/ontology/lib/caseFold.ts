@@ -321,6 +321,41 @@ export function canonicalizeRelDefsForSave(
   return { relDefs: outDefs, containment: remap(containment), lineage: remap(lineage), merged }
 }
 
+/**
+ * Fold case-variant type-id keys in an ontology WRITE request so the payload can never trip the
+ * backend's case-insensitive collision guard (`case_insensitive_type_id_collisions`, which 422s on
+ * two declared ids differing only by case — e.g. `Has`+`HAS`). Operates on the request shape
+ * (camelCase `relationshipTypeDefinitions` / `entityTypeDefinitions` / `containmentEdgeTypes` /
+ * `lineageEdgeTypes`); a NO-OP when those keys are absent or already canonical, so it is safe to run
+ * on every create/update/import from the shared service layer. Idempotent — re-folding an already
+ * canonical payload changes nothing.
+ */
+export function foldRequestTypeDefs<T extends Record<string, unknown>>(req: T): T {
+  if (!req || typeof req !== 'object') return req
+  const out: Record<string, unknown> = { ...req }
+
+  const relDefs = out.relationshipTypeDefinitions
+  if (relDefs && typeof relDefs === 'object') {
+    const canon = canonicalizeRelDefsForSave(
+      relDefs as Record<string, unknown>,
+      (out.containmentEdgeTypes as string[]) ?? [],
+      (out.lineageEdgeTypes as string[]) ?? [],
+    )
+    out.relationshipTypeDefinitions = canon.relDefs
+    // Only rewrite the lists that were actually part of the request — never add an empty list that
+    // would wipe the server's existing containment/lineage on a partial update.
+    if (out.containmentEdgeTypes !== undefined) out.containmentEdgeTypes = canon.containment
+    if (out.lineageEdgeTypes !== undefined) out.lineageEdgeTypes = canon.lineage
+  }
+
+  const entityDefs = out.entityTypeDefinitions
+  if (entityDefs && typeof entityDefs === 'object') {
+    out.entityTypeDefinitions = canonicalizeEntityDefsForSave(entityDefs as Record<string, unknown>).entityDefs
+  }
+
+  return out as T
+}
+
 export interface CanonicalizedEntityDefs {
   entityDefs: Record<string, unknown>
   merged: Record<string, string[]>
