@@ -1481,7 +1481,7 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
             </ul>
             <div className="flex items-center justify-between text-[11px] text-ink-muted mb-4">
                 <span>
-                    {results.length} sources
+                    {results.length} source{results.length === 1 ? '' : 's'}
                     {queued > 0 && ` · ${queued} rebuild${queued === 1 ? '' : 's'} queued`}
                     {deferred > 0 && ` · ${deferred} deferred`}
                     {failed > 0 && ` · ${failed} failed`}
@@ -1509,6 +1509,8 @@ In `ProviderRefreshDialog.tsx`, replace the `{batch && batch.results.length > 0 
 ```
 
 and import it. Both dialogs currently import `{ AlertTriangle, CheckCircle2, Loader2, XCircle, Zap }`; after this task `XCircle` is unused (it moved into `BatchResultsList`), so drop it. Keep `CheckCircle2` — the completion heading still uses it. `AlertTriangle` is dropped in Task 9, not here. Apply the identical replacement to the results list in `FleetRefreshDialog.tsx`.
+
+**An existing test asserts the current heading.** `Freshness.test.tsx:573` has `expect(await screen.findByText('Refresh complete')).toBeInTheDocument()`; update that string to `'Refresh dispatched'`. The same test's mocked batch result is `{ dataSourceId: 'ds-1', outcome: 'done' }` with no `name`/`actions`/`deferred` — it now flows through `BatchResultsList` and must render `ds-1` via the name fallback, `no changes needed` for the empty actions, and a `1 source` summary. That mock is exactly the shape an older batch still sitting in Redis has, so leave it un-widened: it is load-bearing proof the optional fields degrade correctly.
 
 Also change the completion heading so it cannot read as "rebuilds finished":
 
@@ -1609,6 +1611,14 @@ function clearsCache(scope: RefreshScope): boolean {
     return scope === 'full' || scope === 'clear' || scope === 'read-caches'
 }
 
+/** The change-gated scope does neither of the above on its own: it checks
+ *  each source's fingerprint and acts only where data actually changed.
+ *  Without this line the default scope renders a "This will:" header over
+ *  an empty list. */
+function isChangeGated(scope: RefreshScope, force: boolean): boolean {
+    return scope === 'auto' && !force
+}
+
 export function RefreshImpact({ scope, force, sourceCount }: {
     scope: RefreshScope
     force: boolean
@@ -1625,6 +1635,13 @@ export function RefreshImpact({ scope, force, sourceCount }: {
         <div className="mb-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2.5 text-xs text-ink-secondary">
             <p className="mb-2 font-medium text-ink">This will, for {target}:</p>
             <ul className="space-y-1">
+                {isChangeGated(scope, force) && (
+                    <li className="flex items-start gap-2">
+                        <RotateCcw className="w-3.5 h-3.5 shrink-0 mt-0.5 text-indigo-500" />
+                        check each source and refresh only the ones whose data changed
+                        <span className="text-ink-muted">(unchanged sources cost nothing)</span>
+                    </li>
+                )}
                 {clearsCache(scope) && (
                     <li className="flex items-start gap-2">
                         <Eraser className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-400" />
@@ -1691,7 +1708,19 @@ useEffect(() => { setConfirming(false) }, [scope, force])
 - Its amber warning block sits at `:125-126`; that is what `RefreshImpact` replaces.
 - Its results list is at `:168-170` (replaced in Task 8).
 
-Its confirm copy names the fleet rather than a provider. Everything else — the impact block, the two-step confirm, the reset-on-scope-change effect — is the same.
+Its confirm copy names the fleet rather than a provider. Everything else — the impact block, the two-step confirm, the reset-on-scope-change effect — is the same. Note its start button is already dynamically labelled `{isFull ? 'Run full refresh' : 'Refresh all sources'}` at `:147`; the confirm step replaces that label only while `confirming` is true.
+
+**An existing test drives this button and will break.** In `Freshness.test.tsx` (the fleet-refresh test ending at `:574`), the flow clicks `advanced options`, then `Full refresh`, then `run full refresh`, and immediately expects `refreshAll` to have been called. With the two-step confirm, that first click only arms the confirmation. Add the second click before the assertion:
+
+```tsx
+await user.click(screen.getByRole('button', { name: /run full refresh/i }))
+// Full refresh rebuilds every source, so it now takes an explicit confirm.
+await user.click(await screen.findByRole('button', { name: /yes, rebuild/i }))
+
+await waitFor(() => expect(refreshAll).toHaveBeenCalledWith(expect.objectContaining({ scope: 'full' })))
+```
+
+`ProviderRefreshDialog.test.tsx:49` is NOT affected — it clicks `start refresh` under the default `auto` scope with `force` false, which does not rebuild and so keeps its single click. Verify that stays true rather than assuming it.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
