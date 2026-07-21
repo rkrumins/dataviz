@@ -456,3 +456,94 @@ export function DateRangePicker({
         </div>
     )
 }
+
+// ── Aggregation pipeline phases ─────────────────────────────────────
+//
+// Moved here from JobRow.tsx so the Freshness cockpit renders the SAME
+// stepper and the SAME phase names. Two hard-coded copies of the
+// pipeline's vocabulary drift the moment a phase is added.
+
+// UI phase visibility. Maps the backend's short phase IDs (emitted by
+// the aggregation pipeline's EXTRACT → COMPUTE → RECONCILE → APPLY
+// stages) to operator-readable status labels. ``null`` / unrecognized
+// values fall back to the generic "Processing lineage edges" string so
+// legacy / non-FalkorDB paths keep the old UX.
+export const PHASE_LABELS: Record<string, string> = {
+    extracting: 'Extracting lineage edges',
+    computing: 'Computing rollups',
+    reconciling: 'Reconciling existing aggregated edges',
+    applying: 'Writing aggregated edges',
+}
+
+export function phaseLabel(currentPhase: string | null | undefined): string {
+    if (currentPhase && PHASE_LABELS[currentPhase]) {
+        return PHASE_LABELS[currentPhase]
+    }
+    return 'Processing lineage edges'
+}
+
+// Pipeline phases in execution order — drives the stepper and the
+// per-phase duration readout (keys emitted in ``job.runStats``).
+export const PHASES: Array<{ id: string; label: string; statKey: string }> = [
+    { id: 'extracting', label: 'Extract', statKey: 'extract_s' },
+    { id: 'computing', label: 'Compute', statKey: 'compute_s' },
+    { id: 'reconciling', label: 'Reconcile', statKey: 'reconcile_s' },
+    { id: 'applying', label: 'Apply', statKey: 'apply_s' },
+]
+
+// Overall-progress band each phase occupies. MUST mirror the pipeline's
+// _progress_pct mapping in falkordb_materialize.py (extract 0-45,
+// compute 45-55, reconcile 55-75, apply 75-100).
+export const PHASE_BANDS: Record<string, [number, number]> = {
+    extracting: [0, 45],
+    computing: [45, 55],
+    reconciling: [55, 75],
+    applying: [75, 100],
+}
+
+/**
+ * Four-segment EXTRACT → COMPUTE → RECONCILE → APPLY stepper.
+ * Running: segments before the current phase are done, the current one
+ * pulses, later ones are dormant. Completed: all done, with the
+ * per-phase durations from ``runStats`` under each segment.
+ */
+export function PhaseStepper({ currentPhase, runStats, status }: {
+    currentPhase: string | null | undefined
+    runStats: Record<string, number | string | Record<string, number>> | null | undefined
+    status: string
+}) {
+    const completed = status === 'completed'
+    const currentIdx = currentPhase ? PHASES.findIndex(p => p.id === currentPhase) : -1
+    if (!completed && currentIdx < 0) return null
+    return (
+        <div className="flex items-start gap-1.5">
+            {PHASES.map((p, i) => {
+                const done = completed || i < currentIdx
+                const active = !completed && i === currentIdx
+                const raw = runStats?.[p.statKey]
+                const secs = typeof raw === 'number' ? raw : null
+                return (
+                    <div key={p.id} className="flex-1 min-w-0">
+                        <div className={cn(
+                            'h-1 rounded-full transition-colors',
+                            done ? 'bg-indigo-500/70'
+                                : active ? 'bg-gradient-to-r from-indigo-500 to-violet-400 animate-pulse'
+                                : 'bg-black/[0.06] dark:bg-white/[0.08]',
+                        )} />
+                        <div className="mt-1 flex items-center justify-between gap-1">
+                            <span className={cn(
+                                'text-[9px] font-bold uppercase tracking-wider truncate',
+                                active ? 'text-indigo-400' : done ? 'text-ink-muted' : 'text-ink-muted/35',
+                            )}>{p.label}</span>
+                            {secs != null && (
+                                <span className="text-[9px] tabular-nums text-ink-muted/60 flex-shrink-0">
+                                    {formatDuration(secs)}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )
+            })}
+        </div>
+    )
+}
