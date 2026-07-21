@@ -125,6 +125,12 @@ export interface DataSourceReadinessResponse {
   driftDetected: boolean;
   lastAggregatedAt?: string;
   aggregationEdgeCount: number;
+  /** Depth-stamp contract version of the materialized cube; < 2 predates
+   *  sourceDepth/targetDepth (self-nesting hierarchies read degenerate). */
+  aggregationStampVersion?: number | null;
+  /** True when a ready cube predates the depth-stamp contract and should be
+   *  rebuilt — drives the per-source "rebuild to fix nested hierarchies" warning. */
+  needsRebuild?: boolean;
   message: string;
 }
 
