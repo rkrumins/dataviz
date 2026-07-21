@@ -736,7 +736,7 @@ describe('state-driven row actions', () => {
 
     it('never repeats the primary action in the overflow, and offers no rebuild mid-rebuild', () => {
         expect(overflowActions('neverBuilt')).toEqual([])
-        expect(overflowActions('recomputing').map(a => a.scope)).toEqual(['read-caches'])
+        expect(overflowActions('recomputing').map(a => a.scope)).toEqual(['read-caches', 'clear'])
         expect(overflowActions('upToDate').map(a => a.scope)).not.toContain('read-caches')
         expect(overflowActions('failed').map(a => a.scope)).not.toContain('rollups')
     })

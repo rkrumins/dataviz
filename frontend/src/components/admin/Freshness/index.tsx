@@ -123,10 +123,15 @@ export function Freshness() {
 
     const qc = useQueryClient()
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
-        await aggregationService.cancelJob(dsId, jobId)
+        try {
+            await aggregationService.cancelJob(dsId, jobId)
+            showToast('success', 'Rebuild cancelled.')
+        } catch (e) {
+            showToast('error', (e as Error).message || 'Could not cancel the rebuild.')
+        }
         void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
-    }, [qc])
+    }, [qc, showToast])
 
     const workspacesQ = useQuery({
         queryKey: ['freshness', 'workspaces'],

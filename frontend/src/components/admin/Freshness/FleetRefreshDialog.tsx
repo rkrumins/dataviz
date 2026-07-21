@@ -46,7 +46,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     useEffect(() => {
         if (!done) return
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
-        showToast('success', 'Fleet refresh complete.')
+        showToast('success', 'Fleet refresh dispatched — rebuilds continue in the background.')
     }, [done, qc, showToast])
 
     // A scope switch can never inherit a prior confirmation.

@@ -261,7 +261,7 @@ export function overflowActions(state: FreshnessState): RowAction[] {
         case 'neverBuilt':
             return []
         case 'recomputing':
-            return [byScope('read-caches')]
+            return [byScope('read-caches'), byScope('clear')]
         case 'upToDate':
             return [byScope('clear'), byScope('rollups'), byScope('full')]
         case 'failed':
@@ -273,7 +273,8 @@ export function overflowActions(state: FreshnessState): RowAction[] {
 }
 
 export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded, onToggleExpand, onCancelJob }: Props) {
-    const actions = overflowActions(freshnessState(row))
+    const state = freshnessState(row)
+    const actions = overflowActions(state)
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
     // who can't manage this row's workspace (RegistryConnections convention) —
     // a disabled item would just 403 on click.
@@ -347,7 +348,7 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
                 {canManage && (
                 <div className="flex items-center justify-end gap-1">
                     {(() => {
-                        const p = primaryAction(freshnessState(row))
+                        const p = primaryAction(state)
                         const primaryClass = 'px-2.5 py-1 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
 
                         // Expand only when there is a panel to open; otherwise send them to the
@@ -396,7 +397,7 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
                                         {label}
                                     </DropdownMenu.Item>
                                 ))}
-                                {job?.id && (
+                                {job?.id && state === 'recomputing' && (
                                     <DropdownMenu.Item
                                         onSelect={() => onCancelJob?.(row.dataSourceId, job.id)}
                                         className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 rounded-lg cursor-pointer outline-none transition-colors data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.04]"
