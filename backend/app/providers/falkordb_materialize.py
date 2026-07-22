@@ -603,16 +603,35 @@ class AggregationPipeline:
         yields no advisories at all."""
         advisories: List[Dict[str, Any]] = []
         if self._empty_directory:
+            # Report the property THIS run actually resolved on — the fix
+            # differs by case, and a hardcoded "urn" hid which one applied:
+            #   • ran as `urn` → the configured Node Identity Property did NOT
+            #     reach this run (frozen before the change, or a stale build) →
+            #     re-aggregate so the new value freezes onto the job.
+            #   • ran as e.g. `id` but still empty → the run DID use it, but no
+            #     node carries `urn` OR `id` → the property name is wrong for
+            #     THIS physical graph (case-sensitive), not merely unset.
+            _ident = str(getattr(self.p, "_node_identity_property", None) or "urn")
+            if _ident == "urn":
+                _detail = (
+                    "none carry `urn`. This run keyed identity on `urn` only — "
+                    "if this is an onboarded graph keyed by another property "
+                    "(e.g. `id`), set the data source's Node Identity Property "
+                    "and re-aggregate so the new value takes effect."
+                )
+            else:
+                _detail = (
+                    f"this run resolved identity as coalesce(urn, {_ident}) but "
+                    f"no node carries `urn` OR `{_ident}`. The Node Identity "
+                    f"Property IS applied — confirm `{_ident}` is the exact "
+                    "property (case-sensitive) that holds the node id on this "
+                    "graph, then re-aggregate."
+                )
             advisories.append({
                 "kind": "identity_unresolved",
                 "severity": "error",
-                "message": (
-                    "No node resolved a canonical identity — the graph has "
-                    "nodes but none carry `urn`. If this is an onboarded graph "
-                    "keyed by another property (e.g. `id`), set the data "
-                    "source's Node Identity Property; every aggregation pair is "
-                    "dropped until then."
-                ),
+                "identity_property": _ident,
+                "message": "No node resolved a canonical identity — " + _detail,
             })
         elif self._dropped_endpoints:
             advisories.append({
@@ -637,6 +656,29 @@ class AggregationPipeline:
                     + ", ".join(self._unmatched_types[:8])
                     + ". Check the ontology's edge-type casing against the "
                     "physical graph."
+                ),
+            })
+        # Containment was declared but the DAG came back EMPTY (maxDepth 0):
+        # aggregation degenerates to a flat leaf-only cube — the roll-up the
+        # user expects never happens, and on a FRESH graph this was silent
+        # (no precondition failure since there were no stored cells to wipe).
+        # Surface WHY: either the containment type isn't classified/frozen, or
+        # its physical spelling differs from the declared one and wasn't folded.
+        _struct = getattr(self, "_struct_parents", None)
+        if self._containment and _struct is not None and not _struct:
+            advisories.append({
+                "kind": "containment_empty",
+                "severity": "warning",
+                "types": sorted(self._containment)[:16],
+                "message": (
+                    "Containment edge type(s) "
+                    + ", ".join(sorted(self._containment)[:8])
+                    + " were declared but matched ZERO edges in the graph, so "
+                    "the containment hierarchy is empty (maxDepth 0) and edges "
+                    "do not roll up past the leaf level. Confirm the type is "
+                    "classified as Containment AND spelled as the physical graph "
+                    "has it (FalkorDB is case-sensitive — declared HAS vs "
+                    "physical Has)."
                 ),
             })
         return advisories
@@ -876,6 +918,20 @@ class AggregationPipeline:
         # across restarts of the same run.
         self._effective_types = sorted({str(t) for t in effective if t})
         self._type_bit = {t: 1 << i for i, t in enumerate(self._effective_types)}
+        # Observability: the ACTUAL physical spellings this run will scan, after
+        # alias translation + case-fold expansion. If the graph spells a type
+        # differently from the ontology (declared HAS, physical Has), the folded
+        # set MUST include the physical spelling or that type scans nothing.
+        # "declared" is what froze on the job; the folded lists are what runs.
+        logger.info(
+            "aggregation pipeline on %s: scanning containment=%s lineage=%s "
+            "(declared containment=%s lineage=%s; %d rel type(s) observed in graph)",
+            self.p._graph_name,
+            sorted(self._containment), self._effective_types,
+            sorted(str(t) for t in (self._containment_arg or [])),
+            sorted(str(t) for t in (self._lineage_arg or []) if t and t != "AGGREGATED"),
+            len(self._observed_rels or ()),
+        )
         # Completeness diagnosability: a declared/derived spelling that
         # matches NOTHING observed (not exact, not alias, not case-fold)
         # scans zero edges — silently missing aggregations would look

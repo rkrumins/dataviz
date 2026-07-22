@@ -537,7 +537,25 @@ def test_advisory_identity_unresolved_is_error_severity():
     advs = pipe._result(0)["run_stats"]["advisories"]
     hit = next(a for a in advs if a["kind"] == "identity_unresolved")
     assert hit["severity"] == "error"
+    assert hit["identity_property"] == "urn"
     assert "Node Identity Property" in hit["message"]
+
+
+def test_advisory_identity_unresolved_reports_configured_property():
+    """When the run DID apply a custom identity property (e.g. `id`) but still
+    resolved nothing, the advisory must report THAT property — the hardcoded
+    'none carry urn / set the property' text hid whether the setting took
+    effect, which is exactly the "I set id but it says missing" confusion."""
+    pipe = _make_pipeline()
+    pipe.p._node_identity_property = "id"
+    pipe._empty_directory = True
+    hit = next(
+        a for a in pipe._result(0)["run_stats"]["advisories"]
+        if a["kind"] == "identity_unresolved"
+    )
+    assert hit["identity_property"] == "id"
+    assert "coalesce(urn, id)" in hit["message"]
+    assert "IS applied" in hit["message"]
 
 
 def test_advisory_dropped_endpoints_reports_count():
@@ -566,6 +584,31 @@ def test_advisory_unmatched_edge_types_lists_them():
     hit = next(a for a in advs if a["kind"] == "edge_types_unmatched")
     assert "TRANSFORMS" in hit["message"]
     assert hit["types"] == ["TRANSFORMS", "MOVES"]
+
+
+def test_advisory_empty_containment_when_declared_but_no_dag():
+    """Declared containment that matched ZERO edges (maxDepth 0) must surface a
+    loud advisory instead of silently producing a flat leaf-only cube — the
+    'no aggregated edges roll up' failure on a case-drifted / unclassified
+    containment type. _struct_parents is the computed DAG (empty set here)."""
+    pipe = _make_pipeline()
+    pipe._containment = ["HAS", "Has"]   # resolved physical spellings this run
+    pipe._struct_parents = set()          # DAG computed, but empty
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "containment_empty")
+    assert hit["severity"] == "warning"
+    assert "HAS" in hit["message"]
+    assert hit["types"] == ["HAS", "Has"]
+
+
+def test_no_containment_empty_advisory_when_dag_present():
+    """A real containment DAG must NOT trip the empty-containment advisory."""
+    pipe = _make_pipeline()
+    pipe._containment = ["HAS"]
+    pipe._struct_parents = {1, 2}         # non-empty DAG
+    stats = pipe._result(5)["run_stats"]
+    kinds = {a["kind"] for a in stats.get("advisories", [])}
+    assert "containment_empty" not in kinds
 
 
 def test_clean_run_emits_no_advisories_key():
