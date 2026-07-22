@@ -612,25 +612,46 @@ class AggregationPipeline:
             #     node carries `urn` OR `id` → the property name is wrong for
             #     THIS physical graph (case-sensitive), not merely unset.
             _ident = str(getattr(self.p, "_node_identity_property", None) or "urn")
+            # Auto-detected populated identity properties (from the empty-dir
+            # probe) — names the fix and disambiguates "set id but didn't take".
+            _cands = getattr(self, "_identity_candidates", None) or {}
+            _found = ", ".join(
+                f"`{k}` ({v})" for k, v in sorted(_cands.items(), key=lambda kv: -kv[1])
+                if k != _ident and v
+            )
+            _resolvable = {k for k, v in _cands.items() if v and k != _ident}
             if _ident == "urn":
                 _detail = (
-                    "none carry `urn`. This run keyed identity on `urn` only — "
-                    "if this is an onboarded graph keyed by another property "
-                    "(e.g. `id`), set the data source's Node Identity Property "
-                    "and re-aggregate so the new value takes effect."
+                    "this run keyed identity on `urn` only and no node carries it."
                 )
+                if _resolvable:
+                    _detail += (
+                        f" Nodes DO carry: {_found}. Your Node Identity Property "
+                        "did not reach this run — confirm it's saved (it should "
+                        "still show after a refresh) and re-aggregate."
+                    )
+                else:
+                    _detail += (
+                        " If this is an onboarded graph keyed by another property, "
+                        "set the data source's Node Identity Property and re-aggregate."
+                    )
             else:
                 _detail = (
-                    f"this run resolved identity as coalesce(urn, {_ident}) but "
-                    f"no node carries `urn` OR `{_ident}`. The Node Identity "
-                    f"Property IS applied — confirm `{_ident}` is the exact "
-                    "property (case-sensitive) that holds the node id on this "
-                    "graph, then re-aggregate."
+                    f"this run resolved identity as coalesce(urn, {_ident}) but no "
+                    f"node carries `urn` OR `{_ident}`."
                 )
+                if _resolvable:
+                    _detail += f" Nodes DO carry: {_found} — set the property to one of those."
+                else:
+                    _detail += (
+                        f" Confirm `{_ident}` is the exact (case-sensitive) property "
+                        "that holds the node id on this graph, then re-aggregate."
+                    )
             advisories.append({
                 "kind": "identity_unresolved",
                 "severity": "error",
                 "identity_property": _ident,
+                "resolvable_properties": sorted(_resolvable),
                 "message": "No node resolved a canonical identity — " + _detail,
             })
         elif self._dropped_endpoints:
@@ -1699,14 +1720,48 @@ class AggregationPipeline:
         # identity mapping configured). Surface it loudly instead of silently dropping every pair.
         if not directory and max_id >= 0:
             self._empty_directory = True            # → run_stats advisory
+            # Auto-detect the fix: which common identity property WOULD resolve?
+            # A read-only sample so the advisory can NAME the property to set
+            # instead of the operator guessing — and so a case where the run
+            # keyed on `urn` while nodes actually carry `id` is unmistakable.
+            self._identity_candidates = await self._probe_identity_candidates()
+            _hint = ", ".join(
+                f"{k}={v}" for k, v in sorted(
+                    self._identity_candidates.items(), key=lambda kv: -kv[1])
+            )
             logger.warning(
                 "aggregation pipeline on %s: node directory is EMPTY though the graph has nodes — "
-                "no node resolved a canonical identity via %s. If this is an onboarded graph whose "
-                "nodes are identified by a property other than `urn`, set the source's identity "
-                "property (URN-equivalent). Every aggregation pair will be dropped until then.",
-                self.p._graph_name, _node_identity_expr(ident_prop),
+                "no node resolved a canonical identity via %s. Sampled properties that WOULD "
+                "resolve: %s. Set the source's Node Identity Property to a populated one and "
+                "re-aggregate; every aggregation pair is dropped until then.",
+                self.p._graph_name, _node_identity_expr(ident_prop), _hint or "none found",
             )
         return directory
+
+    async def _probe_identity_candidates(self) -> Dict[str, int]:
+        """Read-only: over a bounded node sample, how many carry each common
+        identity property. Powers a precise "set Node Identity Property to X (N
+        nodes carry it)" advisory when the configured property resolved nothing
+        — including revealing that nodes DO carry `id` while the run keyed on
+        `urn`, the exact "I set id but it says missing" case."""
+        cands = ["id", "name", "key", "uuid", "guid", "qualifiedName", "urn"]
+        parts = ", ".join(
+            f"sum(CASE WHEN n.`{c}` IS NOT NULL THEN 1 ELSE 0 END)" for c in cands
+        )
+        try:
+            res = await self.p._ro_query(
+                f"MATCH (n) WITH n LIMIT 5000 RETURN {parts}",
+                timeout=_scan_timeout_s(),
+            )
+            row = (res.result_set or [[]])[0] if (res.result_set) else []
+            return {
+                c: int(row[i] or 0)
+                for i, c in enumerate(cands)
+                if i < len(row) and row[i]
+            }
+        except Exception as exc:
+            logger.debug("identity candidate probe failed: %s", exc)
+            return {}
 
     async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
         """Resolve node IDs → (urn, first label) from the range-scanned

@@ -555,7 +555,24 @@ def test_advisory_identity_unresolved_reports_configured_property():
     )
     assert hit["identity_property"] == "id"
     assert "coalesce(urn, id)" in hit["message"]
-    assert "IS applied" in hit["message"]
+    assert "case-sensitive" in hit["message"]
+
+
+def test_advisory_identity_unresolved_names_resolvable_property():
+    """The decisive "I set id but it says missing" case: the run keyed on `urn`,
+    but the probe found nodes DO carry `id` — the advisory must name it and say
+    the setting didn't reach this run, not repeat 'set the property'."""
+    pipe = _make_pipeline()
+    pipe._empty_directory = True
+    pipe._identity_candidates = {"id": 4200, "name": 4200, "urn": 0}
+    hit = next(
+        a for a in pipe._result(0)["run_stats"]["advisories"]
+        if a["kind"] == "identity_unresolved"
+    )
+    assert hit["identity_property"] == "urn"
+    assert "id" in hit["resolvable_properties"]
+    assert "`id` (4200)" in hit["message"]
+    assert "did not reach this run" in hit["message"]
 
 
 def test_advisory_dropped_endpoints_reports_count():
