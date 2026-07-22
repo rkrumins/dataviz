@@ -9,7 +9,9 @@
       "Bash(docker stop *)",
       "Bash(docker run *)",
       "Bash(docker start *)",
-      "Bash(timeout 180 npx vite build --outDir /tmp/claude-0/-home-user-dataviz/18adb4a1-b872-5eee-9795-b1520525140b/scratchpad/dist-check --emptyOutDir)"
+      "Bash(timeout 180 npx vite build --outDir /tmp/claude-0/-home-user-dataviz/18adb4a1-b872-5eee-9795-b1520525140b/scratchpad/dist-check --emptyOutDir)",
+      "Bash(git -C /home/user/dataviz log --oneline -20)",
+      "Bash(git -C /home/user/dataviz log -5 --stat)"
     ]
   },
   "sandbox": {
