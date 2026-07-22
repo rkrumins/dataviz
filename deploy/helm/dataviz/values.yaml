@@ -203,6 +203,19 @@ services:
     resources:
       requests: { cpu: 250m, memory: 1Gi }
       limits: { cpu: "1", memory: 4Gi }
+  # Versioning projection engine. Runs `python -m backend.app.services.versioning`
+  # off the web tier so the CPU-bound full-seed build never wedges the API event
+  # loop. This MUST be deployed for versioned graphs to project into FalkorDB —
+  # without it, projection jobs sit pending (and the web tier must never pick up
+  # the slack via GRAPHVER_PROJECTION_INPROCESS=1). Replicas serialize per graph
+  # via a Postgres advisory lock; scale up for many concurrently-lagging graphs.
+  versioningWorker:
+    replicas: 1
+    skipSchemaCheck: false
+    terminationGracePeriodSeconds: 60
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { cpu: "2", memory: 4Gi }
   stats:
     replicas: 1
     skipSchemaCheck: false

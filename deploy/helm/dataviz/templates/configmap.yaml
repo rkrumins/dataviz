@@ -12,6 +12,12 @@ data:
   FALKORDB_PORT: {{ .Values.config.falkordb.port | quote }}
   FALKORDB_GRAPH_NAME: {{ .Values.config.falkordb.graphName | quote }}
   FALKORDB_SERVER_TIMEOUT_MAX_MS: {{ .Values.config.falkordb.serverTimeoutMaxMs | quote }}
+  # Projection is delegated to the versioning-worker Deployment; the web tier
+  # must NOT host the in-process projector (its CPU-bound full-seed build would
+  # wedge the event loop and freeze every request -> event_loop_lag CRITICAL,
+  # HTTP 504 on all routes). Pinned here so the topology never depends on a code
+  # default flipping. Only ever set 1 for a single-node dev stack with no worker.
+  GRAPHVER_PROJECTION_INPROCESS: "0"
   JWT_ALGORITHM: {{ .Values.config.jwt.algorithm | quote }}
   JWT_EXPIRY_MINUTES: {{ .Values.config.jwt.expiryMinutes | quote }}
   ADMIN_EMAIL: {{ .Values.config.adminEmail | quote }}

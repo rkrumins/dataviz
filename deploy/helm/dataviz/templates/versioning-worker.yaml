@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versioning-worker
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/name: versioning-worker
+spec:
+  # Projection is serialized per graph_id by a cross-pod Postgres advisory lock
+  # + a Redis consumer group, so replicas never double-project. Start at 1;
+  # scale for throughput on many concurrently-lagging graphs.
+  replicas: {{ .Values.services.versioningWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versioning-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versioning-worker
+        app.kubernetes.io/part-of: dataviz
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.services.versioningWorker.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.ordering.enabled (not .Values.services.versioningWorker.skipSchemaCheck) }}
+      initContainers:
+        {{- if .Values.ordering.enabled }}
+        {{- include "dataviz.waitForControlplane" . | nindent 8 }}
+        {{- end }}
+        {{- if not .Values.services.versioningWorker.skipSchemaCheck }}
+        {{- include "dataviz.schemaCheckInitContainer" (dict "ctx" $) | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: versioning-worker
+          # The worker image bundles the whole backend; run the versioning
+          # projection module instead of the aggregation one.
+          image: {{ include "dataviz.image" (dict "ctx" $ "name" "aggregation-worker") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "backend.app.services.versioning"]
+          envFrom:
+            - configMapRef:
+                name: dataviz-config
+            - secretRef:
+                name: {{ include "dataviz.secretName" . }}
+          env:
+            - name: FALKORDB_SOCKET_TIMEOUT
+              value: "60"
+          # No httpGet probes: this worker has no HTTP health server yet, so
+          # probes would flap and restart-loop. A crash exits the process and
+          # the Deployment restarts it; projection is idempotent + PEL-recovered
+          # on restart.
+          resources:
+            {{- toYaml .Values.services.versioningWorker.resources | nindent 12 }}
