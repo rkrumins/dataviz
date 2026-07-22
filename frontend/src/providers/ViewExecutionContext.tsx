@@ -117,28 +117,21 @@ export function ViewExecutionProvider({
 
   // ── Resolve null dataSourceId to the workspace's primary data source ──
   // Many views don't have an explicit dataSourceId — they use the workspace's
-  // primary data source. The old code resolved this via setActiveWorkspace()
-  // which synchronously set activeDataSourceId. We replicate that resolution
-  // reactively here: useWorkspacesStore subscription ensures we re-resolve
-  // when workspaces finish loading (critical for page refresh, where the
-  // workspace list loads asynchronously after mount).
+  // primary data source. This resolution is reactive: the useWorkspacesStore
+  // subscription re-resolves when workspaces finish loading (critical for page
+  // refresh, where the workspace list loads asynchronously after mount). A view
+  // is self-scoping, so its data source is NEVER taken from the global active
+  // workspace/DS selection — only from the view's own workspace.
   const workspaces = useWorkspacesStore(s => s.workspaces)
-  const globalActiveDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
 
   const dataSourceId = useMemo(() => {
-    // 1. If view has an explicit dataSourceId, use it
+    // 1. If the view has an explicit dataSourceId, use it
     if (dataSourceIdProp) return dataSourceIdProp
-    // 2. If view's workspace matches the global active workspace, use its
-    //    active data source (already resolved to primary by workspace store)
-    if (workspaceId === globalCtx.workspaceId && globalActiveDataSourceId) {
-      return globalActiveDataSourceId
-    }
-    // 3. Otherwise look up the workspace's primary data source from the
-    //    workspace list (reactive — re-computes when workspaces load)
+    // 2. Otherwise use the view's workspace primary data source (or its first)
     const ws = workspaces.find(w => w.id === workspaceId)
     const primaryDs = ws?.dataSources?.find(ds => ds.isPrimary) ?? ws?.dataSources?.[0]
     return primaryDs?.id ?? null
-  }, [dataSourceIdProp, workspaceId, globalCtx.workspaceId, globalActiveDataSourceId, workspaces])
+  }, [dataSourceIdProp, workspaceId, workspaces])
 
   const providerId = useMemo(() => {
     const ws = workspaces.find((workspace) => workspace.id === workspaceId)

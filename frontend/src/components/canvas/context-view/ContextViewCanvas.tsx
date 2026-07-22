@@ -30,7 +30,6 @@ import {
 } from '@/hooks/useViewSchema'
 import { useCanvasStore, useCanvasVersion, type LineageEdge } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
 import { useQueryClient } from '@tanstack/react-query'
@@ -574,7 +573,6 @@ export function ContextViewCanvas({
   const displayRules = useReferenceModelStore(s => s.displayRules)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
-  const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // View/Edit mode gates — Published is strictly read-only for everyone;
   // "edit mode" IS having a draft open (no separate flag). `isDraft` is
@@ -583,11 +581,12 @@ export function ContextViewCanvas({
   // belongs to a different data source.
   const dataSourceId = activeView?.dataSourceId ?? null
   // The canvas-versioning scope is the VIEW's own workspace — the same source
-  // CanvasVersioningBar / branchStore.setResolved use. The global workspaces-store
-  // selection can lag or diverge (deep links, workspace switching), and when it does
-  // the strict scope guard in useEffectiveBranchId returned null → isDraft false →
-  // the whole Edit cluster went invisible. See canvasScopeWorkspaceId.
-  const scopeWsId = canvasScopeWorkspaceId(activeView?.workspaceId, activeWorkspaceId)
+  // CanvasVersioningBar / branchStore.setResolved use (CanvasRouter passes
+  // activeView.workspaceId straight through, gated on it being set). It is NOT
+  // coupled to the global active-workspace selection, which could lag or diverge
+  // on deep links / workspace switching and resolve the wrong branch. See
+  // canvasScopeWorkspaceId.
+  const scopeWsId = canvasScopeWorkspaceId(activeView?.workspaceId)
   // Branch-per-view: also scope by the active view's id, so `isDraft` never reflects a
   // draft belonging to a DIFFERENT view on the same data source (branchStore is a single
   // global store — without this, a view switch could keep reading the prior view's gate).

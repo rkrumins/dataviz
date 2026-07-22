@@ -15,6 +15,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeAll } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { DataSourceGroupCard, type DataSourceGroup } from './DataSourceGroupCard'
 
 // jsdom lacks the pointer-capture + scroll APIs Radix calls when a menu opens.
@@ -69,6 +70,7 @@ function renderCard() {
             setPurgeConfirm={vi.fn()}
             actionLoading={null}
         />,
+        { wrapper: MemoryRouter },
     )
 }
 
@@ -109,6 +111,7 @@ describe('DataSourceGroupCard actions menu', () => {
                 setPurgeConfirm={vi.fn()}
                 actionLoading={null}
             />,
+            { wrapper: MemoryRouter },
         )
 
         await user.click(screen.getByLabelText('Data source actions'))
