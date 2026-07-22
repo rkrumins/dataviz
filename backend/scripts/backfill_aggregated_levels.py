@@ -41,6 +41,16 @@ Usage:
 Run order after a fresh ingest / ontology change:
     1. backfill_node_levels.py           (writes n.level)
     2. backfill_aggregated_levels.py     (writes r.sourceLevel / r.targetLevel / r.levelDigest)
+
+⚠️  SELF-NESTING HIERARCHIES: these two scripts write only the DEGENERATE type-LEVEL stamps. Type
+    level collapses every instance of a self-nesting type (``Node ⊃ Node``, ``Container ⊃
+    Container``) onto ONE level (see ``ontology_levels._derive_from_containment``), so the level-pair
+    filter mixes every structural depth into one wave and the drill/trace of a self-nested chain
+    collapses. The depth-correct read path keys on ``r.sourceDepth``/``r.targetDepth`` + the
+    ``_AggMeta(stampVersion=2)`` marker, which ONLY the real materialize pipeline writes. So after an
+    ontology change to a graph with any self-nesting containment, re-run the aggregation pipeline
+    (``backfill_aggregation.py`` / ``materialize_aggregated_edges_batch``) — which materializes the
+    rollups AND writes the depth stamps — rather than only these level scripts.
 """
 
 import argparse

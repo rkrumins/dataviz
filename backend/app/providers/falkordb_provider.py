@@ -647,7 +647,19 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
         return GraphNode(
             urn=props["urn"],
             entityType=str(entity_type),
-            displayName=props.get("displayName", ""),
+            # Onboarded third-party graphs often store the human name under
+            # `name`/`title`/`label` rather than the platform's `displayName`,
+            # which would otherwise render a BLANK node label. Fall back through
+            # the common keys. A source with a truly custom name property sets
+            # its `name_property`, which the aggregation stamp copies onto
+            # `displayName` server-side (see stamp_identity_urns).
+            displayName=(
+                props.get("displayName")
+                or props.get("name")
+                or props.get("title")
+                or props.get("label")
+                or ""
+            ),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
             properties=user_props,
@@ -1972,6 +1984,87 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
+    async def stamp_identity_urns(self) -> int:
+        """Stamp per-source CONFORMANCE properties onto every node that lacks them, so the entire
+        urn-keyed write / index / read / trace stack works for an onboarded graph that keys nodes
+        by e.g. ``id`` and names them under e.g. ``name`` instead of the platform's ``urn`` /
+        ``displayName``.
+
+        This is THE definitive fix. The AGGREGATED write and every read filter on the ``urn``
+        PROPERTY (a ``MERGE`` cannot key on a ``coalesce`` expression), and the read stack renders
+        ``displayName`` verbatim — so resolving identity only in the aggregation directory left
+        in-source aggregation attaching ZERO edges, and a non-``displayName`` name rendered blank.
+        Stamping both up front makes all of it work unchanged.
+
+        * ``urn`` ← ``identity_property``  (only when it's a non-default property)
+        * ``displayName`` ← ``name_property``  (piggybacks on the urn pass, or runs standalone only
+          for a CUSTOM name property — a fully conforming source stays a complete no-op)
+
+        Safe: in-source projection only (never mutates a possibly read-only source behind a
+        dedicated projection); ``coalesce`` SETs only fill a MISSING value, never overwrite; batched
+        by internal ID range (no property index needed); best-effort per batch. Idempotent — a
+        re-run only touches nodes added since the last run. Returns nodes stamped.
+        """
+        ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
+        name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
+        stamp_urn = bool(ident) and ident != "urn"
+        # Name-stamp piggybacks on a urn stamp, or runs standalone only for a non-default name
+        # property — so a conforming (urn/displayName) source never triggers a write pass.
+        stamp_name = bool(name_prop) and name_prop != "displayName" and (stamp_urn or name_prop != "name")
+        if not stamp_urn and not stamp_name:
+            return 0
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            return 0  # projection is separate; don't write to the (maybe read-only) source
+        await self._ensure_connected()
+        try:
+            res = await self._ro_query("MATCH (n) RETURN max(ID(n))", op="identity.max_id")
+            rows = res.result_set or []
+            max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        except Exception as exc:
+            logger.warning(
+                "FalkorDB %s: conformance stamp skipped — max-id probe failed: %s",
+                self._graph_name, exc,
+            )
+            return 0
+        if max_id < 0:
+            return 0
+
+        sets, wheres = [], []
+        if stamp_urn:
+            sets.append(f"n.`urn` = coalesce(n.`urn`, n.`{ident}`)")
+            wheres.append(f"(n.`urn` IS NULL AND n.`{ident}` IS NOT NULL)")
+        if stamp_name:
+            sets.append(f"n.`displayName` = coalesce(n.`displayName`, n.`{name_prop}`)")
+            wheres.append(f"(n.`displayName` IS NULL AND n.`{name_prop}` IS NOT NULL)")
+        set_clause = ", ".join(sets)
+        where_clause = " OR ".join(wheres)
+
+        width = 50_000
+        stamped = 0
+        lo = 0
+        while lo <= max_id:
+            hi = lo + width
+            try:
+                r = await self._query(
+                    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
+                    f"SET {set_clause}",
+                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                )
+                stamped += int(getattr(r, "properties_set", 0) or 0)
+            except Exception as exc:
+                logger.warning(
+                    "FalkorDB %s: conformance stamp batch [%d,%d) failed (continuing): %s",
+                    self._graph_name, lo, hi, exc,
+                )
+            lo = hi
+        if stamped:
+            logger.info(
+                "FalkorDB %s: conformance stamp set %d propert(y/ies) (urn←%s, displayName←%s).",
+                self._graph_name, stamped, ident if stamp_urn else "—",
+                name_prop if stamp_name else "—",
+            )
+        return stamped
+
     async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
         """Create indices for node labels and properties.
 
@@ -1991,6 +2084,13 @@ class FalkorDBProvider(GraphDataProvider):
         self._indexed_entity_type_ids = list(entity_type_ids or [])
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
+        # Index the source's URN-equivalent too, so the identity-urn stamp's
+        # NULL-urn lookup and any direct property access are index-backed rather
+        # than full label scans. No-op when the source uses the default `urn`
+        # (already in INDEXED_NODE_PROPS).
+        _ident = getattr(self, "_node_identity_property", None)
+        if _ident and _ident != "urn" and _ident not in properties:
+            properties.append(_ident)
 
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         # Failure accounting: "already indexed" is success (idempotent DDL);
@@ -2378,8 +2478,37 @@ class FalkorDBProvider(GraphDataProvider):
         levels = getattr(self, "_entity_type_levels", None) or {}
         return max(2 * len(levels), 16)
 
+    def _floor_case_fold(self, types, observed):
+        """Universal case-fold floor: union each resolved type with every
+        observed spelling that shares its case-fold, so a declared ``TO``
+        still resolves to a graph's ``To``/``to`` even when the injected
+        alias map is empty (a governed-but-drifted source, or introspection
+        that came back empty). Monotonic — only ADDS same-casefold spellings
+        the graph actually has; it never drops a type, so a mismatched cache
+        can't make a query miss. Mirrors the aggregation pipeline's
+        ``_fold_expand`` at the read-path choke point every consumer flows
+        through (trace / top-level / containment / lineage accessors)."""
+        if not types or not observed:
+            return types
+        by_fold: Dict[str, List[str]] = {}
+        for o in observed:
+            by_fold.setdefault(str(o).casefold(), []).append(str(o))
+        out: List[str] = list(types)
+        have = set(out)
+        for t in list(out):
+            for variant in by_fold.get(str(t).casefold(), []):
+                if variant not in have:
+                    have.add(variant)
+                    out.append(variant)
+        return set(out) if isinstance(types, (set, frozenset)) else out
+
     def _alias_rel_types(self, types):
-        return self._alias_types(types, "_source_rel_aliases")
+        # Alias translation first (declared → the source's mapped spelling),
+        # then a case-fold floor from the reliably-probed observed vocabulary
+        # (populated by get_ontology_metadata, which has an edge-scan fallback)
+        # so an empty/partial alias map can never cause a silent case miss.
+        aliased = self._alias_types(types, "_source_rel_aliases")
+        return self._floor_case_fold(aliased, getattr(self, "_observed_rel_types", None))
 
     def _alias_entity_types(self, types):
         return self._alias_types(types, "_source_entity_aliases")
@@ -3342,8 +3471,19 @@ class FalkorDBProvider(GraphDataProvider):
             ]
             lineage_params: Dict[str, Any] = {"pageUrns": page_urns}
             if effective_lineage:
-                l_alt = "|".join(_sanitize_label(t) for t in effective_lineage)
-                lr_pattern, lineage_where = f"[lr:{l_alt}]", ""
+                # Case-INSENSITIVE match. A rebuild reseeds edges with the type spelling stored in
+                # the Postgres payload, and the reader's ontology→observed alias map can be stale
+                # (a projection rebuild does NOT invalidate resolved_ontology_cache), so a
+                # case-sensitive `[lr:Type]` alternation silently misses a differently-cased stored
+                # spelling → raw lineage edges vanish from the canvas. Matching on
+                # `toUpper(type(lr))` renders them regardless of stored casing / alias freshness.
+                # This lineage step is already page-scoped (a.urn IN $bucketUrns AND b.urn IN
+                # $pageUrns), so the untyped scan is over a tiny neighborhood. (Containment step 1
+                # keeps its typed alternation — a deliberate hub-node index optimization, and its
+                # canonical-uppercase types already match.)
+                lr_pattern = "[lr]"
+                lineage_where = "AND toUpper(type(lr)) IN $lineageUpper "
+                lineage_params["lineageUpper"] = [_sanitize_label(t).upper() for t in effective_lineage]
             else:
                 lr_pattern, lineage_where = "[lr]", "AND NOT type(lr) IN $excludeTypes "
                 lineage_params["excludeTypes"] = exclude_types
@@ -8274,7 +8414,13 @@ class FalkorDBProvider(GraphDataProvider):
             try:
                 cached = await self._redis.get(cache_key)
                 if cached:
-                    return OntologyMetadata(**json.loads(cached))
+                    cached_meta = OntologyMetadata(**json.loads(cached))
+                    # Keep the sync case-fold floor (_alias_rel_types) warm even
+                    # on a cache hit: the metadata's edge-type keys ARE the
+                    # observed physical spellings, so trace/top-level resolve
+                    # declared→physical correctly without re-probing the graph.
+                    self._observed_rel_types = set(cached_meta.edge_type_metadata or {})
+                    return cached_meta
             except Exception:
                 pass
 
@@ -8317,7 +8463,13 @@ class FalkorDBProvider(GraphDataProvider):
                 "MATCH ()-[r]->() RETURN DISTINCT type(r)", op="ontology.edge_scan",
             )
             all_types = [row[0] for row in (type_res.result_set or [])]
-        
+
+        # Feed the sync case-fold floor (_alias_rel_types) the observed
+        # vocabulary discovered here (catalog ∪ edge-scan fallback), so every
+        # read-path consumer resolves declared→physical case variants without
+        # depending on the injected per-source alias map being non-empty.
+        self._observed_rel_types = {str(t) for t in all_types if t}
+
         # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
         resolved_meta = getattr(self, "_resolved_edge_metadata", None)
         resolved_lineage = getattr(self, "_resolved_lineage_types", None)
@@ -8991,13 +9143,16 @@ class FalkorDBProvider(GraphDataProvider):
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
                     MERGE (a)-[r:{rel_type}]->(b)
-                    SET r.id = $eid, r.confidence = $conf
+                    SET r.id = $eid, r.confidence = $conf, r.properties = $props
                     """,
                     params={
                         "src": containment_edge.source_urn,
                         "tgt": containment_edge.target_urn,
                         "eid": containment_edge.id,
                         "conf": containment_edge.confidence,
+                        # Write r.properties like every other edge writer — it was omitted here, so a
+                        # containment edge created with properties lost them until the next rebuild.
+                        "props": json.dumps(containment_edge.properties or {}),
                     },
                 )
             return True
@@ -9021,7 +9176,11 @@ class FalkorDBProvider(GraphDataProvider):
                     "src": edge.source_urn,
                     "tgt": edge.target_urn,
                     "eid": edge.id,
-                    "conf": edge.confidence or 1.0,
+                    # Pass confidence through RAW (may be None) — matching save_custom_graph, the
+                    # projector reseed, and create_node's containment edge. `edge.confidence or 1.0`
+                    # silently rewrote a legitimate 0.0 (and None) to 1.0, fabricating a value the
+                    # rebuild round-trip would then treat as real.
+                    "conf": edge.confidence,
                     "props": json.dumps(edge.properties or {}),
                 },
             )

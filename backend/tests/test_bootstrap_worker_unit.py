@@ -5,11 +5,14 @@ deterministic version ids (so replaying a window is a no-op), exactly-once tally
 accumulation across windows, the reservoir sample, the phase machine, and the
 integrity comparisons that decide whether the copy is allowed to become visible.
 """
+import types
+
 import pytest
 
 from backend.app.services.versioning.bootstrap_worker import (
     PHASES,
     BootstrapFailure,
+    BootstrapRunner,
     _Reservoir,
     _explain_failed_checks,
     _label_of,
@@ -161,3 +164,51 @@ def test_reservoir_resumes_from_checkpointed_state():
     r.offer("urn:c")
     assert r.items == ["urn:a", "urn:b", "urn:c"]
     assert r.seen == 3
+
+
+# ── job-worker edge serialization is the canonical shape (regression: rebuild blanked edges) ──
+
+def _edges_to_rows(rows, live):
+    # `_edges_to_rows` reads no instance state, so drive it with a bare object as `self`.
+    commit = types.SimpleNamespace(id="cmt_1", commit_seq=1)
+    return BootstrapRunner._edges_to_rows(
+        object(), rows, commit, "main_1", "g1", "alice", None, live)
+
+
+def test_edges_to_rows_emits_canonical_payload_with_confidence_and_nested_props():
+    # A FalkorDB edge row carries confidence + a nested `properties` dict (here as the JSON string
+    # form the reader tolerates). The stored payload must be canonical — NOT the old flattened shape
+    # that spread props at the top level and dropped confidence, which blanked both on every rebuild.
+    rows = [("urn:a", "urn:b", "DERIVES_FROM",
+             {"id": "l1", "confidence": 0.9, "properties": '{"sql": "select email"}'})]
+    dicts, tallies, rejects, _sample, dupes = _edges_to_rows(rows, {"urn:a", "urn:b"})
+    assert len(dicts) == 1 and rejects["danglingEdges"] == 0 and dupes == 0
+    payload = dicts[0]["payload"]
+    assert payload == {"edgeType": "DERIVES_FROM", "sourceEntityId": "urn:a",
+                       "targetEntityId": "urn:b", "confidence": 0.9,
+                       "properties": {"sql": "select email"}}
+    # the durable row columns mirror the canonical payload (confidence is not lost to the column either)
+    assert dicts[0]["confidence"] == 0.9
+    assert dicts[0]["source_entity_id"] == "urn:a" and dicts[0]["target_entity_id"] == "urn:b"
+    assert tallies == {"DERIVES_FROM": 1}
+
+
+def test_edges_to_rows_bare_containment_edge_has_no_confidence_key():
+    rows = [("urn:layer:1", "urn:obj:1", "CONTAINS", {"id": "c1"})]
+    dicts, _tallies, _rejects, _sample, _dupes = _edges_to_rows(rows, {"urn:layer:1", "urn:obj:1"})
+    payload = dicts[0]["payload"]
+    assert payload == {"edgeType": "CONTAINS", "sourceEntityId": "urn:layer:1",
+                       "targetEntityId": "urn:obj:1"}   # no confidence/properties keys
+    assert dicts[0]["confidence"] is None
+
+
+def test_edges_to_rows_drops_dangling_and_dedups_same_triple():
+    rows = [
+        ("urn:a", "urn:missing", "CONTAINS", {"id": "c1"}),        # dangling: endpoint not live
+        ("urn:a", "urn:b", "CONTAINS", {"id": "c2"}),
+        ("urn:a", "urn:b", "CONTAINS", {"id": "c2"}),              # duplicate id → collapsed
+    ]
+    dicts, _tallies, rejects, _sample, dupes = _edges_to_rows(rows, {"urn:a", "urn:b"})
+    assert rejects["danglingEdges"] == 1
+    assert dupes == 1
+    assert [d["entity_id"] for d in dicts] == ["c2"]

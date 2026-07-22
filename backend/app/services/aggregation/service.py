@@ -454,6 +454,11 @@ class AggregationService:
                 entity_type_levels=json.dumps(
                     ontology_data.get("entity_type_levels") or {}
                 ),
+                # URN-equivalent node-identity property frozen at trigger time.
+                # A change to the data source's identity_property is picked up
+                # on the next trigger; in-flight jobs keep their frozen value.
+                identity_property=ontology_data.get("identity_property") or "urn",
+                name_property=ontology_data.get("name_property") or "name",
                 status="pending",
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
@@ -586,10 +591,13 @@ class AggregationService:
         can_create = status in ("ready", "skipped")
         is_ready = status == "ready"
 
-        # Check for drift using the aggregation-owned fingerprint
+        # Check for drift using the aggregation-owned fingerprint, and read the
+        # cube's depth-stamp contract version — both off the SAME provider fetch
+        # so a ready data source pays at most one provider resolution here.
         drift = False
+        stamp_version: Optional[int] = None
         _DRIFT_TIMEOUT = float(__import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
-        if is_ready and state.graph_fingerprint:
+        if is_ready:
             try:
                 provider = await asyncio.wait_for(
                     self._registry.get_provider_for_workspace(
@@ -597,13 +605,26 @@ class AggregationService:
                     ),
                     timeout=_DRIFT_TIMEOUT,
                 )
-                current_fp = await asyncio.wait_for(
-                    compute_graph_fingerprint(provider),
-                    timeout=_DRIFT_TIMEOUT,
-                )
-                drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+                # Depth-stamp contract version — an O(1) _AggMeta singleton read
+                # (cached ~5min on the provider), NOT the forbidden all-edges
+                # scan. stamp_version < 2 ⇒ pre-depth cube ⇒ self-nesting reads
+                # degenerate until re-aggregated. FalkorDB-only; other providers
+                # lack the method, so it stays None (no warning).
+                _run_meta = getattr(provider, "_aggregation_run_meta", None)
+                if _run_meta is not None:
+                    try:
+                        meta = await asyncio.wait_for(_run_meta(), timeout=_DRIFT_TIMEOUT)
+                        stamp_version = meta.stamp_version
+                    except Exception:
+                        pass
+                if state.graph_fingerprint:
+                    current_fp = await asyncio.wait_for(
+                        compute_graph_fingerprint(provider),
+                        timeout=_DRIFT_TIMEOUT,
+                    )
+                    drift = not fingerprints_match(state.graph_fingerprint, current_fp)
             except Exception:
-                pass  # Can't check drift — don't block
+                pass  # Can't reach the graph — don't block or false-warn
 
         messages = {
             "none": "Aggregation has not been configured. Aggregate or skip to create views.",
@@ -623,6 +644,10 @@ class AggregationService:
             drift_detected=drift,
             last_aggregated_at=state.last_aggregated_at,
             aggregation_edge_count=state.aggregation_edge_count or 0,
+            aggregation_stamp_version=stamp_version,
+            # A ready cube stamped below v2 predates depth stamps — rebuild to
+            # restore depth-accurate (self-nesting) hierarchy reads.
+            needs_rebuild=bool(is_ready and stamp_version is not None and stamp_version < 2),
             message=messages.get(status, "Unknown status."),
         )
 
@@ -2225,6 +2250,42 @@ class AggregationService:
         )
         flat = derive_flat_lists(entity_defs, rel_defs)
 
+        # Honor the ontology's PERSISTED containment/lineage lists in addition to the per-rel flags,
+        # mirroring resolver.resolve_ontology (the read/canvas path). derive_flat_lists reads ONLY the
+        # per-rel is_containment/is_lineage flags; an ontology that recorded containment in its
+        # top-level list but left the flag at its False default (Hierarchy-panel edit, blank/custom
+        # ontology, older data) would otherwise freeze an EMPTY containment list and the pipeline would
+        # silently roll up nothing. Union case-insensitively, preserving the declared casing already in
+        # `flat`, so a list-only classification still drives aggregation. This does not perturb the job
+        # fingerprint (computed from the raw defs, not these derived lists).
+        containment_types = list(flat.containment_edge_types)
+        lineage_types = list(flat.lineage_edge_types)
+        _seen_containment = {t.upper() for t in containment_types}
+        _seen_lineage = {t.upper() for t in lineage_types}
+        for t in json.loads(ontology_orm.containment_edge_types or "[]"):
+            if t and t.upper() not in _seen_containment:
+                containment_types.append(t)
+                _seen_containment.add(t.upper())
+        for t in json.loads(ontology_orm.lineage_edge_types or "[]"):
+            if t and t.upper() not in _seen_lineage:
+                lineage_types.append(t)
+                _seen_lineage.add(t.upper())
+
+        # Loud, actionable diagnostic for the silent-no-op failure mode: lineage edges to roll up but
+        # NO containment hierarchy to roll them up over. The materialize pipeline would take its
+        # leaf-mirror cube branch and write zero cross-tier AGGREGATED edges while the job still
+        # reports "completed" — undiagnosable from the outside. Surfacing it here (with full ontology
+        # context) points the operator straight at the fix: classify the parent/child edge as
+        # containment. Not raised — a genuinely flat source with no hierarchy is legitimately empty.
+        if lineage_types and not containment_types:
+            logger.warning(
+                "Aggregation resolve for ds=%s: %d lineage edge type(s) configured but NO containment "
+                "edge types — the rollup has no hierarchy to ascend and will produce zero cross-tier "
+                "AGGREGATED edges. Classify the parent/child edge (e.g. HAS) as containment in the "
+                "ontology so the hierarchy can be walked.",
+                ds_id, len(lineage_types),
+            )
+
         # Entity-type → hierarchy level map. Frozen onto the job so the
         # worker can inject it into the provider (set_entity_type_levels)
         # and drive per-label indexing (ensure_indices) without importing
@@ -2243,9 +2304,15 @@ class AggregationService:
             "provider_id": ds.provider_id,
             "graph_name": ds.graph_name,
             "data_source_label": getattr(ds, "label", None),
-            "containment_edge_types": flat.containment_edge_types,
-            "lineage_edge_types": flat.lineage_edge_types,
+            "containment_edge_types": containment_types,
+            "lineage_edge_types": lineage_types,
             "entity_type_levels": entity_type_levels,
+            # URN-equivalent for this physical graph. Frozen onto the job so a
+            # mid-lifecycle change to the data source's identity_property is
+            # picked up by the NEXT run. Default "urn" for every existing source.
+            "identity_property": getattr(ds, "identity_property", None) or "urn",
+            # Node display-name property, frozen likewise. Default "name".
+            "name_property": getattr(ds, "name_property", None) or "name",
         }
 
     async def _replay_fingerprint_matches(

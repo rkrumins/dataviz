@@ -154,6 +154,28 @@ def _scan_timeout_s() -> float:
     return _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
 
 
+def _node_identity_expr(identity_property: Optional[str]) -> str:
+    """Cypher expression for a node's canonical identity: the platform ``urn``, falling back to the
+    source's configured URN-equivalent property when a node has no ``urn``.
+
+    Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
+    (or ``name``), not ``urn``. The DEFINITIVE fix is :meth:`FalkorDBProvider.stamp_identity_urns`,
+    which copies the identity property onto ``urn`` for every node at aggregation start — after it
+    runs, the whole urn-keyed write / index / read / trace stack works unchanged. This expression is
+    defense-in-depth for the directory scans: it still resolves identity if the stamp was skipped
+    (e.g. a read-only source) or hasn't reached a freshly-added node yet. It does NOT fix the
+    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a coalesce expression) —
+    the stamp is what makes writes attach.
+
+    Default is ``urn`` (OPT-IN — no behavior change for conforming graphs); a source sets it to its
+    URN-equivalent (e.g. ``id``)."""
+    prop = identity_property or "urn"
+    safe = str(prop).replace("`", "")
+    if not safe or safe == "urn":
+        return "n.`urn`"
+    return f"coalesce(n.`urn`, n.`{safe}`)"
+
+
 def _extract_concurrency() -> int:
     """Concurrent read-only range scans (extract/reconcile/node directory).
     Bounded well below the server's THREAD_COUNT so interactive readers
@@ -413,6 +435,15 @@ class AggregationPipeline:
         self._scan_subwidth: Optional[int] = None
         self._scan_success_streak = 0
 
+        # ── Conformance diagnostics (Phase IV — loud, never silent) ──
+        # Structured advisories surfaced in run_stats (and thus the job-detail
+        # UI), so a zero-edge run whose cause is a conformance gap is
+        # diagnosable WITHOUT trawling worker logs. Advisory-only: they never
+        # fail an otherwise-clean run (a genuinely flat source stays green).
+        self._dropped_endpoints = 0                 # pairs dropped: no identity
+        self._empty_directory = False               # nodes exist, none resolved
+        self._unmatched_types: List[str] = []       # declared spellings scanning 0 edges
+
     # -- tuning knob resolution ---------------------------------------------
 
     def _knob_int(self, name: str, env_default: Callable[[], int], lo: int, hi: int) -> int:
@@ -562,7 +593,56 @@ class AggregationPipeline:
             ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none",
         )
 
+    def _conformance_advisories(self) -> List[Dict[str, Any]]:
+        """Structured, operator-facing advisories for the conformance gaps that
+        silently zero out a run — identity (no resolvable node id) and casing
+        (declared edge types matching nothing observed). Recorded in run_stats
+        so the job detail shows WHY a run produced few/zero edges, instead of a
+        green ``completed`` that looks like an empty source. Advisory-only: an
+        otherwise-clean run stays ``completed`` and a genuinely flat source
+        yields no advisories at all."""
+        advisories: List[Dict[str, Any]] = []
+        if self._empty_directory:
+            advisories.append({
+                "kind": "identity_unresolved",
+                "severity": "error",
+                "message": (
+                    "No node resolved a canonical identity — the graph has "
+                    "nodes but none carry `urn`. If this is an onboarded graph "
+                    "keyed by another property (e.g. `id`), set the data "
+                    "source's Node Identity Property; every aggregation pair is "
+                    "dropped until then."
+                ),
+            })
+        elif self._dropped_endpoints:
+            advisories.append({
+                "kind": "endpoints_unresolved",
+                "severity": "warning",
+                "dropped_pairs": self._dropped_endpoints,
+                "message": (
+                    f"{self._dropped_endpoints} aggregation pair(s) were dropped "
+                    "because an endpoint had no resolvable identity (a deleted "
+                    "node, or a missing `urn`/identity property)."
+                ),
+            })
+        if self._unmatched_types:
+            advisories.append({
+                "kind": "edge_types_unmatched",
+                "severity": "warning",
+                "types": self._unmatched_types[:16],
+                "message": (
+                    f"{len(self._unmatched_types)} declared edge-type "
+                    "spelling(s) matched nothing in the graph's observed "
+                    "vocabulary and scanned zero edges: "
+                    + ", ".join(self._unmatched_types[:8])
+                    + ". Check the ontology's edge-type casing against the "
+                    "physical graph."
+                ),
+            })
+        return advisories
+
     def _result(self, affected: int = 0) -> Dict[str, Any]:
+        advisories = self._conformance_advisories()
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -603,6 +683,10 @@ class AggregationPipeline:
                     {"pairs_by_level": self._pairs_by_level}
                     if getattr(self, "_pairs_by_level", None) else {}
                 ),
+                # Conformance advisories (identity / casing gaps) — present
+                # only when a gap was detected, so a clean run's run_stats is
+                # unchanged. Advisory-only: never flips the job off "completed".
+                **({"advisories": advisories} if advisories else {}),
             },
         }
 
@@ -702,6 +786,33 @@ class AggregationPipeline:
                 "— alias-map-only spelling matching this run.",
                 self.p._graph_name, exc,
             )
+        # The schema-catalog procedure can return EMPTY even when the graph
+        # holds edges (a stale/partial catalog on some engines) — the exact
+        # failure that left declared ``TO`` scanning nothing and folded the
+        # hierarchy flat. Recover the observed vocabulary with the SAME
+        # edge-type scan ``get_ontology_metadata`` already falls back to, so
+        # the case-fold union below always has a real vocabulary to match
+        # against. O(#edges), but only on the empty path (never for a healthy
+        # catalog), and the scan-timeout still bounds it.
+        if not rels:
+            try:
+                res = await self.p._ro_query(
+                    "MATCH ()-[r]->() RETURN DISTINCT type(r)",
+                    timeout=_scan_timeout_s(),
+                )
+                rels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
+                if rels:
+                    logger.info(
+                        "aggregation pipeline on %s: db.relationshipTypes() was "
+                        "empty; recovered %d edge type(s) via edge scan.",
+                        self.p._graph_name, len(rels),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "aggregation pipeline on %s: edge-type fallback scan failed "
+                    "(%s) — declared casing only this run.",
+                    self.p._graph_name, exc,
+                )
         self._observed_rels = rels
         self._observed_labels = labels
 
@@ -777,6 +888,8 @@ class AggregationPipeline:
                 and t.casefold() not in observed_folds
             )
             if unmatched:
+                # Surface on the job (run_stats advisory), not just the log.
+                self._unmatched_types = unmatched
                 logger.warning(
                     "aggregation pipeline on %s: %d edge-type spelling(s) "
                     "match NOTHING in the graph's observed vocabulary and "
@@ -1383,10 +1496,14 @@ class AggregationPipeline:
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
 
+        # Identity-aware (parity with the full-mode directory): resolve `urn`, or the source's
+        # URN-equivalent for onboarded graphs whose containers carry no `urn`.
+        _ident_expr = _node_identity_expr(getattr(self.p, "_node_identity_property", None))
+
         async def run_one(lo: int, hi: int):
             r = await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-                "RETURN ID(n), n.urn, labels(n)",
+                f"RETURN ID(n), {_ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
@@ -1482,6 +1599,11 @@ class AggregationPipeline:
         # node set.
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
+        # Canonical identity per node: `urn`, or the source's configured URN-equivalent (e.g. `id`)
+        # for onboarded third-party graphs whose nodes carry no `urn` (stamp_identity_urns normally
+        # populates `urn` first; this coalesce covers any node it hasn't reached).
+        ident_prop = getattr(self.p, "_node_identity_property", None)
+        ident_expr = _node_identity_expr(ident_prop)
         res = await self.p._ro_query(
             "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
         )
@@ -1492,7 +1614,7 @@ class AggregationPipeline:
         async def run_one(lo: int, hi: int):
             res = await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
-                "RETURN ID(n), n.urn, labels(n)",
+                f"RETURN ID(n), {ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
@@ -1507,15 +1629,27 @@ class AggregationPipeline:
             wave = lows[start:start + conc]
             for rows in await asyncio.gather(*(fetch(lo) for lo in wave)):
                 for row in rows:
-                    nid, urn, labels = row[0], row[1], row[2] or []
-                    if nid is None or not urn or not labels:
+                    nid, identity, labels = row[0], row[1], row[2] or []
+                    if nid is None or not identity or not labels:
                         continue
-                    directory[int(nid)] = (urn, sys.intern(str(labels[0])))
+                    directory[int(nid)] = (identity, sys.intern(str(labels[0])))
         self._node_dir = directory
         logger.info(
-            "aggregation pipeline on %s: node directory loaded — %d entries.",
-            self.p._graph_name, len(directory),
+            "aggregation pipeline on %s: node directory loaded — %d entries (identity=%s).",
+            self.p._graph_name, len(directory), _node_identity_expr(ident_prop),
         )
+        # A totally empty directory on a graph that HAS nodes means identity resolution failed for
+        # every node — the classic onboarded-graph symptom (nodes keyed by `id`, not `urn`, and no
+        # identity mapping configured). Surface it loudly instead of silently dropping every pair.
+        if not directory and max_id >= 0:
+            self._empty_directory = True            # → run_stats advisory
+            logger.warning(
+                "aggregation pipeline on %s: node directory is EMPTY though the graph has nodes — "
+                "no node resolved a canonical identity via %s. If this is an onboarded graph whose "
+                "nodes are identified by a property other than `urn`, set the source's identity "
+                "property (URN-equivalent). Every aggregation pair will be dropped until then.",
+                self.p._graph_name, _node_identity_expr(ident_prop),
+            )
         return directory
 
     async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
@@ -1595,6 +1729,7 @@ class AggregationPipeline:
                 "td": td,
             })
         if dropped:
+            self._dropped_endpoints += dropped      # → run_stats advisory
             logger.warning(
                 "aggregation pipeline on %s: dropped %d pairs with "
                 "unresolvable endpoints (deleted nodes or missing urn/label).",

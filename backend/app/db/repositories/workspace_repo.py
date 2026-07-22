@@ -52,6 +52,13 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        # Mirror data_source_repo._to_response — this parallel serializer backs
+        # the workspace list/detail reads, so omitting these made a saved
+        # identity/name mapping silently read back as the default on refresh
+        # (same duplicated-serializer drift the aggregationStatus note below hit).
+        # NULL / unset → the platform defaults so clients never special-case them.
+        identityProperty=(getattr(row, "identity_property", None) or "urn"),
+        nameProperty=(getattr(row, "name_property", None) or "name"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         # The column existed and was never mapped, so DataSourceResponse fell back to
@@ -84,7 +91,19 @@ def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
 # ------------------------------------------------------------------ #
 
 def _ws_query():
-    return select(WorkspaceORM).options(selectinload(WorkspaceORM.data_sources))
+    # A soft-deleted data source is in the trash: it must never be embedded in a
+    # workspace's dataSources (that leak kept off-boarded sources alive in the
+    # Workspaces list and the View Wizard). Same predicate as
+    # data_source_repo._live() and the get_workspace_impact query below — one
+    # predicate, one meaning. Filtered at the eager load so no other read path,
+    # present or future, has to remember to re-apply it.
+    return select(WorkspaceORM).options(
+        selectinload(
+            WorkspaceORM.data_sources.and_(
+                WorkspaceDataSourceORM.deleted_at.is_(None)
+            )
+        )
+    )
 
 
 async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:

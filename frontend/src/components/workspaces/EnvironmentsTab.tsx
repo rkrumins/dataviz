@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, type FC } from 'react'
 import { Database, Plus, Trash2, CheckCircle, AlertCircle, Server, Shield, Layers, Edit2, Check } from 'lucide-react'
+import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { useWorkspacesStore } from '@/store/workspaces'
 import {
     workspaceService,
@@ -16,6 +17,7 @@ import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import {
     useDataSourceDeletion, impactSections, deleteCaveat,
 } from '@/components/admin/workspace/useDataSourceDeletion'
+import { DataSourceActionMenu } from '@/components/admin/workspace/DataSourceActionMenu'
 import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 
 // ============================================================
@@ -33,6 +35,10 @@ interface DataSourceFormRow {
     graphName: string
     ontologyId: string
     label: string
+    /** URN-equivalent node-identity property. '' or 'urn' = platform default. */
+    identityProperty: string
+    /** Node display-name property. '' or 'name' = platform default. */
+    nameProperty: string
 }
 
 const EMPTY_DS_ROW: DataSourceFormRow = {
@@ -40,6 +46,8 @@ const EMPTY_DS_ROW: DataSourceFormRow = {
     graphName: '',
     ontologyId: '',
     label: '',
+    identityProperty: '',
+    nameProperty: '',
 }
 
 // ============================================================
@@ -194,6 +202,18 @@ export const DSRowEditor: FC<DSRowEditorProps> = ({
                     </select>
                 </label>
             </div>
+
+            {/* Node Identity Property (URN-equivalent) — shared control, with
+                graph-aware suggestions from this source's own node properties. */}
+            <NodeIdentityField
+                variant="compact"
+                value={row.identityProperty}
+                onChange={(v) => update('identityProperty', v)}
+                providerId={row.providerId || undefined}
+                graphName={row.graphName || undefined}
+                nameValue={row.nameProperty}
+                onNameChange={(v) => update('nameProperty', v)}
+            />
         </div>
     )
 }
@@ -235,6 +255,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     graphName: rowState.graphName,
                     ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
+                    // Sent verbatim (incl. '' to clear back to default 'urn');
+                    // the edit form pre-fills it, so unchanged rows are a no-op.
+                    identityProperty: rowState.identityProperty,
+                    nameProperty: rowState.nameProperty,
                 }
                 await workspaceService.updateDataSource(workspace.id, editingDsId, req)
                 setEditingDsId(null)
@@ -244,6 +268,9 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     graphName: rowState.graphName,
                     ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
+                    // Only carried when the operator maps a non-default identity.
+                    identityProperty: rowState.identityProperty || undefined,
+                    nameProperty: rowState.nameProperty || undefined,
                 }
                 await workspaceService.addDataSource(workspace.id, req)
                 setAdding(false)
@@ -264,6 +291,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
             graphName: ds.graphName || '',
             ontologyId: ds.ontologyId || '',
             label: ds.label || '',
+            // Server always echoes "urn"/"name" by default; keep verbatim so a
+            // no-op save doesn't accidentally reset a real mapping.
+            identityProperty: ds.identityProperty || 'urn',
+            nameProperty: ds.nameProperty || 'name',
         })
         setAdding(false) // make sure adding is off
         setError(null)
@@ -368,6 +399,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                                                     <CheckCircle className="w-3 h-3" /> Default Primary
                                                 </span>
                                             )}
+                                            <NodeIdentityBadge value={ds.identityProperty} className="shrink-0" />
                                         </div>
                                         <span className="text-[11px] text-ink-muted flex items-center gap-1.5 font-mono bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded max-w-fit mt-0.5">
                                             <Server className="w-3 h-3" /> {ds.providerId}
@@ -395,14 +427,11 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                                                 </button>
                                             )}
                                             {dataSources.length > 1 && (
-                                                <button
-                                                    onClick={() => deletion.open(ds.id, ds.label || ds.id)}
+                                                <DataSourceActionMenu
                                                     disabled={loading}
-                                                    className="p-1.5 text-red-500 bg-canvas border border-transparent hover:bg-red-500/10 hover:border-red-500/20 rounded transition-colors disabled:opacity-50"
-                                                    title="Remove Data Source"
-                                                >
-                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                </button>
+                                                    onOffboard={() => deletion.open(ds.id, ds.label || ds.id)}
+                                                    onDelete={() => deletion.openPermanent(ds.id, ds.label || ds.id)}
+                                                />
                                             )}
                                         </div>
                                         <div className="w-px h-5 bg-glass-border mx-1 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -469,10 +498,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
 
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Offboard data source'}
                 subtitle={deletion.target?.label}
                 confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
-                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Offboard'}
                 sections={impactSections(deletion.target?.impact ?? null,
                                          deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}
@@ -581,6 +610,10 @@ export const EnvironmentsTab: FC = () => {
                             graphName: ds.graphName,
                             ontologyId: ds.ontologyId || undefined,
                             label: ds.label || undefined,
+                            // Was silently dropped here — a Node Identity set during
+                            // initial workspace creation never reached the backend.
+                            identityProperty: ds.identityProperty || undefined,
+                            nameProperty: ds.nameProperty || undefined,
                         })),
                 }
                 const ws = await workspaceService.create(req)

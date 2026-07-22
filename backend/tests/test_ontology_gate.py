@@ -172,6 +172,23 @@ def test_no_lineage_blocks():
     assert report.has_lineage is False
 
 
+def test_array_only_lineage_does_not_block():
+    """A lineage type that lives ONLY in the top-level ``lineage_edge_types``
+    list (no rich per-def flag) must NOT trigger ``no_lineage`` — the resolver
+    and aggregation worker BOTH union the arrays and would run it, so the gate
+    cannot be stricter than the engine it guards."""
+    report = check_resolution(**_kwargs(
+        relationship_type_definitions_raw={
+            "HAS_COL": _make_relationship(is_containment=True, is_lineage=False),
+        },
+        containment_edge_types=["HAS_COL"],
+        lineage_edge_types=["FLOWS"],   # array-only — no declared def, no flag
+    ))
+    assert "no_lineage" not in report.blocking_reasons
+    assert report.has_lineage is True
+    assert report.resolved is True
+
+
 def test_has_lineage_uses_full_ontology_not_just_introspected():
     # Stats cache miss → introspected lists are empty. The ontology has
     # a lineage relationship, so the gate should NOT block on
@@ -408,3 +425,70 @@ def test_aggregated_only_graph_still_resolves():
     ))
     assert report.missing_edge_types == []
     assert report.resolved, report.blocking_reasons
+
+
+# ── Persisted list ↔ per-rel flag reconciliation (Phase 3 / RC2) ──────
+
+
+def test_list_only_lineage_satisfies_gate():
+    """A relationship classified as lineage ONLY via the top-level lineage_edge_types list (its
+    per-rel is_lineage flag left at the parser default) must still satisfy criterion 4. resolve_
+    ontology unions the two representations for the read/canvas path; the gate and aggregation now
+    do too, so a list-only classification no longer spuriously blocks the trigger with no_lineage."""
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={"Table": _make_entity(level=2, name="Table"),
+                                     "Column": _make_entity(level=3, name="Column")},
+        relationship_type_definitions_raw={"FLOWS": _make_relationship(name="Flows")},  # no flags
+        introspected_entity_ids=["Table", "Column"],
+        introspected_edge_ids=["FLOWS"],
+        lineage_edge_types=["FLOWS"],
+    ))
+    assert report.has_lineage is True
+    assert "no_lineage" not in report.blocking_reasons
+    assert report.resolved, report.blocking_reasons
+
+
+def test_list_only_containment_sets_has_containment():
+    """Containment recorded only in containment_edge_types (flag defaulted False) flips
+    has_containment, so the 'no_containment_edges' advisory does not fire."""
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={"Roots": _make_entity(level=0, name="Roots"),
+                                     "Node": _make_entity(level=1, name="Node")},
+        relationship_type_definitions_raw={
+            "HAS": _make_relationship(name="Has"),                       # no flags
+            "FLOWS": _make_relationship(is_lineage=True, name="Flows"),  # keep the gate resolvable
+        },
+        introspected_edge_ids=["HAS", "FLOWS"],
+        containment_edge_types=["HAS"],
+    ))
+    assert report.has_containment is True
+    assert "no_containment_edges" not in report.advisory_warnings
+    assert report.resolved, report.blocking_reasons
+
+
+def test_list_reconciliation_is_case_insensitive():
+    """The list may carry a different casing than the declared rel id (physical drift); the
+    reconciliation folds case just like the rest of the canonical contract."""
+    report = check_resolution(**_kwargs(
+        relationship_type_definitions_raw={"To": _make_relationship(name="To")},  # declared 'To'
+        introspected_edge_ids=["To"],
+        lineage_edge_types=["TO"],  # list spells it 'TO'
+    ))
+    assert report.has_lineage is True
+    assert "no_lineage" not in report.blocking_reasons
+
+
+def test_missing_types_fold_case_variants():
+    """A graph that spells one type several ways yields ONE canonical missing type, so the
+    one-click 'add missing types' fix seeds a single canonical declaration instead of a
+    case-colliding pair (Has+HAS) the write-path guard would 422."""
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={},
+        relationship_type_definitions_raw={"FLOWS": _make_relationship(is_lineage=True)},
+        introspected_entity_ids=["Node", "node", "NODE", "Roots"],
+        introspected_edge_ids=["Has", "HAS", "has", "FLOWS"],
+    ))
+    # Has/HAS/has collapse to one canonical; FLOWS is declared so not missing.
+    assert report.missing_edge_types == ["HAS"]
+    # Node/node/NODE collapse to one; Roots is its own.
+    assert report.missing_entity_types == ["NODE", "Roots"]

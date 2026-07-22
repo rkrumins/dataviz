@@ -15,6 +15,7 @@ import pytest
 from backend.app.services.versioning import models
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 R, M = "workspace:datasource:read", "workspace:datasource:manage"
 
@@ -43,10 +44,6 @@ class _FakeReadGraph:
         if "a.urn IN $urns" in cypher:
             return _FakeRes([[e["src"], e["tgt"], e["type"], _FakeRel(e.get("props", {}))] for e in self._edges])
         return _FakeRes([[_FakeNode(p)] for p in self._nodes])
-
-
-async def _noop(cypher, params=None):
-    return None
 
 
 def _build_app():
@@ -136,7 +133,7 @@ async def _run() -> None:
         assert len(d2_log) == 1 and d2_log[0]["kind"] == "edit"   # draft checkpoint commit
 
         # ── project main → fresh; FalkorDB serves ONLY main@head, never branch/as-of ──
-        await FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop)).project_graph(gid)
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
         assert (await svc.projection_watermark(gid))["fresh"] is True
         fake = _FakeReadGraph(
             nodes=[{"urn": "gv:A", "entityType": "Dataset", "displayName": "Alpha"},

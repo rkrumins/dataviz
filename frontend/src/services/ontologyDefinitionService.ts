@@ -5,6 +5,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { foldRequestTypeDefs } from '@/features/ontology/lib/caseFold'
 
 const ADMIN_API = '/api/v1/admin/ontologies'
 
@@ -46,6 +47,14 @@ export interface OntologyMatchResult {
     uncoveredRelationshipTypes: string[]
     totalEntityTypes: number
     totalRelationshipTypes: number
+    /** Edge types the graph uses that this ontology declares but leaves UNCLASSIFIED (stuck in
+     *  "Other"). A 100% name match with these non-empty is not a working setup — aggregation and
+     *  lineage need containment/lineage classification. */
+    uncategorizedRelationshipTypes?: string[]
+    /** Edge types the graph spells differently than this ontology declares (physical `To` vs
+     *  declared `TO`) — present but missing FalkorDB's per-label index. Same signal as Health's
+     *  case-drift view. */
+    caseDriftRelationshipTypes?: Array<{ id: string; declared: string; count: number }>
 }
 
 /** One physical spelling folded into a canonical suggested type id. */
@@ -161,16 +170,18 @@ export const ontologyDefinitionService = {
     },
 
     create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {
+        // Fold case-variant type-id keys so no caller can send e.g. `Has`+`HAS` (which the backend's
+        // case-insensitive collision guard 422s). Single choke point for every write path.
         return request<OntologyDefinitionResponse>(ADMIN_API, {
             method: 'POST',
-            body: JSON.stringify(req),
+            body: JSON.stringify(foldRequestTypeDefs(req as unknown as Record<string, unknown>)),
         })
     },
 
     update(id: string, req: OntologyUpdateRequest): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`, {
             method: 'PUT',
-            body: JSON.stringify(req),
+            body: JSON.stringify(foldRequestTypeDefs(req as Record<string, unknown>)),
         })
     },
 
@@ -290,7 +301,7 @@ export const ontologyDefinitionService = {
     importNew(data: Record<string, unknown>): Promise<OntologyImportResponse> {
         return request<OntologyImportResponse>(`${ADMIN_API}/import`, {
             method: 'POST',
-            body: JSON.stringify(data),
+            body: JSON.stringify(foldRequestTypeDefs(data)),
         })
     },
 
@@ -302,7 +313,7 @@ export const ontologyDefinitionService = {
     importInto(id: string, data: Record<string, unknown>): Promise<OntologyImportResponse> {
         return request<OntologyImportResponse>(`${ADMIN_API}/${id}/import`, {
             method: 'POST',
-            body: JSON.stringify(data),
+            body: JSON.stringify(foldRequestTypeDefs(data)),
         })
     },
 

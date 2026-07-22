@@ -155,6 +155,7 @@ def _patch_resolution_and_claim(
     monkeypatch: pytest.MonkeyPatch,
     *,
     lineage_types: list[str] | None = None,
+    identity_property: str | None = None,
 ) -> None:
     """Bypass the Postgres-only advisory lock and ontology lookup so the
     trigger flow runs end-to-end against an in-memory session."""
@@ -162,7 +163,7 @@ def _patch_resolution_and_claim(
         return True
 
     async def _fake_resolve(self, _ds_id, _session):
-        return {
+        resolved = {
             "ontology_id": "ont_test",
             "workspace_id": "ws_test",
             "provider_id": "prov_test",
@@ -171,6 +172,11 @@ def _patch_resolution_and_claim(
             "containment_edge_types": [],
             "lineage_edge_types": lineage_types or ["TRANSFORMS"],
         }
+        # Only include the identity key when the test sets one, so the
+        # default path (key absent) is exercised by every other caller.
+        if identity_property is not None:
+            resolved["identity_property"] = identity_property
+        return resolved
 
     monkeypatch.setattr(
         "backend.app.services.aggregation.service.claim_exclusive",
@@ -240,6 +246,66 @@ async def test_trigger_with_timeout_secs_and_max_retries_lands_on_orm(
     # Worker selector parity — proves the per-job override would beat
     # the global default at runtime.
     assert (job.timeout_secs or 7200) == 300
+
+
+# ── Node-identity property freeze (URN-equivalent) ──────────────────────
+
+
+async def test_trigger_freezes_default_identity_property_urn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A data source with no configured identity_property freezes 'urn' onto
+    the job — the default for every existing/legacy source."""
+    _patch_resolution_and_claim(monkeypatch)  # resolve dict omits the key
+
+    service = _make_service()
+    session = _FakeSession()
+
+    def _capture_response(job: AggregationJobORM):
+        _seed_required_orm_defaults(job)
+        return AggregationService._to_response(job)
+
+    monkeypatch.setattr(service, "_to_response", _capture_response)
+
+    await service.trigger(
+        "ds_default_ident",
+        AggregationTriggerRequest(batch_size=1000, projection_mode="in_source"),
+        "manual",
+        session,
+    )
+
+    inserted = [o for o in session.added if isinstance(o, AggregationJobORM)]
+    assert len(inserted) == 1
+    assert inserted[0].identity_property == "urn"
+
+
+async def test_trigger_freezes_configured_identity_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A data source that maps its URN-equivalent to 'id' freezes 'id' onto the
+    job, so the NEXT run resolves endpoints as coalesce(n.urn, n.id). This is
+    what lets an operator change the mapping mid-lifecycle."""
+    _patch_resolution_and_claim(monkeypatch, identity_property="id")
+
+    service = _make_service()
+    session = _FakeSession()
+
+    def _capture_response(job: AggregationJobORM):
+        _seed_required_orm_defaults(job)
+        return AggregationService._to_response(job)
+
+    monkeypatch.setattr(service, "_to_response", _capture_response)
+
+    await service.trigger(
+        "ds_id_ident",
+        AggregationTriggerRequest(batch_size=1000, projection_mode="in_source"),
+        "manual",
+        session,
+    )
+
+    inserted = [o for o in session.added if isinstance(o, AggregationJobORM)]
+    assert len(inserted) == 1
+    assert inserted[0].identity_property == "id"
 
 
 async def test_trigger_rolls_back_preexisting_read_transaction(

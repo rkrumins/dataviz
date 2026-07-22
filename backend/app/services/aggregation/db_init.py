@@ -110,6 +110,16 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS rebuild_min_interval_secs INTEGER NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_settings "
                 "ADD COLUMN IF NOT EXISTS cadence_json TEXT NULL",
+                # Node-identity property (URN-equivalent) frozen at trigger
+                # time (2026-07-21), mirrored in alembic
+                # 20260721_1200_ds_identity_prop. NULL → "urn" in the
+                # worker, so every legacy row keeps the canonical behaviour.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS identity_property TEXT NULL",
+                # Node display-name property frozen at trigger time (2026-07-21),
+                # mirrored in alembic 20260721_1500_ds_name_prop.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS name_property TEXT NULL",
                 # Job-row guards (2026-07-11), mirrored in alembic
                 # 20260711_1200_agg_job_guards: the trigger-source CHECK
                 # must accept the automatic callers (post_purge, auto) or

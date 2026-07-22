@@ -212,21 +212,27 @@ export function WorkspaceDetailPage() {
      */
     const handleSaveAggregationConfig = async (
         dsId: string,
-        pending: { projectionMode: string; dedicatedGraphName: string },
-        original: { projectionMode: string; dedicatedGraphName: string },
+        pending: { projectionMode: string; dedicatedGraphName: string; identityProperty: string; nameProperty: string },
+        original: { projectionMode: string; dedicatedGraphName: string; identityProperty: string; nameProperty: string },
     ) => {
         if (!wsId) return
         const modeChanged = pending.projectionMode !== original.projectionMode
         const nameChanged = pending.dedicatedGraphName !== original.dedicatedGraphName
+        const identityChanged = pending.identityProperty !== original.identityProperty
+        const namePropChanged = pending.nameProperty !== original.nameProperty
         if (modeChanged) {
             await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
         }
-        if (nameChanged) {
+        if (nameChanged || identityChanged || namePropChanged) {
             await workspaceService.updateDataSource(wsId, dsId, {
-                dedicatedGraphName: pending.dedicatedGraphName || undefined,
+                ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
+                // Empty string clears back to the default "urn" server-side.
+                ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
+                // Empty string clears back to the default "name" server-side.
+                ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
             })
         }
-        if (modeChanged || nameChanged) {
+        if (modeChanged || nameChanged || identityChanged || namePropChanged) {
             showToast('success', 'Aggregation settings saved')
             reload()
         }
@@ -259,6 +265,38 @@ export function WorkspaceDetailPage() {
             const msg = err instanceof Error ? err.message : 'Failed to trigger aggregation'
             showToast('error', msg)
         }
+    }
+
+    // Bulk strategic rebuild: re-trigger aggregation for every aggregatable
+    // data source in the workspace. A re-run heals graphs materialized before
+    // the depth-stamp contract (reconcile rewrites depth-null cells and bumps
+    // _AggMeta.stampVersion to 2), fixing self-nesting hierarchies that read
+    // degenerate on legacy generations. Per-source failures (e.g. 409 when a
+    // job is already running, or a gate rejection) are tolerated and summarised
+    // — one toast, one reload — rather than aborting the whole sweep.
+    const handleReaggregateAll = async () => {
+        if (!wsId) return
+        const targets = (workspace?.dataSources ?? []).filter(
+            ds => ds.isActive !== false && ds.ontologyId,
+        )
+        if (targets.length === 0) {
+            showToast('info', 'No aggregatable data sources (each needs an assigned ontology).')
+            return
+        }
+        const results = await Promise.allSettled(
+            targets.map(ds => aggregationService.triggerAggregation(ds.id, {
+                projectionMode: ds.projectionMode || 'in_source',
+                batchSize: 1000,
+            }, 'manual')),
+        )
+        const triggered = results.filter(r => r.status === 'fulfilled').length
+        const skipped = results.length - triggered
+        showToast(
+            skipped ? 'warning' : 'success',
+            `Rebuild triggered for ${triggered}/${targets.length} data source(s)`
+            + (skipped ? ` — ${skipped} skipped (already running or gated)` : ''),
+        )
+        reload()
     }
 
     const handlePurge = async (ds: DataSourceResponse) => {
@@ -533,6 +571,7 @@ export function WorkspaceDetailPage() {
                         readinessMap={readinessMap}
                         onReaggregate={handleReaggregate}
                         onPurge={handlePurge}
+                        onReaggregateAll={handleReaggregateAll}
                     />
                 </>
             )}
@@ -590,10 +629,10 @@ export function WorkspaceDetailPage() {
                 the copy stops hedging. Friction proportional to consequence. */}
             <DangerConfirmDialog
                 isOpen={!!deletion.target}
-                title={deletion.target?.permanent ? 'Delete permanently' : 'Remove data source'}
+                title={deletion.target?.permanent ? 'Delete permanently' : 'Offboard data source'}
                 subtitle={deletion.target?.label}
                 confirmPhrase={deletion.target?.permanent ? (deletion.target?.label ?? '') : ''}
-                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Remove'}
+                confirmLabel={deletion.target?.permanent ? 'Delete permanently' : 'Offboard'}
                 sections={impactSections(deletion.target?.impact ?? null,
                                          deletion.target?.permanent)}
                 loadingImpact={deletion.target?.loading}
@@ -620,6 +659,9 @@ export function WorkspaceDetailPage() {
                 onSaveEdit={handleEditDsSave}
                 onDelete={workspace.dataSources.length > 1 && selectedDs
                     ? () => deletion.open(selectedDs.id, selectedDs.label || selectedDs.id)
+                    : undefined}
+                onDeletePermanent={workspace.dataSources.length > 1 && selectedDs
+                    ? () => deletion.openPermanent(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}

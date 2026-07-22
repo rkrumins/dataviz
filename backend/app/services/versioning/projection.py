@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import func, literal, select
 
 from . import config, db
-from .reconcile import falkor_counts, pg_live_counts
+from .reconcile import falkor_counts, pg_live_counts_projectable
 from .models import (
     EdgeVersionORM,
     EntityHeadORM,
@@ -88,6 +88,7 @@ def _node_merge_cypher(label: str) -> str:
         f"n.tags = item.tags, n.layerAssignment = item.layerAssignment, "
         f"n.childCount = item.childCount, n.sourceSystem = item.sourceSystem, "
         f"n.lastSyncedAt = item.lastSyncedAt, n.propertiesRaw = item.propertiesRaw, "
+        f"n.level = coalesce(item.level, n.level), "
         f"n.searchableText = item.searchableText, n += item.nativeProps "
         f"REMOVE n.properties"
     )
@@ -153,11 +154,19 @@ def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
     return f"gv:{entity_id}"
 
 
-def _node_item(entity_id: str, urn: str, payload: dict) -> dict:
+def _node_item(entity_id: str, urn: str, payload: dict,
+               level_map: Optional[Dict[str, int]] = None) -> dict:
     native, residual = _split_user_properties(payload.get("properties"))
     dn = payload.get("displayName") or ""
     qn = payload.get("qualifiedName") or ""
     desc = payload.get("description") or ""
+    # The node's hierarchy depth. `save_custom_graph` stamps this (from the ontology
+    # entity-type→level map) and the trace level-pair filter reads it; the projector must
+    # stamp the SAME value or a rebuild would drop it (COALESCE leaves it unset only when the
+    # type has no mapped level — e.g. dedicated mode / no ontology — matching save_custom_graph).
+    lvl = (level_map or {}).get(payload.get("entityType"))
+    if lvl is None:
+        lvl = payload.get("level")
     return {
         "urn": urn,
         "entityId": entity_id,
@@ -171,6 +180,7 @@ def _node_item(entity_id: str, urn: str, payload: dict) -> dict:
         "childCount": payload.get("childCount") or 0,
         "sourceSystem": payload.get("sourceSystem") or "",
         "lastSyncedAt": payload.get("lastSyncedAt") or "",
+        "level": lvl,
         "searchableText": _compute_searchable_text(dn, qn, desc, native),
     }
 
@@ -294,6 +304,7 @@ class FalkorProjector:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             data_source_id = graph.data_source_id
+            workspace_id = graph.workspace_id
             from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
@@ -340,6 +351,9 @@ class FalkorProjector:
             # build (a genuine suspension point), so a cancellation here must ALSO reset the
             # already-committed "projecting" row rather than strand it.
             client = await self._graph_client(name, provider_id)
+            # Ontology entity-type→level map so projected nodes carry n.level (parity with
+            # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
+            level_map = await self._resolve_level_map(graph_id)
             progress = (self._progress_writer(graph_id, total_items)
                         if from_seq <= 0 and total_items else None)
             if from_seq <= 0:
@@ -372,7 +386,7 @@ class FalkorProjector:
                                      "(fresh); MERGE will create it", name, graph_id)
                     else:
                         raise
-            await self._apply(client, *changes, progress=progress)
+            await self._apply(client, *changes, progress=progress, level_map=level_map)
             if rollup_pairs and rollup_pairs != "stale":
                 # After the raw upserts, so pair endpoints exist. Idempotent per window
                 # (gvSeq guard), so a retried window can't double-count weights. A rollup
@@ -388,19 +402,36 @@ class FalkorProjector:
             # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
             # the watermark advances, so the cache can't silently diverge from committed main.
             verify_error, heal_reseeded = (
-                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork)
+                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
+                                            level_map=level_map)
                 if config.PROJECTION_VERIFY_ENABLED else (None, False)
             )
 
+            published = verify_error is None
             async with self._session() as s:
                 ps = await s.get(ProjectionStateORM, graph_id)
-                ps.projected_commit_seq = to_seq
                 ps.status = "idle"
                 ps.falkor_graph_name = name
-                ps.last_projected_at = _now()
                 ps.last_error = verify_error
                 ps.progress_done = None                  # full-seed progress is over either way
                 ps.progress_total = None
+                if published:
+                    # Verified faithful → publish: advance the watermark so reads flip to FalkorDB.
+                    ps.projected_commit_seq = to_seq
+                    ps.last_projected_at = _now()
+                else:
+                    # The reseed did NOT match committed main (a dropped/mistyped edge, a drifted
+                    # field — the content-drift class the old count-only verify published blind).
+                    # DO NOT advance: hold projected < committed so `fresh` stays false and reads
+                    # keep falling back to Postgres (the SoR) instead of flipping onto a corrupt
+                    # cache. Pin target down to the un-advanced seq so the poll loop
+                    # (project_pending: projected < target) stops re-running a deterministic-fail
+                    # seed; a manual rebuild (request_projection_rebuild re-arms target=head) or a
+                    # new commit retries it.
+                    ps.target_commit_seq = ps.projected_commit_seq
+                    logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
+                                 "at %d so reads stay on Postgres — %s", graph_id, to_seq,
+                                 ps.projected_commit_seq, verify_error)
         except (Exception, asyncio.CancelledError) as exc:
             # Reset the "projecting" row committed above so it is not stranded — a stranded row
             # spins the UI's "Refreshing…" badge forever AND blocks the manual rebuild escape
@@ -426,6 +457,16 @@ class FalkorProjector:
                                          else str(exc)[:500])
                         ps.progress_done = None          # don't strand a stale progress bar
                         ps.progress_total = None
+                        # NB: do NOT pin target on a cancel here. The original "Rebuild fast read layer"
+                        # wipe-loop was driven by the O(N²) verify blowing past the 900s rebuild budget
+                        # and being cancelled — that root cause is fixed (the verify is now an O(N+E)
+                        # single scan, size-gated), so a full seed completes well inside the budget and
+                        # is not cancelled. A cancel now means a SHORT-budget caller gave up
+                        # (project_now's 10s interactive ceiling — common for a first-import / post-
+                        # eviction full seed) and DEFERS to the async worker, which re-runs with the
+                        # 900s budget. Pinning target here would strand that graph un-projected (the
+                        # nudge/worker could never rescue it) — the very regression an adversarial
+                        # review caught. Leave projected<target so project_pending re-selects it.
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the
@@ -448,7 +489,10 @@ class FalkorProjector:
         # overlapping application exceeded what incremental maintenance can reconcile. Hand
         # off to the app layer to queue a scoped aggregation rebuild (fires after the
         # watermark is durable, so the rebuild sees the projected raw edges).
-        if self._on_rollups_stale is not None and (
+        # Gated on `published`: aggregating over — or nudging insights for — an unfaithful seed
+        # that was NOT published (reads still serve Postgres) would build rollups on top of a
+        # known-bad raw layer. A later successful rebuild re-fires this (full seed ⇒ from_seq<=0).
+        if published and self._on_rollups_stale is not None and (
                 from_seq <= 0 or rollup_pairs == "stale" or heal_reseeded):
             try:
                 await self._on_rollups_stale(graph_id)
@@ -458,14 +502,32 @@ class FalkorProjector:
         # Committed main just landed in the real FalkorDB graph — let the
         # app layer nudge the insights counts poll (after the watermark is
         # durable, so the poll observes the projected state).
-        if self._on_projected is not None and data_source_id:
+        if published and self._on_projected is not None and data_source_id:
             try:
                 await self._on_projected(data_source_id)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
 
+        # A full-seed / heal reseed can change the graph's stored relationship-type spelling, but the
+        # reader's ontology→observed alias map is cached (resolved_ontology_cache) and is NOT
+        # invalidated by a projection rebuild — so reads keep matching the PRE-rebuild spelling and
+        # raw lineage edges (whose declared types are often mixed-case) silently stop rendering until
+        # the TTL lapses. Bump the ontology generation so every pod re-introspects the reseeded graph
+        # and rebuilds a correct alias (and drop this pod's L1 entry immediately). Best-effort;
+        # scoped to full-seed/heal so incremental publishes don't re-incur the resolve/DDL tax.
+        if published and (from_seq <= 0 or heal_reseeded) and workspace_id and data_source_id:
+            try:
+                from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+                await bump_ontology_generation(workspace_id, data_source_id)
+            except Exception as exc:                   # pragma: no cover - infra
+                logger.warning("ontology-generation bump after rebuild failed for %s: %s",
+                               graph_id, exc)
+
         applied = sum(len(c) for c in changes)
-        return {"projected": to_seq, "applied": applied, "noop": False, "verify_error": verify_error}
+        # Report the seq actually PUBLISHED: to_seq when verified, else the held-back from_seq
+        # (the watermark did not advance — reads stay on Postgres).
+        return {"projected": to_seq if published else from_seq, "applied": applied,
+                "noop": False, "verify_error": verify_error}
 
     async def project_pending(
         self, limit: int = 100, concurrency: Optional[int] = None
@@ -504,6 +566,25 @@ class FalkorProjector:
                     return {"graph_id": gid, "error": str(exc)[:200]}
 
         return list(await asyncio.gather(*[_one(g) for g in ids]))
+
+    async def _resolve_level_map(self, graph_id: str) -> Dict[str, int]:
+        """Best-effort ontology entity-type→level map for stamping ``n.level`` on projected
+        nodes (parity with ``save_custom_graph``). Reuses the aggregation edge-type resolver,
+        whose 3rd tuple element is the level map. Returns ``{}`` when unavailable — no resolver
+        (unit tests), dedicated mode / no lineage vocabulary, or a resolution error — in which
+        case the node MERGE's ``coalesce(item.level, n.level)`` simply leaves level unset,
+        exactly as ``save_custom_graph`` does before the ontology map is injected. Never raises."""
+        if self._edge_types_resolver is None:
+            return {}
+        try:
+            sets = await self._edge_types_resolver(self._svc, graph_id)
+        except Exception:                                # pragma: no cover - app-layer resolution
+            logger.debug("level-map resolution failed for %s; projecting without n.level",
+                         graph_id, exc_info=True)
+            return {}
+        if not sets or len(sets) <= 2 or not sets[2]:
+            return {}
+        return dict(sets[2])
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
@@ -1053,19 +1134,23 @@ class FalkorProjector:
         return urn, label
 
     async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
-        """Live (non-tombstone) node/edge counts on ``main`` from ``entity_heads`` —
-        O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` only for a NON-fork
-        main that is fully caught up (``main_head == to_seq``); ``None`` otherwise
-        (a fork's composed count is O(graph); a lagging head verifies on catch-up)."""
+        """Node count + the count a FAITHFUL FalkorDB projection should hold, from ``entity_heads``,
+        for a NON-fork main fully caught up (``main_head == to_seq``); ``None`` otherwise (a fork's
+        composed count is O(graph); a lagging head verifies on catch-up).
+
+        Edges are counted as DISTINCT ``(source, type, target)`` TRIPLES, not raw ids: the projector
+        MERGEs edges id-lessly, so parallel edges (same triple, different ids) collapse to one
+        relationship in FalkorDB. Comparing against the raw edge count would flag that legitimate
+        collapse as a shortfall and hold every parallel-edge graph back forever."""
         if is_fork:
             return None
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.main_head_commit_seq != to_seq:
                 return None
-            # The count SQL lives in reconcile.pg_live_counts (single source, shared with the
-            # reconciler); the fork / lagging-head gate above is this verify path's own concern.
-            return await pg_live_counts(s, graph_id, main_id)
+            # Collapse-correct count (reconcile.pg_live_counts_projectable): distinct edge triples ==
+            # what falkor_counts sees after the id-less MERGE. Single source, shared semantics.
+            return await pg_live_counts_projectable(s, graph_id, main_id)
 
     @staticmethod
     async def _falkor_counts(client):
@@ -1075,10 +1160,12 @@ class FalkorProjector:
         return await falkor_counts(client)
 
     async def _verify_and_heal(
-        self, client, graph_id, main_id, from_seq, to_seq, is_fork
+        self, client, graph_id, main_id, from_seq, to_seq, is_fork, level_map=None
     ) -> Tuple[Optional[str], bool]:
         """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
-        apply. Best-effort (any count failure → skip). Two mismatch directions:
+        apply, and — on a FULL SEED — additionally CONTENT-verify (id-set + deep fields), since
+        counts alone are blind to a dropped/mistyped edge or a node reseeded with a wrong label /
+        empty displayName. Best-effort (any count failure → skip). Two mismatch directions:
 
         * FalkorDB has FEWER than committed main (a dropped delta): bounded-heal by
           reseeding the graph from Postgres ONCE (idempotent MERGE/DELETE).
@@ -1102,7 +1189,11 @@ class FalkorProjector:
             logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
             return None, False
         if pg == fk:
-            return None, False
+            # Counts match — but on a full seed that is NOT sufficient (content drift keeps the
+            # counts). Run the content verify; None unless it finds drift (or not a full seed).
+            # Pass the entity count so the deep pass can size-gate itself (fk = node + edge counts).
+            return (await self._full_seed_content_error(
+                client, graph_id, main_id, from_seq, fk[0] + fk[1])), False
         pg_n, pg_e = pg
         f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
@@ -1128,6 +1219,12 @@ class FalkorProjector:
             logger.error("%s for %s", msg, graph_id)
             return msg, False
         if from_seq > 0:                                 # missing committed data → reseed once
+            # Incremental window that dropped a committed delta: reseed the FULL live state once,
+            # idempotently, then re-verify. A FULL seed (from_seq==0) is NOT reseeded here — it just
+            # DID the full DROP+reseed, so a shortfall is deterministic and re-running reproduces it;
+            # it falls through to the mismatch error below and the caller HOLDS THE WATERMARK BACK
+            # (reads stay on Postgres) rather than looping. A count-clean full seed still gets the
+            # content verify at the `pg == fk` branch above.
             logger.warning("projection verify mismatch for %s (PG n=%d,e=%d > Falkor n=%d,e=%d); "
                            "reseeding from Postgres (bounded heal)", graph_id, pg_n, pg_e, f_n, f_e)
             try:
@@ -1138,7 +1235,7 @@ class FalkorProjector:
                     await client.delete()
                 except Exception:
                     pass
-                await self._apply(client, *seed)
+                await self._apply(client, *seed, level_map=level_map)
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
                 fk2 = await self._falkor_counts(client)
                 if pg2 is None or pg2 == fk2:
@@ -1149,6 +1246,41 @@ class FalkorProjector:
         msg = f"projection verify mismatch at seq {to_seq} after heal (committed != FalkorDB)"
         logger.error("%s for %s", msg, graph_id)
         return msg, False
+
+    async def _full_seed_content_error(
+        self, client, graph_id, main_id, from_seq, entity_count=0
+    ) -> Optional[str]:
+        """Content verify for a FULL SEED whose COUNTS already matched: the reconciler's single-scan
+        content diff (node displayName/label drift + edge type/confidence/properties drift) of the
+        freshly-seeded cache vs committed main. Returns an error string on ANY field drift the count
+        verify can't see, else None. No-op off the full-seed path, when disabled, or above the
+        deep-verify entity ceiling (the ordered scan's SKIP/LIMIT paging degrades on a very large
+        graph — count verify still ran; the on-demand reconcile can deep-diff any size). Best-effort:
+        a diff-infra failure degrades to None (counts already passed), never raises."""
+        if from_seq > 0 or not config.PROJECTION_VERIFY_DEEP:
+            return None
+        cap = config.PROJECTION_VERIFY_DEEP_MAX_ENTITIES
+        if cap > 0 and entity_count > cap:
+            logger.info("full-seed deep verify skipped for %s (%d entities > %d cap); count verify "
+                        "already applied, on-demand reconcile can deep-diff", graph_id, entity_count, cap)
+            return None
+        try:
+            from .reconcile import ProjectionReconciler
+            rec = ProjectionReconciler(self._session, lambda name, provider_id=None: client)
+            # Edge missing/extra are owned by the DISTINCT-triple count verify (collapse-noisy by id),
+            # so content_drift returns them empty; node coverage + node/edge field drift remain.
+            mn, xn, _me, _xe, mm, em = await rec.content_drift(client, graph_id, main_id)
+        except Exception:                                # pragma: no cover - infra
+            logger.debug("full-seed content verify skipped for %s (diff failed)",
+                         graph_id, exc_info=True)
+            return None
+        if mn or xn or mm or em:
+            msg = (f"content drift after full seed: {len(mn)} missing node(s), "
+                   f"{len(xn)} extra node(s), {len(mm)} node field mismatch(es), "
+                   f"{len(em)} edge attr mismatch(es) (bounded sample) — cache NOT published")
+            logger.error("%s for %s", msg, graph_id)
+            return msg
+        return None
 
     async def _sweep_tombstoned(self, client, graph_id, main_id) -> None:
         """DETACH DELETE from the cache every node/edge ``main`` has TOMBSTONED that the
@@ -1261,14 +1393,14 @@ class FalkorProjector:
         return _on_chunk
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
-                     progress=None) -> None:
+                     progress=None, level_map: Optional[Dict[str, int]] = None) -> None:
         # Nodes in (grouped by label), edges in (grouped by type + endpoint
         # labels — the per-label URN indexes drive every node match), edges
         # out, nodes out.
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
             by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
-                _node_item(eid, urn, p)
+                _node_item(eid, urn, p, level_map)
             )
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):

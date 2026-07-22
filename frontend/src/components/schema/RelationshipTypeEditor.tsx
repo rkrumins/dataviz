@@ -11,6 +11,7 @@ import * as LucideIcons from 'lucide-react'
 import type { RelationshipTypeSchema, RelationshipVisualConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
 import { toRelationshipTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
+import { caseFold } from '@/features/ontology/lib/caseFold'
 import { DEFAULT_REL_VISUAL } from '@/features/ontology/lib/ontology-types'
 import { ColorInput } from '@/components/ui/ColorInput'
 
@@ -106,12 +107,18 @@ export function RelationshipTypeEditor({
     setForm((p) => ({ ...p, id: toRelationshipTypeId(raw) }))
   }
 
-  // Uniqueness is scoped to THIS ontology, excluding the type being edited.
+  // Uniqueness is scoped to THIS ontology, excluding the type being edited (case-insensitively —
+  // `To` and `TO` are the same declared type, so neither may count as the other's collision).
   const otherIds = useMemo(
-    () => existingTypeIds.filter((id) => id !== relType?.id),
+    () => existingTypeIds.filter((id) => caseFold(id) !== caseFold(relType?.id ?? '')),
     [existingTypeIds, relType?.id],
   )
-  const collision = findCaseInsensitiveCollision(form.id, otherIds)
+  // The edge-type id is frozen once created (the id input is disabled below), so a pre-existing
+  // case-variant duplicate is NOT something the user can resolve from this dialog. Only a NEW type
+  // can collide in a way renaming would fix. Gating an existing type on `collision` would
+  // permanently dead-end pure re-categorization (moving an edge into Containment/Lineage), which is
+  // the whole point of opening the editor. So the collision only blocks new types.
+  const collision = isNew ? findCaseInsensitiveCollision(form.id, otherIds) : null
   const canSave = !!form.name.trim() && !!form.id.trim() && !collision
 
   // Edge preview SVG

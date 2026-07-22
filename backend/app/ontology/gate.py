@@ -73,6 +73,18 @@ class ResolutionReport:
     fingerprint: Optional[str] = None
 
 
+def _fold_case_variants(ids) -> List[str]:
+    """Collapse case-variant ids to ONE canonical per case-fold, sorted (uppercase-first, matching
+    the UPPER_SNAKE edge / PascalCase node conventions). A graph that spells one type several ways
+    (``Has``/``HAS``/``has``) yields ONE missing type — so the one-click "add missing types" fix
+    seeds a single canonical declaration instead of a case-colliding pair the write-path guard
+    (``case_insensitive_type_id_collisions``) would then reject with a 422."""
+    seen: Dict[str, str] = {}
+    for i in sorted(ids):
+        seen.setdefault(str(i).lower(), i)
+    return sorted(seen.values())
+
+
 def _was_explicitly_classified(raw: Dict[str, Any]) -> bool:
     """Check if both is_containment and is_lineage were explicitly set in the
     raw JSON dict (not just defaulted to false by the parser).
@@ -120,6 +132,8 @@ def check_resolution(
     relationship_type_definitions_raw: Dict[str, Any],
     introspected_entity_ids: List[str],
     introspected_edge_ids: List[str],
+    containment_edge_types: Optional[List[str]] = None,
+    lineage_edge_types: Optional[List[str]] = None,
 ) -> ResolutionReport:
     """Evaluate the resolution gate against an ontology + a graph schema snapshot.
 
@@ -157,6 +171,21 @@ def check_resolution(
         relationship_type_definitions_raw or {}
     )
 
+    # Honor the ontology's PERSISTED containment/lineage lists, not ONLY the per-rel
+    # is_containment/is_lineage flags. Save-time does not always keep the two in sync — a type
+    # classified via the Hierarchy panel, or a blank/custom ontology, records the top-level LIST but
+    # leaves the flag at its False default — and resolver.resolve_ontology already unions them for
+    # the read/canvas path. Reconciling the parsed flags here (in-memory only; the fingerprint is
+    # computed from the raw defs, so this cannot perturb idempotency) means a list-only lineage
+    # classification still satisfies criterion 4 instead of spuriously blocking with ``no_lineage``.
+    _containment_upper = {str(t).upper() for t in (containment_edge_types or [])}
+    _lineage_upper = {str(t).upper() for t in (lineage_edge_types or [])}
+    for _rid, _rd in user_rel_defs.items():
+        if _rid.upper() in _containment_upper:
+            _rd.is_containment = True
+        if _rid.upper() in _lineage_upper:
+            _rd.is_lineage = True
+
     blocking_reasons: List[str] = []
     advisory_warnings: List[str] = []
 
@@ -164,7 +193,7 @@ def check_resolution(
     # Case-insensitive match: graph providers return labels like "Person"
     # while ontologies may key them differently. Same convention as resolver.
     defined_entity_keys = {k.upper() for k in entity_defs}
-    missing_entity_types = sorted(
+    missing_entity_types = _fold_case_variants(
         {eid for eid in introspected_entity_ids if eid.upper() not in defined_entity_keys}
     )
     if missing_entity_types:
@@ -172,7 +201,7 @@ def check_resolution(
 
     # Criterion 2 (advisory) — every introspected edge type defined.
     defined_rel_keys = {k.upper() for k in rel_defs}
-    missing_edge_types = sorted(
+    missing_edge_types = _fold_case_variants(
         {eid for eid in introspected_edge_ids if eid.upper() not in defined_rel_keys}
     )
     if missing_edge_types:
@@ -211,7 +240,17 @@ def check_resolution(
     # lineage is independent of any specific graph's current contents.
     # Without this, a stats-cache miss (which produces empty
     # introspected_edge_ids) would spuriously block re-triggers.
-    has_lineage = any(rel_def.is_lineage for rel_def in user_rel_defs.values())
+    # Also honor a lineage type that lives ONLY in the top-level list with no
+    # rich def (a legitimate "legacy vocabulary" state the repo preserves): the
+    # reconcile loop above can only flag ids that exist in ``user_rel_defs``, so
+    # an array-only id would be missed here and spuriously block — even though
+    # resolve_ontology and the aggregation worker BOTH union the raw arrays and
+    # would run it. Reconcile the gate against the arrays too, so the preflight
+    # can never be stricter than the engine it guards.
+    has_lineage = (
+        any(rel_def.is_lineage for rel_def in user_rel_defs.values())
+        or bool(_lineage_upper)
+    )
     if not has_lineage:
         blocking_reasons.append("no_lineage")
 
@@ -221,7 +260,10 @@ def check_resolution(
     # endpoints (no ancestor-to-ancestor propagation). Aggregation will
     # technically run, but the user won't see the cross-tier roll-up
     # they expect.
-    has_containment = any(rel_def.is_containment for rel_def in user_rel_defs.values())
+    has_containment = (
+        any(rel_def.is_containment for rel_def in user_rel_defs.values())
+        or bool(_containment_upper)
+    )
     if not has_containment:
         advisory_warnings.append("no_containment_edges")
 

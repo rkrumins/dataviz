@@ -24,6 +24,7 @@ is a ``main``-only, non-fork concern — matching the projector's own count sema
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ def _bounded_query(client, cypher: str, params=None):
 
 from .models import (
     BranchORM,
+    EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
     NodeVersionORM,
@@ -66,7 +68,8 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 async def pg_live_counts(session, graph_id: str, branch_id: str) -> Tuple[int, int]:
     """Live (non-tombstone) node/edge counts on *branch_id* from ``entity_heads`` —
-    O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)``."""
+    O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` — the TRUE counts (every distinct
+    edge id), for the drift report the operator reads."""
     pg_nodes = (await session.execute(
         select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
@@ -78,6 +81,49 @@ async def pg_live_counts(session, graph_id: str, branch_id: str) -> Tuple[int, i
             EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
         ))).scalar_one()
     return int(pg_nodes), int(pg_edges)
+
+
+async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> Tuple[int, int]:
+    """Node count + DISTINCT edge-TRIPLE count — what a FAITHFUL FalkorDB projection actually holds,
+    so it can be compared 1:1 with :func:`falkor_counts`.
+
+    The projector writes edges id-lessly (``MERGE (a)-[r:TYPE]->(b)``), so N Postgres edges that share
+    a ``(source, type, target)`` triple collapse to ONE relationship in FalkorDB (the model's
+    parallel-edge invariant). Comparing FalkorDB's edge count against the TRUE edge count
+    (:func:`pg_live_counts`) therefore reports a false shortfall on ANY graph with parallel edges and
+    holds the rebuild back forever. Counting DISTINCT triples models the collapse exactly: a genuine
+    dropped triple still shows as a shortfall, an extra still shows as a surplus. Nodes never collapse,
+    so the node count is unchanged. O(E) — one indexed aggregation, not per-edge.
+
+    The triple's TYPE must be the SAME string the projector stamps as the relationship type —
+    ``_sanitize_label(edgeType or "REL")`` — NOT the raw ``edge_type`` column: ``_sanitize_label`` maps
+    every non-alphanumeric/underscore char to ``_`` (so ``depends on`` / ``depends-on`` / ``depends.on``
+    ALL become ``depends_on``) and an empty/NULL type defaults to ``REL``. Counting the raw column would
+    treat those as distinct triples while FalkorDB collapses them to one — the very false shortfall this
+    function exists to prevent. ``[:alnum:]`` (POSIX, locale-aware) mirrors Python ``str.isalnum`` for
+    the punctuation cases that actually occur in imported free-form labels."""
+    pg_nodes = (await session.execute(
+        select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(False),
+        ))).scalar_one()
+    projected_type = func.regexp_replace(
+        func.coalesce(func.nullif(EdgeVersionORM.edge_type, ""), "REL"),
+        "[^[:alnum:]_]", "_", "g")               # == _sanitize_label(edge_type or "REL")
+    triples = (await session.execute(
+        select(func.count(func.distinct(func.concat(
+            EdgeVersionORM.source_entity_id, "\x1f",
+            projected_type, "\x1f",
+            EdgeVersionORM.target_entity_id,
+        )))).select_from(EntityHeadORM).join(
+            EdgeVersionORM,
+            (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+            & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+        ).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
+        ))).scalar_one()
+    return int(pg_nodes), int(triples)
 
 
 async def falkor_counts(client) -> Tuple[int, int]:
@@ -107,15 +153,20 @@ async def falkor_counts(client) -> Tuple[int, int]:
 # null key would break the sorted-merge's id comparison (str vs None). They still surface via count
 # drift (``falkor_counts`` counts them), which is the coherent signal for "the cache holds something
 # the SoR doesn't".
+# The scans carry the DEEP fields too (displayName + labels for nodes; type + confidence + properties
+# for edges), so the sorted-merge compares them inline on a matched id — one ordered scan does BOTH
+# the id-set coverage AND the field check, O(N+E). (The old design added a SEPARATE per-entity fetch
+# — `MATCH (n {urn})` / `MATCH ()-[r {id}]->()` — an UNINDEXED scan PER entity, i.e. O(N²+E²), which
+# hung a 60k rebuild.) Nodes ordered by entityId; edges by r.id — the FalkorDB relationship key that
+# the id-less MERGE stamps to the LAST writer, so a collapsed parallel edge's surviving r.id AND its
+# attributes come from the SAME Postgres edge, and comparing FalkorDB against that Postgres row by id
+# is consistent.
 _SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) AND n.entityId IS NOT NULL "
-               "RETURN n.entityId, n.urn ORDER BY n.entityId SKIP $s LIMIT $l")
+               "RETURN n.entityId, n.urn, n.displayName, labels(n) ORDER BY n.entityId SKIP $s LIMIT $l")
 _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
-               "RETURN r.id ORDER BY r.id SKIP $s LIMIT $l")
-_DEEP_FETCH = ("UNWIND $urns AS u MATCH (n {urn: u}) "
-               "RETURN n.urn, n.entityId, n.displayName, labels(n)")
+               "RETURN r.id, type(r), r.confidence, r.properties ORDER BY r.id SKIP $s LIMIT $l")
 
 _PG_BATCH = 5000      # keyset page size for the Postgres entity_heads stream
-_DEEP_BATCH = 500     # UNWIND fan-in per deep FalkorDB fetch
 
 
 @dataclass
@@ -134,7 +185,8 @@ class DriftReport:
     extra_nodes: List[dict]                               # bounded samples {entityId, urn}
     missing_edges: List[str]                              # bounded entity-id samples
     extra_edges: List[str]                                # bounded entity-id samples
-    mismatched: List[dict]                                # deep only: {entityId, field, pg, falkor}
+    mismatched: List[dict]                                # deep only: node {entityId, field, pg, falkor}
+    edge_mismatched: List[dict]                           # deep only: edge {entityId, field, pg, falkor}
     truncated: bool                                       # drift exceeded sample_limit somewhere
     in_sync: bool
     checked_at: str
@@ -155,14 +207,16 @@ async def _anext(aiter: AsyncIterator) -> Any:
 
 async def _merge(pg_iter, fk_iter, pg_key, fk_key):
     """Sorted-merge two ascending streams keyed by the same (byte-ordered) id. Yields
-    ``("missing", pg_item)`` for ids only in Postgres (present in the SoR, absent from the
-    cache) and ``("extra", fk_item)`` for ids only in FalkorDB. O(1) state beyond the two
-    look-ahead rows — the whole point is to never hold either side's id-set in memory."""
+    ``("missing", pg_item)`` for ids only in Postgres (present in the SoR, absent from the cache),
+    ``("extra", fk_item)`` for ids only in FalkorDB, and ``("match", (pg_item, fk_item))`` for ids in
+    BOTH — so the caller can field-compare a present entity without a second fetch. O(1) state beyond
+    the two look-ahead rows — the whole point is to never hold either side's id-set in memory."""
     pg = await _anext(pg_iter)
     fk = await _anext(fk_iter)
     while pg is not _SENTINEL and fk is not _SENTINEL:
         pk, fkk = pg_key(pg), fk_key(fk)
         if pk == fkk:
+            yield "match", (pg, fk)
             pg = await _anext(pg_iter)
             fk = await _anext(fk_iter)
         elif pk < fkk:
@@ -208,8 +262,11 @@ class ProjectionReconciler:
             status = ps.status if ps is not None else "idle"
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
+            # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
+            # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
+            # is NOT reported as a false shortfall / out-of-sync.
             pg_nodes, pg_edges = (
-                await pg_live_counts(s, graph_id, main_id) if main_id is not None else (0, 0)
+                await pg_live_counts_projectable(s, graph_id, main_id) if main_id is not None else (0, 0)
             )
         fresh = projected >= committed
 
@@ -220,7 +277,7 @@ class ProjectionReconciler:
                 pg_nodes=pg_nodes, pg_edges=pg_edges,
                 falkor_nodes=0, falkor_edges=0,
                 missing_nodes=[], extra_nodes=[], missing_edges=[], extra_edges=[],
-                mismatched=[], truncated=False, in_sync=False,
+                mismatched=[], edge_mismatched=[], truncated=False, in_sync=False,
                 checked_at=checked_at, duration_ms=int((time.monotonic() - started) * 1000),
                 skipped_reason=None,
             )
@@ -246,27 +303,53 @@ class ProjectionReconciler:
             client = await client
         falkor_nodes, falkor_edges = await falkor_counts(client)
 
-        missing_nodes, extra_nodes, trunc_n = await self._diff_nodes(
-            client, graph_id, main_id, sample_limit)
-        missing_edges, extra_edges, trunc_e = await self._diff_edges(
-            client, graph_id, main_id, sample_limit)
+        missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
+            client, graph_id, main_id, sample_limit, deep)
+        # Edge missing/extra BY ID is collapse-noisy — N Postgres edges sharing a (src,type,tgt)
+        # triple collapse to ONE FalkorDB relationship, so the collapsed-away ids read as "missing"
+        # though the triple is present. Edge COVERAGE is owned by the DISTINCT-triple count compare
+        # (``pg_edges == falkor_edges`` below, where ``pg_edges`` is the projectable triple count);
+        # drop the id samples and keep only the per-edge ATTRIBUTE drift on matched ids.
+        _me, _xe, edge_mismatched, trunc_e = await self._diff_edges(
+            client, graph_id, main_id, sample_limit, deep)
         truncated = trunc_n or trunc_e
 
-        mismatched: List[dict] = []
-        if deep:
-            mismatched, trunc_d = await self._deep_check(client, graph_id, main_id, sample_limit)
-            truncated = truncated or trunc_d
-
         in_sync = (
-            not missing_nodes and not extra_nodes and not missing_edges and not extra_edges
-            and not mismatched and pg_nodes == falkor_nodes and pg_edges == falkor_edges
+            not missing_nodes and not extra_nodes
+            and not mismatched and not edge_mismatched
+            and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
         return _report(
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
-            missing_edges=missing_edges, extra_edges=extra_edges,
-            mismatched=mismatched, truncated=truncated, in_sync=in_sync,
+            missing_edges=[], extra_edges=[],
+            mismatched=mismatched, edge_mismatched=edge_mismatched,
+            truncated=truncated, in_sync=in_sync,
         )
+
+    async def content_drift(
+        self, client, graph_id: str, main_id: str, *, deep: bool = True, sample_limit: int = 5
+    ) -> Tuple[List[dict], List[dict], List[str], List[str], List[dict], List[dict]]:
+        """Guard-free content diff of committed ``main`` against an ALREADY-RESOLVED cache client:
+        the id-set diff (nodes + edges) plus, when ``deep``, the per-node field check
+        (entityId / displayName / entityType-label) AND the per-edge attribute check
+        (edgeType / confidence / properties). Returns ``(missing_nodes, extra_nodes,
+        missing_edges, extra_edges, node_mismatched, edge_mismatched)``.
+
+        Unlike :meth:`reconcile`, this takes the client directly and skips the watermark /
+        in-flight guards — the projector's inline full-seed verify calls it while it still holds
+        the graph mid-rebuild (status ``rebuilding``, ``fresh`` still false), where those guards
+        would otherwise short-circuit. ``sample_limit`` bounds only the reported samples, not the
+        (full) scan, so any drift is detected."""
+        missing_n, extra_n, node_mm, _ = await self._diff_nodes(
+            client, graph_id, main_id, sample_limit, deep)
+        _me, _xe, edge_mm, _ = await self._diff_edges(
+            client, graph_id, main_id, sample_limit, deep)
+        # Edge missing/extra BY ID is collapse-noisy — parallel edges share ONE FalkorDB relationship,
+        # so the collapsed-away ids read as "missing" though the triple is present. Edge COVERAGE is
+        # owned by the DISTINCT-triple count verify (run before this), so drop the edge id samples and
+        # keep only the per-edge ATTRIBUTE drift (type/confidence/properties) on matched ids.
+        return missing_n, extra_n, [], [], node_mm, edge_mm
 
     # ------------------------------------------------------------------ #
     # Streams                                                            #
@@ -311,26 +394,37 @@ class ProjectionReconciler:
                 return
             cursor = rows[-1][0]
 
-    async def _stream_pg_edge_ids(self, graph_id: str, branch_id: str):
-        """Ascending (``COLLATE "C"``) stream of live ``main`` edge entity-ids — the FalkorDB
-        edge key is ``r.id == entity_id``, so ids alone diff edges (no payload join needed)."""
+    async def _stream_pg_edges(self, graph_id: str, branch_id: str):
+        """Ascending (``COLLATE "C"``) stream of live ``main`` edges as
+        ``{entityId, edgeType, confidence, properties}``, read from the head ``edge_versions``
+        payload the ``entity_heads`` pointer names — the SAME source the projector serialised into
+        the cache, so the deep check compares the cache against exactly what SHOULD have been
+        written. Confidence/edgeType/properties are taken from the payload (not the denormalised
+        columns) because ``_edge_item`` writes ``r.confidence = payload['confidence']`` and
+        ``r.properties = json.dumps(payload['properties'] or {})``."""
         cursor = ""
         while True:
             async with self._session() as s:
                 rows = (await s.execute(
-                    select(EntityHeadORM.entity_id).where(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.payload).join(
+                        EdgeVersionORM,
+                        (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                        & (EdgeVersionORM.id == EntityHeadORM.head_version_id),
+                    ).where(
                         EntityHeadORM.graph_id == graph_id,
                         EntityHeadORM.branch_id == branch_id,
                         EntityHeadORM.entity_kind == "edge",
                         EntityHeadORM.is_tombstone.is_(False),
                         EntityHeadORM.entity_id.collate("C") > cursor,
                     ).order_by(EntityHeadORM.entity_id.collate("C")).limit(_PG_BATCH)
-                )).scalars().all()
-            for eid in rows:
-                yield eid
+                )).all()
+            for eid, payload in rows:
+                p = payload or {}
+                yield {"entityId": eid, "edgeType": p.get("edgeType"),
+                       "confidence": p.get("confidence"), "properties": p.get("properties") or {}}
             if len(rows) < _PG_BATCH:
                 return
-            cursor = rows[-1]
+            cursor = rows[-1][0]
 
     async def _scan_falkor(self, client, cypher: str):
         """Ascending stream of a FalkorDB scan's rows via SKIP/LIMIT paging (O(batch) memory)."""
@@ -345,10 +439,15 @@ class ProjectionReconciler:
             skip += _PG_BATCH
 
     # ------------------------------------------------------------------ #
-    # Diff levels                                                        #
+    # Diff levels — ONE ordered scan per entity type does coverage AND    #
+    # (when deep) the field check, on a matched id — no per-entity fetch. #
     # ------------------------------------------------------------------ #
-    async def _diff_nodes(self, client, graph_id, branch_id, sample_limit):
-        missing, extra = [], []
+    async def _diff_nodes(self, client, graph_id, branch_id, sample_limit, deep=False):
+        """Sorted-merge live ``main`` nodes against the cache scan: ids only-in-PG (missing) /
+        only-in-Falkor (extra), and — when ``deep`` — displayName / entityType-label drift on a
+        matched id. Everything comes from the single ordered ``_SCAN_NODES`` (which now RETURNs
+        displayName + labels), so there is no separate per-node fetch."""
+        missing, extra, mismatched = [], [], []
         truncated = False
         merge = _merge(
             self._stream_pg_nodes(graph_id, branch_id),
@@ -362,66 +461,60 @@ class ProjectionReconciler:
                                     "displayName": item["displayName"]})
                 else:
                     truncated = True
-            else:
+            elif kind == "extra":
                 if len(extra) < sample_limit:
                     extra.append({"entityId": item[0], "urn": item[1]})
                 else:
                     truncated = True
-        return missing, extra, truncated
-
-    async def _diff_edges(self, client, graph_id, branch_id, sample_limit):
-        missing, extra = [], []
-        truncated = False
-        merge = _merge(
-            self._stream_pg_edge_ids(graph_id, branch_id),
-            self._scan_falkor(client, _SCAN_EDGES),
-            pg_key=lambda e: e, fk_key=lambda r: r[0],
-        )
-        async for kind, item in merge:
-            bucket = missing if kind == "missing" else extra
-            eid = item if kind == "missing" else item[0]
-            if len(bucket) < sample_limit:
-                bucket.append(eid)
-            else:
-                truncated = True
-        return missing, extra, truncated
-
-    async def _deep_check(self, client, graph_id, branch_id, sample_limit):
-        """Full field scan: ride the node stream, batch-fetch each batch's nodes from FalkorDB by
-        urn, and compare ``entityId`` / ``displayName`` / ``entityType`` (label). A node absent from
-        the cache is a *missing* (the id-diff owns it), not a mismatch, so it is skipped here."""
-        mismatched: List[dict] = []
-        truncated = False
-        batch: List[dict] = []
-
-        async def flush() -> bool:
-            nonlocal truncated
-            if not batch:
-                return truncated
-            res = await _bounded_query(
-                client, _DEEP_FETCH, params={"urns": [n["urn"] for n in batch]})
-            fk_by_urn: Dict[str, tuple] = {}
-            for urn, eid, dname, labels in (getattr(res, "result_set", None) or []):
-                fk_by_urn[urn] = (eid, dname, list(labels or []))
-            for n in batch:
-                got = fk_by_urn.get(n["urn"])
-                if got is None:
-                    continue
-                for fname, pg_val, fk_val in _field_mismatches(n, *got):
+            elif deep:                                   # ("match", (pg, fk)); fk = [eid, urn, dname, labels]
+                pg, fk = item
+                for fname, pg_val, fk_val in _field_mismatches(pg, fk[0], fk[2], list(fk[3] or [])):
                     if len(mismatched) < sample_limit:
-                        mismatched.append({"entityId": n["entityId"], "field": fname,
+                        mismatched.append({"entityId": pg["entityId"], "field": fname,
                                            "pg": pg_val, "falkor": fk_val})
                     else:
                         truncated = True
-            batch.clear()
-            return truncated
+        return missing, extra, mismatched, truncated
 
-        async for node in self._stream_pg_nodes(graph_id, branch_id):
-            batch.append(node)
-            if len(batch) >= _DEEP_BATCH:
-                await flush()
-        await flush()
-        return mismatched, truncated
+    async def _diff_edges(self, client, graph_id, branch_id, sample_limit, deep=False):
+        """Sorted-merge live ``main`` edges against the cache scan BY ``r.id``: missing / extra ids,
+        and — when ``deep`` — edgeType / confidence / properties drift on a matched id, all from the
+        single ordered ``_SCAN_EDGES`` (which now RETURNs type + confidence + properties).
+
+        Parallel edges (same (src,type,tgt) triple, different ids) COLLAPSE to one FalkorDB
+        relationship whose ``r.id`` is the last writer, so the collapsed-away ids surface here as
+        ``missing``. That id-level 'missing' is NOT edge loss — the triple is present — which is why
+        edge COVERAGE is owned by the DISTINCT-triple count verify and :meth:`content_drift` drops the
+        edge missing/extra samples, keeping only the attribute drift. The matched id's FalkorDB
+        attributes AND its ``r.id`` were both stamped from the SAME Postgres edge (the last writer), so
+        comparing FalkorDB against that Postgres row by id is collapse-consistent."""
+        missing, extra, mismatched = [], [], []
+        truncated = False
+        merge = _merge(
+            self._stream_pg_edges(graph_id, branch_id),
+            self._scan_falkor(client, _SCAN_EDGES),
+            pg_key=lambda e: e["entityId"], fk_key=lambda r: r[0],
+        )
+        async for kind, item in merge:
+            if kind == "missing":
+                if len(missing) < sample_limit:
+                    missing.append(item["entityId"])
+                else:
+                    truncated = True
+            elif kind == "extra":
+                if len(extra) < sample_limit:
+                    extra.append(item[0])
+                else:
+                    truncated = True
+            elif deep:                                   # ("match", (pg, fk)); fk = [r.id, type, conf, props]
+                pg, fk = item
+                for fname, pg_val, fk_val in _edge_field_mismatches(pg, fk[1], fk[2], fk[3]):
+                    if len(mismatched) < sample_limit:
+                        mismatched.append({"entityId": pg["entityId"], "field": fname,
+                                           "pg": pg_val, "falkor": fk_val})
+                    else:
+                        truncated = True
+        return missing, extra, mismatched, truncated
 
 
 def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
@@ -437,3 +530,44 @@ def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
     if pg_label not in f_labels:
         out.append(("entityType", pg_label, f_labels))
     return out
+
+
+def _edge_field_mismatches(pg_edge: dict, f_type, f_conf, f_props) -> List[tuple]:
+    """The ``(field, pg_value, falkor_value)`` triples where a cached edge disagrees with its
+    committed-``main`` payload — comparing the SAME derivations the projector wrote: the sanitised
+    ``edgeType`` label (``_sanitize_label(edgeType or "REL")``), the top-level ``confidence`` scalar,
+    and the JSON-serialised nested ``properties``."""
+    out: List[tuple] = []
+    pg_type = _sanitize_label(pg_edge["edgeType"] or "REL")
+    if pg_type != f_type:
+        out.append(("edgeType", pg_type, f_type))
+    if not _conf_equal(pg_edge["confidence"], f_conf):
+        out.append(("confidence", pg_edge["confidence"], f_conf))
+    if (pg_edge["properties"] or {}) != _parse_props(f_props):
+        out.append(("properties", pg_edge["properties"], f_props))
+    return out
+
+
+def _conf_equal(a, b) -> bool:
+    """Confidence equality tolerant of float representation. ``None`` (edge carries no confidence)
+    equals only ``None``; two numbers compare within a tiny epsilon (the cache round-trips a double,
+    so a drift is a real value change, not a rounding artefact)."""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) <= 1e-9
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _parse_props(f_props) -> dict:
+    """The cache stores edge ``properties`` as a JSON string (``json.dumps(... or {})``); parse it
+    back to a dict for comparison, tolerating a legacy native value or an unparseable residual."""
+    if isinstance(f_props, str):
+        try:
+            return json.loads(f_props or "{}")
+        except (ValueError, TypeError):
+            return {}
+    return f_props or {}

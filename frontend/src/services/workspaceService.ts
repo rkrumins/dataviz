@@ -20,6 +20,10 @@ export interface DataSourceCreateRequest {
     // of a catalog item; the backend accepts either shape.
     providerId?: string
     graphName?: string
+    /** URN-equivalent node-identity property. Omit for the default "urn". */
+    identityProperty?: string
+    /** Node display-name property. Omit for the default "name". */
+    nameProperty?: string
 }
 
 export interface DataSourceUpdateRequest {
@@ -30,6 +34,10 @@ export interface DataSourceUpdateRequest {
     isActive?: boolean
     projectionMode?: string | null  // null | "in_source" | "dedicated"
     dedicatedGraphName?: string | null  // graph name when mode is "dedicated"
+    /** URN-equivalent node-identity property. "" clears back to the default "urn". */
+    identityProperty?: string
+    /** Node display-name property. "" clears back to the default "name". */
+    nameProperty?: string
 }
 
 export interface DataSourceResponse {
@@ -48,6 +56,10 @@ export interface DataSourceResponse {
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
     dedicatedGraphName?: string | null  // graph name when dedicated
+    /** URN-equivalent node-identity property. Always populated ("urn" by default). */
+    identityProperty?: string
+    /** Node display-name property. Always populated ("name" by default). */
+    nameProperty?: string
     /** Provenance: 'managed' = fully managed in-app graph (blank/versioned),
      *  'federated' = external system of record. Null/absent on legacy rows —
      *  resolve with {@link resolveSourceMode}. */

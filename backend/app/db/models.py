@@ -580,6 +580,20 @@ class WorkspaceDataSourceORM(Base):
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
+    # Node-identity property — the physical graph property that plays the role
+    # the platform's canonical ``urn`` does (universal node identity). NULL means
+    # "urn" (the default, and every legacy row). Set to e.g. "id" when an
+    # onboarded third-party graph identifies nodes by a differently-named
+    # property; resolved at read time as coalesce(n.urn, n[identity_property]) so
+    # the source can keep updating independently without a rewrite.
+    identity_property = Column(Text, nullable=True)
+    # Node display-name property — the physical graph property that holds the
+    # human-readable node name. NULL means "name" (the default). Set when an
+    # onboarded graph stores its name under a differently-named property (e.g.
+    # "title"); the aggregation run stamps it onto `displayName` so the whole
+    # read stack renders it, and the serializer falls back through name/title/
+    # label meanwhile. Symmetric to identity_property.
+    name_property = Column(Text, nullable=True)
     # ── Versioning source model ───────────────────────────────
     # None = derive from provider capability (managed if writable & not external).
     source_mode = Column(Text, nullable=True)              # "managed" | "federated"

@@ -747,6 +747,16 @@ class OntologyResolutionResponse(BaseModel):
         populate_by_name = True
 
 
+class TypeCaseDrift(BaseModel):
+    """One physical spelling that drifts from its declared spelling by case only."""
+    id: str          # the physical spelling observed in the graph
+    declared: str    # the declared spelling it should match
+    count: int = 0
+
+    class Config:
+        populate_by_name = True
+
+
 class OntologyMatchResult(BaseModel):
     ontology_id: str = Field(alias="ontologyId")
     ontology_name: str = Field(alias="ontologyName")
@@ -758,6 +768,21 @@ class OntologyMatchResult(BaseModel):
     uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
     total_entity_types: int = Field(0, alias="totalEntityTypes")
     total_relationship_types: int = Field(0, alias="totalRelationshipTypes")
+    # Relationship types the graph USES that this ontology declares but leaves UNCLASSIFIED
+    # (neither containment nor lineage — i.e. stuck in "Other"). The name-overlap jaccardScore
+    # ignores classification, so a 100% match can still be non-functional for aggregation; this
+    # qualifies it so the UI can warn "N edges uncategorized" instead of implying a working setup.
+    uncategorized_relationship_types: List[str] = Field(
+        default_factory=list, alias="uncategorizedRelationshipTypes"
+    )
+    # Edge types the graph uses that match a declared type case-INSENSITIVELY but not exactly
+    # (physical `To` vs declared `TO`). They resolve via the alias map but do NOT hit FalkorDB's
+    # per-label index, so a "100% name match" can still be case-drifted. Same signal Health's
+    # adoption view shows (backend.app.ontology.adoption case_drift) — surfaced here so onboarding
+    # sees it before assigning.
+    case_drift_relationship_types: List[TypeCaseDrift] = Field(
+        default_factory=list, alias="caseDriftRelationshipTypes"
+    )
 
     class Config:
         populate_by_name = True
@@ -793,6 +818,13 @@ class DataSourceCreateRequest(BaseModel):
     label: Optional[str] = None
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
+    # Node-identity property — the URN-equivalent for this physical graph.
+    # None → "urn" (default). Set to e.g. "id" for onboarded graphs that key
+    # nodes by a differently-named property.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    # Node display-name property. None → "name" (default). Set when the graph
+    # stores its human name under a differently-named property (e.g. "title").
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -818,6 +850,14 @@ class DataSourceUpdateRequest(BaseModel):
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
+    # Node-identity property — the URN-equivalent for this physical graph.
+    # None → field untouched on update (partial-update semantics); an explicit
+    # value (incl. "urn") overwrites it. Editable across the data source's whole
+    # lifecycle; the next aggregation run freezes and uses the current value.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    # Node display-name property. None → field untouched on update; "" resets to
+    # the default "name".
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -843,6 +883,11 @@ class DataSourceResponse(BaseModel):
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
+    # Node-identity property (URN-equivalent). Always populated on the way out —
+    # legacy/unset rows echo "urn" so the client never has to special-case NULL.
+    identity_property: str = Field("urn", alias="identityProperty")
+    # Node display-name property; unset rows echo "name" (the default).
+    name_property: str = Field("name", alias="nameProperty")
     # Provenance: "managed" = in-app writable graph (blank/versioned models),
     # "federated" = external system of record. None on legacy rows — clients
     # derive from shape (no catalog item → managed), mirroring the ORM comment.

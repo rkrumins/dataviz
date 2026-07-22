@@ -195,6 +195,15 @@ class AggregationWorker:
                 entity_type_levels = json.loads(
                     getattr(job, "entity_type_levels", None) or "{}"
                 )
+                # URN-equivalent node-identity property frozen at trigger time.
+                # NULL on legacy rows → "urn" (no behaviour change). Injected
+                # into the provider below so endpoint resolution reads
+                # coalesce(n.urn, n[identity_property]) for onboarded graphs
+                # that key nodes by e.g. "id" instead of the canonical urn.
+                identity_property = getattr(job, "identity_property", None) or "urn"
+                # Node display-name property, frozen likewise (default "name").
+                # Stamped onto `displayName` so the whole read stack renders it.
+                name_property = getattr(job, "name_property", None) or "name"
 
                 if not lineage_types:
                     # Self-heal instead of failing a doomed row: re-freeze
@@ -206,6 +215,12 @@ class AggregationWorker:
                     containment_types, lineage_types, entity_type_levels = (
                         await self._refreeze_edge_types(session, job)
                     )
+                    # The self-heal also re-derived identity_property and
+                    # name_property from the data source — pick up the refreshed
+                    # values (read above from the un-frozen row, which would have
+                    # been the defaults "urn"/"name").
+                    identity_property = getattr(job, "identity_property", None) or "urn"
+                    name_property = getattr(job, "name_property", None) or "name"
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -265,6 +280,17 @@ class AggregationWorker:
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
 
+                # Inject the frozen node-identity property so the provider's
+                # directory build resolves endpoints as
+                # coalesce(n.urn, n[identity_property]). Default "urn" is a
+                # no-op (the historical hardcoded behaviour). Set as a plain
+                # attribute the provider reads at directory-build time.
+                try:
+                    provider._node_identity_property = identity_property
+                    provider._name_property = name_property
+                except Exception:
+                    pass
+
                 # Per-source vocabulary alignment (Task E): the frozen containment/lineage
                 # types carry the ontology's DECLARED casing, but this graph may spell them
                 # differently (has/to vs HAS/TO) and FalkorDB matches types case-sensitively.
@@ -318,6 +344,21 @@ class AggregationWorker:
                             "Aggregation job %s: ensure_indices failed "
                             "(continuing; first query will surface a missing "
                             "index if any): %s", job.id, exc,
+                        )
+
+                # Onboarded-graph identity: copy the source's URN-equivalent
+                # (e.g. `id`) onto `urn` for any node missing one, AFTER the
+                # indexes exist, so the urn-keyed write/read/trace stack actually
+                # attaches AGGREGATED edges to the real nodes. No-op for
+                # conforming (urn) sources and dedicated projections; best-effort
+                # (a failure degrades to the directory-only coalesce).
+                if hasattr(provider, "stamp_identity_urns"):
+                    try:
+                        await provider.stamp_identity_urns()
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: identity-urn stamp failed "
+                            "(continuing): %s", job.id, exc,
                         )
 
                 # Distributed write-admission control: N workers × M pods
@@ -504,9 +545,19 @@ class AggregationWorker:
                     from backend.insights_service.enqueue import mark_stats_changed
                     await mark_stats_changed(job.data_source_id, job.workspace_id)
 
+                # created_edges is the desired-cube total (used for the
+                # readiness edge count). It is NOT how many edges this run
+                # wrote — a steady-state re-run finds the cube already present
+                # and writes zero. Report both so a genuine write is never
+                # confused with a no-op reconcile ("49747 created" while
+                # writes=0 previously read as if 49747 edges were persisted).
+                _run_writes = result.get("writes", 0)
+                _run_deletes = result.get("deletes", 0)
                 logger.info(
-                    "Aggregation job %s completed: %d edges processed, %d AGGREGATED created",
+                    "Aggregation job %s completed: %d edges processed, "
+                    "%d AGGREGATED edges in cube (%d written, %d deleted this run)",
                     job_id, job.processed_edges, job.created_edges,
+                    _run_writes, _run_deletes,
                 )
 
             except asyncio.TimeoutError as timeout_exc:
@@ -784,7 +835,23 @@ class AggregationWorker:
             json.loads(pinned.relationship_type_definitions or "{}")
         )
         flat = derive_flat_lists(entity_defs, rel_defs)
-        if not flat.lineage_edge_types:
+        # Union the ontology's PERSISTED containment/lineage lists with the per-rel flags, matching
+        # both resolver.resolve_ontology and AggregationService._resolve_ontology. derive_flat_lists
+        # reads only the per-rel flags, so a list-only classification would otherwise re-freeze an
+        # empty hierarchy and roll up nothing.
+        containment_types = list(flat.containment_edge_types)
+        lineage_types = list(flat.lineage_edge_types)
+        _seen_containment = {t.upper() for t in containment_types}
+        _seen_lineage = {t.upper() for t in lineage_types}
+        for t in json.loads(pinned.containment_edge_types or "[]"):
+            if t and t.upper() not in _seen_containment:
+                containment_types.append(t)
+                _seen_containment.add(t.upper())
+        for t in json.loads(pinned.lineage_edge_types or "[]"):
+            if t and t.upper() not in _seen_lineage:
+                lineage_types.append(t)
+                _seen_lineage.add(t.upper())
+        if not lineage_types:
             raise ValueError(
                 "No lineage edge types configured — the pinned ontology "
                 f"{job.ontology_id!r} classifies no relationship as "
@@ -794,10 +861,30 @@ class AggregationWorker:
         levels = derive_level_map(
             SimpleNamespace(entity_type_definitions=entity_defs)
         )
-        job.containment_edge_types = json.dumps(list(flat.containment_edge_types))
-        job.lineage_edge_types = json.dumps(list(flat.lineage_edge_types))
+        job.containment_edge_types = json.dumps(containment_types)
+        job.lineage_edge_types = json.dumps(lineage_types)
         if hasattr(job, "entity_type_levels"):
             job.entity_type_levels = json.dumps(levels)
+        # Re-derive the node-identity property from the DATA SOURCE too (identity
+        # is a per-source property, not an ontology one). Without this, a
+        # legacy/partial row on an id-keyed source would self-heal its edge types
+        # yet keep identity_property NULL → "urn", so the urn stamp/directory
+        # would still drop every id-keyed node — an asymmetric half-heal.
+        if hasattr(job, "identity_property"):
+            try:
+                from backend.app.db.models import WorkspaceDataSourceORM
+                ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+                if ds is not None:
+                    job.identity_property = getattr(ds, "identity_property", None) or "urn"
+                    # Display-name property is per-source too — re-derive it in
+                    # the same pass so the label stamp heals symmetrically.
+                    if hasattr(job, "name_property"):
+                        job.name_property = getattr(ds, "name_property", None) or "name"
+            except Exception as exc:
+                logger.warning(
+                    "Aggregation job %s: identity_property re-derive failed "
+                    "during self-heal (keeping frozen value): %s", job.id, exc,
+                )
         job.updated_at = _now()
         await session.commit()
         logger.warning(
@@ -805,7 +892,7 @@ class AggregationWorker:
             "(trigger_source=%r) — re-froze from pinned ontology %s "
             "(%d lineage, %d containment types)",
             job.id, job.trigger_source, job.ontology_id,
-            len(flat.lineage_edge_types), len(flat.containment_edge_types),
+            len(lineage_types), len(containment_types),
         )
         return (
             list(flat.containment_edge_types),

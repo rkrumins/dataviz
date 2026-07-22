@@ -20,6 +20,7 @@ import { mapWithConcurrency } from '@/lib/concurrency'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
+import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { AggregationFleetPanel } from './AggregationFleetPanel'
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -29,6 +30,10 @@ interface WorkspaceAggregationDashboardProps {
     readinessMap: Record<string, DataSourceReadinessResponse>
     onReaggregate: (ds: DataSourceResponse) => Promise<void>
     onPurge: (ds: DataSourceResponse) => Promise<void>
+    /** Bulk strategic rebuild: re-trigger aggregation for every aggregatable
+     *  data source (heals pre-depth-stamp graphs so self-nesting hierarchies
+     *  resolve). Optional — the button hides when not provided. */
+    onReaggregateAll?: () => Promise<void>
 }
 
 type StatusFilter = 'all' | 'ready' | 'running' | 'pending' | 'failed' | 'skipped' | 'none'
@@ -76,12 +81,15 @@ export function WorkspaceAggregationDashboard({
     readinessMap,
     onReaggregate,
     onPurge,
+    onReaggregateAll,
 }: WorkspaceAggregationDashboardProps) {
     const [activeFilter, setActiveFilter] = useState<StatusFilter>('all')
     const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null)
     const [purging, setPurging] = useState<string | null>(null)
     const [triggering, setTriggering] = useState<string | null>(null)
     const [expandedId, setExpandedId] = useState<string | null>(null)
+    const [confirmRebuildAll, setConfirmRebuildAll] = useState(false)
+    const [rebuildingAll, setRebuildingAll] = useState(false)
 
     // Live readiness state — starts from parent's map, then polled locally
     const [liveReadiness, setLiveReadiness] = useState<Record<string, DataSourceReadinessResponse>>(readinessMap)
@@ -169,19 +177,80 @@ export function WorkspaceAggregationDashboard({
         }
     }
 
+    const handleRebuildAll = async () => {
+        if (!onReaggregateAll) return
+        setRebuildingAll(true)
+        try {
+            await onReaggregateAll()
+            setTimeout(pollReadiness, 500)
+        } finally {
+            setRebuildingAll(false)
+            setConfirmRebuildAll(false)
+        }
+    }
+
+    // Sources eligible for a bulk rebuild (need an ontology to aggregate).
+    const rebuildableCount = dataSources.filter(ds => ds.isActive !== false && ds.ontologyId).length
+    // Ready sources whose cube predates the depth-stamp contract (self-nesting
+    // reads degenerate) — surfaced so the strategic rebuild is prioritisable.
+    const needsRebuildCount = dataSources.filter(ds => liveReadiness[ds.id]?.needsRebuild).length
+
     const totalCount = dataSources.length
 
     return (
         <div className="space-y-5">
             {/* ─── Header ───────────────────────────────────────────── */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
                 <h3 className="text-lg font-bold text-ink">Aggregation Overview</h3>
-                {hasActiveJobs && (
-                    <span className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        Live — polling every 4s
-                    </span>
-                )}
+                <div className="flex items-center gap-3">
+                    {hasActiveJobs && (
+                        <span className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            Live — polling every 4s
+                        </span>
+                    )}
+                    {onReaggregateAll && rebuildableCount > 0 && (
+                        confirmRebuildAll ? (
+                            <span className="flex items-center gap-2 text-xs">
+                                <span className="text-ink-muted">Rebuild all {rebuildableCount}?</span>
+                                <button
+                                    onClick={handleRebuildAll}
+                                    disabled={rebuildingAll}
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                                >
+                                    {rebuildingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                                    {rebuildingAll ? 'Triggering…' : 'Confirm'}
+                                </button>
+                                <button
+                                    onClick={() => setConfirmRebuildAll(false)}
+                                    disabled={rebuildingAll}
+                                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                            </span>
+                        ) : (
+                            <button
+                                onClick={() => setConfirmRebuildAll(true)}
+                                title={`Re-run aggregation for all ${rebuildableCount} data source(s) in this workspace. Heals graphs materialized before the depth-stamp contract so nested (self-referencing) hierarchies resolve.`}
+                                className={cn(
+                                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors',
+                                    needsRebuildCount > 0
+                                        ? 'border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/[0.06]'
+                                        : 'border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400',
+                                )}
+                            >
+                                {needsRebuildCount > 0 ? <AlertTriangle className="w-3.5 h-3.5" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                                Rebuild all aggregations
+                                {needsRebuildCount > 0 && (
+                                    <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-bold tabular-nums">
+                                        {needsRebuildCount} need it
+                                    </span>
+                                )}
+                            </button>
+                        )
+                    )}
+                </div>
             </div>
 
             {/* ─── Worker fleet + global tuning defaults ─────────────── */}
@@ -242,6 +311,7 @@ export function WorkspaceAggregationDashboard({
                         const status = resolveStatus(ds, readiness)
                         const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.none
                         const drift = readiness?.driftDetected ?? false
+                        const needsRebuild = readiness?.needsRebuild ?? false
                         const activeJob = readiness?.activeJob
                         const isExpanded = expandedId === ds.id
                         const isTriggering = triggering === ds.id
@@ -297,6 +367,7 @@ export function WorkspaceAggregationDashboard({
                                                         {ds.projectionMode}
                                                     </span>
                                                 )}
+                                                <NodeIdentityBadge value={ds.identityProperty} />
                                             </div>
                                         </div>
                                     </div>
@@ -343,6 +414,19 @@ export function WorkspaceAggregationDashboard({
                                             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
                                             <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
                                                 Drift detected — source data has changed since last aggregation. Re-trigger to reconcile.
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {/* Pre-depth-stamp warning — nested (self-referencing) hierarchies
+                                        read degenerate until this cube is rebuilt to stampVersion 2. */}
+                                    {needsRebuild && (
+                                        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06]">
+                                            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+                                            <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+                                                Aggregation predates depth stamps — nested hierarchies (e.g. a type that
+                                                contains itself) won't fully resolve. Re-aggregate to rebuild with
+                                                depth-accurate roll-up.
                                             </p>
                                         </div>
                                     )}

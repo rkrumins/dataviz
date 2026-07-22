@@ -360,6 +360,15 @@ class DataSourceReadinessResponse(BaseModel):
     drift_detected: bool = Field(False, alias="driftDetected")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     aggregation_edge_count: int = Field(0, alias="aggregationEdgeCount")
+    # Depth-stamp contract version of the materialized cube (from the in-graph
+    # _AggMeta singleton). < 2 means the run predates sourceDepth/targetDepth,
+    # so self-nesting hierarchies (Node⊃Node) read degenerate until re-run.
+    # None when unknown (never aggregated / non-FalkorDB / probe failed).
+    aggregation_stamp_version: Optional[int] = Field(None, alias="aggregationStampVersion")
+    # True when a ready data source's cube predates the depth-stamp contract and
+    # should be rebuilt. Drives the per-source "rebuild to fix nested
+    # hierarchies" warning in the UI.
+    needs_rebuild: bool = Field(False, alias="needsRebuild")
     message: str
 
     class Config:

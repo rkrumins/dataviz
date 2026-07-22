@@ -13,6 +13,7 @@ import {
     BarChart3, AlertTriangle, Loader2,
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
+import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -26,6 +27,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 
@@ -36,6 +38,10 @@ import { DataSourceProfile, type DataSourceProfileContext } from '@/components/i
 export interface AggregationConfigSnapshot {
     projectionMode: string
     dedicatedGraphName: string
+    /** URN-equivalent node-identity property. "urn" is the default. */
+    identityProperty: string
+    /** Node display-name property. "name" is the default. */
+    nameProperty: string
 }
 
 interface DataSourceDetailPanelProps {
@@ -56,7 +62,10 @@ interface DataSourceDetailPanelProps {
     /** Persist an inline metadata edit (label + ontology). Replaces the old
      *  separate Edit-Data-Source modal. */
     onSaveEdit: (label: string, ontologyId: string | undefined) => Promise<void> | void
+    /** Offboard — reversible; moves the source to Recently deleted. */
     onDelete?: () => void
+    /** Delete permanently — irreversible; only the guarded direct path offers it. */
+    onDeletePermanent?: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
@@ -127,6 +136,7 @@ export function DataSourceDetailPanel({
     ontologies,
     onSaveEdit,
     onDelete,
+    onDeletePermanent,
     onReaggregate,
     onPurge,
     onSaveAggregationConfig,
@@ -169,8 +179,14 @@ export function DataSourceDetailPanel({
     //    reloads that would unmount this drawer mid-interaction.
     const originalMode = ds?.projectionMode ?? ''
     const originalDedicatedName = ds?.dedicatedGraphName ?? ''
+    // Node-identity property (URN-equivalent). Server always echoes "urn" by
+    // default, so a missing value on legacy responses folds to "urn" too.
+    const originalIdentityProperty = ds?.identityProperty || 'urn'
+    const originalNameProperty = ds?.nameProperty || 'name'
     const [pendingMode, setPendingMode] = useState(originalMode)
     const [pendingDedicatedName, setPendingDedicatedName] = useState(originalDedicatedName)
+    const [pendingIdentityProperty, setPendingIdentityProperty] = useState(originalIdentityProperty)
+    const [pendingNameProperty, setPendingNameProperty] = useState(originalNameProperty)
     const [isSaving, setIsSaving] = useState(false)
 
     // Reset pending state whenever the drawer points at a different DS, or when
@@ -178,10 +194,19 @@ export function DataSourceDetailPanel({
     useEffect(() => {
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
+        setPendingIdentityProperty(originalIdentityProperty)
+        setPendingNameProperty(originalNameProperty)
         setIsSaving(false)
-    }, [ds?.id, originalMode, originalDedicatedName])
+    }, [ds?.id, originalMode, originalDedicatedName, originalIdentityProperty, originalNameProperty])
 
-    const isDirty = pendingMode !== originalMode || pendingDedicatedName !== originalDedicatedName
+    // Normalise for comparison/save: trim, and treat empty as the default.
+    const normalizedIdentityProperty = pendingIdentityProperty.trim() || 'urn'
+    const normalizedNameProperty = pendingNameProperty.trim() || 'name'
+    const isDirty =
+        pendingMode !== originalMode ||
+        pendingDedicatedName !== originalDedicatedName ||
+        normalizedIdentityProperty !== originalIdentityProperty ||
+        normalizedNameProperty !== originalNameProperty
     const isOverridden = !!pendingMode
 
     const handleSelectInherit = () => setPendingMode('')
@@ -198,8 +223,8 @@ export function DataSourceDetailPanel({
         setIsSaving(true)
         try {
             await onSaveAggregationConfig(
-                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName },
-                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName },
+                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName, identityProperty: normalizedIdentityProperty, nameProperty: normalizedNameProperty },
+                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName, identityProperty: originalIdentityProperty, nameProperty: originalNameProperty },
             )
             // The parent triggers a reload after save. The useEffect above will
             // resync pending state when the new originals arrive.
@@ -211,6 +236,8 @@ export function DataSourceDetailPanel({
     const handleDiscardConfig = () => {
         setPendingMode(originalMode)
         setPendingDedicatedName(originalDedicatedName)
+        setPendingIdentityProperty(originalIdentityProperty)
+        setPendingNameProperty(originalNameProperty)
     }
 
     // Last-aggregated timestamp prefers the live readiness over the persisted
@@ -295,6 +322,7 @@ export function DataSourceDetailPanel({
                                         <Clock className="w-3 h-3" /> Aggregated {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
+                                <NodeIdentityBadge value={ds.identityProperty} />
                             </div>
 
                             {/* Quick action buttons */}
@@ -315,6 +343,7 @@ export function DataSourceDetailPanel({
                                     wsId={wsId}
                                     onEdit={startEditing}
                                     onDelete={onDelete}
+                                    onDeletePermanent={onDeletePermanent}
                                 />
                                 {/* DataSourceActions handles permission gating per
                                     workspace; falls back to hidden buttons if the
@@ -378,7 +407,7 @@ export function DataSourceDetailPanel({
                                 ds.catalogItemId ? (
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
-                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName } satisfies DataSourceProfileContext}
+                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty, nameProperty: ds.nameProperty } satisfies DataSourceProfileContext}
                                         embedded
                                         onNavigate={onClose}
                                     />
@@ -474,6 +503,19 @@ export function DataSourceDetailPanel({
                                             </div>
                                         </div>
                                     )}
+
+                                    {/* Node Identity Property (URN-equivalent) — shared control,
+                                        graph-aware suggestions from the source's own node properties. */}
+                                    <NodeIdentityField
+                                        key={ds.id}
+                                        value={pendingIdentityProperty}
+                                        onChange={setPendingIdentityProperty}
+                                        canEdit={canManageDs}
+                                        providerId={ds.providerId}
+                                        graphName={ds.graphName}
+                                        nameValue={pendingNameProperty}
+                                        onNameChange={setPendingNameProperty}
+                                    />
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
                                     {isDirty && canManageDs && (
@@ -624,11 +666,14 @@ export function DataSourceDetailPanel({
 // workspace; without it the buttons are hidden so a viewer doesn't
 // click into a 403 toast.
 function DataSourceActions({
-    wsId, onEdit, onDelete,
+    wsId, onEdit, onDelete, onDeletePermanent,
 }: {
     wsId: string
     onEdit: () => void
+    /** Offboard (reversible). */
     onDelete?: () => void
+    /** Delete permanently (irreversible). */
+    onDeletePermanent?: () => void
 }) {
     const isPlatformAdmin = usePermission('system:admin')
     const canManage = isPlatformAdmin || usePermission('workspace:datasource:manage', wsId)
@@ -638,10 +683,12 @@ function DataSourceActions({
             <button onClick={onEdit} className="p-2 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Edit">
                 <Edit2 className="w-3.5 h-3.5" />
             </button>
-            {onDelete && (
-                <button onClick={onDelete} className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Remove">
-                    <Trash2 className="w-3.5 h-3.5" />
-                </button>
+            {onDelete && onDeletePermanent && (
+                <DataSourceActionMenu
+                    align="right"
+                    onOffboard={onDelete}
+                    onDelete={onDeletePermanent}
+                />
             )}
         </>
     )

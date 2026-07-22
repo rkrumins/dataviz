@@ -189,6 +189,12 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const statRegime = typeof job.runStats?.regime === 'string' ? job.runStats.regime : null
     const statCubeEstimate = typeof job.runStats?.cube_estimate === 'number' ? job.runStats.cube_estimate : null
     const statBudget = typeof job.runStats?.materialize_budget === 'number' ? job.runStats.materialize_budget : null
+    // Conformance advisories (identity / casing gaps) recorded in run_stats.
+    // Advisory-only backend signal — a completed run can still carry these,
+    // so surface them here instead of leaving a green row that scanned zero.
+    const advisories = (Array.isArray((job.runStats as { advisories?: unknown } | null | undefined)?.advisories)
+        ? (job.runStats as unknown as { advisories: Array<{ kind: string; severity?: string; message: string }> }).advisories
+        : [])
     const isNoopRun = job.status === 'completed' && statWrites === 0 && statDeletes === 0
     // Purge rows carry the post-purge mode on their tuning payload.
     const purgeStaysEmpty = job.triggerSource === 'purge'
@@ -648,6 +654,39 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     runStats={job.runStats}
                                                     status={job.status}
                                                 />
+                                            </div>
+                                        )}
+
+                                        {/* Conformance advisories — why a run scanned/wrote fewer
+                                            edges than expected (identity or edge-type casing gap). */}
+                                        {advisories.length > 0 && (
+                                            <div className="space-y-1.5">
+                                                {advisories.map((adv, i) => {
+                                                    const isError = adv.severity === 'error'
+                                                    return (
+                                                        <div
+                                                            key={`${adv.kind}-${i}`}
+                                                            className={cn(
+                                                                'flex items-start gap-2 rounded-lg px-3 py-2 border',
+                                                                isError
+                                                                    ? 'bg-red-500/[0.06] border-red-500/20'
+                                                                    : 'bg-amber-500/[0.06] border-amber-500/20',
+                                                            )}
+                                                        >
+                                                            {isError
+                                                                ? <AlertCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+                                                                : <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />}
+                                                            <p className={cn(
+                                                                'text-[11px] leading-relaxed',
+                                                                isError
+                                                                    ? 'text-red-600/90 dark:text-red-400/90'
+                                                                    : 'text-amber-600/90 dark:text-amber-400/90',
+                                                            )}>
+                                                                {adv.message}
+                                                            </p>
+                                                        </div>
+                                                    )
+                                                })}
                                             </div>
                                         )}
 

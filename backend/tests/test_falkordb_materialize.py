@@ -310,6 +310,270 @@ def test_cursor_rejects_legacy_and_garbage():
     assert mat.parse_cursor("v3:x:apply:0") is None
 
 
+# ── node-identity resolution (URN-equivalent) ────────────────────────────
+
+def test_node_identity_expr_default_is_plain_urn(monkeypatch):
+    """Default (None / "urn") keeps the historical hardcoded n.urn — no
+    coalesce, so conforming graphs are byte-for-byte unchanged."""
+    monkeypatch.delenv("AGGREGATION_NODE_IDENTITY_PROPERTY", raising=False)
+    assert mat._node_identity_expr(None) == "n.`urn`"
+    assert mat._node_identity_expr("urn") == "n.`urn`"
+
+
+def test_node_identity_expr_maps_configured_property():
+    """A configured URN-equivalent falls back to it only when urn is absent."""
+    assert mat._node_identity_expr("id") == "coalesce(n.`urn`, n.`id`)"
+    assert mat._node_identity_expr("name") == "coalesce(n.`urn`, n.`name`)"
+
+
+def test_node_identity_expr_strips_backticks_to_prevent_injection():
+    """A hostile property name can't break out of the backtick-quoted ident."""
+    assert mat._node_identity_expr("id`") == "coalesce(n.`urn`, n.`id`)"
+
+
+def test_node_identity_expr_ignores_global_env_var(monkeypatch):
+    """The old AGGREGATION_NODE_IDENTITY_PROPERTY global was a footgun (it would
+    silently affect every source) and has been removed — identity is per-source
+    only. Setting the env var must have NO effect; None resolves to plain urn."""
+    monkeypatch.setenv("AGGREGATION_NODE_IDENTITY_PROPERTY", "id")
+    assert mat._node_identity_expr(None) == "n.`urn`"
+
+
+# ── identity-urn stamp (P0: make id-keyed graphs work end-to-end) ────────────
+
+def test_stamp_identity_urns_sets_urn_from_identity_property():
+    """An in-source id-keyed graph must get `urn` stamped from `id` so the
+    urn-keyed AGGREGATED write/read stack attaches edges to the real nodes."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[100]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 3
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped >= 3
+    assert any(
+        "coalesce(n.`urn`, n.`id`)" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
+        for c in calls
+    ), "stamp must fill urn from id only for nodes missing urn (coalesce, never overwrite)"
+
+
+def test_stamp_identity_urns_noop_for_default_and_dedicated():
+    """No write for a conforming (urn) source, nor for a dedicated projection
+    (which is self-consistent and must not mutate a possibly read-only source)."""
+    p = _make_provider(_FakeFalkor())
+
+    async def _boom(*a, **k):
+        raise AssertionError("stamp must not issue any query in the no-op cases")
+    p._ensure_connected = _boom
+    p._ro_query = _boom
+    p._query = _boom
+
+    p._node_identity_property = "urn"
+    p._projection_mode = "in_source"
+    assert _run(p.stamp_identity_urns()) == 0
+
+    p._node_identity_property = "id"
+    p._projection_mode = "dedicated"
+    assert _run(p.stamp_identity_urns()) == 0
+
+
+def test_stamp_display_name_from_custom_name_property():
+    """A custom name_property (identity conforming) still triggers a standalone
+    displayName stamp, so a non-`displayName` node name renders across the whole
+    read stack — not just the node-detail serializer's fallback."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "urn"       # identity conforming → no urn stamp
+    p._name_property = "title"              # custom name property
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[10]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 2
+        return r
+
+    p._ensure_connected = _noop
+    p._ro_query = _ro
+    p._query = _wq
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped >= 2
+    assert any("coalesce(n.`displayName`, n.`title`)" in c for c in calls)
+    assert all("n.`urn`" not in c for c in calls), "identity conforming → no urn stamp"
+
+
+# ── end-to-end: an id-keyed graph aggregates once urn is stamped ─────────────
+
+class _IdKeyedFake(_FakeFalkor):
+    """A graph whose nodes carry an `id` property and NO `urn`, until
+    stamp_identity_urns copies id→urn — the onboarded-third-party-graph case."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids = {}
+
+    def add_id_node(self, nid, id_value, label):
+        self.nodes[nid] = (None, label)   # urn absent until stamped
+        self.ids[nid] = id_value
+
+    async def write_query(self, cypher, params=None, **kw):
+        # The conformance stamp fills urn (from id) for NULL-urn nodes in an ID
+        # range. These fake nodes carry no `name`, so the displayName clause of
+        # the combined SET is a no-op here.
+        if "SET" in cypher and "n.`urn`" in cypher:
+            lo, hi = params["lo"], params["hi"]
+            n = 0
+            for nid, (urn, label) in list(self.nodes.items()):
+                if lo <= nid < hi and urn is None and self.ids.get(nid) is not None:
+                    idv = self.ids[nid]
+                    self.nodes[nid] = (idv, label)      # now carries urn == id
+                    self._urn_ids[idv] = nid
+                    n += 1
+            r = _Result()
+            r.properties_set = n
+            return r
+        raise AssertionError(f"unhandled write query: {cypher}")
+
+
+def _seed_id_keyed_two_chain(fake):
+    """Domain⊃Table⊃Column, two chains, lineage col_a→col_b (×2) — but nodes are
+    keyed by `id` with no `urn` (mirrors _seed_two_chain_graph)."""
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_id_node(1, "id:domain_abc", "domain")
+    fake.add_id_node(2, "id:table_a", "table")
+    fake.add_id_node(3, "id:col_a", "column")
+    fake.add_id_node(11, "id:domain_def", "domain")
+    fake.add_id_node(12, "id:table_b", "table")
+    fake.add_id_node(13, "id:col_b", "column")
+    fake.add_edge("CONTAINS", 0, 1, 2)
+    fake.add_edge("CONTAINS", 1, 2, 3)
+    fake.add_edge("CONTAINS", 2, 11, 12)
+    fake.add_edge("CONTAINS", 3, 12, 13)
+    fake.add_edge("FLOWS", 10, 3, 13)
+    fake.add_edge("FLOWS", 11, 3, 13)
+    return levels
+
+
+def test_id_keyed_graph_aggregates_end_to_end_after_urn_stamp():
+    """The whole point of the identity feature: a graph keyed by `id` (no `urn`)
+    must aggregate into AGGREGATED edges once stamp_identity_urns runs."""
+    fake = _IdKeyedFake()
+    levels = _seed_id_keyed_two_chain(fake)
+    p = _make_provider(fake, levels)
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+
+    async def _noop():
+        return None
+    p._ensure_connected = _noop
+    p._query = fake.write_query
+
+    stamped = _run(p.stamp_identity_urns())
+    assert stamped == 6, "every id-keyed node must be stamped with a urn"
+
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {(2, 12): 2, (1, 11): 2}, (
+        "an id-keyed graph must roll up like any urn-keyed one once stamped"
+    )
+    # Edges are keyed by the id VALUES (the stamped urn), not a synthetic urn.
+    key = fake.agg[(1, 11)]["aggKey"]
+    assert "id:domain_abc" in key and "id:domain_def" in key
+
+
+def test_id_keyed_graph_without_stamp_writes_nothing():
+    """Proves the stamp is load-bearing: with no urn, the directory is empty and
+    zero AGGREGATED edges are written (the silent failure the stamp fixes)."""
+    fake = _IdKeyedFake()
+    levels = _seed_id_keyed_two_chain(fake)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(p))       # no stamp
+    assert result["errors"] == 0
+    assert fake.agg == {}
+
+
+# ── conformance advisories (Phase IV — loud, never silent) ───────────────
+
+def _make_pipeline():
+    p = _make_provider(_FakeFalkor(), {"domain": 0})
+    return mat.AggregationPipeline(
+        p,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        last_cursor=None,
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+    )
+
+
+def test_advisory_identity_unresolved_is_error_severity():
+    pipe = _make_pipeline()
+    pipe._empty_directory = True
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "identity_unresolved")
+    assert hit["severity"] == "error"
+    assert "Node Identity Property" in hit["message"]
+
+
+def test_advisory_dropped_endpoints_reports_count():
+    pipe = _make_pipeline()
+    pipe._dropped_endpoints = 5
+    advs = pipe._result(3)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "endpoints_unresolved")
+    assert hit["dropped_pairs"] == 5
+
+
+def test_advisory_empty_directory_supersedes_dropped_count():
+    """An empty directory already means every pair was dropped — surface the
+    single actionable identity advisory, not a redundant drop count."""
+    pipe = _make_pipeline()
+    pipe._empty_directory = True
+    pipe._dropped_endpoints = 999
+    kinds = {a["kind"] for a in pipe._result(0)["run_stats"]["advisories"]}
+    assert "identity_unresolved" in kinds
+    assert "endpoints_unresolved" not in kinds
+
+
+def test_advisory_unmatched_edge_types_lists_them():
+    pipe = _make_pipeline()
+    pipe._unmatched_types = ["TRANSFORMS", "MOVES"]
+    advs = pipe._result(0)["run_stats"]["advisories"]
+    hit = next(a for a in advs if a["kind"] == "edge_types_unmatched")
+    assert "TRANSFORMS" in hit["message"]
+    assert hit["types"] == ["TRANSFORMS", "MOVES"]
+
+
+def test_clean_run_emits_no_advisories_key():
+    """A conforming run's run_stats must be unchanged — no advisories noise."""
+    pipe = _make_pipeline()
+    assert "advisories" not in pipe._result(10)["run_stats"]
+
+
 # ── semantics ────────────────────────────────────────────────────────────
 
 

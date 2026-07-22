@@ -1,12 +1,13 @@
 """
 Unit tests for backend.app.db.repositories.workspace_repo
 """
-from backend.app.db.repositories import workspace_repo
+from backend.app.db.repositories import workspace_repo, data_source_repo
 from backend.app.db.models import ProviderORM, CatalogItemORM
 from backend.common.models.management import (
     WorkspaceCreateRequest,
     WorkspaceUpdateRequest,
     DataSourceCreateRequest,
+    DataSourceUpdateRequest,
 )
 
 
@@ -135,6 +136,78 @@ async def test_get_workspace_includes_data_sources(db_session):
     assert fetched is not None
     assert len(fetched.data_sources) == 1
     assert fetched.data_sources[0].label == "ds-label"
+
+
+async def test_workspace_reads_echo_identity_and_name_property(db_session):
+    """The embedded data sources on get_workspace / list_workspaces must echo a
+    saved identity_property / name_property — not fall back to the model default.
+
+    Regression: workspace_repo._ds_to_response is a SEPARATE serializer from
+    data_source_repo._to_response. It omitted these fields, so a mapping saved
+    via the PUT endpoint (which returns _to_response, correctly) read back as
+    "urn"/"name" on the very next Workspace-page refresh (which reads through
+    this path) — the value looked like it never saved.
+    """
+    _prov_id, cat_id = await _seed_catalog(
+        db_session, provider_id="prov_ident", catalog_id="cat_ident"
+    )
+    ds_req = DataSourceCreateRequest(catalog_item_id=cat_id, label="ds-ident")
+    req = _make_create_req(name="ws-ident", data_sources=[ds_req])
+    created = await workspace_repo.create_workspace(db_session, req)
+    ds_id = created.data_sources[0].id
+
+    # Map identity → "id" and display name → "title" via the update path.
+    await data_source_repo.update_data_source(
+        db_session, ds_id,
+        DataSourceUpdateRequest(identity_property="id", name_property="title"),
+    )
+
+    # get_workspace embeds the mapping (was "urn"/"name" before the fix).
+    fetched = await workspace_repo.get_workspace(db_session, created.id)
+    assert fetched is not None
+    assert fetched.data_sources[0].identity_property == "id"
+    assert fetched.data_sources[0].name_property == "title"
+
+    # list_workspaces (backs GET /admin/workspaces) too.
+    listed = await workspace_repo.list_workspaces(db_session)
+    target = next(ws for ws in listed if ws.id == created.id)
+    assert target.data_sources[0].identity_property == "id"
+    assert target.data_sources[0].name_property == "title"
+
+
+# ── soft-deleted (tombstoned) data sources are excluded from reads ────
+
+async def test_workspace_reads_exclude_soft_deleted_data_sources(db_session):
+    """A soft-deleted (off-boarded) data source must not appear in a workspace's
+    embedded data_sources — via get OR list. Regression: the workspace read path
+    used to load the relationship without the deleted_at IS NULL filter, so
+    tombstoned sources kept showing in the Workspaces list and the View Wizard.
+    """
+    _prov_id, cat_id = await _seed_catalog(
+        db_session, provider_id="prov_soft", catalog_id="cat_soft"
+    )
+
+    ds_req = DataSourceCreateRequest(catalog_item_id=cat_id, label="doomed")
+    req = _make_create_req(name="ws-soft-del", data_sources=[ds_req])
+    created = await workspace_repo.create_workspace(db_session, req)
+    ds_id = created.data_sources[0].id
+
+    # Off-board it (soft delete / tombstone — reversible, not destroyed).
+    assert await data_source_repo.soft_delete_data_source(db_session, ds_id) is True
+
+    # get_workspace no longer embeds the tombstone.
+    fetched = await workspace_repo.get_workspace(db_session, created.id)
+    assert fetched is not None
+    assert fetched.data_sources == []
+
+    # list_workspaces (backs GET /admin/workspaces → Workspaces + View Wizard) too.
+    listed = await workspace_repo.list_workspaces(db_session)
+    target = next(ws for ws in listed if ws.id == created.id)
+    assert target.data_sources == []
+
+    # But it is only trashed, not gone — the restore path can still see it.
+    trashed = await data_source_repo.list_deleted_data_sources(db_session, created.id)
+    assert [r.id for r in trashed] == [ds_id]
 
 
 # ── list ──────────────────────────────────────────────────────────────

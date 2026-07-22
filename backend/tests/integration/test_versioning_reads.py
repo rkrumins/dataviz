@@ -15,6 +15,7 @@ import pytest
 from backend.app.services.versioning import models
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 R, M = "workspace:datasource:read", "workspace:datasource:manage"
 
@@ -108,8 +109,8 @@ async def _run() -> None:
         assert [e["id"] for e in nb["edges"]] == ["E1"]
         assert nb["watermark"]["fresh"] is False
 
-        # advance the projection (no-op write client) → fresh
-        await FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop)).project_graph(gid)
+        # advance the projection (faithful fake: DROP+reseed+verify all run) → fresh
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
         wm = await svc.projection_watermark(gid)
         assert wm["projected"] == 2 and wm["fresh"] is True
 
@@ -132,10 +133,6 @@ async def _run() -> None:
 
     from backend.app.services.versioning import db
     await db.dispose_engine()
-
-
-async def _noop(cypher, params=None):
-    return None
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
