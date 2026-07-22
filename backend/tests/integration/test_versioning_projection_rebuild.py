@@ -262,6 +262,38 @@ async def _run_legacy_null_id() -> None:
     await db.dispose_engine()
 
 
+async def _run_reconcile_ignores_derived_meta() -> None:
+    """CONTRAST with the legacy-null-id case above: after the projector publishes, the
+    on_rollups_stale hook runs the aggregation pipeline, which stamps an ``_AggMeta`` singleton (and
+    ``:AGGREGATED`` rollup edges) into the SAME graph. Those are derived CACHE artifacts, NOT
+    committed main — and ``_AggMeta`` carries no entityId. falkor_counts must exclude EVERY derived
+    label, not just ``_GVRollupMeta``; counting ``_AggMeta`` made ``falkor_nodes == pg_nodes + 1`` so
+    Check sync reported a faithful graph as out-of-sync with NO detail (the scan skips it on
+    entityId-null, so there's nothing to show). Unlike the legacy node (a REAL label → a genuine
+    extra), a derived-label node must NOT move the graph out of sync."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    gid, proj, name = await _seed(svc, fake)
+
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
+    assert rep.in_sync is True, rep                        # baseline: clean
+
+    # Post-publish aggregation output on the SAME graph: the _AggMeta singleton (no entityId, like the
+    # real MERGE (m:_AggMeta {id:'singleton'})) + an :AGGREGATED rollup edge between real nodes.
+    g = fake.graphs[name]
+    urns = list(g.nodes.keys())
+    g.nodes["_aggmeta"] = {"urn": "_aggmeta", "_label": "_AggMeta"}      # derived meta node — no entityId
+    g.edges["_agg1"] = {"src": urns[0], "tgt": urns[1], "type": "AGGREGATED"}
+
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
+    assert rep.in_sync is True, rep                        # STILL in sync — derived artifacts ignored
+    assert rep.pg_nodes == rep.falkor_nodes, rep           # _AggMeta not counted
+    assert rep.pg_edges == rep.falkor_edges, rep           # :AGGREGATED not counted
+    assert not rep.extra_nodes and not rep.mismatched, rep # and nothing spuriously flagged
+    await db.dispose_engine()
+
+
 # --------------------------------------------------------------------------- #
 # 6. Failure honesty: a dead cache instance leaves status=idle + last_error     #
 #    (no stranded spinner state), the watermark exposes it, and a later rebuild #
@@ -693,6 +725,11 @@ def test_projection_reconcile_legacy_null_id_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_reconcile_ignores_derived_meta_e2e():
+    asyncio.run(_run_reconcile_ignores_derived_meta())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_failure_honesty_e2e():
     asyncio.run(_run_failure_honesty())
 
@@ -708,6 +745,6 @@ if __name__ == "__main__":
                 _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
                 _run_holdback_on_edge_attr_drift, _run_publishes_with_parallel_edges,
                 _run_deep_verify_size_gated, _run_deep_verify_time_boxed,
-                _run_rebuild_bumps_ontology_cache):
+                _run_reconcile_ignores_derived_meta, _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

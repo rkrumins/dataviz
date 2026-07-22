@@ -12,6 +12,25 @@ import asyncio
 import os
 from typing import Optional
 
+# Canonical derived / system-internal node labels: NOT committed entities, so they must be excluded
+# wherever the cache is compared against Postgres (counts, scans) or read as user entities. Kept in
+# ONE place so the exclusion can never diverge between call sites — a divergence (reconcile excluded
+# only ``_GVRollupMeta`` while the aggregation pipeline writes ``_AggMeta``) is exactly what made
+# "Check sync" report a healthy graph as out-of-sync-by-one-node with no detail. Peers that MUST agree:
+# ``bootstrap_worker`` (imports this) and ``context_engine`` (filters ``labels(n)`` on read).
+#  * ``_GVRollupMeta`` — the projector's rollup-watermark marker (projection.py).
+#  * ``_AggMeta``      — the aggregation pipeline's run-metadata singleton (falkordb_materialize.py).
+#  * ``_Projection``   — projection scaffolding (falkordb_provider.py).
+DERIVED_META_LABELS = ("_GVRollupMeta", "_AggMeta", "_Projection")
+
+
+def not_derived_clause(var: str = "n") -> str:
+    """A Cypher predicate excluding every :data:`DERIVED_META_LABELS` label from ``var`` — the
+    ``MATCH (n) WHERE not_derived_clause('n')`` guard shared by the count + scan so both count/scan
+    exactly the committed entities a faithful projection holds."""
+    return " AND ".join(f"NOT '{lab}' IN labels({var})" for lab in DERIVED_META_LABELS)
+
+
 # Server-side query budgets (ms). FalkorDB runs with TIMEOUT_DEFAULT / TIMEOUT_MAX set, so an
 # un-budgeted query inherits the 30s default and dies mid-seed; every projector / reconcile query
 # passes an explicit budget below TIMEOUT_MAX (mirroring the aggregation pipeline's clamp).

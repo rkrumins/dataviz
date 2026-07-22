@@ -33,7 +33,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select
 
-from .falkor_query import _q, _READ_TIMEOUT_MS
+from .falkor_query import _q, _READ_TIMEOUT_MS, DERIVED_META_LABELS, not_derived_clause
 
 
 def _bounded_query(client, cypher: str, params=None):
@@ -126,18 +126,28 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
     return int(pg_nodes), int(triples)
 
 
+# Count cypher (module constants so the test fakes match by identity, not a brittle literal). Nodes:
+# exclude ALL derived/meta labels (``_GVRollupMeta`` the projector's rollup marker, ``_AggMeta`` the
+# aggregation pipeline's run-metadata singleton, ``_Projection`` scaffolding) — NOT just
+# ``_GVRollupMeta``. The aggregation pipeline writes its ``_AggMeta`` singleton AFTER the projector
+# publishes (via the on_rollups_stale hook), and that node carries no entityId — so counting it made
+# ``falkor_nodes = pg_nodes + 1`` and "Check sync" reported a faithful graph as out-of-sync-by-one
+# with NO detail sample (the scan skips it on entityId-null). Edges: exclude the derived ``:AGGREGATED``
+# rollup layer (the only derived edge type).
+_COUNT_NODES = f"MATCH (n) WHERE {not_derived_clause('n')} RETURN count(n) AS c"
+_COUNT_EDGES = "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c"
+
+
 async def falkor_counts(client) -> Tuple[int, int]:
     """Node/edge counts in a FalkorDB cache graph, excluding derived-cache artifacts.
 
-    The ``:AGGREGATED`` rollup layer and its ``_GVRollupMeta`` marker are derived (aggregation
-    worker + projector's incremental maintenance), NOT committed-main entities — exclude them or
-    every graph with rollups reads as "extra entities vs committed main"."""
-    fn = await _bounded_query(
-        client,
-        "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c")
-    fe = await _bounded_query(
-        client,
-        "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
+    The ``:AGGREGATED`` rollup layer and the derived meta nodes (``_GVRollupMeta`` / ``_AggMeta`` /
+    ``_Projection``, see :data:`DERIVED_META_LABELS`) are derived (aggregation pipeline + projector's
+    rollup maintenance), NOT committed-main entities — exclude them or every graph with rollups reads
+    as "extra entities vs committed main". Missing ``_AggMeta`` here is what made a healthy rollup
+    rebuild read as out-of-sync on "Check sync"."""
+    fn = await _bounded_query(client, _COUNT_NODES)
+    fe = await _bounded_query(client, _COUNT_EDGES)
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
 
@@ -161,7 +171,7 @@ async def falkor_counts(client) -> Tuple[int, int]:
 # the id-less MERGE stamps to the LAST writer, so a collapsed parallel edge's surviving r.id AND its
 # attributes come from the SAME Postgres edge, and comparing FalkorDB against that Postgres row by id
 # is consistent.
-_SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) AND n.entityId IS NOT NULL "
+_SCAN_NODES = (f"MATCH (n) WHERE {not_derived_clause('n')} AND n.entityId IS NOT NULL "
                "RETURN n.entityId, n.urn, n.displayName, labels(n) ORDER BY n.entityId SKIP $s LIMIT $l")
 _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
                "RETURN r.id, type(r), r.confidence, r.properties ORDER BY r.id SKIP $s LIMIT $l")

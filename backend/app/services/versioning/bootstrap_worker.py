@@ -78,7 +78,7 @@ from .models import (
     ProjectionStateORM,
     _now,
 )
-from .falkor_query import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
+from .falkor_query import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS, DERIVED_META_LABELS
 from .service import (
     ConcurrencyError,
     GraphVersioningService,
@@ -131,7 +131,9 @@ _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 # worker's own output, not source data — importing them would make the graph    #
 # own its own cache.                                                            #
 # --------------------------------------------------------------------------- #
-_DERIVED_LABELS = ("_GVRollupMeta", "_AggMeta", "_Projection")
+# The canonical derived/meta label set lives in falkor_query (shared with reconcile's count/scan) so
+# the exclusion can never diverge again — a divergence is what let reconcile miss ``_AggMeta``.
+_DERIVED_LABELS = DERIVED_META_LABELS
 
 
 def _not_derived(var: str) -> str:
