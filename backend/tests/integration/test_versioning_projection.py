@@ -21,8 +21,11 @@ from backend.app.services.versioning.projection import (
     _DELETE_EDGES_FALLBACK,
 )
 from backend.app.services.versioning.reconcile import (
+    _COUNT_EDGES,
+    _COUNT_NODES,
     _SCAN_EDGES,
     _SCAN_NODES,
+    DERIVED_META_LABELS,
 )
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -47,20 +50,23 @@ class FakeGraph:
         # (a trivial read that never touches the graph); a reachable instance answers it.
         if cypher == "RETURN 1":
             return _Result([[1]])
-        # projection verify (Part 1E) — mirrors _falkor_counts: exclude rollup-derived artifacts
-        # (the :AGGREGATED layer and its _GVRollupMeta marker) the same way FalkorDB's WHERE does.
-        if cypher == "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c":
-            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") != "_GVRollupMeta")]])
-        if cypher == "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c":
+        # projection verify (Part 1E) — mirrors _falkor_counts: exclude ALL derived/meta artifacts
+        # (the :AGGREGATED edge layer and the _GVRollupMeta / _AggMeta / _Projection meta nodes) the
+        # same way FalkorDB's WHERE does. Excluding only _GVRollupMeta here (and counting the
+        # aggregation pipeline's _AggMeta) is exactly the over-count that made Check sync cry wolf.
+        if cypher == _COUNT_NODES:
+            return _Result([[sum(1 for n in self.nodes.values()
+                                 if n.get("_label") not in DERIVED_META_LABELS)]])
+        if cypher == _COUNT_EDGES:
             return _Result([[sum(1 for e in self.edges.values() if e.get("type") != "AGGREGATED")]])
         # Content-verify scans (reconciler primitives the full-seed verify now runs): the sorted
         # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
-        # / rollup exclusion mirror the real scan's guards.
+        # / derived-label exclusion mirror the real scan's guards.
         if cypher == _SCAN_NODES:
             # RETURN n.entityId, n.urn, n.displayName, labels(n) — the scan now carries the deep fields
             rows = sorted(([n["entityId"], n.get("urn"), n.get("displayName"), [n.get("_label")]]
                            for n in self.nodes.values()
-                           if n.get("_label") != "_GVRollupMeta" and n.get("entityId") is not None),
+                           if n.get("_label") not in DERIVED_META_LABELS and n.get("entityId") is not None),
                           key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
         if cypher == _SCAN_EDGES:

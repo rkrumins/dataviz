@@ -22,13 +22,13 @@ import asyncio
 import inspect
 import json
 import logging
-import os
 import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, literal, select
 
 from . import config, db
+from .falkor_query import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
 from .reconcile import falkor_counts, pg_live_counts_projectable
 from .models import (
     EdgeVersionORM,
@@ -56,27 +56,9 @@ NodeUpsert = Tuple[str, str, dict]                     # (entity_id, urn, payloa
 # the per-label URN indexes instead of scanning all nodes per UNWIND row.
 EdgeUpsert = Tuple[str, str, str, dict, str, str]
 
-# Server-side query budgets (ms). FalkorDB now runs with TIMEOUT_DEFAULT /
-# TIMEOUT_MAX set, so an un-budgeted projector write inherits the 30s
-# default and dies mid-seed; every projector query passes an explicit
-# budget below TIMEOUT_MAX (mirroring the aggregation pipeline's clamp).
-_WRITE_TIMEOUT_MS = int(1000 * min(170.0, max(
-    5.0, float(os.getenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "60")))))
-_READ_TIMEOUT_MS = int(1000 * min(170.0, max(
-    2.0, float(os.getenv("PROJECTION_FALKOR_READ_TIMEOUT_S", "30")))))
-
-
-async def _q(client, cypher: str, params: Optional[dict] = None,
-             *, timeout_ms: int = _WRITE_TIMEOUT_MS):
-    """Run one query with a server-side kill budget AND a client-side hang
-    net (belt over the pool-level socket timeouts, and the bound for client
-    fakes without them). Falls back to the timeout-less call for client
-    fakes/libs without the kwarg."""
-    try:
-        coro = client.query(cypher, params=params, timeout=timeout_ms)
-    except TypeError:
-        coro = client.query(cypher, params=params)
-    return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
+# Server-side FalkorDB query budgets + the bounded ``_q`` helper live in ``falkor_query`` (a leaf
+# module) so the projector and the reconciler can both reach them without importing each other —
+# ``_q`` / ``_READ_TIMEOUT_MS`` / ``_WRITE_TIMEOUT_MS`` are imported at the top of this module.
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -1269,7 +1251,19 @@ class FalkorProjector:
             rec = ProjectionReconciler(self._session, lambda name, provider_id=None: client)
             # Edge missing/extra are owned by the DISTINCT-triple count verify (collapse-noisy by id),
             # so content_drift returns them empty; node coverage + node/edge field drift remain.
-            mn, xn, _me, _xe, mm, em = await rec.content_drift(client, graph_id, main_id)
+            # HARD wall-clock bound: the SKIP/LIMIT scan re-sorts the whole graph per page, so on a
+            # large/dense graph it can grind for many minutes. Cap it well under the rebuild budget so
+            # it can NEVER get the whole rebuild cancelled (which would re-loop) — on timeout, degrade
+            # to the already-passed count verify and publish. The size gate above skips the scan for
+            # obviously-large graphs; this catches anything under the gate that is still too slow.
+            mn, xn, _me, _xe, mm, em = await asyncio.wait_for(
+                rec.content_drift(client, graph_id, main_id),
+                timeout=config.PROJECTION_VERIFY_DEEP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("full-seed deep verify for %s exceeded its %ss budget; publishing on the "
+                           "(passed) count verify — run 'Check sync' to deep-diff on demand",
+                           graph_id, config.PROJECTION_VERIFY_DEEP_TIMEOUT_S)
+            return None
         except Exception:                                # pragma: no cover - infra
             logger.debug("full-seed content verify skipped for %s (diff failed)",
                          graph_id, exc_info=True)

@@ -43,6 +43,18 @@ def _deep_verify_cap(n: int):
         yield
     finally:
         _vcfg.PROJECTION_VERIFY_DEEP_MAX_ENTITIES = prev
+
+
+@contextlib.contextmanager
+def _deep_verify_timeout(secs: float):
+    """Temporarily set the deep-verify wall-clock budget; on timeout the deep pass degrades to the
+    (already-passed) count verify and the rebuild publishes rather than hanging."""
+    prev = _vcfg.PROJECTION_VERIFY_DEEP_TIMEOUT_S
+    _vcfg.PROJECTION_VERIFY_DEEP_TIMEOUT_S = secs
+    try:
+        yield
+    finally:
+        _vcfg.PROJECTION_VERIFY_DEEP_TIMEOUT_S = prev
 from backend.app.services.versioning.reconcile import ProjectionReconciler
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -247,6 +259,38 @@ async def _run_legacy_null_id() -> None:
     # deep scan must also complete (the legacy node is never fetched — it's not in the SoR stream).
     rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
     assert rep.in_sync is False and rep.falkor_nodes == rep.pg_nodes + 1
+    await db.dispose_engine()
+
+
+async def _run_reconcile_ignores_derived_meta() -> None:
+    """CONTRAST with the legacy-null-id case above: after the projector publishes, the
+    on_rollups_stale hook runs the aggregation pipeline, which stamps an ``_AggMeta`` singleton (and
+    ``:AGGREGATED`` rollup edges) into the SAME graph. Those are derived CACHE artifacts, NOT
+    committed main — and ``_AggMeta`` carries no entityId. falkor_counts must exclude EVERY derived
+    label, not just ``_GVRollupMeta``; counting ``_AggMeta`` made ``falkor_nodes == pg_nodes + 1`` so
+    Check sync reported a faithful graph as out-of-sync with NO detail (the scan skips it on
+    entityId-null, so there's nothing to show). Unlike the legacy node (a REAL label → a genuine
+    extra), a derived-label node must NOT move the graph out of sync."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    gid, proj, name = await _seed(svc, fake)
+
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
+    assert rep.in_sync is True, rep                        # baseline: clean
+
+    # Post-publish aggregation output on the SAME graph: the _AggMeta singleton (no entityId, like the
+    # real MERGE (m:_AggMeta {id:'singleton'})) + an :AGGREGATED rollup edge between real nodes.
+    g = fake.graphs[name]
+    urns = list(g.nodes.keys())
+    g.nodes["_aggmeta"] = {"urn": "_aggmeta", "_label": "_AggMeta"}      # derived meta node — no entityId
+    g.edges["_agg1"] = {"src": urns[0], "tgt": urns[1], "type": "AGGREGATED"}
+
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
+    assert rep.in_sync is True, rep                        # STILL in sync — derived artifacts ignored
+    assert rep.pg_nodes == rep.falkor_nodes, rep           # _AggMeta not counted
+    assert rep.pg_edges == rep.falkor_edges, rep           # :AGGREGATED not counted
+    assert not rep.extra_nodes and not rep.mismatched, rep # and nothing spuriously flagged
     await db.dispose_engine()
 
 
@@ -533,6 +577,48 @@ async def _run_deep_verify_size_gated() -> None:
     await db.dispose_engine()
 
 
+async def _run_deep_verify_time_boxed() -> None:
+    """The deep verify's FalkorDB scan re-sorts the whole graph per SKIP/LIMIT page, so on a
+    large/dense graph it can grind for many minutes and — before this fix — overran the 900s rebuild
+    budget, got the whole rebuild cancelled, and (a cancelled full seed being left retryable) re-ran
+    forever: the "stuck at N of N items rebuilt" loop. The deep pass is now hard-time-boxed WELL under
+    the rebuild budget; on timeout it degrades to the (passed) count verify and PUBLISHES. Proven by
+    making the content diff hang and pinning a tiny budget: the rebuild still converges to fresh."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        {"op": "create", "entity_kind": "edge", "entity_id": "E1", "payload": _edge("A", "B")},
+    ], "seed")
+
+    # Make the deep content diff hang; the wall-clock budget must cut it off and publish. The stub is
+    # cancelled by wait_for at the budget, so the 30s sleep never actually elapses — the test is fast.
+    orig = ProjectionReconciler.content_drift
+
+    async def _slow(self, *a, **k):
+        await asyncio.sleep(30)                           # never completes within the tiny budget
+        return [], [], [], [], [], []
+
+    ProjectionReconciler.content_drift = _slow
+    try:
+        with _deep_verify_on(), _deep_verify_timeout(0.1):
+            r = await proj.project_graph(gid)
+    finally:
+        ProjectionReconciler.content_drift = orig
+
+    assert not r.get("verify_error"), r                  # degraded to count verify — not held back
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is True and wm["projected"] == wm["committed"], wm   # published, no hang/loop
+    await db.dispose_engine()
+
+
 # --------------------------------------------------------------------------- #
 # 9. A rebuild invalidates the reader's ontology→observed alias cache so raw    #
 #    lineage edges render against the reseeded graph immediately (not after the #
@@ -609,6 +695,11 @@ def test_projection_deep_verify_size_gated_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_deep_verify_time_boxed_e2e():
+    asyncio.run(_run_deep_verify_time_boxed())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
 
@@ -634,6 +725,11 @@ def test_projection_reconcile_legacy_null_id_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_reconcile_ignores_derived_meta_e2e():
+    asyncio.run(_run_reconcile_ignores_derived_meta())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_failure_honesty_e2e():
     asyncio.run(_run_failure_honesty())
 
@@ -648,6 +744,7 @@ if __name__ == "__main__":
                 _run_failure_honesty, _run_progress_writer,
                 _run_holdback_on_count_shortfall, _run_holdback_on_content_drift,
                 _run_holdback_on_edge_attr_drift, _run_publishes_with_parallel_edges,
-                _run_deep_verify_size_gated, _run_rebuild_bumps_ontology_cache):
+                _run_deep_verify_size_gated, _run_deep_verify_time_boxed,
+                _run_reconcile_ignores_derived_meta, _run_rebuild_bumps_ontology_cache):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

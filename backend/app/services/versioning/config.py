@@ -125,17 +125,29 @@ PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").l
 # On a FULL SEED (an explicit rebuild / first seed / repin), also run a CONTENT verify that catches
 # what the count verify can't: an edge reseeded with a dropped confidence / blanked properties / wrong
 # type, or a node with a drifted displayName or label. It rides the SAME single ordered scan the
-# id-set diff already streams (comparing fields on matched ids), so it is O(N+E) — NOT the O(N²+E²)
-# per-entity fetch it used to do, which hung a 60k rebuild for minutes and drove a DROP+reseed
-# wipe-loop. On any drift the rebuild is held back (watermark not advanced) so reads keep serving
-# Postgres. Disable with GRAPHVER_PROJECTION_VERIFY_DEEP=0 (the collapse-correct DISTINCT-triple count
-# verify still runs and holds back on a dropped/extra entity).
+# id-set diff streams (comparing fields on matched ids) instead of the O(N²+E²) per-entity fetch it
+# used to do. The Postgres side is keyset-paged O(N); the FalkorDB side still pages with SKIP/LIMIT and
+# re-sorts per page (~O(N²/batch)), so on a large/dense graph the deep pass is bounded TWO ways — an
+# entity ceiling (skip outright) and a hard wall-clock budget (degrade + publish) — see the two knobs
+# below. On any drift within budget the rebuild is held back (watermark not advanced) so reads keep
+# serving Postgres. Disable with GRAPHVER_PROJECTION_VERIFY_DEEP=0 (the collapse-correct DISTINCT-triple
+# count verify still runs and holds back on a dropped/extra entity).
 PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1").lower() not in ("0", "false", "no")
-# Scale ceiling for the deep field verify on the hot path. The scan pages with SKIP/LIMIT (~O(N²/batch)
-# to re-sort each page on the unindexed entityId ordering), so above this many entities the deep pass
-# is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
-# can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
-PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
+# Scale ceiling for the deep field verify on the hot path. The scan pages with SKIP/LIMIT, and each
+# page re-sorts the whole graph on the unindexed entityId/id ordering (~O(N²/batch)), so its wall-clock
+# grows super-linearly and — at ~60k entities with a dense edge set — overran the 900s rebuild budget,
+# got the whole rebuild cancelled, and (since a cancelled full seed is left retryable) re-ran forever:
+# the "stuck at N of N items rebuilt" loop. Above this many entities (node + edge count) the deep pass
+# is skipped on the automatic rebuild (the collapse-correct count verify still runs and still holds the
+# watermark back on any missing/extra entity); the on-demand reconcile ("Check sync") can still deep-diff
+# any size when an operator explicitly asks and is willing to wait. 0 disables the ceiling.
+PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "50000"))
+# Hard wall-clock budget (seconds) for the full-seed deep verify, INDEPENDENT of the entity ceiling: a
+# belt-and-braces bound so the deep pass can never approach the 900s rebuild budget (which, if hit,
+# cancels the rebuild and re-loops). On timeout the deep pass degrades to the already-passed count verify
+# and the rebuild PUBLISHES — reads flip to the fresh cache rather than spinning forever. Well under
+# REBUILD_SYNC_TIMEOUT_SECS so the outer rebuild is never the thing that cancels.
+PROJECTION_VERIFY_DEEP_TIMEOUT_S: float = float(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_TIMEOUT_S", "90"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
