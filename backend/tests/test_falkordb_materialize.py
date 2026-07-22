@@ -628,6 +628,36 @@ def test_no_containment_empty_advisory_when_dag_present():
     assert "containment_empty" not in kinds
 
 
+def test_pick_autoheal_identity_prefers_unique_key_over_name():
+    """The self-heal must adopt a likely-UNIQUE key populated on ~all nodes and
+    never `name` (non-unique → stamping urn from it would merge nodes)."""
+    pipe = _make_pipeline()
+    pipe._identity_sample_total = 1000
+    # name is fully populated but must be ignored; id qualifies (>=90%).
+    pipe._identity_candidates = {"name": 1000, "id": 980, "key": 10}
+    assert pipe._pick_autoheal_identity() == "id"
+    # A sparse id (below 90%) disqualifies → no auto-heal.
+    pipe._identity_candidates = {"name": 1000, "id": 100}
+    assert pipe._pick_autoheal_identity() is None
+    # No sample → never heal.
+    pipe._identity_sample_total = 0
+    assert pipe._pick_autoheal_identity() is None
+
+
+def test_advisory_identity_autohealed_prompts_permanent_fix():
+    """After the self-heal adopts a property, a warning advisory must tell the
+    operator to set it permanently (so the recovery doesn't run every time)."""
+    pipe = _make_pipeline()
+    pipe._autohealed_identity = "id"
+    hit = next(
+        a for a in pipe._result(7)["run_stats"]["advisories"]
+        if a["kind"] == "identity_autohealed"
+    )
+    assert hit["severity"] == "warning"
+    assert hit["identity_property"] == "id"
+    assert "make it permanent" in hit["message"]
+
+
 def test_clean_run_emits_no_advisories_key():
     """A conforming run's run_stats must be unchanged — no advisories noise."""
     pipe = _make_pipeline()

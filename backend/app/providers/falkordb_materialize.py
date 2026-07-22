@@ -443,6 +443,10 @@ class AggregationPipeline:
         self._dropped_endpoints = 0                 # pairs dropped: no identity
         self._empty_directory = False               # nodes exist, none resolved
         self._unmatched_types: List[str] = []       # declared spellings scanning 0 edges
+        self._identity_candidates: Dict[str, int] = {}  # empty-dir probe: prop -> populated count
+        self._identity_sample_total = 0             # nodes sampled by that probe
+        self._identity_autohealed = False           # ran the auto-detect + stamp recovery once
+        self._autohealed_identity: Optional[str] = None  # property the auto-heal adopted
 
     # -- tuning knob resolution ---------------------------------------------
 
@@ -663,6 +667,19 @@ class AggregationPipeline:
                     f"{self._dropped_endpoints} aggregation pair(s) were dropped "
                     "because an endpoint had no resolvable identity (a deleted "
                     "node, or a missing `urn`/identity property)."
+                ),
+            })
+        if self._autohealed_identity:
+            advisories.append({
+                "kind": "identity_autohealed",
+                "severity": "warning",
+                "identity_property": self._autohealed_identity,
+                "message": (
+                    "Node identity was not configured (or resolved nothing), so this "
+                    f"run auto-detected `{self._autohealed_identity}` and stamped `urn` "
+                    "from it to attach aggregated edges. Set the data source's Node "
+                    f"Identity Property to `{self._autohealed_identity}` to make it "
+                    "permanent and skip this recovery next run."
                 ),
             })
         if self._unmatched_types:
@@ -1719,12 +1736,43 @@ class AggregationPipeline:
         # every node — the classic onboarded-graph symptom (nodes keyed by `id`, not `urn`, and no
         # identity mapping configured). Surface it loudly instead of silently dropping every pair.
         if not directory and max_id >= 0:
-            self._empty_directory = True            # → run_stats advisory
             # Auto-detect the fix: which common identity property WOULD resolve?
-            # A read-only sample so the advisory can NAME the property to set
-            # instead of the operator guessing — and so a case where the run
-            # keyed on `urn` while nodes actually carry `id` is unmistakable.
-            self._identity_candidates = await self._probe_identity_candidates()
+            # A read-only sample so we can NAME the property (and, on a writable
+            # graph, adopt it) instead of dropping every pair.
+            self._identity_candidates, self._identity_sample_total = (
+                await self._probe_identity_candidates()
+            )
+            best = self._pick_autoheal_identity()
+            # Only a graph we can WRITE to (in_source; a dedicated projection or
+            # read-only federated source must not be stamped) and only once.
+            writable = getattr(self.p, "_projection_mode", "in_source") != "dedicated"
+            if best and writable and not self._identity_autohealed:
+                self._identity_autohealed = True
+                self._autohealed_identity = best
+                logger.warning(
+                    "aggregation pipeline on %s: identity %s resolved 0 nodes, but `%s` is "
+                    "populated on %d/%d sampled nodes — SELF-HEALING: stamping urn from `%s` "
+                    "and rebuilding the directory. Set the source's Node Identity Property to "
+                    "`%s` to make this permanent (and skip this recovery next run).",
+                    self.p._graph_name, _node_identity_expr(ident_prop), best,
+                    self._identity_candidates.get(best, 0), self._identity_sample_total,
+                    best, best,
+                )
+                try:
+                    self.p._node_identity_property = best
+                    if hasattr(self.p, "stamp_identity_urns"):
+                        await self.p.stamp_identity_urns()
+                except Exception as exc:
+                    logger.warning(
+                        "aggregation pipeline on %s: self-heal urn stamp failed (%s) — "
+                        "falling back to directory-only coalesce.", self.p._graph_name, exc,
+                    )
+                # Rebuild ONCE with the adopted property (the guard above stops
+                # a second heal; a still-empty directory then advises loudly).
+                self._node_dir = None
+                return await self._ensure_node_directory()
+
+            self._empty_directory = True            # → run_stats advisory
             _hint = ", ".join(
                 f"{k}={v}" for k, v in sorted(
                     self._identity_candidates.items(), key=lambda kv: -kv[1])
@@ -1738,30 +1786,51 @@ class AggregationPipeline:
             )
         return directory
 
-    async def _probe_identity_candidates(self) -> Dict[str, int]:
+    # Likely-UNIQUE canonical keys, in preference order — NEVER `name` (not
+    # unique; stamping urn from it would merge distinct nodes).
+    _AUTOHEAL_IDENTITY_PRIORITY = ("id", "uuid", "guid", "qualifiedName", "key")
+
+    def _pick_autoheal_identity(self) -> Optional[str]:
+        """The best identity property to adopt when the configured one resolved
+        nothing: the first likely-unique candidate populated on ~every sampled
+        node (≥90%), so the auto-heal never keys on a sparse or non-unique
+        property. None ⇒ don't self-heal (fall through to the advisory)."""
+        total = self._identity_sample_total or 0
+        if total <= 0:
+            return None
+        for cand in self._AUTOHEAL_IDENTITY_PRIORITY:
+            if self._identity_candidates.get(cand, 0) >= 0.9 * total:
+                return cand
+        return None
+
+    async def _probe_identity_candidates(self) -> Tuple[Dict[str, int], int]:
         """Read-only: over a bounded node sample, how many carry each common
-        identity property. Powers a precise "set Node Identity Property to X (N
-        nodes carry it)" advisory when the configured property resolved nothing
-        — including revealing that nodes DO carry `id` while the run keyed on
-        `urn`, the exact "I set id but it says missing" case."""
-        cands = ["id", "name", "key", "uuid", "guid", "qualifiedName", "urn"]
+        identity property (and the sample size). Powers the empty-directory
+        advisory AND the auto-heal candidate pick — revealing e.g. that nodes DO
+        carry `id` while the run keyed on `urn`, the exact "I set id but it says
+        missing" case."""
+        cands = ["id", "uuid", "guid", "qualifiedName", "key", "name", "urn"]
         parts = ", ".join(
             f"sum(CASE WHEN n.`{c}` IS NOT NULL THEN 1 ELSE 0 END)" for c in cands
         )
         try:
             res = await self.p._ro_query(
-                f"MATCH (n) WITH n LIMIT 5000 RETURN {parts}",
+                f"MATCH (n) WITH n LIMIT 5000 RETURN count(n), {parts}",
                 timeout=_scan_timeout_s(),
             )
-            row = (res.result_set or [[]])[0] if (res.result_set) else []
-            return {
-                c: int(row[i] or 0)
+            row = (res.result_set or [[]])[0] if res.result_set else []
+            if not row:
+                return {}, 0
+            total = int(row[0] or 0)
+            counts = {
+                c: int(row[i + 1] or 0)
                 for i, c in enumerate(cands)
-                if i < len(row) and row[i]
+                if i + 1 < len(row) and row[i + 1]
             }
+            return counts, total
         except Exception as exc:
             logger.debug("identity candidate probe failed: %s", exc)
-            return {}
+            return {}, 0
 
     async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
         """Resolve node IDs → (urn, first label) from the range-scanned
