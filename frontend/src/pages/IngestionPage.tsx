@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { Server, Layers, Activity, DatabaseZap, BellOff } from 'lucide-react'
+import { Server, Layers, Activity, DatabaseZap, BellOff, Gauge } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -11,11 +11,12 @@ import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
+import { Freshness } from '@/components/admin/Freshness'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
-type IngestionTab = 'providers' | 'assets' | 'jobs'
+type IngestionTab = 'providers' | 'assets' | 'jobs' | 'freshness'
 
 interface TabDef {
     id: IngestionTab
@@ -28,6 +29,7 @@ const ALL_TABS: TabDef[] = [
     { id: 'providers', label: 'Providers', icon: Server, desc: 'View provider credentials and health' },
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
+    { id: 'freshness', label: 'Freshness', icon: Gauge, desc: 'Monitor and refresh source freshness across the fleet' },
 ]
 
 /** "until 3:45 PM" for a same-day snooze, "until Wed 8:00 AM" otherwise. */
@@ -51,8 +53,13 @@ export function IngestionPage() {
     // across renders even when ``isPlatformAdmin`` flips.
     const hasProviderRead = useAnyWorkspacePermission('workspace:provider:read')
     const hasCatalogRead = useAnyWorkspacePermission('workspace:catalog:read')
+    const hasDataSourceManage = useAnyWorkspacePermission('workspace:datasource:manage')
     const canReadProviders = isPlatformAdmin || hasProviderRead
     const canReadCatalog = isPlatformAdmin || hasCatalogRead
+    // Freshness mirrors the backend's Ingestion-surface read gate: any of
+    // provider:read / datasource:manage (both any-workspace, both short-circuit
+    // for system/org admins). Catalog-only readers can't load it, so hide it.
+    const canReadFreshness = canReadProviders || hasDataSourceManage
 
     // Provider-alert snooze (set from the status banner). Surfaced here so
     // it's discoverable and undoable — the banner hides itself while snoozed.
@@ -62,8 +69,11 @@ export function IngestionPage() {
     // Visible tabs reflect what the current claim set can actually use.
     // Non-readers (no workspace bindings) skip Providers entirely.
     const visibleTabs = useMemo(
-        () => ALL_TABS.filter(t => t.id !== 'providers' || canReadProviders),
-        [canReadProviders],
+        () => ALL_TABS.filter(t =>
+            (t.id !== 'providers' || canReadProviders) &&
+            (t.id !== 'freshness' || canReadFreshness)
+        ),
+        [canReadProviders, canReadFreshness],
     )
 
     const rawTab = searchParams.get('tab')
@@ -266,6 +276,7 @@ export function IngestionPage() {
                     <PageContainer className="py-6">
                         {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
+                        {activeTab === 'freshness' && <Freshness />}
                     </PageContainer>
                 )}
             </div>

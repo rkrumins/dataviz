@@ -2187,6 +2187,61 @@ class SchemaMigrationORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# refresh_events  (append-only audit trail — OPS Freshness Cockpit)   #
+# ------------------------------------------------------------------ #
+
+class RefreshEventORM(Base):
+    """Immutable record of one freshness/refresh operation.
+
+    Covers every origin (script, connector, api, drift, reconcile) and
+    scope (auto, read-caches, rollups, full, batch-item, clear) — the durable
+    source of truth for "when did this data source last refresh and what
+    happened", read by the per-source history and the fleet freshness
+    view. Emission is best-effort (see ``refresh_events_repo.emit_refresh_event``)
+    and must never block or fail the operation it records.
+    """
+    __tablename__ = "refresh_events"
+
+    id = Column(Text, primary_key=True, default=lambda: uuid.uuid4().hex)
+    ts = Column(Text, nullable=False, default=_now, index=True)
+    workspace_id = Column(Text, nullable=True)
+    data_source_id = Column(Text, nullable=False)
+    provider_id = Column(Text, nullable=True)
+    origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile
+    actor = Column(Text, nullable=False, default="internal")
+    scope = Column(Text, nullable=False)       # auto|read-caches|rollups|full|batch-item|clear
+    gate = Column(Text, nullable=False)        # changed|unchanged|forced|n/a
+    actions = Column(Text, nullable=True)      # JSON: what was acted on
+    outcome = Column(Text, nullable=False)     # accepted|deferred|noop|conflict|error|completed|failed
+    detail = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_refresh_events_ds_ts", "data_source_id", "ts"),
+        CheckConstraint(
+            "origin IN ('script', 'connector', 'api', 'drift', 'reconcile')",
+            name="ck_refresh_events_origin",
+        ),
+        CheckConstraint(
+            "scope IN ('auto', 'read-caches', 'rollups', 'full', 'batch-item', "
+            "'clear')",
+            name="ck_refresh_events_scope",
+        ),
+        CheckConstraint(
+            "gate IN ('changed', 'unchanged', 'forced', 'n/a')",
+            name="ck_refresh_events_gate",
+        ),
+        CheckConstraint(
+            "outcome IN ('accepted', 'deferred', 'noop', 'conflict', 'error', "
+            "'completed', 'failed')",
+            name="ck_refresh_events_outcome",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RefreshEvent id={self.id!r} ds={self.data_source_id!r} outcome={self.outcome!r}>"
+
+
+# ------------------------------------------------------------------ #
 # Cross-domain registration                                             #
 # ------------------------------------------------------------------ #
 # Domain-owned ORM modules live next to their service code (e.g.,

@@ -36,7 +36,11 @@ from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 from backend.app.services.aggregation.internal_auth import internal_auth_headers
-from backend.app.services.aggregation.schemas import ResumeOverrides
+from backend.app.services.aggregation.schemas import (
+    ResumeOverrides,
+    SourceChangedRequest,
+    SourceChangedResponse,
+)
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
@@ -264,7 +268,9 @@ async def put_aggregation_settings(
     import json as _json
     from backend.app.services.aggregation.schemas import AggregationSettingsRequest
     body_model = AggregationSettingsRequest(**_json.loads(await request.body()))
-    return await svc.put_settings(session, body_model.tuning)
+    return await svc.put_settings(
+        session, body_model.tuning, cadence=body_model.cadence,
+    )
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
@@ -1084,3 +1090,41 @@ async def check_drift(
         return await svc.check_drift(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── POST /data-sources/{ds_id}/source-changed ──────────────────────
+
+@router.post(
+    "/data-sources/{ds_id}/source-changed",
+    response_model=SourceChangedResponse,
+    summary="Signal that a source's graph changed (external direct load)",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
+)
+async def source_changed(
+    ds_id: str,
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Confirm-and-converge after a direct write to the source's graph:
+    marks the source stale, clears content + hierarchy read caches, nudges
+    stats, and queues an aggregation rebuild (change-gated + idempotent).
+    Called by external connectors.
+
+    Equivalent to the unified refresh verb at ``scope=auto`` (see
+    ``freshness.py`` / ``AggregationService.refresh_source``) — the loader
+    script now calls ``refresh`` with ``origin="script"`` instead of this
+    route. This endpoint stays for connectors already wired to it."""
+    if _PROXY_ENABLED:
+        body = await request.body()
+        return await _proxy(
+            "POST",
+            f"/aggregation/data-sources/{ds_id}/source-changed",
+            request,
+            body=body if body else None,
+        )
+    raw = await request.body()
+    body = SourceChangedRequest(**(_json.loads(raw) if raw else {}))
+    return await svc.signal_source_changed(
+        ds_id, session, reason=body.reason, force=body.force,
+    )

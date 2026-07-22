@@ -281,6 +281,13 @@ export interface AggregatedEdgeResult {
     truncated?: boolean
     lastMaterializedAt?: string | null
     materializationTriggered?: boolean
+    /**
+     * Stale-while-revalidate: true when a source-data change has queued or is
+     * running a rebuild and this response is the prior (still-usable) rollup.
+     */
+    stale?: boolean
+    /** Why the result is stale (e.g. "source_changed"), or null when fresh. */
+    staleReason?: string | null
 }
 
 // ============================================

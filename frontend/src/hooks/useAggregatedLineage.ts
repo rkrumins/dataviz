@@ -110,6 +110,19 @@ export interface UseAggregatedLineageResult {
     truncated: boolean
 
     /**
+     * True while a source's data changed and a rebuild is queued/running —
+     * the response is the prior rollup (stale-while-revalidate). Any stale
+     * chunk marks the merged result stale.
+     */
+    stale: boolean
+
+    /**
+     * Why the result is stale (e.g. "source_changed"), or null when fresh.
+     * First non-null reason across the merged chunks wins.
+     */
+    staleReason: string | null
+
+    /**
      * ISO-8601 timestamp of the last AGGREGATED materialisation, or null if
      * the projection has never been computed for this data source.
      */
@@ -226,6 +239,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const [error, setError] = useState<string | null>(null)
     const [granularity, setGranularity] = useState(initialGranularity)
     const [truncated, setTruncated] = useState(false)
+    const [stale, setStale] = useState(false)
+    const [staleReason, setStaleReason] = useState<string | null>(null)
     const [lastMaterializedAt, setLastMaterializedAt] = useState<string | null>(null)
     const [materializationTriggered, setMaterializationTriggered] = useState(false)
 
@@ -257,6 +272,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 return edgeMap
             })
             setTruncated(cached.result.truncated ?? false)
+            setStale(cached.result.stale ?? false)
+            setStaleReason(cached.result.staleReason ?? null)
             setLastMaterializedAt(cached.result.lastMaterializedAt ?? null)
             setMaterializationTriggered(cached.result.materializationTriggered ?? false)
             return
@@ -299,12 +316,16 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             const mergedEdgesById = new Map<string, AggregatedEdgeInfo>()
             let mergedTotalSourceEdges = 0
             let mergedTruncated = false
+            let mergedStale = false
+            let mergedStaleReason: string | null = null
             let mergedLastMaterializedAt: string | null | undefined = undefined
             let mergedMaterializationTriggered = false
             for (const r of fulfilled) {
                 for (const agg of r.aggregatedEdges) mergedEdgesById.set(agg.id, agg)
                 mergedTotalSourceEdges += r.totalSourceEdges ?? 0
                 if (r.truncated) mergedTruncated = true
+                if (r.stale) mergedStale = true
+                if (mergedStaleReason === null && r.staleReason != null) mergedStaleReason = r.staleReason
                 if (r.materializationTriggered) mergedMaterializationTriggered = true
                 if (r.lastMaterializedAt !== undefined) {
                     if (mergedLastMaterializedAt === undefined || mergedLastMaterializedAt === null) {
@@ -319,23 +340,33 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 aggregatedEdges: Array.from(mergedEdgesById.values()),
                 totalSourceEdges: mergedTotalSourceEdges,
                 truncated: mergedTruncated,
+                stale: mergedStale,
+                staleReason: mergedStaleReason,
                 lastMaterializedAt: mergedLastMaterializedAt ?? null,
 
                 materializationTriggered: mergedMaterializationTriggered,
             }
 
-            // Cache the merged result (LRU eviction when full)
-            if (aggregatedEdgeCache.size >= CACHE_MAX_ENTRIES) {
-                const oldestKey = aggregatedEdgeCache.keys().next().value
-                if (oldestKey !== undefined) aggregatedEdgeCache.delete(oldestKey)
+            // Cache the merged result (LRU eviction when full) — but only when
+            // it's a COMPLETE answer. A truncated merge, or one missing a chunk
+            // that rejected/failed, must never be re-served from the module
+            // cache as if it were the full set. `stale` results ARE cached:
+            // while a rebuild runs every response is stale-flagged, so skipping
+            // the cache for stale would refetch continuously and defeat
+            // stale-while-revalidate.
+            if (!mergedTruncated && rejected.length === 0) {
+                if (aggregatedEdgeCache.size >= CACHE_MAX_ENTRIES) {
+                    const oldestKey = aggregatedEdgeCache.keys().next().value
+                    if (oldestKey !== undefined) aggregatedEdgeCache.delete(oldestKey)
+                }
+                aggregatedEdgeCache.set(cacheKey, {
+                    result: mergedResult,
+                    timestamp: Date.now(),
+                    sourceUrns,
+                    targetUrns,
+                    granularity,
+                })
             }
-            aggregatedEdgeCache.set(cacheKey, {
-                result: mergedResult,
-                timestamp: Date.now(),
-                sourceUrns,
-                targetUrns,
-                granularity,
-            })
 
             // Update state with functional update to avoid dependency on aggregatedEdges
             setAggregatedEdges(prev => {
@@ -352,6 +383,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             })
 
             setTruncated(mergedResult.truncated ?? false)
+            setStale(mergedResult.stale ?? false)
+            setStaleReason(mergedResult.staleReason ?? null)
             setLastMaterializedAt(mergedResult.lastMaterializedAt ?? null)
             setMaterializationTriggered(mergedResult.materializationTriggered ?? false)
 
@@ -540,6 +573,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         currentSourceUrnsRef.current = []
         currentTargetUrnsRef.current = undefined
         setTruncated(false)
+        setStale(false)
+        setStaleReason(null)
         setLastMaterializedAt(null)
         setMaterializationTriggered(false)
     }, [])
@@ -592,6 +627,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         getEdgeCount,
         getEdgeTypes,
         truncated,
+        stale,
+        staleReason,
         lastMaterializedAt,
         materializationTriggered,
     }

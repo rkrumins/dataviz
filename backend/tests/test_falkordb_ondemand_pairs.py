@@ -1131,3 +1131,271 @@ def test_entry_result_carries_freshness_fields():
     ))
     assert result2.stale is False
     assert result2.regime == "boundary" and result2.stamp_version == 2
+
+
+def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
+    """A timed-out :AGGREGATED batch used to be silently swallowed by
+    `_run_batch`'s ``except Exception: return []`` — the merged result
+    presented (and got cached upstream) as complete even though a whole
+    label bucket's edges were dropped. It must instead flag the result
+    stale/degraded/truncated, exactly like an on-demand sub-query
+    failure, WITHOUT dropping the rows the other batch did return."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a-fail"]), ("LabelB", ["urn:b-ok"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "LabelA" in cypher:
+            raise TimeoutError("batch timed out")
+        return _Result([["urn:b-ok", "urn:target", 3, ["FLOWS"]]])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a-fail", "urn:b-ok"], ["urn:target"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],  # short-circuits on-demand synthesis
+    ))
+
+    assert result.stale is True
+    assert result.stale_reason == "degraded"
+    assert result.truncated is True
+    got = {
+        (e.source_urn, e.target_urn): e.edge_count
+        for e in result.aggregated_edges
+    }
+    assert got == {("urn:b-ok", "urn:target"): 3}
+
+
+def test_all_materialized_batches_succeed_leaves_flags_unset():
+    """Sanity counterpart: when every batch succeeds, the new flag must
+    not falsely mark the result stale/truncated."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a-ok"]), ("LabelB", ["urn:b-ok"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "LabelA" in cypher:
+            return _Result([["urn:a-ok", "urn:target", 1, ["FLOWS"]]])
+        return _Result([["urn:b-ok", "urn:target", 3, ["FLOWS"]]])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a-ok", "urn:b-ok"], ["urn:target"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert result.stale is False
+    assert result.stale_reason is None
+    assert result.truncated is False
+
+
+def test_materialized_read_truncates_on_a_stable_key_not_weight_alone():
+    """The :AGGREGATED read caps at AGGREGATED_EDGE_RESULT_CAP rows, and
+    ``weight`` is a COUNT — so ties are pervasive and the LIMIT cut lands
+    in the middle of a tie group. Ordering by weight ALONE leaves the
+    surviving subset arbitrary and free to differ between executions;
+    combined with delete-on-oversize (a >1MiB payload is never cached, so
+    every canvas open re-runs the query) a large model would render a
+    DIFFERENT lineage subset each time it is opened. Pin the keyset the
+    same way the paged reads do: weight DESC, then (s.urn, t.urn).
+    """
+    from backend.app.providers.falkordb_provider import AggRunMeta
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    seen: list = []
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        seen.append(cypher)
+        return _Result([])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    # Both shapes of the materialized read: target-scoped and source-only.
+    for targets in (["urn:target"], []):
+        _run(p.get_aggregated_edges_between(
+            ["urn:a"], targets,
+            granularity=None,
+            containment_edges=["CONTAINS"],
+            lineage_edges=[],
+        ))
+
+    agg_reads = [c for c in seen if ":AGGREGATED]->" in c and "LIMIT" in c]
+    assert agg_reads, f"expected the materialized :AGGREGATED read, saw: {seen}"
+    for cypher in agg_reads:
+        assert "ORDER BY weight DESC, sUrn, tUrn" in cypher, (
+            f"page boundaries must be deterministic, got: {cypher}"
+        )
+        # A bare r.weight is unordered against null, which would strand
+        # null-weight cells after the first page.
+        assert "coalesce(r.weight, 0) AS weight" in cypher, (
+            f"page ordering must be null-safe, got: {cypher}"
+        )
+
+
+def test_materialized_read_pages_until_the_match_set_is_exhausted(monkeypatch):
+    """The Cypher LIMIT is a page size, not the answer size. A match set
+    larger than one page must come back in FULL — the old single-LIMIT read
+    silently dropped everything past the cap, which is how a large model
+    could serve less lineage than FalkorDB actually holds."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+    from backend.app.config import resilience
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    page_size = 5
+    monkeypatch.setattr(resilience, "AGGREGATED_EDGE_PAGE_SIZE", page_size)
+    # Two full pages plus a short one. Every row shares one weight, so the
+    # resume predicate has nothing but (sUrn, tUrn) to walk the boundary.
+    total = page_size * 2 + 2
+    all_rows = [
+        [f"urn:s{i:08d}", f"urn:t{i:08d}", 5, ["X"]] for i in range(total)
+    ]
+    pages_served: list = []
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if ":AGGREGATED]->" not in cypher or "LIMIT" not in cypher:
+            return _Result([])
+        params = params or {}
+        if "lastSourceUrn" not in params:
+            start = 0
+            assert "$lastWeight" not in cypher, "first page must not resume"
+        else:
+            assert "$lastWeight" in cypher, "resume page must carry the keyset"
+            start = int(params["lastSourceUrn"].removeprefix("urn:s")) + 1
+        page = all_rows[start:start + page_size]
+        pages_served.append(len(page))
+        return _Result([list(r) for r in page])
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a"], [],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert pages_served == [page_size, page_size, 2], (
+        f"expected paging until a short page, got {pages_served}"
+    )
+    assert len(result.aggregated_edges) == total, (
+        f"paged read must return every cell, got {len(result.aggregated_edges)}"
+    )
+    # Every pair distinct: no page overlap, no gap.
+    pairs = {(e.source_urn, e.target_urn) for e in result.aggregated_edges}
+    assert len(pairs) == total
+    assert not result.truncated, "a complete paged read is not truncated"
+
+
+def test_materialized_read_keeps_prefix_and_flags_when_a_page_fails(monkeypatch):
+    """A mid-paging failure must surface as degraded/stale rather than a
+    silently short answer that gets cached as if it were complete."""
+    from backend.app.providers.falkordb_provider import AggRunMeta
+    from backend.app.config import resilience
+
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    page_size = 5
+    monkeypatch.setattr(resilience, "AGGREGATED_EDGE_PAGE_SIZE", page_size)
+    calls = {"n": 0}
+
+    async def noop_connect():
+        return None
+
+    async def label_buckets(urns):
+        return [("LabelA", ["urn:a"])]
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if ":AGGREGATED]->" not in cypher or "LIMIT" not in cypher:
+            return _Result([])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _Result([
+                [f"urn:s{i:08d}", f"urn:t{i:08d}", 5, ["X"]]
+                for i in range(page_size)
+            ])
+        raise RuntimeError("connection reset mid-page")
+
+    async def agg_meta():
+        return AggRunMeta("boundary", 2, None, "2026-07-17T00:00:00Z")
+
+    p._ensure_connected = noop_connect
+    p._label_buckets = label_buckets
+    p._proj_ro_query = proj_ro_query
+    p._aggregation_run_meta = agg_meta
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a"], [],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=[],
+    ))
+
+    assert len(result.aggregated_edges) == page_size, "prefix must be kept"
+    assert result.stale is True
+    assert result.stale_reason == "degraded"
+    assert result.truncated is True

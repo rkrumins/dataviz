@@ -266,7 +266,7 @@ export function EntityAssignmentPanel({
 
     // Load root entities on mount so the panel has data to display
     useEffect(() => {
-        loadChildren('', { useAllSchemaTypes: true })
+        loadChildren('')
     }, [loadChildren])
 
     // Load children for newly expanded nodes

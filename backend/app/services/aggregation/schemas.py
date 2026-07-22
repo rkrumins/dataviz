@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -165,6 +165,16 @@ class AggregationSkipRequest(BaseModel):
 
 class AggregationScheduleRequest(BaseModel):
     cron_expression: Optional[str] = Field(None, alias="cronExpression")  # null = disable
+
+    class Config:
+        populate_by_name = True
+
+
+class SourceChangedRequest(BaseModel):
+    """Body for the source-changed signal. Both fields optional — an
+    external loader can POST an empty body and get the defaults."""
+    reason: str = Field("external_load")
+    force: bool = Field(False)
 
     class Config:
         populate_by_name = True
@@ -375,12 +385,275 @@ class DriftCheckResponse(BaseModel):
         populate_by_name = True
 
 
+class SourceChangedResponse(BaseModel):
+    """Result of the change-gated source-changed signal.
+
+    ``changed`` is False only on the no-op path (fingerprints matched and
+    ``force`` was not set) — nothing was invalidated or queued. When True,
+    caches were invalidated and a rebuild was queued unless ``job_id`` is
+    None (an aggregation job was already active, the source's status makes
+    aggregation not applicable, or the rebuild was ``deferred`` by the
+    cooldown throttle for the scheduler reconciler to pick up).
+    """
+    changed: bool
+    job_id: Optional[str] = Field(None, alias="jobId")
+    reason: str
+    current_fingerprint: str = Field(alias="currentFingerprint")
+    stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
+    # True when the change was invalidated but the aggregation rebuild was
+    # throttled by the cooldown window — the scheduler reconciler queues it
+    # once the window elapses.
+    deferred: bool = False
+    # Id of the refresh_events audit row this invocation emitted, or None
+    # if the emit failed (audit writes are best-effort — see
+    # emit_refresh_event). Reachable by F3/F4 to avoid a duplicate emit.
+    event_id: Optional[str] = Field(None, alias="eventId")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Unified refresh verb (operator-facing) ───────────────────────────
+
+
+class RefreshRequest(BaseModel):
+    """Body for the unified ``refresh_source`` verb — every field optional.
+
+    ``scope`` selects what converges:
+      * ``auto``        — delegate to the change-gated source-changed signal.
+      * ``read-caches`` — clear content + hierarchy + aggregated-LKG caches
+                          and nudge stats (no change gate, no rebuild).
+      * ``rollups``     — mark stale + queue an aggregation rebuild.
+      * ``full``        — read-caches steps, then rollups steps.
+      * ``clear``       — the read-caches steps, THEN clear the stale marker
+                          (no gate, no cooldown, no rebuild) — un-sticks a
+                          source stuck "recomputing" after a failed rebuild.
+
+    ``force`` only affects ``auto`` (it overrides the change gate); the other
+    scopes act unconditionally by construction. ``wait='complete'`` blocks on
+    a queued rebuild (bounded) so a caller can refresh-then-read synchronously.
+    """
+    scope: Literal["auto", "read-caches", "rollups", "full", "clear"] = "auto"
+    force: bool = Field(False)
+    reason: Optional[str] = None
+    wait: Literal["none", "complete"] = "none"
+
+    class Config:
+        populate_by_name = True
+
+
+class RefreshRequestInternal(RefreshRequest):
+    """Body for the Control Plane's ``refresh`` twin. Extends the public
+    ``RefreshRequest`` with the two fields only an internal caller asserts:
+
+      * ``origin`` — the audit origin: the loader script sends ``script``,
+        external connectors ``connector``; the viz proxy leaves it ``api``.
+        Restricted to the non-system origins (``drift``/``reconcile`` are
+        emitted internally, never via this route).
+      * ``actor`` — who triggered it. The viz proxy forwards the
+        authenticated user id it already resolves for direct mode, so a
+        UI-triggered refresh is attributed to the user in production
+        (proxy) deployments too, not to ``internal``.
+    """
+    origin: Literal["script", "connector", "api"] = "api"
+    actor: str = Field("internal", max_length=128)
+
+    class Config:
+        populate_by_name = True
+
+
+class RefreshResponse(BaseModel):
+    """Result of one ``refresh_source`` invocation.
+
+    ``changed`` mirrors the ``auto`` change gate; the forced scopes always
+    act, so it is True for them. ``gate`` is ``forced|changed|unchanged`` for
+    ``auto`` and ``n/a`` for the other scopes. ``actions`` is the ordered list
+    of what ran (plus a terminal ``job:<status>``/``job:timeout`` when
+    ``wait='complete'`` polled a rebuild). ``event_id`` is the single
+    refresh_events audit row this invocation is attributed to (the signal's
+    own row for ``auto``, this verb's for the others).
+    """
+    scope: str
+    gate: str
+    changed: bool
+    actions: List[str] = Field(default_factory=list)
+    job_id: Optional[str] = Field(None, alias="jobId")
+    deferred: bool = False
+    event_id: Optional[str] = Field(None, alias="eventId")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Freshness cockpit (operator-facing read models) ──────────────────
+
+
+class RefreshEventSummary(BaseModel):
+    """One row of the refresh_events audit trail, trimmed to what the
+    freshness views render. Populated from ``RefreshEventORM``."""
+    origin: str
+    outcome: str
+    ts: str
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessRow(BaseModel):
+    """One data source's freshness signals for the fleet view. Assembled
+    from ONE SQL pass (workspace_data_sources ⋈ providers) plus ONE Redis
+    pipeline (generation / cache-as-of / stale marker) — never a provider
+    or FalkorDB call. Optional-heavy: every Redis-sourced field degrades to
+    ``None`` when the cache is unreachable or the key is absent."""
+    data_source_id: str = Field(alias="dataSourceId")
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    name: Optional[str] = None
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
+    last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
+    cache_as_of: Optional[str] = Field(None, alias="cacheAsOf")
+    generation: Optional[int] = None
+    stale_reason: Optional[str] = Field(None, alias="staleReason")
+    # The marker carries no reliable "since": its TTL is a 7-day backstop
+    # that is refreshed on every re-signal, so a TTL-derived timestamp
+    # would misreport when the source first went stale. Left None until a
+    # marker set-time is durably recorded.
+    stale_since: Optional[str] = Field(None, alias="staleSince")
+    cooldown_until: Optional[str] = Field(None, alias="cooldownUntil")
+    stored_fingerprint: Optional[str] = Field(None, alias="storedFingerprint")
+    # Only ever set under an explicit probe (fleet never probes → None).
+    drifted: Optional[bool] = None
+    running_job_id: Optional[str] = Field(None, alias="runningJobId")
+    last_event: Optional[RefreshEventSummary] = Field(None, alias="lastEvent")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessDoc(FreshnessRow):
+    """A single source's full freshness detail — the fleet row plus the
+    per-source extras that cost one bounded LKG SCAN and (only under
+    ``probe=true``) one provider ``get_schema_stats`` call."""
+    lkg_count: Optional[int] = Field(None, alias="lkgCount")
+    lkg_oldest_age_secs: Optional[int] = Field(None, alias="lkgOldestAgeSecs")
+    live_fingerprint: Optional[str] = Field(None, alias="liveFingerprint")
+    live_node_count: Optional[int] = Field(None, alias="liveNodeCount")
+    live_edge_count: Optional[int] = Field(None, alias="liveEdgeCount")
+    events: List[RefreshEventSummary] = Field(default_factory=list)
+    # Rebuild-cadence detail for the drawer's "Rebuild cadence" row. The raw
+    # per-source override (null = none), the RESOLVED window, and where it
+    # came from ("custom" | "global" | "default") — computed server-side so a
+    # ds:manage (non-admin) viewer never needs to read the global settings.
+    rebuild_override_secs: Optional[int] = Field(None, alias="rebuildOverrideSecs")
+    resolved_rebuild_interval_secs: Optional[int] = Field(
+        None, alias="resolvedRebuildIntervalSecs",
+    )
+    rebuild_interval_source: Optional[str] = Field(
+        None, alias="rebuildIntervalSource",
+    )
+    # Per-source cache footprint: a bounded SCAN of the CURRENT-generation
+    # primary cache keys, tallied by endpoint. Doc-only (never on the fleet
+    # path) — see ``count_cache_keys_by_endpoint``. ``None`` on a Redis
+    # error/disabled cache, distinct from ``{}``/0 (nothing cached).
+    cache_key_count: Optional[int] = Field(None, alias="cacheKeyCount")
+    cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
+        None, alias="cacheKeyCountByEndpoint",
+    )
+    # Failure surfacing (spec §9c): populated only when the latest job for
+    # this source is ``failed`` (one bounded query); None otherwise —
+    # doc-only, best-effort, never raises.
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    retry_count: Optional[int] = Field(None, alias="retryCount")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessSummary(BaseModel):
+    """Fleet-wide stat-tile counts for the Freshness cockpit, computed over
+    the workspace/provider-filtered set *before* the ``staleOnly`` facet and
+    pagination are applied — the tiles describe the whole filtered fleet,
+    not the visible page. ``None`` (on the response) when that filtered set
+    exceeds 1000 sources, so the assembly never does unbounded work."""
+    total: int
+    ready: int = Field(0)  # aggregation_status == "ready"
+    pending: int = Field(0)  # aggregation_status == "pending" (rebuild in flight)
+    failed: int = Field(0)  # aggregation_status == "failed"
+    not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
+    recomputing: int = Field(0)  # stale marker present
+    needs_attention: int = Field(0, alias="needsAttention")  # marker present OR failed
+    cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+
+    class Config:
+        populate_by_name = True
+
+
+class ProviderFreshnessSummary(BaseModel):
+    """Per-provider breakdown of the fleet ``summary`` — identical bucket
+    semantics, grouped by ``(provider_id, provider_name)``. ``provider_id``/
+    ``provider_name`` are ``None`` for the no-provider group. ``None`` on
+    the response whenever ``summary`` is (the same >1000-source cutoff)."""
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    total: int = 0
+    ready: int = Field(0)
+    pending: int = Field(0)
+    failed: int = Field(0)
+    not_built: int = Field(0, alias="notBuilt")
+    needs_attention: int = Field(0, alias="needsAttention")
+    cache_stamped: int = Field(0, alias="cacheStamped")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessFleetResponse(BaseModel):
+    """Paged fleet freshness response — ``total`` is the filtered count."""
+    rows: List[FreshnessRow] = Field(default_factory=list)
+    total: int = 0
+    summary: Optional[FreshnessSummary] = None
+    provider_summaries: Optional[List[ProviderFreshnessSummary]] = Field(
+        None, alias="providerSummaries",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
 # ── Global defaults (settings) ───────────────────────────────────────
 
 
+class AggregationCadence(BaseModel):
+    """Persisted global rebuild cadence — the env-only knobs
+    ``AGGREGATION_REBUILD_MIN_INTERVAL_SECS`` and
+    ``AGGREGATION_DRIFT_AUTO_REBUILD`` made editable. Each field ``None``
+    means "unset → fall through to the env default"; this is NOT part of
+    ``AggregationTuning`` on purpose (cadence is a scheduler/cooldown
+    concern, never frozen onto a per-job pipeline run)."""
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
+        description="Minimum seconds between automatic rebuilds of a source "
+                    "(0 disables the throttle). Unset → env default.",
+    )
+    drift_auto_rebuild: Optional[bool] = Field(
+        None, alias="driftAutoRebuild",
+        description="Whether the scheduler auto-queues a rebuild when it "
+                    "detects drift. Unset → env default.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
 class AggregationSettingsRequest(BaseModel):
-    """PUT /aggregation/settings body — replaces the stored defaults."""
-    tuning: AggregationTuning
+    """PUT /aggregation/settings body. ``tuning`` and ``cadence`` are
+    independent: each is applied only when present, so the tuning-defaults
+    editor and the cadence editor can write without clobbering each other."""
+    tuning: Optional[AggregationTuning] = None
+    cadence: Optional[AggregationCadence] = None
 
     class Config:
         populate_by_name = True
@@ -388,8 +661,42 @@ class AggregationSettingsRequest(BaseModel):
 
 class AggregationSettingsResponse(BaseModel):
     tuning: Optional[AggregationTuning] = None
+    cadence: Optional[AggregationCadence] = None
+    # Effective ENV defaults (read server-side), so the cadence editor can
+    # seed its controls from ``persisted ?? envDefault`` — a no-op save then
+    # round-trips the real current default instead of pinning a wrong value.
+    env_rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="envRebuildMinIntervalSecs",
+    )
+    env_drift_auto_rebuild: Optional[bool] = Field(
+        None, alias="envDriftAutoRebuild",
+    )
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessSettingsRequest(BaseModel):
+    """PATCH /data-sources/{id}/freshness-settings body — the per-source
+    rebuild-interval override. ``None`` clears the override (back to the
+    resolved global/env default)."""
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class FreshnessSettingsResponse(BaseModel):
+    """The stored per-source override after a PATCH (echoes the effective
+    override; ``None`` = no override, source resolves global/env)."""
+    data_source_id: str = Field(alias="dataSourceId")
+    rebuild_min_interval_secs: Optional[int] = Field(
+        None, alias="rebuildMinIntervalSecs",
+    )
 
     class Config:
         populate_by_name = True
@@ -429,6 +736,68 @@ class WorkersResponse(BaseModel):
     workers: List[WorkerInfo] = Field(default_factory=list)
     queue_depth: int = Field(0, alias="queueDepth")
     queue_pending: int = Field(0, alias="queuePending")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Guarded provider refresh batch (F5; reused for the fleet-wide
+# refresh-all batch, G2) ──────────────────────────────────────────────
+
+
+class BatchRefreshRequest(BaseModel):
+    """Body for the provider batch-refresh verb (also reused, unchanged,
+    by the fleet-wide refresh-all verb). ``scope``/``force`` are forwarded
+    to ``refresh_source`` for every live data source in scope;
+    ``max_concurrent`` bounds the fan-out (the runner additionally caps it
+    at 4 regardless of what's requested)."""
+    scope: Literal["auto", "read-caches", "rollups", "full", "clear"] = "auto"
+    force: bool = Field(False)
+    max_concurrent: int = Field(2, ge=1, alias="maxConcurrent")
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchRefreshRequestInternal(BatchRefreshRequest):
+    """Body for the Control Plane's batch-refresh twin — adds the two
+    internal-channel fields (mirrors ``RefreshRequestInternal``): ``origin``
+    is caller-asserted, ``actor`` is the batch initiator's user id forwarded
+    by the viz proxy (defaults to ``internal`` for direct callers)."""
+    origin: Literal["script", "connector", "api"] = "api"
+    actor: str = Field("internal", max_length=128)
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchItemResult(BaseModel):
+    """One data source's outcome within a refresh batch.
+
+    ``name``/``actions``/``deferred`` exist so the completion dialog can say
+    WHAT it did to each source instead of listing opaque ids with a tick.
+    All three default, because the error branch has no ``RefreshResponse``
+    to read and an exception there would strand the batch at "running"."""
+    data_source_id: str = Field(alias="dataSourceId")
+    outcome: Literal["done", "error"]
+    job_id: Optional[str] = Field(None, alias="jobId")
+    name: Optional[str] = None
+    actions: List[str] = Field(default_factory=list)
+    deferred: bool = False
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchStatus(BaseModel):
+    """Progress/result of one guarded provider refresh batch, assembled
+    from the ``refreshbatch:{batch_id}`` Redis hash."""
+    batch_id: str = Field(alias="batchId")
+    provider_id: str = Field(alias="providerId")
+    total: int = 0
+    done: int = 0
+    results: List[BatchItemResult] = Field(default_factory=list)
+    state: Literal["running", "done"] = "running"
 
     class Config:
         populate_by_name = True

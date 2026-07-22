@@ -110,6 +110,7 @@ import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
+import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -550,6 +551,7 @@ export function ContextViewCanvas({
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
+    staleReason: aggregationStaleReason,
     error: aggregationError,
     loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
@@ -2090,6 +2092,12 @@ export function ContextViewCanvas({
     return () => clearTimeout(fetchDebounced)
   }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing, aggregatedCacheVersion, loadingNodes])
 
+  // Source-changed self-refresh: while the aggregated overlay is flagged
+  // `source_changed`, poll readiness and invalidate the aggregated cache once
+  // the rebuild completes so the "recomputing" banner self-clears. See
+  // hooks/useSourceChangedRefresh.
+  useSourceChangedRefresh(dataSourceId, aggregationStaleReason)
+
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
   // saved expansion set onto a freshly-hydrated canvas that only has roots. Such
@@ -3509,6 +3517,17 @@ export function ContextViewCanvas({
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
             <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+          </div>
+        )}
+        {/* Stale-source banner — a source-data change queued/ran a rebuild; the
+            canvas keeps serving the previous rollup (stale-while-revalidate)
+            and self-clears when the rebuild's epoch flip triggers a refetch. */}
+        {aggregationStaleReason === 'source_changed' && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">Source data changed — lineage is being recomputed. Showing the previous rollup.</span>
           </div>
         )}
         {/* Edge-fetch integrity banner — an edge query failed and was

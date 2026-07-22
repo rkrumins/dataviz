@@ -12,6 +12,19 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def fingerprint_from_stats(stats: Any) -> str:
+    """Hash an already-fetched ``GraphSchemaStats`` into the drift
+    fingerprint. Factored out so a caller that already holds schema stats
+    (e.g. the freshness probe) derives the SAME digest without a second
+    ``get_schema_stats`` round-trip."""
+    structure: Dict[str, Any] = {
+        "nodes": {s.id: s.count for s in sorted(stats.entity_type_stats, key=lambda s: s.id)},
+        "edges": {s.id: s.count for s in sorted(stats.edge_type_stats, key=lambda s: s.id)},
+    }
+    raw = json.dumps(structure, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 async def compute_graph_fingerprint(provider: Any) -> str:
     """Compute a fingerprint of the graph's current structure.
 
@@ -21,15 +34,7 @@ async def compute_graph_fingerprint(provider: Any) -> str:
     try:
         # Get full schema stats
         stats = await provider.get_schema_stats()
-
-        # Build a sortable structure for deterministic hashing
-        structure: Dict[str, Any] = {
-            "nodes": {s.id: s.count for s in sorted(stats.entity_type_stats, key=lambda s: s.id)},
-            "edges": {s.id: s.count for s in sorted(stats.edge_type_stats, key=lambda s: s.id)},
-        }
-
-        raw = json.dumps(structure, sort_keys=True)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        return fingerprint_from_stats(stats)
     except Exception as e:
         logger.warning("Failed to compute graph fingerprint: %s", e)
         return ""

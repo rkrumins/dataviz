@@ -467,6 +467,10 @@ Examples:
             asyncio.run(push_to_falkordb(
                 builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values()),
                 bulk=not args.keep_persistence, append=args.append))
+            # Converge read caches + the :AGGREGATED overlay after the direct
+            # load (best-effort; no-op if the CP is unreachable / signal skipped).
+            from backend.scripts.signal_data_changed import emit_after_load
+            emit_after_load(graph_name=args.graph)
         sys.exit(0)
 
     # ── Schema path: convert into the custom ontology ────────────────────────
@@ -492,6 +496,10 @@ Examples:
                     "canonicalized=%s ingested=%s rejected=%s",
                     result["ontology_id"], result["data_source_id"], result["graph_id"],
                     result["canonicalized"], result["ingested"], len(result["rejected"]))
+        # Converge read caches + the :AGGREGATED overlay for the newly-created
+        # data source (best-effort; no-op if the CP is unreachable / skipped).
+        from backend.scripts.signal_data_changed import emit_after_load
+        emit_after_load(data_source_id=result["data_source_id"])
     elif args.dry_run:
         logger.info("Dry run — no data pushed.")
         for node in cg.nodes[:5]:
@@ -501,3 +509,7 @@ Examples:
         asyncio.run(push_to_falkordb(
             cg, args.graph, declared_labels=set(schema.entity_map.values()),
             bulk=not args.keep_persistence, append=args.append))
+        # Converge read caches + the :AGGREGATED overlay after the direct load
+        # (best-effort; no-op if the CP is unreachable / signal skipped).
+        from backend.scripts.signal_data_changed import emit_after_load
+        emit_after_load(graph_name=args.graph)

@@ -102,6 +102,14 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS run_stats TEXT NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
+                # F9 (2026-07-19) — configurable rebuild cadence, mirrored in
+                # alembic 20260719_1200_agg_cadence: a per-source cooldown
+                # override on the state table and the persisted GLOBAL cadence
+                # (its own column so cadence never leaks into per-job tuning).
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS rebuild_min_interval_secs INTEGER NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_settings "
+                "ADD COLUMN IF NOT EXISTS cadence_json TEXT NULL",
                 # Node-identity property (URN-equivalent) frozen at trigger
                 # time (2026-07-21), mirrored in alembic
                 # 20260721_1200_ds_identity_prop. NULL → "urn" in the

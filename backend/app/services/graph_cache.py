@@ -41,6 +41,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
 
 from pydantic import BaseModel
@@ -56,6 +57,12 @@ T = TypeVar("T", bound=BaseModel)
 
 _KEY_PREFIX = "graphcache:v1"
 _GEN_PREFIX = "graphcache:gen"
+# Cache-as-of stamp: the ISO timestamp of the last generation bump for a
+# scope — the OPS Freshness Cockpit's "as of" signal for cached reads.
+# Written alongside the generation counter in bump_generation(s); read via
+# get_cache_as_of(). Best-effort, same fail-open conventions as the rest
+# of this module.
+_GENAT_PREFIX = "graphcache:genat"
 
 
 # ─── env-safe parsing ──────────────────────────────────────────────────
@@ -247,17 +254,43 @@ class CacheScope:
     empty string so the key is stable across requests that omit it.
     branch_id scopes the entry to a draft so a draft read can never be
     served to main (or vice-versa); empty string = main.
+
+    graph_ns identifies the PHYSICAL FalkorDB graph (host:port:graph_name,
+    hashed — see ``graph_ns_hash``) behind this data source, mirroring the
+    provider content caches' own ``_cache_ns`` (falkordb_provider.py). A
+    data source id is stable even when re-pointed to a different physical
+    graph; without graph_ns, a re-point could serve a stale response cached
+    under the old graph until the next write's generation bump. Optional
+    and defaulted to "" (unknown/unresolvable) so the many call sites that
+    build a CacheScope with no live engine/provider (service-layer
+    invalidation, tests) stay valid — see ``_build_key``/``_build_lkg_key``
+    for how "" degrades to today's ds-only key shape.
     """
     workspace_id: str
     data_source_id: str = ""
     branch_id: str = ""
+    graph_ns: str = ""
 
 
 class GraphCache:
     """Singleton cache wrapper. Get the instance via `get_graph_cache()`."""
 
-    def __init__(self, redis: aioredis.Redis) -> None:
-        self._redis = redis
+    def __init__(
+        self, redis: aioredis.Redis, cache_redis: Optional[aioredis.Redis] = None,
+    ) -> None:
+        # Durable, shared client — COORDINATION only: the generation
+        # counter, the genat cache-as-of stamp, and the aggstale markers.
+        # Never the CACHE role — this repo's agg:members ledger-corruption
+        # lesson: eviction of a lossy cache Redis must not lose
+        # coordination state (spec §10b).
+        self._coord_redis = redis
+        # Response-cache PAYLOADS + LKG snapshots. Resolved by the caller
+        # via the CACHE role (REDIS_CACHE_*) with a fallback to the shared
+        # client baked in — so when no dedicated client is supplied (every
+        # existing call site/test), this is the SAME client as
+        # ``_coord_redis`` and behavior is byte-identical to today's
+        # single-client cache.
+        self._cache_redis = cache_redis if cache_redis is not None else redis
         # In-process singleflight: key → Future holding the computed result.
         # Concurrent callers awaiting an in-flight future read the same
         # answer with no extra provider work.
@@ -308,7 +341,7 @@ class GraphCache:
 
         # ── 1. Redis cache lookup ─────────────────────────────────────
         try:
-            cached = await self._redis.get(cache_key)
+            cached = await self._cache_redis.get(cache_key)
         except RedisError as exc:
             logger.warning("graph_cache: GET failed (%s); bypassing cache", exc)
             return await compute()
@@ -397,7 +430,7 @@ class GraphCache:
             return None
         try:
             gen = await self._get_generation(scope)
-            raw = await self._redis.get(
+            raw = await self._cache_redis.get(
                 _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params)
             )
             return int(raw) if raw is not None else None
@@ -414,7 +447,7 @@ class GraphCache:
             return
         try:
             gen = await self._get_generation(scope)
-            await self._redis.set(
+            await self._cache_redis.set(
                 _build_key(scope, gen, ENDPOINT_TOP_LEVEL_COUNT, params),
                 str(int(value)),
                 ex=_DEFAULT_TOP_LEVEL_TTL,
@@ -431,7 +464,10 @@ class GraphCache:
         off; INCR on a non-existent key just starts it at 1.
         """
         try:
-            await self._redis.incr(_gen_key(scope))
+            await self._coord_redis.incr(_gen_key(scope))
+            await self._coord_redis.set(
+                _genat_key(scope), datetime.now(timezone.utc).isoformat(),
+            )
         except RedisError as exc:
             logger.warning(
                 "graph_cache: generation bump failed for %s (%s); "
@@ -447,9 +483,11 @@ class GraphCache:
         if not scopes:
             return
         try:
-            pipe = self._redis.pipeline(transaction=False)
+            pipe = self._coord_redis.pipeline(transaction=False)
+            now_iso = datetime.now(timezone.utc).isoformat()
             for scope in scopes:
                 pipe.incr(_gen_key(scope))
+                pipe.set(_genat_key(scope), now_iso)
             await pipe.execute()
         except RedisError as exc:
             logger.warning(
@@ -474,11 +512,11 @@ class GraphCache:
         try:
             cursor = 0
             while True:
-                cursor, keys = await self._redis.scan(
+                cursor, keys = await self._cache_redis.scan(
                     cursor=cursor, match=pattern, count=500,
                 )
                 if keys:
-                    removed += int(await self._redis.delete(*keys) or 0)
+                    removed += int(await self._cache_redis.delete(*keys) or 0)
                 if not cursor:
                     break
         except RedisError as exc:
@@ -489,12 +527,43 @@ class GraphCache:
             )
         return removed
 
+    async def purge_lkg_scope(
+        self, scope: CacheScope, *, exclude_endpoint: Optional[str] = None,
+    ) -> int:
+        """Delete the last-known-good entries for ``scope`` across EVERY
+        endpoint (every branch) — the hierarchy-invalidation counterpart to
+        :meth:`purge_lkg`, which is scoped to one endpoint. ``exclude_endpoint``
+        carves out one endpoint's LKG (the aggregated mirror, kept as the
+        stale-while-revalidate fallback until its own rebuild completes).
+        Bounded SCAN, never KEYS."""
+        pattern = f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:*"
+        removed = 0
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self._cache_redis.scan(
+                    cursor=cursor, match=pattern, count=500,
+                )
+                if exclude_endpoint is not None:
+                    keys = [k for k in keys if f":{exclude_endpoint}:" not in k]
+                if keys:
+                    removed += int(await self._cache_redis.delete(*keys) or 0)
+                if not cursor:
+                    break
+        except RedisError as exc:
+            logger.warning(
+                "graph_cache: LKG scope purge failed for %s (%s); stale "
+                "last-known-good entries may persist until TTL expiry",
+                scope, exc,
+            )
+        return removed
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
         """Read the current generation counter for `scope`. Returns 0
         when never set (which yields a stable initial key)."""
-        raw = await self._redis.get(_gen_key(scope))
+        raw = await self._coord_redis.get(_gen_key(scope))
         if raw is None:
             return 0
         try:
@@ -517,15 +586,18 @@ class GraphCache:
         ttl = _resolve_ttl(ttl_seconds, endpoint)
         if _is_empty_result(result):
             ttl = _NEGATIVE_TTL
+        elif _is_incomplete_result(result):
+            ttl = _NEGATIVE_TTL
         try:
             payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 logger.warning(
-                    "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (skipping cache write)",
+                    "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (dropping stale entry + skipping cache write)",
                     endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
                 )
+                await self._cache_redis.delete(cache_key)
                 return
-            await self._redis.set(cache_key, payload, ex=ttl)
+            await self._cache_redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: SET failed (%s)", exc)
 
@@ -540,20 +612,27 @@ class GraphCache:
 
         Skipped for empty results — a transient empty answer must not
         pin "empty" as the stale fallback during a future outage. Skipped
-        when ``_LKG_TTL`` is 0 (operator-disabled). Failures are
-        swallowed for the same reason as ``_set``.
+        for incomplete (truncated/stale) results — a degraded snapshot
+        must not become the outage fallback either. Skipped when
+        ``_LKG_TTL`` is 0 (operator-disabled). Failures are swallowed for
+        the same reason as ``_set``.
         """
         if _LKG_TTL <= 0:
             return
         if _is_empty_result(result):
             return
+        if _is_incomplete_result(result):
+            return
         try:
             payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 # Already logged at WARNING in _set for the primary key;
-                # the LKG mirror is dropped silently to avoid double-noise.
+                # the stale mirror is dropped here deliberately (log-silent
+                # to avoid double-noise) — an outage fallback that no
+                # longer matches reality is worse than none.
+                await self._cache_redis.delete(_build_lkg_key(scope, endpoint, params))
                 return
-            await self._redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
+            await self._cache_redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: LKG SET failed (%s)", exc)
 
@@ -571,7 +650,7 @@ class GraphCache:
         if _LKG_TTL <= 0:
             return None
         try:
-            raw = await self._redis.get(_build_lkg_key(scope, endpoint, params))
+            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
         except RedisError as exc:
             logger.warning("graph_cache: LKG GET failed (%s)", exc)
             return None
@@ -587,28 +666,68 @@ class GraphCache:
 # ─── Module-level helpers ──────────────────────────────────────────────
 
 def _gen_key(scope: CacheScope) -> str:
+    # Deliberately NOT graph_ns-scoped: invalidation is by gen-bump (this
+    # key) + prefix SCAN (purge_lkg), both of which must cover every
+    # physical-graph variant of a (ws, ds) — a re-point's stale entries
+    # under the OLD graph_ns still need to die on the next write. Only the
+    # exact read/write key (_build_key/_build_lkg_key) needs graph_ns, to
+    # stop a re-point from serving the wrong graph's cached response
+    # before the next gen-bump.
     return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
+
+
+def _genat_key(scope: CacheScope) -> str:
+    # (ws, ds)-scoped coordination, same rationale as _gen_key above.
+    return f"{_GENAT_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
+
+
+def graph_ns_hash(physical_graph_id: str) -> str:
+    """Hash a physical-graph identity (``host:port:graph_name``) into a
+    bounded cache-key segment for ``CacheScope.graph_ns``. Mirrors the
+    provider content caches' ``_cache_ns`` identity triple
+    (falkordb_provider.py) but hashed + truncated to keep the key bounded,
+    same rationale as the params digest below. The ONE place this hashing
+    happens — callers that resolve the (host, port, graph_name) triple
+    (e.g. the endpoint layer's ``_cache_scope``) pass the raw string here
+    rather than hashing it themselves."""
+    return hashlib.sha1(physical_graph_id.encode("utf-8")).hexdigest()[:16]
 
 
 def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any]) -> str:
     """Build a cache key. We hash params (not raw-include them) so the
     key length is bounded — `params` for /edges/aggregated can carry
-    thousands of source URNs."""
+    thousands of source URNs.
+
+    ``graph_ns`` (when resolved) is appended as a trailing segment so the
+    same (workspace, data_source, branch, gen) can never collide across
+    two distinct physical FalkorDB graphs — see CacheScope's docstring.
+    Appending after the digest (rather than inserting earlier) keeps
+    ``count_cache_keys_by_endpoint``'s fixed-index endpoint parse intact,
+    and means graph_ns="" (unresolved/legacy callers) produces EXACTLY
+    today's key — full back-compat.
+    """
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
+    key = f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
+    if scope.graph_ns:
+        key = f"{key}:{scope.graph_ns}"
+    return key
 
 
 def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> str:
     """Last-known-good key: identical to the primary key shape minus
     the generation component, so the LKG survives ``bump_generation``
     invalidations. Same params hash so a write to the primary cache
-    always has a matching LKG slot."""
+    always has a matching LKG slot. ``graph_ns`` handling mirrors
+    ``_build_key`` (trailing segment, "" = today's exact shape)."""
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
+    key = f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
+    if scope.graph_ns:
+        key = f"{key}:{scope.graph_ns}"
+    return key
 
 
 def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
@@ -657,6 +776,22 @@ def _is_empty_result(result: BaseModel) -> bool:
     return False
 
 
+def _is_incomplete_result(result: BaseModel) -> bool:
+    """Truncated/degraded/stale results must not be pinned for the full
+    TTL as if they were complete — cache them only for the negative
+    window. Checks the result itself and its nested AggregatedEdgeResult
+    payloads: ``aggregated`` (canvas bootstrap) and ``aggregated_delta``
+    (canvas expand)."""
+    for obj in (
+        result,
+        getattr(result, "aggregated", None),
+        getattr(result, "aggregated_delta", None),
+    ):
+        if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
+            return True
+    return False
+
+
 async def invalidate_aggregated_reads(
     workspace_id: str, data_source_id: str,
 ) -> None:
@@ -691,6 +826,309 @@ async def invalidate_aggregated_reads(
             "aggregated-read cache invalidation failed for %s/%s: %s",
             workspace_id, data_source_id, exc,
         )
+
+
+async def invalidate_hierarchy_reads(
+    workspace_id: str, data_source_id: str,
+) -> Optional[int]:
+    """Invalidate the hierarchy read caches (children, top-level, trace,
+    layer-assignment, canvas, …) after an event that changed the
+    underlying graph — e.g. an external load that wrote FalkorDB directly,
+    bypassing the app's own write paths and their per-write generation
+    bumps.
+
+    Bumps the scope-wide generation, which makes every endpoint's primary
+    cache entries unreachable; hierarchy endpoints read the live graph on
+    a miss, so they converge on the very next read. The aggregated LKG
+    mirror is deliberately KEPT (not purged here) — mid-rebuild it still
+    matches the live overlay and is the best degraded-read answer
+    available; :func:`invalidate_aggregated_reads` purges it once the
+    aggregation rebuild completes. Best-effort: never raises.
+
+    Returns the non-aggregated LKG entry count purged, or ``None`` if
+    skipped (missing ids) or the invalidation itself failed — callers
+    that need to know whether the generation bump actually happened
+    (e.g. audit recording) can treat ``None`` as "didn't run".
+    """
+    if not workspace_id or not data_source_id:
+        return None
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(
+            workspace_id=str(workspace_id),
+            data_source_id=str(data_source_id),
+            branch_id="",
+        )
+        await cache.bump_generation(scope)
+        removed = await cache.purge_lkg_scope(scope, exclude_endpoint=ENDPOINT_AGGREGATED)
+        logger.info(
+            "hierarchy-read caches invalidated for %s/%s (%d non-aggregated LKG purged)",
+            workspace_id, data_source_id, removed,
+        )
+        return removed
+    except Exception as exc:
+        logger.warning(
+            "hierarchy-read cache invalidation failed for %s/%s: %s",
+            workspace_id, data_source_id, exc,
+        )
+        return None
+
+
+# ─── Stale-source marker (stale-while-revalidate flag) ─────────────────
+
+_STALE_PREFIX = "aggstale:v1"      # key: aggstale:v1:{ws}:{ds}; value = reason string
+_STALE_TTL_S = 7 * 86400           # backstop only; cleared explicitly on job.completed
+
+
+def _stale_key(workspace_id: str, data_source_id: str) -> str:
+    return f"{_STALE_PREFIX}:{workspace_id}:{data_source_id}"
+
+
+async def mark_source_stale(
+    workspace_id: str, data_source_id: str, reason: str = "source_changed",
+) -> None:
+    """Set the stale-while-revalidate flag for a data source: its
+    underlying graph changed and a rebuild is queued. Read by the
+    aggregated/canvas read paths post-cache, so even a cached hit gets
+    flagged as stale to the caller. Cleared by the aggregation event
+    listener on ``job.completed``. ``_STALE_TTL_S`` is a backstop only —
+    a dropped completion event doesn't strand the flag forever.
+    Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return
+    try:
+        cache = get_graph_cache()
+        await cache._coord_redis.set(_stale_key(ws, ds), reason, ex=_STALE_TTL_S)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: mark_source_stale failed for %s/%s: %s", ws, ds, exc,
+        )
+
+
+async def clear_source_stale(workspace_id: str, data_source_id: str) -> None:
+    """Clear the stale-while-revalidate flag once the queued rebuild
+    completes. Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return
+    try:
+        cache = get_graph_cache()
+        await cache._coord_redis.delete(_stale_key(ws, ds))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: clear_source_stale failed for %s/%s: %s", ws, ds, exc,
+        )
+
+
+async def get_source_stale_reason(
+    workspace_id: str, data_source_id: str,
+) -> Optional[str]:
+    """Read the stale-while-revalidate reason for a data source. Returns
+    ``None`` when not stale, on empty ids, or on any Redis error — this
+    runs on the read path post-cache, so a Redis hiccup must degrade to
+    "not stale" rather than blocking the response. Best-effort: never
+    raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        return await cache._coord_redis.get(_stale_key(ws, ds))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: get_source_stale_reason failed for %s/%s: %s", ws, ds, exc,
+        )
+        return None
+
+
+async def get_cache_as_of(
+    workspace_id: str, data_source_id: str, branch_id: str = "",
+) -> Optional[str]:
+    """Read the cache-as-of stamp — the ISO timestamp of the last
+    ``bump_generation``/``bump_generations`` call for this scope. Returns
+    ``None`` on empty ids, cache miss, or any Redis error; this is a
+    best-effort freshness signal for the OPS Freshness Cockpit, never a
+    hard dependency."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id=str(branch_id))
+        return await cache._coord_redis.get(_genat_key(scope))
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: get_cache_as_of failed for %s/%s: %s", ws, ds, exc,
+        )
+        return None
+
+
+async def read_freshness_signals(
+    pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]]:
+    """Batch-read the freshness signals for many ``(workspace_id,
+    data_source_id)`` pairs in ONE Redis pipeline — the fleet freshness
+    view's only cache round-trip. For each pair it reads the cache
+    generation counter, the cache-as-of stamp, and the stale-source
+    marker reason.
+
+    Returns a dict keyed by ``(str(ws), str(ds))`` → ``(generation,
+    cache_as_of, stale_reason)``; any missing/unparseable value is
+    ``None``. Best-effort: on any Redis error every requested pair maps to
+    ``(None, None, None)`` so callers degrade to "freshness unknown"
+    rather than failing. Follows graph_cache conventions: ``str()``
+    coercion, empty-id guards, never raises."""
+    clean = [(str(ws), str(ds)) for ws, ds in pairs if ws and ds]
+    result: dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]] = {
+        pair: (None, None, None) for pair in clean
+    }
+    if not clean:
+        return result
+    try:
+        cache = get_graph_cache()
+        pipe = cache._coord_redis.pipeline(transaction=False)
+        for ws, ds in clean:
+            scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id="")
+            pipe.get(_gen_key(scope))
+            pipe.get(_genat_key(scope))
+            pipe.get(_stale_key(ws, ds))
+        raw = await pipe.execute()
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_freshness_signals failed for %d pairs: %s",
+            len(clean), exc,
+        )
+        return result
+    for idx, pair in enumerate(clean):
+        gen_raw, genat_raw, stale_raw = raw[idx * 3: idx * 3 + 3]
+        try:
+            gen = int(gen_raw) if gen_raw is not None else None
+        except (TypeError, ValueError):
+            gen = None
+        result[pair] = (gen, genat_raw, stale_raw)
+    return result
+
+
+async def read_lkg_stats(
+    workspace_id: str, data_source_id: str,
+) -> tuple[Optional[int], Optional[int]]:
+    """Count the last-known-good cache entries for one source and the age
+    of the oldest, via ONE bounded SCAN over
+    ``graphcache:lkg:v1:{ws}:{ds}:*`` then ONE pipelined TTL read.
+
+    Returns ``(lkg_count, oldest_age_secs)``; either is ``None`` on empty
+    ids or any Redis error, and ``lkg_count`` is 0 (with ``None`` age)
+    when the source has no LKG entries. Per-source only — never called on
+    the fleet path. Best-effort: never raises."""
+    ws, ds = str(workspace_id), str(data_source_id)
+    if not ws or not ds:
+        return (None, None)
+    try:
+        cache = get_graph_cache()
+        pattern = f"{_LKG_PREFIX}:{ws}:{ds}:*"
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await cache._cache_redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            keys.extend(batch)
+            if not cursor:
+                break
+        if not keys:
+            return (0, None)
+        pipe = cache._cache_redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.ttl(key)
+        ttls = await pipe.execute()
+        # age(oldest) = LKG_TTL − min(remaining TTL); keys without a TTL
+        # (-1) or already gone (-2) are ignored for the age computation.
+        remaining = [int(t) for t in ttls if t is not None and int(t) >= 0]
+        oldest_age: Optional[int] = None
+        if remaining and _LKG_TTL > 0:
+            oldest_age = max(0, _LKG_TTL - min(remaining))
+        return (len(keys), oldest_age)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_lkg_stats failed for %s/%s: %s", ws, ds, exc,
+        )
+        return (None, None)
+
+
+async def count_cache_keys_by_endpoint(
+    workspace_id: str, data_source_id: str, branch_id: str = "",
+) -> Optional[dict[str, int]]:
+    """Bounded SCAN over the CURRENT-generation primary cache keys for a
+    source, tallied by endpoint segment (index 6 of
+    ``graphcache:v1:{ws}:{ds}:{branch}:{gen}:{endpoint}:{digest}``).
+    Reads the current generation first so the SCAN pattern locks to it —
+    stale-generation and LKG keys (a different prefix) never match.
+
+    Returns ``{}`` when nothing is cached (distinct from ``None`` = a
+    Redis error/disabled cache), ``None`` on empty ids (no SCAN issued).
+    Per-source only — never called on the fleet path. Best-effort: never
+    raises."""
+    ws, ds, branch = str(workspace_id), str(data_source_id), str(branch_id)
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch)
+        gen = await cache._get_generation(scope)
+        pattern = f"{_KEY_PREFIX}:{ws}:{ds}:{branch}:{gen}:*"
+        tally: dict[str, int] = {}
+        cursor = 0
+        while True:
+            cursor, keys = await cache._cache_redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            for key in keys:
+                parts = key.split(":")
+                if len(parts) > 6:
+                    tally[parts[6]] = tally.get(parts[6], 0) + 1
+            if not cursor:
+                break
+        return tally
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: count_cache_keys_by_endpoint failed for %s/%s: %s",
+            ws, ds, exc,
+        )
+        return None
+
+
+async def list_stale_sources() -> list[tuple[str, str]]:
+    """List every ``(workspace_id, data_source_id)`` pair currently
+    marked stale — read by the scheduler reconciler to re-signal sources
+    whose rebuild was deferred by the cooldown throttle or left stale by
+    a failed rebuild. Bounded SCAN, never KEYS. Malformed keys (wrong
+    segment count) are skipped. Best-effort: returns ``[]`` on any
+    Redis error."""
+    pairs: list[tuple[str, str]] = []
+    try:
+        cache = get_graph_cache()
+        pattern = f"{_STALE_PREFIX}:*"
+        cursor = 0
+        while True:
+            cursor, keys = await cache._coord_redis.scan(
+                cursor=cursor, match=pattern, count=500,
+            )
+            for key in keys:
+                rest = key[len(_STALE_PREFIX) + 1:]
+                parts = rest.split(":")
+                if len(parts) != 2 or not parts[0] or not parts[1]:
+                    logger.warning(
+                        "graph_cache: skipping malformed stale key %r", key,
+                    )
+                    continue
+                pairs.append((parts[0], parts[1]))
+            if not cursor:
+                break
+    except Exception as exc:
+        logger.warning("graph_cache: list_stale_sources failed: %s", exc)
+        return []
+    return pairs
 
 
 async def bump_aggregated_generations(scopes) -> None:
@@ -745,12 +1183,45 @@ async def purge_aggregated_lkg(scopes) -> None:
 _cache: Optional[GraphCache] = None
 
 
+def _resolve_cache_role_client() -> Optional[aioredis.Redis]:
+    """Resolve the global CACHE-role Redis client for response-cache
+    payloads + LKG snapshots (``REDIS_CACHE_*``, falling back to the
+    legacy ``CACHE_REDIS_URL`` — see ``resolve_redis_config``/
+    ``falkordb_connection.build_cache_client``).
+
+    No per-provider ``cacheConnection`` override here: this resolves the
+    fleet-wide default only, since graph_cache has no single provider to
+    key off of; routing a provider's own cache override into graph_cache
+    is a documented follow-up (spec §10a note).
+
+    Returns ``None`` when the role isn't configured, or when resolution
+    itself fails for any reason — best-effort, same as every other
+    contract in this module: the caller falls back to the shared/durable
+    client so dev and unconfigured deployments see no behavior change.
+    """
+    try:
+        from backend.common.adapters.redis_endpoint import (
+            RedisRole, build_redis_client, resolve_redis_config,
+        )
+        cfg = resolve_redis_config(RedisRole.CACHE)
+        if not cfg.is_configured:
+            return None
+        return build_redis_client(cfg)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: CACHE-role Redis resolution failed (%s); "
+            "response-cache payloads will use the shared Redis client",
+            exc,
+        )
+        return None
+
+
 def get_graph_cache() -> GraphCache:
     """Return the process-wide GraphCache. Lazy-initialised on first use
     so test code can patch `get_redis()` before this fires."""
     global _cache
     if _cache is None:
-        _cache = GraphCache(get_redis())
+        _cache = GraphCache(get_redis(), _resolve_cache_role_client())
     return _cache
 
 

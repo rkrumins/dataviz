@@ -313,7 +313,7 @@ are in parentheses.
 - **Rebrand → Context Visualization Platform (CVP)** — white-label branding fetched on boot and
   applied to title/favicon/accent (pre-mount cache prevents flash); `{brand}`/`{brandShort}`
   tokens resolve at render time; backend `branding.py` + endpoint and a non-clobbering one-time
-  migration (`20260719_1200_rebrand_default_branding`) that updates the default identity only
+  migration (`20260719_1200_rebrand_branding`) that updates the default identity only
   where an admin hasn't customized it. (`store/branding.ts`, `components/brand/BrandName.tsx`)
 - CHANGELOG `[Unreleased]` cut to a dated `[0.2.0]` entry; broken README links fixed; login
   credentials reconciled to real defaults.

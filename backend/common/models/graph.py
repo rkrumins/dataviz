@@ -568,7 +568,9 @@ class AggregatedEdgeResult(BaseModel):
     # "unmaterialized" (no _AggMeta / never aggregated),
     # "legacy_cells" (cells predate depth stamps — mixed/leaf derivation off),
     # "chain_cache_miss" (leaf/mixed resolution dropped pairs pending cache),
-    # "degraded" (an on-demand sub-query failed).
+    # "degraded" (an on-demand sub-query failed),
+    # "source_changed" (source data changed; rebuild in flight — overlaid
+    # post-cache, so cached/composed reads reflect it too).
     stale: bool = False
     stale_reason: Optional[str] = Field(default=None, alias="staleReason")
     stamp_version: Optional[int] = Field(default=None, alias="stampVersion")

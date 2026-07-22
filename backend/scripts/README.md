@@ -319,6 +319,35 @@ All model fields are populated by the seed scripts:
 
 ---
 
+## After loading data directly into FalkorDB
+
+**Every direct load must end with a source-changed signal.** Seed scripts,
+import scripts, and external connectors write FalkorDB directly, bypassing the
+app's write paths — so the read caches never bump their generation and the
+:AGGREGATED overlay is never rebuilt. Canvases then serve stale data until a
+TTL lapses (up to 15 min) and lineage rollups stay wrong indefinitely. Cache
+generation and the aggregation rebuild are **signal-driven**, so the load is
+not "done" until you fire the signal:
+
+```bash
+# By graph name (resolved to its data source via the management DB)
+python -m backend.scripts.signal_data_changed --graph nexus_lineage
+
+# Or by data source id
+python -m backend.scripts.signal_data_changed --data-source-id ds_abc123
+```
+
+The signal is change-gated (a no-op when the graph fingerprint is unchanged)
+and idempotent, so it is safe to run after every load. The change gate
+compares label/type **counts**, so a re-parent or property-only change with no
+count delta reads as unchanged — pass `--force` to invalidate and rebuild
+regardless of the fingerprint.
+
+External connectors that can't shell out should call the authenticated admin
+API instead: `POST /api/v1/admin/data-sources/{id}/source-changed`.
+
+---
+
 ## Typical Workflows
 
 ### First-time setup with Docker

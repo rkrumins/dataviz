@@ -148,8 +148,22 @@ export interface JobsSummary {
   avgDurationSeconds: number | null;
 }
 
+/**
+ * Persisted global rebuild cadence — the env-only cooldown/drift knobs made
+ * editable. Each field null = "unset → env default".
+ */
+export interface AggregationCadence {
+  rebuildMinIntervalSecs?: number | null; // 0 .. 86400 (0 disables the throttle)
+  driftAutoRebuild?: boolean | null;
+}
+
 export interface AggregationSettingsResponse {
   tuning: AggregationTuning | null;
+  cadence?: AggregationCadence | null;
+  /** Effective ENV defaults (server-read) — the cadence editor seeds from
+   *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
+  envRebuildMinIntervalSecs?: number | null;
+  envDriftAutoRebuild?: boolean | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }
@@ -332,6 +346,18 @@ class AggregationService {
       {
         method: 'PUT',
         body: JSON.stringify({ tuning }),
+      }
+    );
+  }
+
+  /** Update ONLY the global rebuild cadence — the backend applies tuning and
+   *  cadence independently, so this never clobbers the pipeline defaults. */
+  async putAggregationCadence(cadence: AggregationCadence): Promise<AggregationSettingsResponse> {
+    return authFetch<AggregationSettingsResponse>(
+      '/api/v1/admin/aggregation/settings',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ cadence }),
       }
     );
   }

@@ -2609,6 +2609,15 @@ class FalkorDBProvider(GraphDataProvider):
         port = getattr(self, "_port", "") or ""
         return f"{host}:{port}:{self._graph_name}"
 
+    def physical_graph_id(self) -> str:
+        """Public read-only accessor for this provider's physical-graph
+        identity — the same (host, port, graph_name) triple ``_cache_ns``
+        uses. Exposed so callers OUTSIDE this module (the response cache's
+        ``CacheScope.graph_ns`` in graph_cache.py) can namespace their own
+        cache keys by physical graph without duplicating the host/port/
+        graph_name plumbing here."""
+        return self._cache_ns
+
     def _urn_label_key(self) -> str:
         return f"{self._cache_ns}:urn_labels"
 
@@ -5360,6 +5369,37 @@ class FalkorDBProvider(GraphDataProvider):
 
         logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
 
+    async def clear_content_caches(self) -> None:
+        """Bulk counterpart to :meth:`on_containment_changed`: clears every
+        containment-digest ancestors namespace and the urn→label cache,
+        and drops the in-process aggregation run-meta memo.
+
+        Call only from the confirmed-source-change signal (e.g. after an
+        external bulk load/re-parent) — per-node edits still go through
+        ``on_containment_changed``. Without this, both the read path and
+        the aggregation rebuild worker keep resolving ancestor chains
+        from the old graph shape for up to the 7-day content-cache TTL.
+
+        Best-effort and never-raising: a no-op if no cache Redis is
+        configured; any failure is logged and swallowed.
+        """
+        try:
+            await self._ensure_connected()
+            if self._redis is not None:
+                pattern = f"{self._cache_ns}:ancestors:*"
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(cursor, match=pattern, count=500)
+                    if keys:
+                        await self._redis.delete(*keys)
+                    if cursor == 0:
+                        break
+                await self._redis.delete(self._urn_label_key())
+        except Exception as e:
+            logger.warning(f"clear_content_caches failed: {e}")
+        finally:
+            self._agg_meta_cached = None
+
     async def count_aggregated_edges(self) -> int:
         """Cheap COUNT for purge progress reporting. Returns the current
         number of materialized AGGREGATED edges in the projection graph.
@@ -5602,6 +5642,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         from fastapi import HTTPException
         from ..config.resilience import (
+            AGGREGATED_EDGE_PAGE_SIZE,
             AGGREGATED_EDGE_RESULT_CAP,
             AGGREGATED_SOURCE_URN_BATCH_SIZE,
         )
@@ -5618,11 +5659,14 @@ class FalkorDBProvider(GraphDataProvider):
 
         await self._ensure_connected()
 
-        # LIMIT in the Cypher, not only at Python conversion: without it
-        # every batch materializes + weight-sorts its FULL match set on
-        # the server before the client truncates. Batched calls merge and
-        # re-truncate client-side, so the cap semantics are unchanged —
-        # only the server-side work is bounded.
+        # The Cypher LIMIT is a PAGE size, not the answer size. It is still
+        # needed — without it every batch materializes + weight-sorts its
+        # FULL match set on the server in one go — but ``_run_batch`` below
+        # pages until the match set is exhausted, so bounding per-query
+        # server work no longer bounds the data returned. Previously this
+        # LIMIT was the answer: anything past 100k rows was dropped, and
+        # since an oversized payload is never cached (delete-on-oversize)
+        # a >cap model rendered a DIFFERENT arbitrary subset on every open.
         #
         # Anchors are LABEL-QUALIFIED per source-label bucket: without a
         # label the planner has no URN index on this build and falls back
@@ -5630,38 +5674,89 @@ class FalkorDBProvider(GraphDataProvider):
         # membership — observed timing out (and returning an empty
         # canvas) at 595k stored cells × 600 visible urns. With the label
         # it is |batch| index seeks + local out-edge expansion.
-        def _cypher_for(label: str) -> str:
+        def _cypher_for(label: str, *, resume: bool) -> str:
             anchor = f"(s:{label})" if label else "(s)"
+            where = ["s.urn IN $sourceUrns"]
             if target_urns:
-                return (
-                    f"MATCH {anchor}-[r:AGGREGATED]->(t) "
-                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
-                    "AND s.urn <> t.urn "
-                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                    "r.weight AS weight, r.sourceEdgeTypes AS types "
-                    f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                where.append("t.urn IN $targetUrns")
+            where.append("s.urn <> t.urn")
+            if resume:
+                # Strictly after the previous page's last row in the total
+                # order below. Written out longhand because Cypher has no
+                # row-value comparison operator.
+                where.append(
+                    "(coalesce(r.weight, 0) < $lastWeight "
+                    "OR (coalesce(r.weight, 0) = $lastWeight "
+                    "AND (s.urn > $lastSourceUrn "
+                    "OR (s.urn = $lastSourceUrn AND t.urn > $lastTargetUrn))))"
                 )
             return (
                 f"MATCH {anchor}-[r:AGGREGATED]->(t) "
-                "WHERE s.urn IN $sourceUrns "
-                "AND s.urn <> t.urn "
+                f"WHERE {' AND '.join(where)} "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "r.weight AS weight, r.sourceEdgeTypes AS types "
-                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                # coalesce, not a bare r.weight: a null weight compares as
+                # null against every integer, so `weight < $lastWeight` would
+                # be null for those rows and every page after the first would
+                # skip them permanently. 0 is what the row->model conversion
+                # already maps a missing weight to, so payloads are unchanged.
+                "coalesce(r.weight, 0) AS weight, r.sourceEdgeTypes AS types "
+                # Total order, and the keyset the resume predicate walks.
+                # weight is a COUNT, so ties are pervasive and a page
+                # boundary lands mid-tie-group; (s.urn, t.urn) is what makes
+                # that boundary exact and repeatable across pages.
+                "ORDER BY weight DESC, sUrn, tUrn "
+                f"LIMIT {AGGREGATED_EDGE_PAGE_SIZE}"
             )
 
+        batch_failed = False
+
         async def _run_batch(label: str, batch: List[str]) -> list:
-            params: Dict[str, Any] = {"sourceUrns": batch}
-            if target_urns:
-                params["targetUrns"] = target_urns
-            try:
-                result = await self._proj_ro_query(
-                    _cypher_for(label), params=params, timeout=timeout, op="agg.cells",
-                )
-                return result.result_set or []
-            except Exception as e:
-                logger.warning(f"AGGREGATED edge read failed: {e}")
-                return []
+            """Read every matching cell for this batch, paging as needed.
+
+            Stops only when the server returns a short page (match set
+            exhausted), the read fails, or the runaway guard trips — never
+            at a fixed row count that would silently drop the remainder.
+            """
+            nonlocal batch_failed
+            rows: list = []
+            last: Optional[list] = None
+            while True:
+                params: Dict[str, Any] = {"sourceUrns": batch}
+                if target_urns:
+                    params["targetUrns"] = target_urns
+                if last is not None:
+                    params["lastWeight"] = int(last[2]) if last[2] else 0
+                    params["lastSourceUrn"] = last[0]
+                    params["lastTargetUrn"] = last[1]
+                try:
+                    result = await self._proj_ro_query(
+                        _cypher_for(label, resume=last is not None),
+                        params=params, timeout=timeout, op="agg.cells",
+                    )
+                    page = result.result_set or []
+                except Exception as e:
+                    # Keep the pages already read — they are a correct prefix
+                    # of the answer — and let batch_failed drive
+                    # degraded/stale so the partial is flagged, not cached
+                    # full-TTL as if it were complete.
+                    logger.warning(f"AGGREGATED edge read failed: {e}")
+                    batch_failed = True
+                    return rows
+                rows.extend(page)
+                if len(page) < AGGREGATED_EDGE_PAGE_SIZE:
+                    return rows
+                if len(rows) >= AGGREGATED_EDGE_RESULT_CAP:
+                    # Not marked degraded: the data is fine, the request is
+                    # pathological. Length alone drives truncated=true.
+                    logger.warning(
+                        "AGGREGATED edge read on %s hit the runaway guard at "
+                        "%d rows (AGGREGATED_EDGE_RESULT_CAP) — returning a "
+                        "truncated result. Narrow the request or raise the "
+                        "guard if the instance has headroom.",
+                        self._graph_name, len(rows),
+                    )
+                    return rows
+                last = page[-1]
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
         runs: List[Tuple[str, List[str]]] = []
@@ -5744,7 +5839,12 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
 
-        if synth_degraded and not stale_reason:
+        # A failed materialized-edge batch is the same "answer is
+        # incomplete for this graph state" condition as an on-demand
+        # sub-query failure — fold it into the same degraded/stale_reason
+        # computation rather than a parallel flag.
+        degraded = synth_degraded or batch_failed
+        if degraded and not stale_reason:
             stale_reason = "degraded"
 
         # The legacy single-query read returned rows weight-descending;
@@ -5752,7 +5852,7 @@ class FalkorDBProvider(GraphDataProvider):
         rows = sorted(rows, key=lambda r: -(int(r[2]) if r[2] else 0))
         return self._rows_to_aggregated_result(
             rows, last_materialized_at=meta.last_materialized_at,
-            degraded=synth_degraded,
+            degraded=degraded,
             stale=bool(stale_reason),
             stale_reason=stale_reason,
             stamp_version=meta.stamp_version,
