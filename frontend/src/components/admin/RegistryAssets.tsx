@@ -329,7 +329,7 @@ function AssetRow({
                         ) : (
                             <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-black/5 dark:bg-white/5 text-ink-muted font-bold uppercase tracking-wide">Available</span>
                         )}
-                        {workspaces?.map(ws => (
+                        {workspaces?.slice(0, 3).map(ws => (
                             <WorkspaceLinkBadge
                                 key={ws.id}
                                 workspaceId={ws.id}
@@ -338,6 +338,14 @@ function AssetRow({
                                 className="text-[10px] font-semibold"
                             />
                         ))}
+                        {workspaces && workspaces.length > 3 && (
+                            <span
+                                className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted"
+                                title={workspaces.slice(3).map(w => w.name).join(', ')}
+                            >
+                                +{workspaces.length - 3}
+                            </span>
+                        )}
                         {envelope && (
                             <StatusChip meta={envelope.meta} compact />
                         )}
@@ -837,15 +845,25 @@ export function RegistryAssets() {
     }, [sortMenuOpen])
     // Workspace filter menu (same house dropdown pattern as Sort above).
     const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
+    const [workspaceMenuQuery, setWorkspaceMenuQuery] = useState('')
     const workspaceMenuRef = useRef<HTMLDivElement>(null)
     useEffect(() => {
         if (!workspaceMenuOpen) return
         const onClick = (e: MouseEvent) => {
-            if (!workspaceMenuRef.current?.contains(e.target as Node)) setWorkspaceMenuOpen(false)
+            if (!workspaceMenuRef.current?.contains(e.target as Node)) {
+                setWorkspaceMenuOpen(false)
+                setWorkspaceMenuQuery('')
+            }
         }
         document.addEventListener('mousedown', onClick)
         return () => document.removeEventListener('mousedown', onClick)
     }, [workspaceMenuOpen])
+    const filteredMenuWorkspaces = useMemo(
+        () => workspacesList.filter(
+            ws => !workspaceMenuQuery || ws.name.toLowerCase().includes(workspaceMenuQuery.toLowerCase()),
+        ),
+        [workspacesList, workspaceMenuQuery],
+    )
 
     // Actions
     const [showOnboarding, setShowOnboarding] = useState(false)
@@ -1443,45 +1461,75 @@ export function RegistryAssets() {
                                         {workspaceMenuOpen && (
                                             <div
                                                 role="menu"
-                                                className="absolute right-0 top-full mt-1.5 z-20 w-56 max-h-72 overflow-y-auto p-1 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                                                className="absolute right-0 top-full mt-1.5 z-20 w-64 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl animate-in fade-in slide-in-from-top-1 duration-100 overflow-hidden"
                                             >
-                                                <button
-                                                    role="menuitemradio"
-                                                    aria-checked={workspaceFilter === 'all'}
-                                                    onClick={() => { setWorkspaceFilter('all'); setWorkspaceMenuOpen(false) }}
-                                                    className={cn(
-                                                        'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
-                                                        workspaceFilter === 'all'
-                                                            ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
-                                                            : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                {/* Search */}
+                                                <div className="p-2 border-b border-glass-border/60">
+                                                    <div className="flex items-center gap-2 rounded-lg bg-black/[0.04] dark:bg-white/[0.04] px-2.5 py-1.5">
+                                                        <Search className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                                                        <input
+                                                            autoFocus
+                                                            value={workspaceMenuQuery}
+                                                            onChange={e => setWorkspaceMenuQuery(e.target.value)}
+                                                            placeholder="Search workspaces..."
+                                                            className="flex-1 bg-transparent text-xs text-ink placeholder-ink-muted/60 outline-none"
+                                                        />
+                                                        {workspaceMenuQuery && (
+                                                            <button onClick={() => setWorkspaceMenuQuery('')} aria-label="Clear search" className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/5">
+                                                                <X className="w-3 h-3 text-ink-muted" />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                {/* Options */}
+                                                <div className="max-h-64 overflow-y-auto p-1">
+                                                    <button
+                                                        role="menuitemradio"
+                                                        aria-checked={workspaceFilter === 'all'}
+                                                        onClick={() => { setWorkspaceFilter('all'); setWorkspaceMenuOpen(false); setWorkspaceMenuQuery('') }}
+                                                        className={cn(
+                                                            'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                            workspaceFilter === 'all'
+                                                                ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                                : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                        )}
+                                                    >
+                                                        All workspaces
+                                                        {workspaceFilter === 'all' && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                    </button>
+                                                    {filteredMenuWorkspaces.map(ws => {
+                                                        const active = workspaceFilter === ws.id
+                                                        const dsCount = ws.dataSources?.length ?? 0
+                                                        return (
+                                                            <button
+                                                                key={ws.id}
+                                                                role="menuitemradio"
+                                                                aria-checked={active}
+                                                                onClick={() => { setWorkspaceFilter(ws.id); setWorkspaceMenuOpen(false); setWorkspaceMenuQuery('') }}
+                                                                className={cn(
+                                                                    'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                                    active
+                                                                        ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                                        : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                                )}
+                                                            >
+                                                                <span className="flex-1 min-w-0">
+                                                                    <span className={cn('block truncate', active && 'font-semibold')}>{ws.name}</span>
+                                                                    <span className="block text-[10px] text-ink-muted/70">
+                                                                        {dsCount} data source{dsCount === 1 ? '' : 's'}
+                                                                    </span>
+                                                                </span>
+                                                                {active && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                            </button>
+                                                        )
+                                                    })}
+                                                    {workspacesList.length === 0 && (
+                                                        <p className="px-2.5 py-3 text-xs text-ink-muted text-center">No workspaces</p>
                                                     )}
-                                                >
-                                                    All workspaces
-                                                    {workspaceFilter === 'all' && <Check className="w-3.5 h-3.5 shrink-0" />}
-                                                </button>
-                                                {workspacesList.map(ws => {
-                                                    const active = workspaceFilter === ws.id
-                                                    return (
-                                                        <button
-                                                            key={ws.id}
-                                                            role="menuitemradio"
-                                                            aria-checked={active}
-                                                            onClick={() => { setWorkspaceFilter(ws.id); setWorkspaceMenuOpen(false) }}
-                                                            className={cn(
-                                                                'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
-                                                                active
-                                                                    ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
-                                                                    : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
-                                                            )}
-                                                        >
-                                                            <span className="truncate">{ws.name}</span>
-                                                            {active && <Check className="w-3.5 h-3.5 shrink-0" />}
-                                                        </button>
-                                                    )
-                                                })}
-                                                {workspacesList.length === 0 && (
-                                                    <p className="px-2.5 py-2 text-xs text-ink-muted text-center">No workspaces</p>
-                                                )}
+                                                    {workspacesList.length > 0 && filteredMenuWorkspaces.length === 0 && (
+                                                        <p className="px-2.5 py-3 text-xs text-ink-muted text-center">No matches</p>
+                                                    )}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
