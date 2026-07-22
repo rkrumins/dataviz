@@ -2,13 +2,14 @@ import { memo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
-    ChevronRight, Play, Trash2, Activity, Server, FolderOpen,
+    ChevronRight, Play, Trash2, Activity, Server,
     MoreHorizontal, TrendingUp, TrendingDown, Minus,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { getProviderLogo } from '../ProviderLogos'
+import { WorkspaceLinkBadge } from '../workspace/WorkspaceLinkBadge'
 import { formatDuration, timeAgo, type DataSourceMeta } from './shared'
 import { JobRow } from './JobRow'
 
@@ -287,11 +288,8 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                             </span>
                         )}
                         {/* Workspace badge — skip if same as provider name */}
-                        {meta.workspaceName && meta.workspaceName !== meta.providerName && (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
-                                <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
-                                <span className="truncate max-w-[140px]">{meta.workspaceName}</span>
-                            </span>
+                        {meta.workspaceName && meta.workspaceName !== meta.providerName && meta.workspaceId && (
+                            <WorkspaceLinkBadge workspaceId={meta.workspaceId} workspaceName={meta.workspaceName} />
                         )}
                         {/* Graph name */}
                         {meta.graphName && (

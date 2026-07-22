@@ -2,13 +2,14 @@ import { memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
-    AlertTriangle, Server, FolderOpen,
+    AlertTriangle, Server,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
+import { WorkspaceLinkBadge } from '../workspace/WorkspaceLinkBadge'
 import {
     formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
@@ -175,6 +176,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const isPurging = purgeConfirm === job.id
     const dsName = meta?.label || job.dataSourceLabel || job.dataSourceId
     const wsName = meta?.workspaceName || job.workspaceName
+    const wsId = meta?.workspaceId || job.workspaceId
     const provType = meta?.providerType
     const ProviderLogoIcon = getProviderLogo(provType ?? '')
 
@@ -260,11 +262,8 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         <span className="font-medium truncate max-w-[100px]">{meta.providerName}</span>
                                     </span>
                                 )}
-                                {wsName && wsName !== meta?.providerName && (
-                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
-                                        <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
-                                        <span className="truncate max-w-[100px]">{wsName}</span>
-                                    </span>
+                                {wsName && wsName !== meta?.providerName && wsId && (
+                                    <WorkspaceLinkBadge workspaceId={wsId} workspaceName={wsName} />
                                 )}
                             </div>
                         </div>
@@ -467,11 +466,8 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                             <span className="font-medium">{meta.providerName}</span>
                                                         </span>
                                                     )}
-                                                    {wsName && wsName !== meta?.providerName && (
-                                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
-                                                            <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
-                                                            <span>{wsName}</span>
-                                                        </span>
+                                                    {wsName && wsName !== meta?.providerName && wsId && (
+                                                        <WorkspaceLinkBadge workspaceId={wsId} workspaceName={wsName} />
                                                     )}
                                                     {meta?.graphName && (
                                                         <span className="font-mono text-ink-muted/50">{meta.graphName}</span>

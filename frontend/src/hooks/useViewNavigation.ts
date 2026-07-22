@@ -136,9 +136,19 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
       if (cancelledRef.current) return
 
-      // 2. Validate workspace exists
+      // 2. Validate workspace exists — only against a LOADED list. The
+      // workspaces list is never persisted (only the active id is), so on a
+      // cold start / deep link it can still be empty here. An empty array means
+      // "not loaded yet", NOT "workspace deleted" — load it before deciding,
+      // otherwise a valid view fails with a false "workspace no longer exists".
       if (targetWsId) {
-        const wsExists = useWorkspacesStore.getState().workspaces.some(w => w.id === targetWsId)
+        let wsList = useWorkspacesStore.getState().workspaces
+        if (wsList.length === 0) {
+          await useWorkspacesStore.getState().loadWorkspaces()
+          if (cancelledRef.current) return
+          wsList = useWorkspacesStore.getState().workspaces
+        }
+        const wsExists = wsList.some(w => w.id === targetWsId)
         if (!wsExists) {
           setStatus('error')
           setError('The workspace for this view no longer exists.')

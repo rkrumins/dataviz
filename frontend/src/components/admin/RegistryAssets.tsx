@@ -48,6 +48,7 @@ import { RetriggerDialog } from './job-history/RetriggerDialog'
 import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
+import { WorkspaceLinkBadge } from './workspace/WorkspaceLinkBadge'
 import { RefreshControl } from '@/components/insights/RefreshControl'
 import { DataSourceProfileDrawer } from '@/components/insights/DataSourceProfileDrawer'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
@@ -151,7 +152,7 @@ const TYPE_COLOURS = [
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected, catalogId,
-    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge, onOpenProfile
+    onToggle, onUnregister, workspaces, onReaggregate, onPurge, onOpenProfile
 }: {
     providerId: string
     assetName: string
@@ -164,7 +165,8 @@ function AssetRow({
     onReaggregate?: (name: string) => void
     onPurge?: (name: string, opts?: { skipReaggregate?: boolean }) => void
     onOpenProfile: (catalogId: string) => void
-    boundWorkspaceName?: string
+    /** Workspaces this data source is instantiated in (empty until registered). */
+    workspaces?: Array<{ id: string; name: string }>
 }) {
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
@@ -327,12 +329,15 @@ function AssetRow({
                         ) : (
                             <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-black/5 dark:bg-white/5 text-ink-muted font-bold uppercase tracking-wide">Available</span>
                         )}
-                        {boundWorkspaceName && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[10px] font-semibold">
-                                <Database className="w-2.5 h-2.5" />
-                                {boundWorkspaceName}
-                            </span>
-                        )}
+                        {workspaces?.map(ws => (
+                            <WorkspaceLinkBadge
+                                key={ws.id}
+                                workspaceId={ws.id}
+                                workspaceName={ws.name}
+                                icon={Database}
+                                className="text-[10px] font-semibold"
+                            />
+                        ))}
                         {envelope && (
                             <StatusChip meta={envelope.meta} compact />
                         )}
@@ -770,6 +775,34 @@ export function RegistryAssets() {
     // Stable ref so the callbacks that depend on it (re-aggregate, purge,
     // unregister) aren't rebuilt every render.
     const existingCatalogs = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data])
+
+    // Workspaces this list links to / filters by. Sourced from the global store
+    // (populated app-wide after auth; the guarded load below covers a cold mount
+    // of this page). Invert workspace.dataSources → catalogItemId so each asset
+    // maps to the actual workspace(s) it is instantiated in — a catalog item can
+    // live in more than one workspace, and unregistered assets map to none.
+    const workspacesList = useWorkspacesStore(s => s.workspaces)
+    const catalogIdToWorkspaces = useMemo(() => {
+        const m = new Map<string, Array<{ id: string; name: string }>>()
+        for (const ws of workspacesList) {
+            for (const ds of ws.dataSources ?? []) {
+                if (!ds.catalogItemId) continue
+                const arr = m.get(ds.catalogItemId) ?? []
+                if (!arr.some(w => w.id === ws.id)) arr.push({ id: ws.id, name: ws.name })
+                m.set(ds.catalogItemId, arr)
+            }
+        }
+        return m
+    }, [workspacesList])
+    const workspacesForAsset = useCallback((name: string): Array<{ id: string; name: string }> => {
+        const catId = existingCatalogs.find(c => c.sourceIdentifier === name)?.id
+        return catId ? catalogIdToWorkspaces.get(catId) ?? [] : []
+    }, [existingCatalogs, catalogIdToWorkspaces])
+    useEffect(() => {
+        if (useWorkspacesStore.getState().workspaces.length === 0) {
+            void useWorkspacesStore.getState().loadWorkspaces()
+        }
+    }, [])
     const assetsLoading = assetsQuery.isLoading
     // Only treat as a hard error when we have nothing to show — a failed
     // background refetch keeps the last good list visible.
@@ -781,6 +814,7 @@ export function RegistryAssets() {
     // Filters
     const [searchQuery, setSearchQuery] = useState('')
     const [statusFilter, setStatusFilter] = useState<'all' | 'selected' | 'registered' | 'unregistered'>('all')
+    const [workspaceFilter, setWorkspaceFilter] = useState<string>('all')
 
     // Sort + pagination. Sort keys come from the bulk ``assetsDetail``
     // summaries on the list envelope (one query server-side) — no
@@ -801,6 +835,17 @@ export function RegistryAssets() {
         document.addEventListener('mousedown', onClick)
         return () => document.removeEventListener('mousedown', onClick)
     }, [sortMenuOpen])
+    // Workspace filter menu (same house dropdown pattern as Sort above).
+    const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
+    const workspaceMenuRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (!workspaceMenuOpen) return
+        const onClick = (e: MouseEvent) => {
+            if (!workspaceMenuRef.current?.contains(e.target as Node)) setWorkspaceMenuOpen(false)
+        }
+        document.addEventListener('mousedown', onClick)
+        return () => document.removeEventListener('mousedown', onClick)
+    }, [workspaceMenuOpen])
 
     // Actions
     const [showOnboarding, setShowOnboarding] = useState(false)
@@ -844,6 +889,7 @@ export function RegistryAssets() {
     useEffect(() => {
         setSearchQuery('')
         setStatusFilter('all')
+        setWorkspaceFilter('all')
         setSelected(new Set())
     }, [selectedProviderId])
 
@@ -1081,6 +1127,7 @@ export function RegistryAssets() {
         if (statusFilter === 'registered' && !isReg) return false
         if (statusFilter === 'unregistered' && isReg) return false
         if (statusFilter === 'selected' && !selected.has(g)) return false
+        if (workspaceFilter !== 'all' && !workspacesForAsset(g).some(w => w.id === workspaceFilter)) return false
         return true
     })
 
@@ -1116,7 +1163,7 @@ export function RegistryAssets() {
     // Back to page one whenever the visible set changes shape.
     useEffect(() => {
         setPage(0)
-    }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
+    }, [selectedProviderId, searchQuery, statusFilter, workspaceFilter, sortBy, sortDir, pageSize])
 
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
     // A provider that's still loading its dataset is reachable, not broken —
@@ -1370,6 +1417,74 @@ export function RegistryAssets() {
 
                                 {/* Sort + bulk actions */}
                                 <div className="flex items-center gap-1.5">
+                                    {/* Workspace filter (house dropdown, mirrors Sort) */}
+                                    <div className="relative" ref={workspaceMenuRef}>
+                                        <button
+                                            onClick={() => setWorkspaceMenuOpen(o => !o)}
+                                            aria-haspopup="menu"
+                                            aria-expanded={workspaceMenuOpen}
+                                            aria-label="Filter by workspace"
+                                            className={cn(
+                                                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-glass-border bg-canvas-elevated transition-colors',
+                                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                workspaceFilter !== 'all'
+                                                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                    : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                            )}
+                                        >
+                                            <Filter className="w-3.5 h-3.5" />
+                                            <span className="max-w-[120px] truncate">
+                                                {workspaceFilter === 'all'
+                                                    ? 'Workspace'
+                                                    : workspacesList.find(w => w.id === workspaceFilter)?.name ?? 'Workspace'}
+                                            </span>
+                                            <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', workspaceMenuOpen && 'rotate-180')} />
+                                        </button>
+                                        {workspaceMenuOpen && (
+                                            <div
+                                                role="menu"
+                                                className="absolute right-0 top-full mt-1.5 z-20 w-56 max-h-72 overflow-y-auto p-1 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                                            >
+                                                <button
+                                                    role="menuitemradio"
+                                                    aria-checked={workspaceFilter === 'all'}
+                                                    onClick={() => { setWorkspaceFilter('all'); setWorkspaceMenuOpen(false) }}
+                                                    className={cn(
+                                                        'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                        workspaceFilter === 'all'
+                                                            ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                            : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                    )}
+                                                >
+                                                    All workspaces
+                                                    {workspaceFilter === 'all' && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                </button>
+                                                {workspacesList.map(ws => {
+                                                    const active = workspaceFilter === ws.id
+                                                    return (
+                                                        <button
+                                                            key={ws.id}
+                                                            role="menuitemradio"
+                                                            aria-checked={active}
+                                                            onClick={() => { setWorkspaceFilter(ws.id); setWorkspaceMenuOpen(false) }}
+                                                            className={cn(
+                                                                'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                                active
+                                                                    ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                                    : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                            )}
+                                                        >
+                                                            <span className="truncate">{ws.name}</span>
+                                                            {active && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                        </button>
+                                                    )
+                                                })}
+                                                {workspacesList.length === 0 && (
+                                                    <p className="px-2.5 py-2 text-xs text-ink-muted text-center">No workspaces</p>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                     <div className="relative" ref={sortMenuRef}>
                                         <button
                                             onClick={() => setSortMenuOpen(o => !o)}
@@ -1557,7 +1672,7 @@ export function RegistryAssets() {
                                     <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
                                         <Filter className="w-10 h-10 opacity-20" />
                                         <p className="text-sm font-semibold">No assets match your filters</p>
-                                        <button onClick={() => { setSearchQuery(''); setStatusFilter('all') }} className="text-xs text-indigo-500 hover:underline">
+                                        <button onClick={() => { setSearchQuery(''); setStatusFilter('all'); setWorkspaceFilter('all') }} className="text-xs text-indigo-500 hover:underline">
                                             Clear filters
                                         </button>
                                     </div>
@@ -1575,6 +1690,7 @@ export function RegistryAssets() {
                                         isRegistered={registeredSourceIds.has(assetName)}
                                         isSelected={selected.has(assetName)}
                                         catalogId={existingCatalogs.find(c => c.sourceIdentifier === assetName)?.id}
+                                        workspaces={workspacesForAsset(assetName)}
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
                                         onReaggregate={handleReaggregate}
