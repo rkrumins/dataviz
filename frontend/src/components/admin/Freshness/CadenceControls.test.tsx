@@ -11,11 +11,12 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getSourceDoc, patchFreshnessSettings, getAggregationSettings, putAggregationCadence, permissionFn } = vi.hoisted(() => ({
+const { getSourceDoc, patchFreshnessSettings, getAggregationSettings, putAggregationCadence, listJobsGlobal, permissionFn } = vi.hoisted(() => ({
     getSourceDoc: vi.fn(),
     patchFreshnessSettings: vi.fn(),
     getAggregationSettings: vi.fn(),
     putAggregationCadence: vi.fn(),
+    listJobsGlobal: vi.fn(),
     permissionFn: vi.fn(),
 }))
 
@@ -35,7 +36,7 @@ vi.mock('@/services/aggregationService', async () => {
     const actual = await vi.importActual<typeof import('@/services/aggregationService')>('@/services/aggregationService')
     return {
         ...actual,
-        aggregationService: { ...actual.aggregationService, getAggregationSettings, putAggregationCadence },
+        aggregationService: { ...actual.aggregationService, getAggregationSettings, putAggregationCadence, listJobsGlobal },
     }
 })
 
@@ -63,6 +64,9 @@ function makeDoc(over: Record<string, unknown> = {}) {
 beforeEach(() => {
     vi.clearAllMocks()
     permissionFn.mockReturnValue(true)
+    // FreshnessDrawer joins a live job via useActiveJobs(); without this the
+    // real listJobsGlobal would fire an actual network call from this unit test.
+    listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
 })
 
 describe('drawer rebuild-cadence row', () => {

@@ -264,6 +264,12 @@ export function overflowActions(state: FreshnessState): RowAction[] {
         case 'neverBuilt':
             return []
         case 'recomputing':
+            // `clear` is safe mid-rebuild — it never touches the graph or the
+            // job, and the badge still reads "Recomputing" (isRebuilding beats
+            // staleReason in freshnessState). But it also removes the stale-
+            // marker entry `_reconcile_stale_markers` retries against, and
+            // nothing re-marks on failure, so a rebuild that fails after being
+            // cleared here loses automatic retry, not visibility.
             return [byScope('read-caches'), byScope('clear')]
         case 'upToDate':
             return [byScope('clear'), byScope('rollups'), byScope('full')]

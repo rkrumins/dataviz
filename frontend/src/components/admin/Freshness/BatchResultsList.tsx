@@ -45,31 +45,32 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
     return (
         <>
             <ul className="max-h-48 overflow-y-auto space-y-1 mb-3">
-                {results.map((r) => (
-                    <li key={r.dataSourceId} className="flex items-center gap-2 text-xs text-ink-secondary">
-                        {r.outcome === 'error'
-                            ? <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                            : r.deferred
-                                ? <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                                : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
-                        <span className="truncate font-medium text-ink">{r.name || r.dataSourceId}</span>
-                        <span className="truncate text-ink-muted" title={describeActions(r.actions ?? [])}>
+                {results.map((r) => {
+                    const detail = r.outcome === 'error'
+                        ? 'failed to start'
+                        : r.deferred
+                            ? 'deferred — in cooldown, no rebuild queued'
+                            : r.actions?.length ? describeActions(r.actions) : r.jobId ? 'rebuild queued' : 'no changes needed'
+                    return (
+                        <li key={r.dataSourceId} className="flex items-center gap-2 text-xs text-ink-secondary">
                             {r.outcome === 'error'
-                                ? 'failed to start'
+                                ? <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
                                 : r.deferred
-                                    ? 'deferred — in cooldown, no rebuild queued'
-                                    : r.actions?.length ? describeActions(r.actions) : r.jobId ? 'rebuild queued' : 'no changes needed'}
-                        </span>
-                        {r.jobId && (
-                            <Link
-                                to={jobHistoryPath({ dataSourceId: r.dataSourceId })}
-                                className="ml-auto inline-flex items-center gap-0.5 text-indigo-600 dark:text-indigo-400 hover:underline shrink-0"
-                            >
-                                View job<ArrowUpRight className="w-3 h-3" />
-                            </Link>
-                        )}
-                    </li>
-                ))}
+                                    ? <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                    : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
+                            <span className="truncate font-medium text-ink">{r.name || r.dataSourceId}</span>
+                            <span className="truncate text-ink-muted" title={detail}>{detail}</span>
+                            {r.jobId && (
+                                <Link
+                                    to={jobHistoryPath({ dataSourceId: r.dataSourceId })}
+                                    className="ml-auto inline-flex items-center gap-0.5 text-indigo-600 dark:text-indigo-400 hover:underline shrink-0"
+                                >
+                                    View job<ArrowUpRight className="w-3 h-3" />
+                                </Link>
+                            )}
+                        </li>
+                    )
+                })}
             </ul>
             <div className="flex items-center justify-between text-[11px] text-ink-muted mb-4">
                 <span>

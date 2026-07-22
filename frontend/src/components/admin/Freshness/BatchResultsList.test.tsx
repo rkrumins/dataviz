@@ -54,6 +54,10 @@ describe('BatchResultsList', () => {
         render(<BatchResultsList results={legacy} />, { wrapper: MemoryRouter })
         expect(screen.getByText('rebuild queued')).toBeInTheDocument()
         expect(screen.queryByText('no changes needed')).not.toBeInTheDocument()
+        // Pins the tooltip to the rendered text, not to `actions` — a legacy
+        // item has none, so a title computed from `actions` alone would say
+        // "no changes needed" under a visible "rebuild queued".
+        expect(screen.getByText('rebuild queued')).toHaveAttribute('title', 'rebuild queued')
     })
 })
 
