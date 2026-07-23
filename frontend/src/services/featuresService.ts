@@ -4,6 +4,7 @@
  * When API is unavailable, uses generated fallback (see scripts/generate-features-fallback).
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessage } from '@/lib/errorMessage'
 
 function getFeaturesApiUrl(): string {
   if (import.meta.env.VITE_FEATURES_API_URL) {
@@ -261,7 +262,15 @@ function parseApiError(status: number, body: unknown): string {
     if (typeof d === 'object' && d?.detail) return d.detail
     if (typeof d === 'string') return d
   }
-  return 'Could not save. Please try again.'
+  // Fallback: surface the real cause instead of a bland generic line. Reached for
+  // 401/403/5xx and for any empty/non-JSON body — the cases the old res.json()+res.text()
+  // double-read used to crash on with a "response body already used" TypeError.
+  const detail = extractErrorMessage(body, '')
+  if (detail) return detail
+  if (status >= 500) return `Couldn't reach the server (HTTP ${status}). Please try again.`
+  if (status === 401) return 'Session expired. Please sign in again.'
+  if (status === 403) return "You don't have permission to change features."
+  return `Could not save (HTTP ${status}). Please try again.`
 }
 
 // ─── HTTP helper ───────────────────────────────────────────────────────────
@@ -272,11 +281,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
   if (!res.ok) {
+    // Read the body exactly ONCE. Reading it twice (res.json() then res.text()) throws the
+    // browser's native "Response body is already used" TypeError, which used to mask the real
+    // error on every failed toggle. Parse to an object when it's JSON; keep `undefined` for an
+    // empty or non-JSON body (e.g. a text/plain 500 or proxy HTML) so it never lands in a toast.
+    const text = await res.text()
     let body: unknown
     try {
-      body = await res.json()
+      body = text ? JSON.parse(text) : undefined
     } catch {
-      body = await res.text()
+      body = undefined
     }
     const message = parseApiError(res.status, body)
     if (res.status === 409) throw new FeaturesConcurrencyError(message)

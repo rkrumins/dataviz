@@ -1100,7 +1100,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Global handler for management DB failures — returns structured 503 instead of
 # raw 500 with stack trace, so the frontend can show a meaningful message.
-from sqlalchemy.exc import OperationalError as _SAOperationalError
+from sqlalchemy.exc import (
+    OperationalError as _SAOperationalError,
+    SQLAlchemyError as _SASQLAlchemyError,
+)
 
 @app.exception_handler(_SAOperationalError)
 async def _db_operational_error_handler(_request, exc):
@@ -1108,6 +1111,36 @@ async def _db_operational_error_handler(_request, exc):
     return JSONResponse(
         status_code=503,
         content={"detail": "Management database is temporarily unavailable. Please try again."},
+    )
+
+
+# Broader management-DB failures the OperationalError handler above does not cover:
+# sqlalchemy.exc.TimeoutError (connection-pool checkout exhaustion, pool_timeout),
+# DBAPIError/InterfaceError (connection dropped mid-statement on a failover/restart),
+# IntegrityError, etc. These subclass SQLAlchemyError but NOT OperationalError, so
+# without this they escape to Starlette's default text/plain 500 — a non-JSON body
+# JSON-only clients cannot parse. Return a structured 503 like the OperationalError case.
+@app.exception_handler(_SASQLAlchemyError)
+async def _db_error_handler(_request, exc):
+    logger.error("Management DB error: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database is temporarily unavailable. Please try again."},
+    )
+
+
+# Final safety net. Any exception without a more specific handler above (or one of the
+# typed handlers below) would otherwise become Starlette's default text/plain
+# "Internal Server Error" — a non-JSON body that breaks JSON-only clients (e.g. the
+# admin Features page, which shows the raw parse failure as a confusing toast). Return
+# a structured JSON 500 so every error the frontend receives is parseable; the traceback
+# is still logged here for diagnosis.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(_request, exc):
+    logger.exception("Unhandled exception on %s: %s", getattr(_request, "url", "?"), exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Please try again."},
     )
 
 def _provider_unavailable_payload(request, exc) -> dict:
