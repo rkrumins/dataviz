@@ -454,3 +454,31 @@ async def test_client(
     # Clean up overrides so they don't leak between test modules
     app.dependency_overrides.clear()
     app.state.identity_service = previous_identity_service
+
+
+@pytest.fixture()
+async def csrf_client(
+    test_client: AsyncClient,
+) -> AsyncGenerator[AsyncClient, None]:
+    """A client that carries NO CSRF cookie or header, so ``CSRFMiddleware``
+    actually runs.
+
+    ``test_client`` pre-seeds both halves of the double-submit (see above),
+    which is the right default — hundreds of tests would otherwise have to
+    walk through /login first. The cost is that the middleware is a no-op for
+    the entire suite, and a route wrongly left un-exempt looks fine in tests
+    while 403ing in production. That is exactly how the SAML ACS endpoint —
+    an IdP-originated cross-site form POST that cannot carry a header — stayed
+    broken.
+
+    Depends on ``test_client`` so the app overrides and IdentityService wiring
+    are already installed; this only swaps the transport for one without the
+    tokens.
+    """
+    from backend.app.main import app
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver",
+    ) as client:
+        yield client

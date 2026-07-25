@@ -11,6 +11,7 @@
  * read-only, and telling someone the wrong one sends them to ask the wrong person.
  */
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/store/schema', () => ({
@@ -28,16 +29,21 @@ function setVersioning(on: boolean) {
   useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: on } })
 }
 
+// MemoryRouter is load-bearing: the versioning-off branch renders a
+// <DocsLink>, which is a router <Link>, and a bare render() throws on
+// the null router context before any assertion runs.
 function renderState(over: Partial<React.ComponentProps<typeof BlankCanvasEmptyState>> = {}) {
   return render(
-    <BlankCanvasEmptyState
-      modelName="Data Lineage"
-      isDraft={false}
-      canManage
-      onAddEntity={vi.fn()}
-      onStartBuilding={vi.fn()}
-      {...over}
-    />
+    <MemoryRouter>
+      <BlankCanvasEmptyState
+        modelName="Data Lineage"
+        isDraft={false}
+        canManage
+        onAddEntity={vi.fn()}
+        onStartBuilding={vi.fn()}
+        {...over}
+      />
+    </MemoryRouter>
   )
 }
 

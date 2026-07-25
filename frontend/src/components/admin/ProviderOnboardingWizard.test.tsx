@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
 import { providerService } from '@/services/providerService'
@@ -10,7 +11,12 @@ vi.mock('@/components/ui/toast', () => ({
   }),
 }))
 
-vi.mock('react-router-dom', () => ({
+// Spread the real module rather than listing exports: the wizard header
+// renders a <DocsLink>, which is a router <Link>, and a one-key factory
+// silently breaks the moment any component in the tree reaches for
+// another router export.
+vi.mock('react-router-dom', async () => ({
+  ...await vi.importActual<typeof import('react-router-dom')>('react-router-dom'),
   useNavigate: () => vi.fn(),
 }))
 
@@ -27,11 +33,13 @@ vi.mock('@/services/providerService', async () => {
 
 function renderWizard() {
   return render(
-    <ProviderOnboardingWizard
-      isOpen
-      providers={[]}
-      onClose={() => undefined}
-    />,
+    <MemoryRouter>
+      <ProviderOnboardingWizard
+        isOpen
+        providers={[]}
+        onClose={() => undefined}
+      />
+    </MemoryRouter>,
   )
 }
 
