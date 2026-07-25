@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import (
-    APIRouter, Body, Depends, HTTPException, Path, Request, status,
+    APIRouter, Body, Depends, HTTPException, Path, Request, Response, status,
 )
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,8 @@ from backend.app.db.repositories import idp_provider_repo, user_repo
 from backend.app.db.repositories.idp_provider_repo import (
     ProviderValidationError,
 )
+from backend.auth_service.cookies import set_dryrun_cookie
+from backend.auth_service.core.tokens import create_dryrun_token
 from backend.auth_service.interface import User
 from backend.auth_service.providers import (
     ASSURANCE_DESCRIPTIONS,
@@ -82,6 +85,12 @@ class ProviderDTO(BaseModel):
     # ``auth_service/providers/assurance.py``.
     assurance: str
     assurance_reason: str = Field(alias="assuranceReason")
+    # Domains routed here by email-first login. Plaintext, no secrets.
+    email_domains: list[str] = Field(default_factory=list, alias="emailDomains")
+    # Whether an assertion has been captured, NOT its contents — those
+    # come from a dedicated endpoint so they cannot leak by someone
+    # adding a field to this response.
+    last_assertion_at: Optional[str] = Field(default=None, alias="lastAssertionAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -98,6 +107,7 @@ class CreateProviderRequest(BaseModel):
     enabled: bool = True
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    email_domains: Optional[list[str]] = Field(default=None, alias="emailDomains")
 
 
 class UpdateProviderRequest(BaseModel):
@@ -113,6 +123,7 @@ class UpdateProviderRequest(BaseModel):
     linking_policy: Optional[str] = Field(default=None, alias="linkingPolicy")
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    email_domains: Optional[list[str]] = Field(default=None, alias="emailDomains")
 
 
 class DiscoverRequest(BaseModel):
@@ -158,6 +169,8 @@ def _to_dto(row) -> ProviderDTO:
     return ProviderDTO(
         assurance=level,
         assurance_reason=ASSURANCE_DESCRIPTIONS.get(level, ""),
+        email_domains=idp_provider_repo.parse_email_domains(row),
+        last_assertion_at=getattr(row, "last_assertion_at", None),
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,
@@ -326,6 +339,7 @@ async def create_provider(
             enabled=body.enabled,
             button_label=body.button_label,
             button_icon=body.button_icon,
+            email_domains=body.email_domains,
             created_by=admin.id,
         )
     except ProviderValidationError as exc:
@@ -371,6 +385,7 @@ async def update_provider(
             linking_policy=body.linking_policy,
             button_label=body.button_label,
             button_icon=body.button_icon,
+            email_domains=body.email_domains,
             updated_by=admin.id,
         )
     except ProviderValidationError as exc:
@@ -458,3 +473,64 @@ async def test_provider_mapping(
             "attributes": identity.attributes,
         },
     }
+
+
+@router.post("/{provider_id}/dry-run/start")
+async def start_dry_run(
+    provider_id: str,
+    response: Response,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Begin a rehearsal sign-in against this provider.
+
+    ``/test`` dry-runs the *claim mapping* against a pasted blob. The half
+    that actually breaks in production — redirect URI registered at the
+    IdP, signature verifies, clock skew, certificate still valid — has no
+    test at all, so today the first real test is a user failing to log in.
+
+    The admin signs in with their own IdP account and the callback reports
+    what would have happened instead of doing it: no session is minted and
+    no rows are written. Requiring an admin to start it is what keeps this
+    from being an identity probe — the marker cookie cannot be obtained
+    anonymously.
+    """
+    row = await idp_provider_repo.get_provider(session, provider_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+
+    set_dryrun_cookie(
+        response, create_dryrun_token(admin_id=admin.id, provider_id=row.id),
+    )
+    return {
+        "loginUrl": f"/api/v1/auth/{quote(row.slug, safe='')}/login",
+        "expiresInMinutes": 10,
+    }
+
+
+@router.get("/{provider_id}/last-assertion")
+async def get_last_assertion(
+    provider_id: str,
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The most recent assertion this provider sent.
+
+    Mapping against a pasted sample is guesswork; mapping against what
+    actually arrived is not. Stored encrypted and served only here — never
+    on ``ProviderDTO``, so it cannot leak by someone adding a field to the
+    list response.
+
+    Credential-shaped values are redacted at capture time, not here: the
+    unredacted form is never written.
+    """
+    claims, captured_at = await idp_provider_repo.read_last_assertion(
+        session, provider_id,
+    )
+    if claims is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No assertion captured yet for this provider. It is recorded on "
+            "the next successful sign-in.",
+        )
+    return {"claims": claims, "capturedAt": captured_at}

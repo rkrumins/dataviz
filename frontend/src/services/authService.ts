@@ -237,6 +237,20 @@ export const authService = {
 
     // ── SSO discovery + self-service identities (Phase 3) ───────────
 
+    /**
+     * Route an email address to its IdP (Home Realm Discovery).
+     *
+     * Returns ``null`` for every miss — feature off, unknown domain,
+     * disabled provider — so the caller cannot use it to enumerate which
+     * domains an org has configured.
+     */
+    resolveEmailDomain(email: string): Promise<{ provider: SsoProviderSummary | null }> {
+        return request<{ provider: SsoProviderSummary | null }>(
+            `${AUTH_API}/resolve`,
+            { method: 'POST', body: JSON.stringify({ email }) },
+        )
+    },
+
     /** Public catalog of enabled SSO providers. Drives the login page
      *  buttons. Returns ``[]`` when the registry is unconfigured. */
     listProviders(): Promise<SsoProviderSummary[]> {

@@ -15,6 +15,7 @@ Exempt paths:
   * /api/v1/auth/signup, /forgot-password, /reset-password,
     /verify-invite — no authenticated session
   * /api/v1/auth/logout  — idempotent and intentionally no-auth
+  * /api/v1/auth/resolve — email-first routing, pre-session
   * /health, /api/v1/health, /api/v1/health/providers — operator probes
   * /api/v1/auth/{slug}/{acs,sls,browser-profile,mock} — the IdP-callback
     surface; see ``_EXEMPT_PATTERNS`` for why each one has to be, and what
@@ -47,6 +48,11 @@ _DEFAULT_EXEMPT_PATHS = (
     "/api/v1/auth/forgot-password",
     "/api/v1/auth/reset-password",
     "/api/v1/auth/verify-invite",
+    # Email-first login routing. Called from the login page before any
+    # session exists, so there is no nx_csrf cookie to submit. Reveals
+    # nothing — every miss returns the same empty body — and is rate
+    # limited like /login.
+    "/api/v1/auth/resolve",
     "/health",
     "/api/v1/health",
     "/api/v1/health/providers",

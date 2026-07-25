@@ -364,6 +364,16 @@ async def lifespan(_app: FastAPI):
                 button_icon=row.button_icon,
             )
 
+    async def _resolve_email_domain(domain: str):
+        """Which enabled provider claims *domain*. Injected into the
+        identity service so ``auth_service`` never imports the repo."""
+        async with get_async_session() as session:
+            row = await idp_provider_repo.find_by_email_domain(session, domain)
+            return (
+                _DbProviderConfigLoader._to_snapshot(row)
+                if row is not None else None
+            )
+
     _registry = ProviderRegistry(
         loader=_DbProviderConfigLoader(),
         builders=PROVIDER_BUILDERS,
@@ -506,6 +516,28 @@ async def lifespan(_app: FastAPI):
             provider_id=provider_id,
         )
 
+    async def _preview_sso_targets(
+        session, *, idp_groups: list[str], provider_id=None,
+    ) -> dict:
+        """Which mappings a dry-run's groups would match. Read-only
+        sibling of ``_reconcile_sso_targets`` — the same lookup, without
+        granting anything."""
+        from backend.app.db.repositories import idp_group_mapping_repo
+        mappings = await idp_group_mapping_repo.list_active_for_groups(
+            session, provider_id=provider_id, idp_groups=idp_groups,
+        )
+        return {
+            "matched": [
+                {"idp_group": m.idp_group, "target_type": m.target_type,
+                 "role_name": m.role_name, "group_id": m.target_group_id,
+                 "scope_type": m.scope_type, "scope_id": m.scope_id}
+                for m in mappings
+            ],
+            "unmatched_groups": sorted(
+                set(idp_groups) - {m.idp_group for m in mappings}
+            ),
+        }
+
     # Phase 2.E: inject the session-killer (RevocationService). Called
     # by the auth service when the SSO daily ceiling forces re-auth so
     # every live access token across all tabs bounces to the IdP.
@@ -544,8 +576,11 @@ async def lifespan(_app: FastAPI):
         user_identity_repo=_user_identity_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
+        email_domain_resolver=_resolve_email_domain,
+        assertion_recorder=idp_provider_repo.record_last_assertion,
         claims_resolver=_resolve_claims,
         sso_role_reconciler=_reconcile_sso_targets,
+        sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
         auth_config_provider=_auth_config_provider,
     )

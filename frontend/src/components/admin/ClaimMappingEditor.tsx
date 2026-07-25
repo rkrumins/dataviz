@@ -199,6 +199,22 @@ export function ClaimMappingEditor({
         setSample(raw)
     }
 
+    /** The strongest sample available: what this provider actually sent on
+     *  its last successful sign-in. Beats anything hand-typed. */
+    async function loadLastAssertion() {
+        if (!providerId) return
+        setSampleError(null)
+        try {
+            const found = await ssoAdminService.lastAssertion(providerId)
+            setSample(JSON.stringify(found.claims, null, 2))
+        } catch {
+            setSampleError(
+                'No assertion captured yet. One is recorded on the next ' +
+                'successful sign-in through this provider.',
+            )
+        }
+    }
+
     async function runPreview() {
         if (!providerId) return
         if (!parsedSample || typeof parsedSample !== 'object') {
@@ -291,6 +307,16 @@ export function ClaimMappingEditor({
                         Sample payload
                     </label>
                     <div className="flex gap-2">
+                        {providerId && (
+                            <button
+                                type="button"
+                                onClick={() => { void loadLastAssertion() }}
+                                title="Load the most recent claims this provider actually sent"
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-white/10 text-[11px] text-ink-muted hover:bg-white/5"
+                            >
+                                Load last assertion
+                            </button>
+                        )}
                         {onReadFromBrowser && (
                             <button
                                 type="button"

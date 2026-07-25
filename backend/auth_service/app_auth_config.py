@@ -28,6 +28,10 @@ class AuthConfigSnapshot:
     allow_jit_provisioning: bool
     version: int
     updated_at: str
+    # Trails the required fields (and the repo mirror's ordering) only
+    # because a dataclass cannot put a defaulted field before a bare one;
+    # the default keeps existing keyword construction working.
+    email_first_login: bool = False
 
 
 # All-true default used when the loader has never been called or
@@ -39,6 +43,7 @@ _DEFAULTS = AuthConfigSnapshot(
     allow_jit_provisioning=True,
     version=0,
     updated_at="",
+    email_first_login=False,
 )
 
 

@@ -61,6 +61,15 @@ LINK_INTENT_COOKIE_NAME = "nx_link_intent"
 LINK_INTENT_COOKIE_PATH = "/api/v1/auth/"
 _LINK_INTENT_COOKIE_MAX_AGE = 600
 
+# Dry-run cookie. Set by ``POST /admin/idp-providers/{id}/dry-run/start``,
+# read by the SSO callback, which then reports what WOULD have happened
+# and mints nothing. Cross-site-scoped for the same reason as ``nx_saml``:
+# a SAML dry-run completes on the ACS POST, and a Lax cookie dropped there
+# would silently turn the rehearsal into a real login.
+DRYRUN_COOKIE_NAME = "nx_dryrun"
+DRYRUN_COOKIE_PATH = "/api/v1/auth/"
+_DRYRUN_COOKIE_MAX_AGE = 600
+
 # Refresh cookie is scoped to the /auth subtree so it's sent to /refresh
 # AND /logout (logout needs to read it to revoke the rotation family)
 # but is excluded from every data endpoint where it's never useful.
@@ -245,3 +254,29 @@ def clear_link_intent_cookie(response: Response) -> None:
 
 def read_link_intent_cookie(request: Request) -> str | None:
     return request.cookies.get(LINK_INTENT_COOKIE_NAME)
+
+
+# ── Dry-run cookie ───────────────────────────────────────────────────
+
+
+def set_dryrun_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=DRYRUN_COOKIE_NAME,
+        value=token,
+        max_age=_DRYRUN_COOKIE_MAX_AGE,
+        httponly=True,
+        path=DRYRUN_COOKIE_PATH,
+        **_cross_site_kwargs(),
+    )
+
+
+def clear_dryrun_cookie(response: Response) -> None:
+    response.delete_cookie(
+        DRYRUN_COOKIE_NAME,
+        path=DRYRUN_COOKIE_PATH,
+        **_cross_site_kwargs(),
+    )
+
+
+def read_dryrun_cookie(request: Request) -> str | None:
+    return request.cookies.get(DRYRUN_COOKIE_NAME)

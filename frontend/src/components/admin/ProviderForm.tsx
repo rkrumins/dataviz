@@ -35,6 +35,12 @@ type LinkingPolicy = 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
 
 const REDACTED = '********'
 
+/** Comma/space separated -> the array the API takes. The server
+ *  normalises case and a leading @, so this only has to split. */
+function parseDomains(raw: string): string[] {
+    return raw.split(/[,\s]+/).map((d) => d.trim()).filter(Boolean)
+}
+
 const OIDC_SETTINGS_TEMPLATE =
     '{\n  "issuer": "",\n  "client_id": "",\n  "client_secret": "",\n  "redirect_uri": ""\n}'
 
@@ -338,6 +344,9 @@ export function ProviderForm({
     const [claimMapping, setClaimMapping] = useState<ClaimMapping>(
         existing?.claimMapping ?? {},
     )
+    const [emailDomains, setEmailDomains] = useState(
+        (existing?.emailDomains ?? []).join(', '),
+    )
     const [profileSettings, setProfileSettings] = useState<CustomProfileSettings>(
         existing?.kind === 'custom_profile'
             ? { ...DEFAULT_CUSTOM_PROFILE_SETTINGS, ...existing.settings }
@@ -406,10 +415,12 @@ export function ProviderForm({
             if (editing) {
                 await ssoAdminService.updateProvider(existing.id, {
                     displayName, settings, claimMapping, linkingPolicy,
+                    emailDomains: parseDomains(emailDomains),
                 })
             } else {
                 await ssoAdminService.createProvider({
                     slug, displayName, kind, settings, claimMapping, linkingPolicy,
+                    emailDomains: parseDomains(emailDomains),
                 })
             }
             onSaved()
@@ -501,6 +512,20 @@ export function ProviderForm({
                     </label>
                 </>
             )}
+
+            <label className="block text-xs">
+                Email domains <span className="text-ink-muted">(optional)</span>
+                <input
+                    className={monoCls}
+                    value={emailDomains}
+                    onChange={(e) => setEmailDomains(e.target.value)}
+                    placeholder="corp.example.com, subsidiary.example"
+                />
+                <span className="mt-0.5 block text-[10px] text-ink-muted">
+                    Routes these domains straight to this provider when
+                    email-first sign-in is on (Settings tab). Ignored otherwise.
+                </span>
+            </label>
 
             <ClaimMappingEditor
                 kind={kind}

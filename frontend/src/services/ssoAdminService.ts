@@ -57,6 +57,10 @@ export interface IdpProvider {
     assurance: AssuranceLevel
     /** One-line operator explanation of what that level means. */
     assuranceReason: string
+    /** Domains routed here when email-first login is on. */
+    emailDomains: string[]
+    /** When an assertion was last captured, or null. */
+    lastAssertionAt?: string | null
     createdAt: string
     updatedAt: string
 }
@@ -72,6 +76,7 @@ export interface CreateProviderInput {
     enabled?: boolean
     buttonLabel?: string
     buttonIcon?: string
+    emailDomains?: string[]
 }
 
 export interface UpdateProviderInput {
@@ -83,6 +88,7 @@ export interface UpdateProviderInput {
     linkingPolicy?: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     buttonLabel?: string | null
     buttonIcon?: string | null
+    emailDomains?: string[]
 }
 
 export interface IdpHealth {
@@ -156,6 +162,7 @@ export interface AuthConfig {
     ssoEnabled: boolean
     allowLocalLogin: boolean
     allowJitProvisioning: boolean
+    emailFirstLogin: boolean
     version: number
     updatedAt: string
 }
@@ -164,6 +171,7 @@ export interface AuthConfigPatch {
     ssoEnabled?: boolean
     allowLocalLogin?: boolean
     allowJitProvisioning?: boolean
+    emailFirstLogin?: boolean
     expectedVersion?: number
 }
 
@@ -252,6 +260,24 @@ export const ssoAdminService = {
         return request<void>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
+        )
+    },
+
+    /** Begin a rehearsal sign-in. Sets the marker cookie and returns the
+     *  IdP login URL to open; the callback reports the would-be outcome
+     *  and writes nothing. */
+    startDryRun(id: string): Promise<{ loginUrl: string; expiresInMinutes: number }> {
+        return request<{ loginUrl: string; expiresInMinutes: number }>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/dry-run/start`,
+            { method: 'POST' },
+        )
+    },
+
+    /** The most recent assertion a provider sent, for mapping against
+     *  reality rather than a hand-typed sample. 404s until one is captured. */
+    lastAssertion(id: string): Promise<{ claims: Record<string, unknown>; capturedAt: string }> {
+        return request<{ claims: Record<string, unknown>; capturedAt: string }>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/last-assertion`,
         )
     },
 

@@ -115,8 +115,11 @@ class LocalIdentityService:
         refresh_store_factory,
         user_identity_repo=None,
         outbox_emit=None,
+        email_domain_resolver=None,
+        assertion_recorder=None,
         claims_resolver: Optional[Callable[..., Awaitable[dict]]] = None,
         sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
+        sso_role_preview: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
     ):
@@ -125,8 +128,18 @@ class LocalIdentityService:
         self._user_identity_repo = user_identity_repo
         self._refresh_store_factory = refresh_store_factory
         self._outbox_emit = outbox_emit
+        # Injected by app startup: (domain) -> ProviderConfigSnapshot | None.
+        # Lives outside this module because resolving it needs the provider
+        # repo, and auth_service may not import backend.app.* .
+        self._email_domain_resolver = email_domain_resolver
+        # (session, provider_id, claims) -> None. Injected for the
+        # same isolation reason as the resolver above.
+        self._assertion_recorder = assertion_recorder
         self._claims_resolver = claims_resolver
         self._sso_role_reconciler = sso_role_reconciler
+        # Read-only sibling of the reconciler, for the dry-run: same
+        # mapping lookup, no writes.
+        self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
@@ -554,20 +567,11 @@ class LocalIdentityService:
                             session, by_email.id,
                         )
                     )
-                    deny_reasons: list[str] = []
-                    if linking_policy in ("manual_only", "disabled"):
-                        deny_reasons.append(f"policy:{linking_policy}")
-                    if not email_verified:
-                        deny_reasons.append("email_unverified")
-                    if by_email.status != "active":
-                        deny_reasons.append(f"existing_status:{by_email.status}")
-                    if by_email.deleted_at is not None:
-                        deny_reasons.append("existing_deleted")
-                    if (
-                        linking_policy == "strict"
-                        and has_existing_identity
-                    ):
-                        deny_reasons.append("strict_existing_sso")
+                    deny_reasons = self._link_deny_reasons(
+                        by_email, linking_policy=linking_policy,
+                        email_verified=email_verified,
+                        has_existing_identity=has_existing_identity,
+                    )
 
                     if deny_reasons:
                         await self._emit_audit(
@@ -693,11 +697,148 @@ class LocalIdentityService:
                     }
                 await self._outbox_emit(session, "user.logged_in", payload)
 
+            # Capture what this provider actually sent, so an operator can
+            # build the claim mapping against reality rather than a sample
+            # they typed from memory. Best-effort and last: a failure here
+            # must never cost someone their login.
+            if self._assertion_recorder is not None:
+                try:
+                    await self._assertion_recorder(
+                        session, provider_id,
+                        (identity.raw_claims or {}).get("claims") or {},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Recording last assertion failed (provider=%s): %s",
+                        provider_id, exc,
+                    )
+
         user = _orm_to_user(orm, role=_primary_role(roles))
         tokens = self._issue_tokens(
             user, family_id=None, claims_extra=claims_extra, auth_time=auth_time,
         )
         return user, tokens
+
+    async def preview_sso_login(
+        self,
+        identity,
+        *,
+        provider_id: str,
+        linking_policy: str = "strict",
+    ) -> dict:
+        """What ``complete_sso_login`` WOULD do with this identity.
+
+        Read-only by construction: it calls the same lookups the real path
+        calls but none of the writers, and it never commits. The
+        collision-branch gate is shared code (:meth:`_link_deny_reasons`)
+        so the two cannot disagree about *why* a link is refused; the
+        branch structure around it is mirrored, which is the residual
+        drift risk. The alternative — running the real path inside a
+        rolled-back transaction — would exercise the writers, and the
+        audit helper there commits a session of its own, which would make
+        "writes nothing" untrue in exactly the case an operator is
+        trusting it.
+
+        Deliberately excludes the link-intent branch: a dry-run is about
+        "what happens when this person signs in", and link-intent only
+        fires for an already-authenticated user who asked to attach an
+        identity.
+        """
+        outcome: dict = {
+            "email": identity.email,
+            "external_id": identity.external_id,
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "groups": list(getattr(identity, "groups", ()) or ()),
+            "attributes": dict(getattr(identity, "attributes", {}) or {}),
+            "email_verified": _claims_email_verified(identity.raw_claims),
+            "linking_policy": linking_policy,
+        }
+
+        cfg = await self._auth_config_provider.get()
+        if not cfg.sso_enabled:
+            outcome["action"] = "rejected"
+            outcome["reason"] = "sso_disabled"
+            return outcome
+        if self._user_identity_repo is None:
+            outcome["action"] = "rejected"
+            outcome["reason"] = "identity_repo_unavailable"
+            return outcome
+
+        async with self._session_factory() as session:
+            existing_identity = await self._user_identity_repo.get_by_subject(
+                session, provider_id=provider_id,
+                external_id=identity.external_id,
+            )
+            if existing_identity is not None:
+                orm = await self._user_repo.get_user_by_id(
+                    session, existing_identity.user_id,
+                )
+                if orm is None or orm.deleted_at is not None \
+                        or orm.status != "active":
+                    outcome["action"] = "rejected"
+                    outcome["reason"] = "sso_account_inactive"
+                else:
+                    outcome["action"] = "sign_in_existing"
+                    outcome["user_id"] = orm.id
+                    outcome["user_email"] = orm.email
+            else:
+                by_email = await self._user_repo.get_user_by_email(
+                    session, identity.email,
+                )
+                if by_email is None:
+                    if not cfg.allow_jit_provisioning:
+                        outcome["action"] = "rejected"
+                        outcome["reason"] = "jit_disabled"
+                    else:
+                        outcome["action"] = "provision_new"
+                else:
+                    has_identity = await self._user_identity_repo \
+                        .has_any_identity(session, by_email.id)
+                    denies = self._link_deny_reasons(
+                        by_email, linking_policy=linking_policy,
+                        email_verified=outcome["email_verified"],
+                        has_existing_identity=has_identity,
+                    )
+                    outcome["user_id"] = by_email.id
+                    outcome["user_email"] = by_email.email
+                    if denies:
+                        outcome["action"] = "rejected"
+                        outcome["reason"] = "unsafe_auto_link"
+                        outcome["deny_reasons"] = denies
+                    else:
+                        outcome["action"] = "link_existing"
+
+            if self._sso_role_previewer is not None:
+                try:
+                    outcome["reconcile"] = await self._sso_role_previewer(
+                        session, idp_groups=outcome["groups"],
+                        provider_id=provider_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Dry-run role preview failed: %s", exc)
+
+        return outcome
+
+    @staticmethod
+    def _link_deny_reasons(
+        existing, *, linking_policy: str, email_verified: bool,
+        has_existing_identity: bool,
+    ) -> list[str]:
+        """The collision-branch gate, in one place so the dry-run and the
+        real path cannot disagree about why a link is refused."""
+        reasons: list[str] = []
+        if linking_policy in ("manual_only", "disabled"):
+            reasons.append(f"policy:{linking_policy}")
+        if not email_verified:
+            reasons.append("email_unverified")
+        if existing.status != "active":
+            reasons.append(f"existing_status:{existing.status}")
+        if existing.deleted_at is not None:
+            reasons.append("existing_deleted")
+        if linking_policy == "strict" and has_existing_identity:
+            reasons.append("strict_existing_sso")
+        return reasons
 
     async def _emit_audit(self, event_type: str, payload: dict) -> None:
         """Emit an audit event in its own committed transaction.
@@ -721,6 +862,14 @@ class LocalIdentityService:
                 await session.commit()
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
+
+    async def resolve_email_domain(self, domain: str):
+        """Which provider claims *domain*, or None. See the injected
+        resolver above; returns None when nothing is wired so the
+        email-first route degrades to "no match" rather than erroring."""
+        if self._email_domain_resolver is None:
+            return None
+        return await self._email_domain_resolver(domain)
 
     async def emit_audit(self, event_type: str, payload: dict) -> None:
         """Public entry point to the standalone-transaction audit path.

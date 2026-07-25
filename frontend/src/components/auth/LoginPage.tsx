@@ -91,6 +91,10 @@ function SsoButtons({
                             busySlug === p.slug && "opacity-70 cursor-not-allowed",
                         )}
                     >
+                        {p.buttonIcon && (
+                            <img src={p.buttonIcon} alt="" aria-hidden
+                                 className="w-4 h-4 shrink-0 object-contain" />
+                        )}
                         {p.buttonLabel || p.displayName}
                         {busySlug === p.slug
                             ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
@@ -108,6 +112,10 @@ function SsoButtons({
                                 : "border-white/20 text-ink hover:bg-white/5",
                         )}
                     >
+                        {p.buttonIcon && (
+                            <img src={p.buttonIcon} alt="" aria-hidden
+                                 className="w-4 h-4 shrink-0 object-contain" />
+                        )}
                         {p.buttonLabel || p.displayName}
                         <ExternalLink className="w-3.5 h-3.5 opacity-50" />
                     </a>
@@ -204,6 +212,10 @@ export function LoginPage() {
         loginWithBrowserProfile,
     } = useAuthStore()
 
+    // Email-first routing. Additive: the password form and the button row
+    // are untouched, and an address that matches nothing simply produces no
+    // banner — nobody is stranded by a wrong domain mapping.
+    const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
     const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
     const [providersFailed, setProvidersFailed] = useState(false)
     const [portalError, setPortalError] = useState<string | null>(null)
@@ -260,6 +272,19 @@ export function LoginPage() {
     useEffect(() => {
         clearError()
     }, [clearError])
+
+    // Debounced so it fires once the address looks finished, not on every
+    // keystroke. A miss is silent by design — see /auth/resolve.
+    useEffect(() => {
+        if (!email.includes('@')) { setRouted(null); return }
+        let cancelled = false
+        const timer = setTimeout(() => {
+            authService.resolveEmailDomain(email)
+                .then((r) => { if (!cancelled) setRouted(r.provider) })
+                .catch(() => { if (!cancelled) setRouted(null) })
+        }, 400)
+        return () => { cancelled = true; clearTimeout(timer) }
+    }, [email])
 
     useDocumentTitle('Sign in')
 
@@ -422,6 +447,16 @@ export function LoginPage() {
                         provider that isn't configured, and we render
                         the buttons unconditionally because the user has
                         the most context about which their org uses. */}
+                    {routed && (
+                        <a
+                            href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
+                            className="mt-4 flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-accent-lineage text-white text-sm font-semibold hover:brightness-110 transition-all"
+                        >
+                            Continue with {routed.buttonLabel || routed.displayName}
+                            <ChevronRight className="w-4 h-4" />
+                        </a>
+                    )}
+
                     <SsoButtons
                         providers={providers}
                         failed={providersFailed}

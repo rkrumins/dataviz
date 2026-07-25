@@ -1217,6 +1217,18 @@ class IdpProviderORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
+    # Email domains that route to this provider when email-first login is
+    # on. Plaintext JSON array, mirroring ``claim_mapping`` — no secrets,
+    # and an operator may want to read it straight out of the DB.
+    email_domains = Column(Text, nullable=True)
+    # The most recent assertion this provider sent us, Fernet-encrypted via
+    # the same envelope as ``settings``. Mapping against a pasted sample is
+    # guesswork; mapping against what actually arrived is not. NEVER on the
+    # provider DTO — it is served by a dedicated admin-only endpoint so it
+    # cannot leak by someone adding a field to the list response.
+    last_assertion = Column(Text, nullable=True)
+    last_assertion_at = Column(Text, nullable=True)
+
     identities = relationship("UserIdentityORM", back_populates="provider")
 
     __table_args__ = (
@@ -1386,6 +1398,9 @@ class AppAuthConfigORM(Base):
     sso_enabled = Column(Boolean, nullable=False, default=True)
     allow_local_login = Column(Boolean, nullable=False, default=True)
     allow_jit_provisioning = Column(Boolean, nullable=False, default=True)
+    # Email-first login (Home Realm Discovery). Off by default: it changes
+    # what every user sees, and a wrong domain mapping strands them.
+    email_first_login = Column(Boolean, nullable=False, default=False)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(Text, nullable=False, default=_now)
     updated_by = Column(Text, nullable=True)

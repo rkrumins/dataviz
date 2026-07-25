@@ -181,6 +181,7 @@ async def create_provider(
     enabled: bool = True,
     button_label: Optional[str] = None,
     button_icon: Optional[str] = None,
+    email_domains: Optional[list] = None,
     created_by: Optional[str] = None,
 ) -> IdpProviderORM:
     _validate_shape(
@@ -201,6 +202,7 @@ async def create_provider(
         linking_policy=linking_policy,
         button_label=(button_label or None) and button_label.strip(),
         button_icon=(button_icon or None) and button_icon.strip(),
+        email_domains=_encode_domains(email_domains),
         created_at=_now(),
         created_by=created_by,
         updated_at=_now(),
@@ -223,6 +225,7 @@ async def update_provider(
     linking_policy: Optional[str] = None,
     button_label: Optional[str] = None,
     button_icon: Optional[str] = None,
+    email_domains: Optional[list] = None,
     updated_by: Optional[str] = None,
 ) -> Optional[IdpProviderORM]:
     row = await get_provider(session, provider_id)
@@ -257,6 +260,8 @@ async def update_provider(
         row.button_label = (button_label or None) and button_label.strip()
     if button_icon is not None:
         row.button_icon = (button_icon or None) and button_icon.strip()
+    if email_domains is not None:
+        row.email_domains = _encode_domains(email_domains)
     row.updated_at = _now()
     row.updated_by = updated_by
     await session.flush()
@@ -326,3 +331,107 @@ def parse_claim_mapping(row: IdpProviderORM) -> dict:
         )
         return {}
     return data if isinstance(data, dict) else {}
+
+# ── Email-domain routing (Home Realm Discovery) ──────────────────────
+
+
+def _encode_domains(domains: Optional[list]) -> Optional[str]:
+    """Normalise and store as a JSON array. Strips a leading ``@`` and
+    lower-cases, so ``@Corp.Example`` and ``corp.example`` are one thing."""
+    if domains is None:
+        return None
+    cleaned = sorted({
+        d.strip().lower().lstrip("@")
+        for d in domains if isinstance(d, str) and d.strip()
+    })
+    return json.dumps(cleaned)
+
+
+def parse_email_domains(row) -> list[str]:
+    """Domains that route to this provider, lower-cased. Tolerant of a
+    malformed blob — a bad value must not break the login page."""
+    raw = getattr(row, "email_domains", None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [d.strip().lower().lstrip("@") for d in parsed
+            if isinstance(d, str) and d.strip()]
+
+
+async def find_by_email_domain(
+    session: AsyncSession, domain: str,
+) -> Optional[IdpProviderORM]:
+    """The enabled provider claiming *domain*, or None.
+
+    Scans the enabled set rather than querying by predicate: the row count
+    is small (a handful of IdPs), and a LIKE against a JSON blob would be
+    both slower to reason about and wrong on substrings —
+    ``corp.example.com`` must not match a provider claiming ``example.com``.
+    """
+    needle = (domain or "").strip().lower().lstrip("@")
+    if not needle:
+        return None
+    rows = await list_providers(session, only_enabled=True)
+    for row in rows:
+        if needle in parse_email_domains(row):
+            return row
+    return None
+
+
+# ── Last assertion (claim-mapping aid) ───────────────────────────────
+
+
+#: Claim names whose values are never useful for mapping and are worth not
+#: keeping. The identity claims themselves ARE the point and are retained.
+_ASSERTION_REDACT_HINTS = (
+    "token", "secret", "password", "assertion", "credential", "signature",
+)
+
+
+def redact_assertion(claims: dict) -> dict:
+    """Drop credential-shaped values before storing an assertion.
+
+    An operator maps ``employeeId`` and ``emailAddress``; nobody maps an
+    embedded access token. Keys are kept so the shape stays visible —
+    only the value is replaced.
+    """
+    out: dict = {}
+    for key, value in (claims or {}).items():
+        lowered = str(key).lower()
+        if any(hint in lowered for hint in _ASSERTION_REDACT_HINTS):
+            out[key] = "********"
+        elif isinstance(value, dict):
+            out[key] = redact_assertion(value)
+        else:
+            out[key] = value
+    return out
+
+
+async def record_last_assertion(
+    session: AsyncSession, provider_id: str, claims: dict,
+) -> None:
+    """Store the most recent assertion, encrypted at rest.
+
+    Reuses the ``settings`` Fernet envelope: this is identity data about a
+    real person and must not sit in the clear next to it.
+    """
+    row = await get_provider(session, provider_id)
+    if row is None:
+        return
+    row.last_assertion = encrypt_settings(redact_assertion(claims or {}))
+    row.last_assertion_at = _now()
+
+
+async def read_last_assertion(
+    session: AsyncSession, provider_id: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Decrypt the stored assertion. Returns ``(claims, captured_at)``."""
+    row = await get_provider(session, provider_id)
+    if row is None or not row.last_assertion:
+        return None, None
+    return decrypt_settings(row.last_assertion), row.last_assertion_at

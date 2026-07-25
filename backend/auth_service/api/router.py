@@ -45,12 +45,14 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..cookies import (
+    clear_dryrun_cookie,
     clear_link_intent_cookie,
     clear_mock_identity_cookie,
     clear_oidc_cookie,
     clear_saml_cookie,
     clear_session_cookies,
     read_access_cookie,
+    read_dryrun_cookie,
     read_link_intent_cookie,
     read_mock_identity_cookie,
     read_oidc_cookie,
@@ -66,6 +68,7 @@ from ..core.tokens import (
     create_mock_identity_token,
     create_oidc_state_token,
     create_saml_state_token,
+    decode_dryrun_token,
     decode_link_intent_token,
     decode_oidc_state_token,
     decode_saml_state_token,
@@ -292,6 +295,64 @@ async def _resolve_link_intent(
     return intent_user_id
 
 
+def _is_dryrun(request: Request, *, provider_id: str) -> bool:
+    """Whether this callback is a rehearsal rather than a login.
+
+    The cookie is minted only by the admin-authed
+    ``/admin/idp-providers/{id}/dry-run/start``, which is what stops this
+    from being a way for an anonymous caller to probe identities. An
+    expired or mismatched cookie simply means "not a dry-run" — the flow
+    falls through to a real login, which is the safe direction to fail:
+    the alternative is refusing a genuine sign-in over a stale cookie.
+    """
+    raw = read_dryrun_cookie(request)
+    if not raw:
+        return False
+    try:
+        payload = decode_dryrun_token(raw)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return False
+    return payload.get("provider_id") == provider_id
+
+
+def _dryrun_response(slug: str, outcome: dict) -> Response:
+    """Render the would-be outcome. No session cookies, no rows written.
+
+    Plain HTML rather than a redirect into the SPA: the result has to
+    survive a cross-site landing (the SAML ACS is a POST from the IdP)
+    and carrying it through a redirect would mean putting claim values in
+    a URL. This is the one page in the auth surface an admin reads
+    directly.
+    """
+    import html
+    import json
+
+    action = str(outcome.get("action", "unknown"))
+    headline = {
+        "sign_in_existing": "Would sign in as an existing user",
+        "provision_new": "Would create a new user",
+        "link_existing": "Would link to an existing user",
+        "rejected": "Would be REFUSED",
+    }.get(action, action)
+    body = html.escape(json.dumps(outcome, indent=2, default=str))
+    return Response(
+        content=(
+            "<!doctype html><meta charset=utf-8>"
+            f"<title>Dry run: {html.escape(slug)}</title>"
+            "<style>body{font:14px/1.5 ui-monospace,monospace;max-width:52rem;"
+            "margin:3rem auto;padding:0 1rem}h1{font-size:1.1rem}"
+            "pre{background:#f4f4f5;padding:1rem;border-radius:.5rem;"
+            "overflow-x:auto}</style>"
+            f"<h1>{html.escape(headline)}</h1>"
+            f"<p>Provider <code>{html.escape(slug)}</code>. "
+            "Nothing was written and no session was created — close this tab "
+            "and you are still signed in as yourself.</p>"
+            f"<pre>{body}</pre>"
+        ),
+        media_type="text/html",
+    )
+
+
 async def _require_sso_enabled(request: Request) -> None:
     """Raise 404 when the platform master kill-switch is off. We use
     404 (not 503) so an attacker can't probe the toggle's state."""
@@ -488,6 +549,67 @@ async def list_providers(request: Request):
     ]
 
 
+class _ResolveBody(BaseModel):
+    email: str
+
+
+class ResolveResult(BaseModel):
+    """Which provider, if any, an email address routes to."""
+    model_config = ConfigDict(populate_by_name=True)
+    provider: Optional[ProviderSummary] = None
+
+
+@router.post("/resolve", response_model=ResolveResult,
+             response_model_by_alias=True)
+@limiter.limit("20/minute")
+async def resolve_email_domain(request: Request, body: _ResolveBody):
+    """Route an email address to its IdP (Home Realm Discovery).
+
+    A row of provider buttons is a coin flip once an org has three IdPs, and
+    it publishes the org's IdP topology to anyone who loads /login. Asking
+    for the email first removes both problems.
+
+    Off unless ``app_auth_config.email_first_login`` is on: this changes what
+    every user sees, and a wrong domain mapping strands them with no visible
+    alternative.
+
+    Deliberately NOT an enumeration oracle. Every miss — feature off, unknown
+    domain, disabled provider, malformed input — returns the same empty body,
+    so it reveals nothing about which domains an org has configured. Rate
+    limited like /login for the same reason.
+    """
+    svc = _identity_service(request)
+    empty = ResolveResult(provider=None)
+
+    cfg = await svc.auth_config() if hasattr(svc, "auth_config") else None
+    if cfg is None or not getattr(cfg, "email_first_login", False):
+        return empty
+    if not cfg.sso_enabled:
+        return empty
+
+    _local, _, domain = (body.email or "").partition("@")
+    if not domain:
+        return empty
+
+    resolver = getattr(svc, "resolve_email_domain", None)
+    if resolver is None:
+        return empty
+    try:
+        snap = await resolver(domain)
+    except Exception as exc:  # noqa: BLE001 — a lookup fault is not a leak
+        logger.warning("Email-domain resolve failed: %s", exc)
+        return empty
+    if snap is None or not snap.enabled:
+        return empty
+
+    return ResolveResult(provider=ProviderSummary(
+        id=snap.id, slug=snap.slug, display_name=snap.display_name,
+        kind=snap.kind, priority=snap.priority,
+        button_label=snap.button_label, button_icon=snap.button_icon,
+        config=_public_config(snap),
+    ))
+
+
 # ── /auth/{slug}/login ────────────────────────────────────────────────
 
 
@@ -624,11 +746,28 @@ async def oidc_callback(
     try:
         identity = await provider.fetch_identity(
             code=code,
-            code_verifier=flow["code_verifier"],
+            # The state token stores the PKCE verifier as ``cv`` (see
+            # ``create_oidc_state_token``); this read used the pre-token
+            # field name, so it raised KeyError — swallowed by the except
+            # below into ``token_or_idtoken:'code_verifier'``. Every OIDC
+            # sign-in failed there, and failed looking like an IdP problem.
+            code_verifier=flow["cv"],
             nonce=flow["nonce"],
         )
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
         return await _fail(f"token_or_idtoken:{exc}")
+
+    # A rehearsal stops here: the assertion has been verified, which is the
+    # half that actually breaks, and the rest is reported rather than done.
+    if _is_dryrun(request, provider_id=snap.id):
+        outcome = await svc.preview_sso_login(
+            identity, provider_id=snap.id,
+            linking_policy=snap.linking_policy,
+        )
+        resp = _dryrun_response(slug, outcome)
+        clear_oidc_cookie(resp)
+        clear_dryrun_cookie(resp)
+        return resp
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -730,6 +869,17 @@ async def saml_acs(slug: str, request: Request):
         )
     except Exception as exc:  # noqa: BLE001
         return await _fail(f"saml_validate:{exc}")
+
+    # See the OIDC callback: a rehearsal reports and stops.
+    if _is_dryrun(request, provider_id=snap.id):
+        outcome = await svc.preview_sso_login(
+            identity, provider_id=snap.id,
+            linking_policy=snap.linking_policy,
+        )
+        resp = _dryrun_response(slug, outcome)
+        clear_saml_cookie(resp)
+        clear_dryrun_cookie(resp)
+        return resp
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,

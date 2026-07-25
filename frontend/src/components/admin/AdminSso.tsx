@@ -16,7 +16,7 @@
  * Gated by RequirePermission perm="system:admin" in the route.
  */
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, History, Search, Settings, ShieldOff } from 'lucide-react'
+import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, FlaskConical, History, Search, Settings, ShieldOff } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -134,6 +134,24 @@ function ProvidersTab() {
         }
     }
 
+    async function dryRun(p: IdpProvider) {
+        if (!confirm(
+            `Sign in to ${p.slug} with your own account at that IdP.\n\n` +
+            'Nothing will be written and no session will be created — you ' +
+            'stay signed in here, and a new tab reports what would have ' +
+            'happened.',
+        )) return
+        setBusy(true)
+        try {
+            const { loginUrl } = await ssoAdminService.startDryRun(p.id)
+            window.open(loginUrl, '_blank', 'noopener')
+        } catch (err) {
+            setError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
     async function remove(p: IdpProvider) {
         if (!confirm(`Delete provider ${p.slug}? Linked users must unlink first.`)) return
         setBusy(true)
@@ -211,6 +229,15 @@ function ProvidersTab() {
                                     </button>
                                 </td>
                                 <td className="text-right whitespace-nowrap">
+                                    <button
+                                        onClick={() => { void dryRun(p) }}
+                                        disabled={busy || !p.enabled}
+                                        title="Rehearse a real sign-in — writes nothing"
+                                        aria-label={`Dry run ${p.slug}`}
+                                        className="mr-3 text-ink-muted hover:text-ink disabled:opacity-40"
+                                    >
+                                        <FlaskConical className="inline w-4 h-4" />
+                                    </button>
                                     <button
                                         onClick={() => setEditingId(
                                             editingId === p.id ? null : p.id,
@@ -637,6 +664,13 @@ function SettingsTab() {
             label: 'Allow JIT provisioning',
             description:
                 'When off, SSO logins for unknown subjects raise jit_disabled instead of creating a new user. Existing users keep working; admins must pre-create accounts (or invite).',
+            destructive: false,
+        },
+        {
+            field: 'emailFirstLogin',
+            label: 'Email-first sign-in',
+            description:
+                'Ask for an email address first and route to the matching provider, instead of showing every provider as a button. Set each provider’s email domains before turning this on — an address that matches nothing falls back to the password form, so nobody is stranded.',
             destructive: false,
         },
     ]
