@@ -290,7 +290,9 @@ function CustomProfileSettingsForm({
                     )}{' '}
                     Prefer a signed JWT unless you have no way to add one.
                     Every login through this path is recorded as{' '}
-                    <code>user.sso_unsigned_accepted</code>.
+                    <code>user.sso_unsigned_accepted</code>, and the provider
+                    becomes ineligible to grant platform admin roles through
+                    IdP group mappings.
                 </DangerToggle>
             )}
 
@@ -304,7 +306,9 @@ function CustomProfileSettingsForm({
                     this header from inbound requests before setting its own.
                     Confirm that it does — otherwise a request can name any user
                     it likes. Every login through this path is recorded as{' '}
-                    <code>user.sso_header_accepted</code>.
+                    <code>user.sso_header_accepted</code>, and the provider
+                    becomes ineligible to grant platform admin roles through
+                    IdP group mappings.
                 </DangerToggle>
             )}
         </div>

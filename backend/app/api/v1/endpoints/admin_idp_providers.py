@@ -25,6 +25,8 @@ from backend.app.db.repositories.idp_provider_repo import (
 )
 from backend.auth_service.interface import User
 from backend.auth_service.providers import (
+    ASSURANCE_DESCRIPTIONS,
+    assurance_for,
     apply_claim_mapping,
     ClaimMappingError,
     DEFAULT_OIDC,
@@ -60,6 +62,11 @@ class ProviderDTO(BaseModel):
     linking_policy: str = Field(alias="linkingPolicy")
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    # Derived from kind + settings on every read, never stored — a column
+    # would drift the moment an operator edits settings. See
+    # ``auth_service/providers/assurance.py``.
+    assurance: str
+    assurance_reason: str = Field(alias="assuranceReason")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -106,7 +113,10 @@ class TestMappingRequest(BaseModel):
 
 def _to_dto(row) -> ProviderDTO:
     settings = idp_provider_repo.decrypt_settings(row.settings)
+    level = assurance_for(row.kind, settings)
     return ProviderDTO(
+        assurance=level,
+        assurance_reason=ASSURANCE_DESCRIPTIONS.get(level, ""),
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,

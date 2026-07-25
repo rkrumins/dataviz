@@ -83,6 +83,7 @@ from ..providers import (
     ProviderNotFound,
     get_registry,
 )
+from ..providers.assurance import assurance_for
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,
@@ -586,6 +587,7 @@ async def oidc_callback(
             provider_slug=snap.slug,
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
         if str(exc) == "unsafe_auto_link":
@@ -686,6 +688,7 @@ async def saml_acs(slug: str, request: Request):
             provider_slug=snap.slug,
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
         if str(exc) == "unsafe_auto_link":
@@ -823,6 +826,7 @@ async def _custom_login_flow(
             provider_slug=snap.slug,
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
         return _fail(f"sso_login_rejected:{exc}")
@@ -904,6 +908,7 @@ async def _complete_custom_profile(
         provider_slug=snap.slug,
         linking_policy=snap.linking_policy,
         link_intent_user_id=link_intent_user_id,
+        assurance=assurance_for(snap.kind, snap.settings),
     )
 
 

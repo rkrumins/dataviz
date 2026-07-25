@@ -67,6 +67,12 @@ from .custom import (
     CustomSettings,
     build_custom_provider,
 )
+from .assurance import (
+    ASSURANCE_DESCRIPTIONS,
+    ASSURANCE_ORDER,
+    assurance_for,
+    at_least as assurance_at_least,
+)
 from .custom_profile import (
     BROWSER_STORAGE_SOURCES,
     SERVER_READ_SOURCES,
@@ -150,6 +156,10 @@ __all__ = [
     "build_custom_profile_provider",
     "BROWSER_STORAGE_SOURCES",
     "SERVER_READ_SOURCES",
+    "assurance_for",
+    "assurance_at_least",
+    "ASSURANCE_ORDER",
+    "ASSURANCE_DESCRIPTIONS",
     "ProviderRegistry",
     "ProviderConfigSnapshot",
     "ProviderConfigLoader",

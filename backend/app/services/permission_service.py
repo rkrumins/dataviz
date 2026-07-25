@@ -42,17 +42,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import (
     GroupMemberORM,
     GroupORM,
+    IdpProviderORM,
     RoleBindingORM,
 )
 from backend.app.db.repositories import (
     binding_repo,
     idp_group_mapping_repo,
+    idp_provider_repo,
     permission_repo,
     user_repo,
 )
 from backend.app.db.repositories.idp_group_mapping_repo import (
     FORBIDDEN_AUTO_ROLES,
 )
+from backend.auth_service.providers.assurance import (
+    UNVERIFIED,
+    VERIFIED,
+    assurance_for,
+    at_least as assurance_at_least,
+)
+from backend.common.roles import PLATFORM_ADMIN_ROLES
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +479,30 @@ async def simulate_for_user(
 # ── SSO group -> target reconciliation (Phase 3 — both targets) ──────
 
 
+async def _provider_assurance(
+    session: AsyncSession, provider_id: Optional[str],
+) -> str:
+    """Assurance level for a provider row, failing closed.
+
+    A missing provider_id, a missing row, or an unreadable settings blob all
+    resolve to ``unverified`` — the reconciler only uses this to decide
+    whether to WITHHOLD a platform-admin grant, so "we don't know" must
+    behave the same as "we know it's weak".
+    """
+    if not provider_id:
+        return UNVERIFIED
+    from sqlalchemy import select as sa_select
+
+    provider = (await session.execute(
+        sa_select(IdpProviderORM).where(IdpProviderORM.id == provider_id)
+    )).scalar_one_or_none()
+    if provider is None:
+        return UNVERIFIED
+    return assurance_for(
+        provider.kind, idp_provider_repo.decrypt_settings(provider.settings),
+    )
+
+
 async def reconcile_sso_targets(
     session: AsyncSession,
     *,
@@ -525,6 +558,12 @@ async def reconcile_sso_targets(
         session, provider_id=provider_id, idp_groups=idp_groups,
     )
 
+    # Resolved once, not per mapping. A provider whose assurance was
+    # downgraded after its mappings were written (an operator flipping
+    # trust_unsigned on) must stop granting platform admin from the very
+    # next login — the write-time check cannot see that happen.
+    provider_assurance = await _provider_assurance(session, provider_id)
+
     role_target_keys: set[tuple[str, str | None, str]] = set()
     group_target_ids: set[str] = set()
     for m in mappings:
@@ -548,6 +587,17 @@ async def reconcile_sso_targets(
                 logger.warning(
                     "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
                     m.role_name, m.idp_group, m.id,
+                )
+                continue
+            if (
+                m.role_name in PLATFORM_ADMIN_ROLES
+                and not assurance_at_least(provider_assurance, VERIFIED)
+            ):
+                logger.warning(
+                    "Refusing to auto-grant platform admin role %s from IdP "
+                    "group %s: provider %s has assurance '%s' (mapping id=%s)",
+                    m.role_name, m.idp_group, provider_id,
+                    provider_assurance, m.id,
                 )
                 continue
             if not m.role_name or not m.scope_type:

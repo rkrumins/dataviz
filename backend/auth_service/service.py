@@ -399,6 +399,7 @@ class LocalIdentityService:
         provider_slug: Optional[str] = None,
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
+        assurance: Optional[str] = None,
     ) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue
         a session.
@@ -678,6 +679,11 @@ class LocalIdentityService:
                     "provider_slug": provider_slug,
                     "auth_time": auth_time,
                     "groups": idp_groups,
+                    # How well we actually knew this person. Recorded on the
+                    # login itself so the question is answerable later without
+                    # reconstructing what the provider's settings were at the
+                    # time — they may have changed since.
+                    "assurance": assurance,
                 }
                 if reconcile_result is not None:
                     payload["reconcile"] = {

@@ -29,6 +29,7 @@ import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProviderForm } from './ProviderForm'
+import { AssurancePill } from './AssurancePill'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
 
@@ -126,7 +127,13 @@ function ProvidersTab() {
                             <tr className="border-t border-white/10">
                                 <td className="py-2 font-mono text-xs">{p.slug}</td>
                                 <td>{p.displayName}</td>
-                                <td>{p.kind}</td>
+                                <td className="whitespace-nowrap">
+                                    <span className="mr-2">{p.kind}</span>
+                                    <AssurancePill
+                                        level={p.assurance}
+                                        reason={p.assuranceReason}
+                                    />
+                                </td>
                                 <td className="text-xs">{p.linkingPolicy}</td>
                                 <td>
                                     <button

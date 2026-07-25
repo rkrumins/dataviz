@@ -39,9 +39,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import (
     GroupORM,
     IdpGroupRoleMappingORM,
+    IdpProviderORM,
     RoleORM,
 )
-from backend.common.roles import FORBIDDEN_AUTO_GRANT_ROLES
+from backend.app.db.repositories.idp_provider_repo import decrypt_settings
+from backend.auth_service.providers.assurance import (
+    ASSURANCE_DESCRIPTIONS,
+    VERIFIED,
+    assurance_for,
+    at_least as assurance_at_least,
+)
+from backend.common.roles import (
+    FORBIDDEN_AUTO_GRANT_ROLES,
+    PLATFORM_ADMIN_ROLES,
+)
 
 
 # Roles that are forever excluded from auto-grant via SSO. Admin grants
@@ -82,12 +93,60 @@ class MappingValidationError(ValueError):
 # ── Validation helpers (queried before insert) ──────────────────────
 
 
+async def _validate_provider_assurance(
+    session: AsyncSession, *, provider_id: Optional[str], role_name: str,
+) -> None:
+    """Refuse a platform-admin mapping from a provider that cannot prove
+    who anyone is.
+
+    An unsigned ``custom_profile`` row plus an ``org_admin`` group mapping is
+    a complete compromise assembled from two individually-reasonable admin
+    actions: whoever can write the storage key or cookie picks their own
+    group list, and the reconciler hands them the platform. Neither action
+    looks alarming on its own, which is exactly why the combination has to
+    be refused at the point where they meet.
+
+    Non-privileged roles are unaffected — a low-assurance IdP mapping to an
+    ordinary workspace role is a legitimate configuration.
+    """
+    if role_name not in PLATFORM_ADMIN_ROLES:
+        return
+    if provider_id is None:
+        # A mapping with no provider applies to every provider, including
+        # any unverified one added later. Refuse rather than resolve to
+        # "currently fine".
+        raise ForbiddenSsoRoleError(
+            f"'{role_name}' is a platform admin role and may not be mapped "
+            "from every provider at once; bind it to a specific verified "
+            "provider instead."
+        )
+    provider = (await session.execute(
+        select(IdpProviderORM).where(IdpProviderORM.id == provider_id)
+    )).scalar_one_or_none()
+    if provider is None:
+        raise MappingValidationError(
+            f"provider {provider_id!r} does not exist"
+        )
+    level = assurance_for(
+        provider.kind, decrypt_settings(provider.settings),
+    )
+    if not assurance_at_least(level, VERIFIED):
+        raise ForbiddenSsoRoleError(
+            f"provider '{provider.slug}' has assurance '{level}', so it may "
+            f"not auto-grant the platform admin role '{role_name}'. "
+            f"{ASSURANCE_DESCRIPTIONS.get(level, '')} "
+            "Use a provider whose identities are cryptographically verified, "
+            "or grant this role through the standard admin flow."
+        )
+
+
 async def _validate_role_binding_target(
     session: AsyncSession,
     *,
     role_name: str,
     scope_type: str,
     scope_id: Optional[str],
+    provider_id: Optional[str] = None,
 ) -> None:
     if not role_name:
         raise MappingValidationError("role_name is required for role_binding targets")
@@ -96,6 +155,9 @@ async def _validate_role_binding_target(
             f"IdP groups may not auto-grant {role_name!r}; "
             "grant it via the standard admin role-binding flow."
         )
+    await _validate_provider_assurance(
+        session, provider_id=provider_id, role_name=role_name,
+    )
     if scope_type not in {"global", "workspace"}:
         raise MappingValidationError(
             f"scope_type must be 'global' or 'workspace', got {scope_type!r}"
@@ -165,6 +227,7 @@ async def create_role_binding_mapping(
     """Create a mapping IdP group -> RoleBinding(scope, role)."""
     await _validate_role_binding_target(
         session, role_name=role_name, scope_type=scope_type, scope_id=scope_id,
+        provider_id=provider_id,
     )
     row = IdpGroupRoleMappingORM(
         provider_id=provider_id,

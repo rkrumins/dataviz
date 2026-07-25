@@ -16,6 +16,10 @@ export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
 /** Where a ``custom_profile`` row reads its payload from. Cookie and
  *  header are read server-side; the two storage sources need the
  *  browser to read the key and POST it. */
+/** How much a provider's word is worth — derived server-side from kind +
+ *  settings on every read, never stored. Ordered worst to best. */
+export type AssuranceLevel = 'unverified' | 'asserted' | 'verified'
+
 export type CustomProfileSource =
     | 'cookie' | 'local_storage' | 'session_storage' | 'header'
 
@@ -49,6 +53,10 @@ export interface IdpProvider {
     linkingPolicy: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     buttonLabel?: string | null
     buttonIcon?: string | null
+    /** Derived server-side; see AssuranceLevel. */
+    assurance: AssuranceLevel
+    /** One-line operator explanation of what that level means. */
+    assuranceReason: string
     createdAt: string
     updatedAt: string
 }
