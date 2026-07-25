@@ -1,18 +1,20 @@
 /**
- * AdminSso — minimal admin surface for SSO Phase 3.
+ * AdminSso — admin surface for the SSO configuration.
  *
- * Two tabs:
- *   * Providers — list + create / enable / disable / delete
+ * Four tabs:
+ *   * Providers — list + create / edit / enable / disable / delete
  *   * Group mappings — list + create (role_binding or group_membership)
+ *   * Settings — platform-wide SSO posture toggles
+ *   * Find user — lookup by email, claim attribute, or free text
  *
- * Claim-mapping editing + the /test endpoint live behind a "Preview"
- * link on each provider row; the editor itself is plain JSON for now
- * (richer UX is a follow-up).
+ * The provider create/edit form lives in ``ProviderForm``; the visual
+ * claim-mapping editor and its ``/test`` live preview live in
+ * ``ClaimMappingEditor``.
  *
  * Gated by RequirePermission perm="system:admin" in the route.
  */
-import { useCallback, useEffect, useState } from 'react'
-import { Trash2, Plus, Power, AlertCircle, Beaker, Search, Settings, ShieldOff } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, Search, Settings, ShieldOff } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -26,6 +28,7 @@ import { roleVisualFor } from '@/lib/roleVisual'
 import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { ProviderForm } from './ProviderForm'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
 
@@ -47,6 +50,7 @@ function ProvidersTab() {
     const [rows, setRows] = useState<IdpProvider[]>([])
     const [error, setError] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
+    const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
 
     const refresh = useCallback(async () => {
@@ -99,9 +103,10 @@ function ProvidersTab() {
                 </button>
             </div>
             {showCreate && (
-                <CreateProviderForm
-                    onCreated={() => { setShowCreate(false); void refresh() }}
+                <ProviderForm
+                    onSaved={() => { setShowCreate(false); void refresh() }}
                     onError={setError}
+                    onCancel={() => setShowCreate(false)}
                 />
             )}
             <table className="w-full text-sm">
@@ -117,160 +122,66 @@ function ProvidersTab() {
                 </thead>
                 <tbody>
                     {rows.map((p) => (
-                        <tr key={p.id} className="border-t border-white/10">
-                            <td className="py-2 font-mono text-xs">{p.slug}</td>
-                            <td>{p.displayName}</td>
-                            <td>{p.kind}</td>
-                            <td className="text-xs">{p.linkingPolicy}</td>
-                            <td>
-                                <button
-                                    onClick={() => toggleEnabled(p)}
-                                    disabled={busy}
-                                    className={
-                                        p.enabled
-                                            ? "text-emerald-400 text-xs"
-                                            : "text-ink-muted text-xs"
-                                    }
-                                >
-                                    <Power className="inline w-3.5 h-3.5 mr-1" />
-                                    {p.enabled ? 'on' : 'off'}
-                                </button>
-                            </td>
-                            <td className="text-right">
-                                <button
-                                    onClick={() => remove(p)}
-                                    disabled={busy}
-                                    className="text-red-400 hover:text-red-300"
-                                >
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
-                            </td>
-                        </tr>
+                        <Fragment key={p.id}>
+                            <tr className="border-t border-white/10">
+                                <td className="py-2 font-mono text-xs">{p.slug}</td>
+                                <td>{p.displayName}</td>
+                                <td>{p.kind}</td>
+                                <td className="text-xs">{p.linkingPolicy}</td>
+                                <td>
+                                    <button
+                                        onClick={() => toggleEnabled(p)}
+                                        disabled={busy}
+                                        className={
+                                            p.enabled
+                                                ? "text-emerald-400 text-xs"
+                                                : "text-ink-muted text-xs"
+                                        }
+                                    >
+                                        <Power className="inline w-3.5 h-3.5 mr-1" />
+                                        {p.enabled ? 'on' : 'off'}
+                                    </button>
+                                </td>
+                                <td className="text-right whitespace-nowrap">
+                                    <button
+                                        onClick={() => setEditingId(
+                                            editingId === p.id ? null : p.id,
+                                        )}
+                                        aria-label={`Edit ${p.slug}`}
+                                        className="mr-3 text-ink-muted hover:text-ink"
+                                    >
+                                        <Pencil className="inline w-4 h-4" />
+                                    </button>
+                                    <button
+                                        onClick={() => remove(p)}
+                                        disabled={busy}
+                                        aria-label={`Delete ${p.slug}`}
+                                        className="text-red-400 hover:text-red-300"
+                                    >
+                                        <Trash2 className="inline w-4 h-4" />
+                                    </button>
+                                </td>
+                            </tr>
+                            {editingId === p.id && (
+                                <tr>
+                                    <td colSpan={6} className="pb-4">
+                                        <ProviderForm
+                                            existing={p}
+                                            onSaved={() => {
+                                                setEditingId(null)
+                                                void refresh()
+                                            }}
+                                            onError={setError}
+                                            onCancel={() => setEditingId(null)}
+                                        />
+                                    </td>
+                                </tr>
+                            )}
+                        </Fragment>
                     ))}
                 </tbody>
             </table>
         </div>
-    )
-}
-
-
-function CreateProviderForm({
-    onCreated, onError,
-}: {
-    onCreated: () => void
-    onError: (e: string) => void
-}) {
-    const [slug, setSlug] = useState('')
-    const [displayName, setDisplayName] = useState('')
-    const [kind, setKind] = useState<'oidc' | 'saml2' | 'custom'>('oidc')
-    const [settingsJson, setSettingsJson] = useState('{\n  "issuer": "",\n  "client_id": "",\n  "client_secret": "",\n  "redirect_uri": ""\n}')
-    const [claimMappingJson, setClaimMappingJson] = useState('{}')
-    const [linkingPolicy, setLinkingPolicy] = useState<'strict' | 'allow_verified' | 'manual_only' | 'disabled'>('strict')
-    const [busy, setBusy] = useState(false)
-
-    async function submit(e: React.FormEvent) {
-        e.preventDefault()
-        let settings: Record<string, unknown> = {}
-        let claimMapping: Record<string, unknown> = {}
-        try {
-            settings = JSON.parse(settingsJson)
-            claimMapping = JSON.parse(claimMappingJson)
-        } catch (err) {
-            onError(`JSON parse error: ${(err as Error).message}`)
-            return
-        }
-        setBusy(true)
-        try {
-            await ssoAdminService.createProvider({
-                slug, displayName, kind, settings,
-                claimMapping, linkingPolicy,
-            })
-            onCreated()
-        } catch (err) {
-            onError((err as Error).message)
-        } finally {
-            setBusy(false)
-        }
-    }
-
-    return (
-        <form
-            onSubmit={submit}
-            className="p-4 rounded-xl border border-white/10 bg-white/5 space-y-3"
-        >
-            <div className="grid grid-cols-2 gap-3">
-                <label className="text-xs">
-                    Slug (URL-safe)
-                    <input
-                        className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                        value={slug}
-                        onChange={(e) => setSlug(e.target.value)}
-                        placeholder="entra-staff"
-                        required
-                    />
-                </label>
-                <label className="text-xs">
-                    Display name
-                    <input
-                        className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                        value={displayName}
-                        onChange={(e) => setDisplayName(e.target.value)}
-                        placeholder="Corporate Entra ID"
-                        required
-                    />
-                </label>
-                <label className="text-xs">
-                    Kind
-                    <select
-                        className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                        value={kind}
-                        onChange={(e) => setKind(e.target.value as 'oidc' | 'saml2' | 'custom')}
-                    >
-                        <option value="oidc">OIDC</option>
-                        <option value="saml2">SAML 2.0</option>
-                        <option value="custom">Custom (dev)</option>
-                    </select>
-                </label>
-                <label className="text-xs">
-                    Linking policy
-                    <select
-                        className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                        value={linkingPolicy}
-                        onChange={(e) => setLinkingPolicy(e.target.value as 'strict' | 'allow_verified' | 'manual_only' | 'disabled')}
-                    >
-                        <option value="strict">Strict (default)</option>
-                        <option value="allow_verified">Allow verified</option>
-                        <option value="manual_only">Manual only</option>
-                        <option value="disabled">Disabled (no linking)</option>
-                    </select>
-                </label>
-            </div>
-            <label className="block text-xs">
-                Settings (encrypted JSON)
-                <textarea
-                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                    rows={8}
-                    value={settingsJson}
-                    onChange={(e) => setSettingsJson(e.target.value)}
-                />
-            </label>
-            <label className="block text-xs">
-                Claim mapping (JSON; empty = use kind defaults)
-                <textarea
-                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                    rows={5}
-                    value={claimMappingJson}
-                    onChange={(e) => setClaimMappingJson(e.target.value)}
-                />
-            </label>
-            <button
-                type="submit"
-                disabled={busy}
-                className="px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm disabled:opacity-50"
-            >
-                Create provider
-            </button>
-        </form>
     )
 }
 

@@ -9,11 +9,39 @@ import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const ADMIN = '/api/v1/admin'
 
+/** Provider kinds the backend accepts — mirrors ``VALID_KINDS`` in
+ *  ``idp_provider_repo`` and the ``ck_idp_providers_kind`` CHECK. */
+export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+
+/** Where a ``custom_profile`` row reads its payload from. Cookie and
+ *  header are read server-side; the two storage sources need the
+ *  browser to read the key and POST it. */
+export type CustomProfileSource =
+    | 'cookie' | 'local_storage' | 'session_storage' | 'header'
+
+/** Typed view of a ``custom_profile`` row's settings blob. Every field
+ *  is optional because the admin form builds it up incrementally and
+ *  the server owns validation. */
+export interface CustomProfileSettings {
+    source?: CustomProfileSource
+    source_key?: string
+    encoding?: 'none' | 'base64url' | 'url'
+    payload_format?: 'jwt' | 'json'
+    trust_unsigned?: boolean
+    signing_alg?: 'HS256' | 'RS256'
+    shared_secret?: string
+    public_key?: string
+    issuer?: string
+    audience?: string
+    max_age_seconds?: number
+    trusted_proxy_acknowledged?: boolean
+}
+
 export interface IdpProvider {
     id: string
     slug: string
     displayName: string
-    kind: 'oidc' | 'saml2' | 'custom'
+    kind: IdpKind
     enabled: boolean
     priority: number
     settings: Record<string, unknown>     // secrets redacted as '********'
@@ -28,7 +56,7 @@ export interface IdpProvider {
 export interface CreateProviderInput {
     slug: string
     displayName: string
-    kind: 'oidc' | 'saml2' | 'custom'
+    kind: IdpKind
     settings?: Record<string, unknown>
     claimMapping?: Record<string, unknown>
     linkingPolicy?: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
@@ -197,7 +225,7 @@ export const ssoAdminService = {
         )
     },
 
-    getDefaultMapping(kind: 'oidc' | 'saml2' | 'custom'): Promise<Record<string, unknown>> {
+    getDefaultMapping(kind: IdpKind): Promise<Record<string, unknown>> {
         return request<Record<string, unknown>>(
             `${ADMIN}/idp-providers/defaults/${encodeURIComponent(kind)}`,
         )

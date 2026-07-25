@@ -39,7 +39,7 @@ from backend.app.db.repositories.connection_repo import (
 logger = logging.getLogger(__name__)
 
 
-VALID_KINDS = {"oidc", "saml2", "custom"}
+VALID_KINDS = {"oidc", "saml2", "custom", "custom_profile"}
 VALID_LINKING_POLICIES = {"strict", "allow_verified", "manual_only", "disabled"}
 
 # Fields whose values must never be sent to the UI. The set is
@@ -50,6 +50,7 @@ _SECRET_FIELDS = frozenset({
     "sp_private_key",
     "idp_x509_cert",   # not strictly secret but redacted to discourage tampering
     "sp_x509_cert",
+    "shared_secret",   # custom_profile HS256 signing key
 })
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")

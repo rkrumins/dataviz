@@ -61,6 +61,10 @@ const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage
 // inside the component (renders a "disabled" banner otherwise).
 const DevLogin = lazy(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
 
+// Landing page for a custom_profile provider whose payload lives in
+// browser storage — the backend 302s here from /auth/{slug}/login.
+const PortalLogin = lazy(() => import('@/pages/PortalLogin').then(m => ({ default: m.PortalLogin })))
+
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
   return (
@@ -104,6 +108,8 @@ export const router = createBrowserRouter([
   { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
   // Dev/demo mock IdP — gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED.
   { path: '/dev-login', element: <Lazy><DevLogin /></Lazy> },
+  // Custom-profile SSO landing page (reads the configured storage key).
+  { path: '/portal-login', element: <Lazy><PortalLogin /></Lazy> },
 
   // Authenticated routes (guarded by AppLayout)
   {

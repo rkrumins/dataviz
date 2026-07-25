@@ -1,9 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
-import { authService, type SsoProviderSummary } from '@/services/authService'
+import {
+    authService,
+    needsBrowserPayload,
+    readBrowserProfile,
+    type SsoProviderSummary,
+} from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
@@ -11,27 +16,44 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useFeature } from '@/store/features'
 
 
-// SSO is initiated by a top-level GET so the IdP redirect flow works
-// (a fetch would lose the cookie + redirect chain). The catalog comes
-// from /api/v1/auth/providers — only enabled providers are returned,
-// no client-side fan-out.
-function SsoButtons() {
-    const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
-    const [failed, setFailed] = useState(false)
+// Redirect-based SSO (oidc / saml2 / custom, and custom_profile rows
+// sourced from a cookie or header) is initiated by a top-level GET so
+// the IdP redirect flow works — a fetch would lose the cookie + redirect
+// chain. custom_profile rows sourced from browser storage are the
+// exception: only JS can read the key, so those POST it instead.
+// The catalog comes from /api/v1/auth/providers — only enabled
+// providers are returned, no client-side fan-out.
+function SsoButtons({
+    providers,
+    failed,
+    onPortalError,
+}: {
+    providers: SsoProviderSummary[] | null
+    failed: boolean
+    onPortalError: (message: string) => void
+}) {
+    const navigate = useNavigate()
+    const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
+    const [busySlug, setBusySlug] = useState<string | null>(null)
 
-    useEffect(() => {
-        let cancelled = false
-        authService.listProviders()
-            .then((rows) => {
-                if (!cancelled) setProviders(rows)
-            })
-            .catch(() => {
-                if (!cancelled) setFailed(true)
-            })
-        return () => {
-            cancelled = true
+    // ``custom_profile`` providers backed by browser storage can't use a
+    // top-level GET — only JS can read the key. Read it, post it, then
+    // navigate ourselves once the session cookies are set.
+    async function signInWithPortal(p: SsoProviderSummary) {
+        const payload = readBrowserProfile(p)
+        if (!payload) {
+            onPortalError(
+                `No ${p.displayName} session found in this browser. ` +
+                'Sign in to the portal first, then try again.',
+            )
+            return
         }
-    }, [])
+        onPortalError('')
+        setBusySlug(p.slug)
+        const ok = await loginWithBrowserProfile(p.slug, payload)
+        setBusySlug(null)
+        if (ok) navigate('/', { replace: true })
+    }
 
     const next = encodeURIComponent('/dashboard')
     const customEnabled =
@@ -56,20 +78,40 @@ function SsoButtons() {
                 Or sign in with
             </p>
             {(providers ?? []).map((p) => (
-                <a
-                    key={p.id}
-                    href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
-                    className={cn(
-                        "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                        "rounded-xl border text-sm font-medium transition-colors",
-                        p.kind === 'custom'
-                            ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
-                            : "border-white/20 text-ink hover:bg-white/5",
-                    )}
-                >
-                    {p.buttonLabel || p.displayName}
-                    <ExternalLink className="w-3.5 h-3.5 opacity-50" />
-                </a>
+                needsBrowserPayload(p) ? (
+                    <button
+                        key={p.id}
+                        type="button"
+                        disabled={busySlug === p.slug}
+                        onClick={() => { void signInWithPortal(p) }}
+                        className={cn(
+                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
+                            "rounded-xl border text-sm font-medium transition-colors",
+                            "border-white/20 text-ink hover:bg-white/5",
+                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                        )}
+                    >
+                        {p.buttonLabel || p.displayName}
+                        {busySlug === p.slug
+                            ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                            : <ChevronRight className="w-3.5 h-3.5 opacity-50" />}
+                    </button>
+                ) : (
+                    <a
+                        key={p.id}
+                        href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
+                        className={cn(
+                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
+                            "rounded-xl border text-sm font-medium transition-colors",
+                            p.kind === 'custom'
+                                ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
+                                : "border-white/20 text-ink hover:bg-white/5",
+                        )}
+                    >
+                        {p.buttonLabel || p.displayName}
+                        <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                    </a>
+                )
             ))}
             {/* Dev-login button is always offered when the env flag is
                 set, even if no ``custom`` provider exists yet — clicking
@@ -128,6 +170,27 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
     )
 }
 
+/** Session-scoped guard so a rejected auto-attempt can't relaunch on
+ *  every render or on a bounce back to /login. A fresh tab retries. */
+const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
+
+function autoPortalAlreadyTried(): boolean {
+    try {
+        return window.sessionStorage.getItem(AUTO_PORTAL_SENTINEL) === '1'
+    } catch {
+        return false
+    }
+}
+
+function markAutoPortalTried() {
+    try {
+        window.sessionStorage.setItem(AUTO_PORTAL_SENTINEL, '1')
+    } catch {
+        // Storage unavailable — the worst case is one retry per render
+        // cycle guarded by the in-flight ref below.
+    }
+}
+
 export function LoginPage() {
     const signupEnabled = useFeature('signupEnabled')
     const brand = useBrand()
@@ -136,7 +199,44 @@ export function LoginPage() {
     const navigate = useNavigate()
     const [params] = useSearchParams()
 
-    const { login, error, clearError, isLoading, isAuthenticated, status } = useAuthStore()
+    const {
+        login, error, clearError, isLoading, isAuthenticated, status,
+        loginWithBrowserProfile,
+    } = useAuthStore()
+
+    const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
+    const [providersFailed, setProvidersFailed] = useState(false)
+    const [portalError, setPortalError] = useState<string | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+        authService.listProviders()
+            .then((rows) => { if (!cancelled) setProviders(rows) })
+            .catch(() => { if (!cancelled) setProvidersFailed(true) })
+        return () => { cancelled = true }
+    }, [])
+
+    // Silent portal sign-in: on an internal deployment the corporate
+    // portal has already written the profile, so the login form is a
+    // speed bump. Attempt it once per tab when exactly one storage-
+    // backed provider is configured and its key is present. A rejection
+    // falls through to the normal form rather than looping.
+    const autoAttempted = useRef(false)
+    useEffect(() => {
+        if (providers === null || autoAttempted.current) return
+        if (isAuthenticated || autoPortalAlreadyTried()) return
+
+        const candidates = providers.filter(needsBrowserPayload)
+        if (candidates.length !== 1) return
+        const payload = readBrowserProfile(candidates[0])
+        if (!payload) return
+
+        autoAttempted.current = true
+        markAutoPortalTried()
+        void loginWithBrowserProfile(candidates[0].slug, payload).then((ok) => {
+            if (ok) navigate('/', { replace: true })
+        })
+    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])
 
     // Read ``?error_code=...&email=...`` from the SSO failure redirect
     // path. The collision modal is the most user-actionable case; other
@@ -322,7 +422,18 @@ export function LoginPage() {
                         provider that isn't configured, and we render
                         the buttons unconditionally because the user has
                         the most context about which their org uses. */}
-                    <SsoButtons />
+                    <SsoButtons
+                        providers={providers}
+                        failed={providersFailed}
+                        onPortalError={setPortalError}
+                    />
+
+                    {portalError && (
+                        <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <p>{portalError}</p>
+                        </div>
+                    )}
 
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">

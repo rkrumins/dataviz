@@ -716,6 +716,16 @@ class LocalIdentityService:
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
 
+    async def emit_audit(self, event_type: str, payload: dict) -> None:
+        """Public entry point to the standalone-transaction audit path.
+
+        Used by routes that need to record a fact about *how* a login
+        was accepted (e.g. an unsigned or header-sourced profile) before
+        the login itself is attempted, so the record survives a
+        subsequent rejection.
+        """
+        await self._emit_audit(event_type, payload)
+
     # ── Identity helpers (refresh path) ──────────────────────────────
 
     async def _latest_identity_slug(

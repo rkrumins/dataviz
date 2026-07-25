@@ -1200,7 +1200,7 @@ class IdpProviderORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"idp_{uuid.uuid4().hex[:12]}")
     slug = Column(Text, nullable=False)                     # URL-safe id used in /auth/{slug}/login
     display_name = Column(Text, nullable=False)             # 'Corporate Entra ID'
-    kind = Column(Text, nullable=False)                     # oidc | saml2 | custom
+    kind = Column(Text, nullable=False)                     # oidc | saml2 | custom | custom_profile
     enabled = Column(Boolean, nullable=False, default=True)
     priority = Column(Integer, nullable=False, default=100)
     # Fernet-encrypted JSON of kind-specific settings. The repo wraps
@@ -1223,7 +1223,7 @@ class IdpProviderORM(Base):
         UniqueConstraint("slug", name="uq_idp_providers_slug"),
         Index("idx_idp_providers_kind_enabled", "kind", "enabled"),
         CheckConstraint(
-            "kind IN ('oidc', 'saml2', 'custom')",
+            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile')",
             name="ck_idp_providers_kind",
         ),
         CheckConstraint(

@@ -54,10 +54,48 @@ export interface SsoProviderSummary {
     id: string
     slug: string
     displayName: string
-    kind: string                 // 'oidc' | 'saml2' | 'custom'
+    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile'
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
+    /** Non-secret, per-kind hints needed to start the flow. Only
+     *  ``custom_profile`` populates it today: ``source`` always, plus
+     *  ``sourceKey`` when the payload lives in browser storage and the
+     *  client is the one that has to read it. */
+    config?: {
+        source?: string
+        sourceKey?: string
+    }
+}
+
+/** Sources whose payload only JavaScript can reach — cookie and header
+ *  sources are read server-side and complete as a plain redirect. */
+export const BROWSER_STORAGE_SOURCES = ['local_storage', 'session_storage']
+
+/** True when this provider needs the client to read a storage key and
+ *  POST it, rather than just following ``/auth/{slug}/login``. */
+export function needsBrowserPayload(p: SsoProviderSummary): boolean {
+    return (
+        p.kind === 'custom_profile' &&
+        BROWSER_STORAGE_SOURCES.includes(p.config?.source ?? '')
+    )
+}
+
+/** Read a custom-profile payload out of the browser store the provider
+ *  is configured against. Returns null when the key is absent — that
+ *  means "no portal session here", not an error. */
+export function readBrowserProfile(p: SsoProviderSummary): string | null {
+    const key = p.config?.sourceKey
+    if (!key) return null
+    try {
+        const store = p.config?.source === 'session_storage'
+            ? window.sessionStorage
+            : window.localStorage
+        return store.getItem(key)
+    } catch {
+        // Storage can throw in private-mode / blocked-cookie browsers.
+        return null
+    }
 }
 
 /** One linked identity on the current user. */
@@ -203,6 +241,24 @@ export const authService = {
      *  buttons. Returns ``[]`` when the registry is unconfigured. */
     listProviders(): Promise<SsoProviderSummary[]> {
         return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
+    },
+
+    /**
+     * Complete a ``custom_profile`` login from a payload the browser
+     * read out of local/sessionStorage.
+     *
+     * A fetch rather than a top-level navigation because only JS can
+     * reach web storage; the session cookies ride back on the response
+     * and the caller navigates itself. The payload is opaque to us —
+     * signature and freshness are checked server-side.
+     */
+    loginWithBrowserProfile(
+        providerSlug: string, payload: string,
+    ): Promise<SessionResponse> {
+        return request<SessionResponse>(
+            `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
+            { method: 'POST', body: JSON.stringify({ payload }) },
+        )
     },
 
     /** Logged-in user's linked SSO identities + whether they have a

@@ -22,7 +22,8 @@ operators standing up a new IdP.
 > read, extend, test, and debug it*.
 
 The SSO surface today: **OIDC** (Authlib, Authorization Code + PKCE + JWKS
-verify) and **SAML2** (python3-saml strict mode) alongside local password
+verify), **SAML2** (python3-saml strict mode) and **custom profile**
+(cookie / browser storage / proxy header) alongside local password
 auth; DB-backed per-row IdP providers plus a custom dev IdP; multi-identity
 per user; configurable claim mapping with indexed attribute pass-through;
 group→role and group→internal-group mapping; 24h SSO re-authentication;
@@ -83,6 +84,7 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 | `local` | argon2id over email+password | default; everyone has it unless `allow_local_login=false` |
 | `oidc` | Authorization Code + PKCE + JWKS verify | Entra ID, Auth0, Ping, Keycloak, Okta-OIDC |
 | `saml2` | python3-saml strict mode + replay cache | ADFS, OneLogin, Okta-SAML, PingFederate |
+| `custom_profile` | profile handed over via cookie / browser storage / proxy header | internal deployments where a corporate portal or auth proxy already authenticated the user |
 | `custom` | HS256-signed cookie envelope (dev/demo only) | local development, CI smoke, demo videos |
 
 Every provider is one row in `idp_providers`. The runtime
@@ -274,6 +276,8 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `user.sso_linked` | existing user auto-linked to a new SSO identity |
 | `user.sso_link_denied` | unsafe_auto_link rejected (payload carries deny_reasons) |
 | `user.sso_jit_blocked` | JIT refused because `allow_jit_provisioning=false` |
+| `user.sso_unsigned_accepted` | `custom_profile` login accepted an unsigned payload (`trust_unsigned`) |
+| `user.sso_header_accepted` | `custom_profile` login trusted a proxy-injected header |
 | `user.sso_session_expired` | 24h ceiling hit during /refresh |
 | `user.identity.linked` / `user.identity.unlinked` | self-service link/unlink |
 | `user.identity.admin_linked` / `user.identity.admin_unlinked` | admin link/unlink |
@@ -383,10 +387,12 @@ ahead of every `helm install/upgrade`.
        }
      }
      ```
-3. Register the redirect URI at the IdP. Use the **Test** button
-   (POST `/admin/idp-providers/{id}/test`) to paste a sample
-   id_token claims blob and confirm the mapping resolves to the
-   expected `ProviderIdentity` (incl. `attributes`).
+3. Register the redirect URI at the IdP. Use the claim-mapping
+   editor's **Preview** button (POST `/admin/idp-providers/{id}/test`)
+   to paste a sample id_token claims blob and confirm the mapping
+   resolves to the expected `ProviderIdentity` (incl. `attributes`).
+   Preview needs a saved row, so create the provider first, then reopen
+   it with the row's edit (pencil) action.
 4. Toggle **Enabled** on; the login page picks it up within 60 s
    (registry TTL).
 
@@ -411,6 +417,88 @@ ahead of every `helm install/upgrade`.
    `GET /api/v1/auth/okta-prod/metadata` returns it.
 4. Smoke test with `/admin/idp-providers/{id}/test` (paste a SAML
    attribute statement as the `claims` blob).
+
+### 2.2.1 Configure a custom profile provider (cookie / storage / header)
+
+For internal deployments where there is no IdP redirect at all: a
+corporate portal or auth proxy has already authenticated the user and
+simply hands the profile over. Field names vary per enterprise, so the
+mapping is configured in the admin UI rather than in code.
+
+> **Read this first.** A payload in `localStorage` — or in a forgeable
+> header — is **not** an authentication. Anyone who can open a browser
+> console can write a storage key, and any client can send a header
+> unless your proxy strips inbound copies. The default therefore expects
+> a **signed JWT**, verified server-side; the transport is then just
+> transport. The two escape hatches below (`trust_unsigned`,
+> `trusted_proxy_acknowledged`) each require an explicit toggle in the
+> admin UI and emit their own audit event on every login.
+
+1. Admin → SSO → Providers → **Add provider**, kind
+   `Custom profile (cookie / browser storage / header)`.
+2. Pick the **source**:
+
+   | Source | Read by | Login flow |
+   |---|---|---|
+   | `cookie` | server, off the request | plain 302 through `/auth/{slug}/login`; works with `HttpOnly` |
+   | `header` | server, off the request | plain 302; requires `trusted_proxy_acknowledged` |
+   | `local_storage` | the browser (JS) | bounces to `/portal-login`, which POSTs to `/auth/{slug}/browser-profile` |
+   | `session_storage` | the browser (JS) | same as `local_storage` |
+
+   One source per row. Multiple rows of this kind are fine — run a
+   cookie provider and a storage provider side by side if you need to.
+3. Set **source key** — the cookie name, storage key, or header name.
+4. Settings, for the signed (recommended) case:
+   ```json
+   {
+     "source":          "local_storage",
+     "source_key":      "corp.user",
+     "payload_format":  "jwt",
+     "signing_alg":     "HS256",
+     "shared_secret":   "<the secret the portal signs with>",
+     "issuer":          "https://portal.corp.example",
+     "audience":        "dataviz",
+     "max_age_seconds": 300,
+     "encoding":        "none"
+   }
+   ```
+   * `exp` is **required** on every payload. `max_age_seconds`
+     independently bounds `iat`, so a portal minting a year-long token
+     still can't hand out a year-long session. `0` disables that check.
+   * `encoding` handles cookies that carry `base64url` or URL-encoded
+     JSON, since a raw JSON blob isn't a legal cookie value.
+   * `signing_alg: "RS256"` swaps `shared_secret` for `public_key` (PEM).
+   * `issuer` / `audience` are enforced only when set.
+5. Map the fields. The **Profile field mapping** editor lists our fields
+   against ordered candidate keys — first non-empty wins. Defaults
+   already cover the common casings (`firstName` / `first_name` /
+   `givenName`, `emailAddress` / `mail` / `upn`, `fullName` split into
+   first + last), so most portals need no override. For a storage
+   source, **Read from my browser** pulls the real object out of your own
+   browser so you can map against it; **Preview** resolves it through
+   the mapping server-side and shows the resulting profile.
+6. Anything else worth keeping (department, employee ID) goes under
+   **Extra attributes** — those land in `users.metadata_.attributes` and
+   the indexed `user_external_attributes` table, so Admin → SSO → Find
+   user can search on them.
+7. Toggle **Enabled** on. The login page picks it up within 60 s.
+
+Note on `external_id`: it is the durable join key for
+`user_identities`, so it must be stable per user. If the portal has no
+subject id, the default candidate list falls back to `email` — workable,
+but a renamed mailbox then reads as a new user.
+
+**Unsigned payloads.** If the portal genuinely cannot sign, set
+`payload_format: "json"` and tick **Trust unsigned payloads**. Understand
+what you are accepting: any user of the app can become any other user,
+including an administrator, network isolation notwithstanding. Every such
+login is audited as `user.sso_unsigned_accepted`.
+
+**Proxy headers.** `source: "header"` requires
+`trusted_proxy_acknowledged: true`. Only tick it once you have confirmed
+your proxy strips the header from inbound requests before setting its
+own — otherwise a request can name any user it likes. Audited as
+`user.sso_header_accepted`.
 
 ### 2.3 Set up IdP group → role mapping
 
@@ -524,17 +612,17 @@ JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_oidc_provider.py \
   backend/tests/test_oidc_login_flow.py \
   backend/tests/test_auth_cookie_flow.py \
-  backend/tests/test_auth_service_isolation.py
+  backend/tests/test_auth_service_isolation.py \
+  backend/tests/test_sso_custom_profile.py
 ```
 
-Expected: 96 passing.
+Expected: 149 passing.
 
 ```bash
-# Frontend sessionStorage cache
-cd frontend && npx vitest run src/store/
+# Frontend: session cache, the claim mapper UI, and the silent
+# custom_profile sign-in (including its anti-loop guard).
+cd frontend && npx vitest run src/store/ src/components/admin/ src/components/auth/
 ```
-
-Expected: 19 passing.
 
 ### 3.2 Architectural invariants
 
@@ -665,6 +753,7 @@ backend/auth_service/
     oidc.py              # Authorization Code + PKCE + JWKS verify
     saml2.py             # python3-saml strict + replay cache
     custom.py            # dev/demo cookie envelope
+    custom_profile.py    # cookie / browser storage / proxy header ingest
     local.py             # email + password
   app_auth_config.py     # AuthConfigSnapshot + provider Protocol + CachedAuthConfigProvider
   service.py             # LocalIdentityService (orchestrates login/refresh/SSO)
@@ -713,6 +802,10 @@ frontend/src/
   services/fetchWithTimeout.ts   # 401 silent refresh + sso_reauth_required redirect
   pages/MyIdentitiesPage.tsx     # /me/identities
   pages/DevLogin.tsx             # /dev-login (custom IdP)
+  pages/PortalLogin.tsx          # /portal-login (custom_profile web storage)
   components/admin/AdminSso.tsx  # Providers / Mappings / Settings / Find user tabs
+  components/admin/ProviderForm.tsx      # create + edit, kind-aware settings
+  components/admin/ClaimMappingEditor.tsx # visual field mapper + live preview
   components/auth/LoginPage.tsx  # dynamic SSO buttons + collision modal
+                                 # + one-shot silent custom_profile sign-in
 ```

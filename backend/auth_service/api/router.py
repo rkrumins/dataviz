@@ -14,6 +14,7 @@ SSO flows are slug-routed:
   GET  /auth/{slug}/metadata                -> SAML SP metadata
   GET|POST /auth/{slug}/sls                 -> SAML SLO
   POST /auth/{slug}/mock                    -> custom dev cookie planter
+  POST /auth/{slug}/browser-profile         -> custom_profile web-storage login
 
 Self-service identity linking (logged-in users only):
 
@@ -38,7 +39,7 @@ from typing import Optional
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -83,6 +84,11 @@ from ..providers import (
     get_registry,
 )
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
+from ..providers.custom_profile import (
+    BROWSER_STORAGE_SOURCES,
+    CustomProfileError,
+    CustomProfileProvider,
+)
 from ..providers.oidc import OidcProvider
 
 # SAML import is best-effort; the registry will refuse to materialise
@@ -130,6 +136,10 @@ class ProviderSummary(BaseModel):
     priority: int = 100
     button_label: Optional[str] = None
     button_icon: Optional[str] = None
+    # Non-secret, per-kind hints the login UI needs to start the flow.
+    # Populated from a strict whitelist (see ``_public_config``) — never
+    # the raw settings dict, which holds secrets.
+    config: dict = Field(default_factory=dict)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -143,6 +153,24 @@ def _identity_service(request: Request) -> IdentityService:
             "Set it during startup (see backend/app/main.py)."
         )
     return svc
+
+
+def _public_config(snap) -> dict:
+    """Non-secret settings the login UI needs to start a flow.
+
+    Strictly whitelisted per kind. ``custom_profile`` rows that read
+    from browser storage need the storage key client-side; nothing else
+    from ``settings`` is ever exposed, because that dict also holds
+    ``shared_secret``.
+    """
+    if snap.kind != "custom_profile":
+        return {}
+    settings = snap.settings or {}
+    source = str(settings.get("source") or "cookie")
+    out: dict = {"source": source}
+    if source in BROWSER_STORAGE_SOURCES:
+        out["sourceKey"] = str(settings.get("source_key") or "")
+    return out
 
 
 def _safe_next(raw: str | None) -> str:
@@ -397,6 +425,7 @@ async def list_providers(request: Request):
             id=s.id, slug=s.slug, display_name=s.display_name,
             kind=s.kind, priority=s.priority,
             button_label=s.button_label, button_icon=s.button_icon,
+            config=_public_config(s),
         )
         for s in snaps
     ]
@@ -479,6 +508,11 @@ async def sso_login(
 
     if isinstance(provider, CustomIdentityProvider):
         return await _custom_login_flow(
+            request, slug=slug, provider=provider, next_path=next_path,
+        )
+
+    if isinstance(provider, CustomProfileProvider):
+        return await _custom_profile_login_flow(
             request, slug=slug, provider=provider, next_path=next_path,
         )
 
@@ -796,3 +830,205 @@ async def _custom_login_flow(
         clear_link_intent_cookie(response)
     logger.info("Custom IdP login succeeded (slug=%s, user=%s)", slug, user.id)
     return response
+
+
+# ── Custom profile IdP (cookie / browser storage / header) ───────────
+
+
+class _BrowserProfileBody(BaseModel):
+    """Payload the login page reads out of local/sessionStorage and
+    posts back. Opaque to the client — it's verified server-side."""
+    payload: str
+
+
+async def _audit_degraded_trust(
+    svc, *, provider, snap, via: str,
+) -> None:
+    """Record that a login was accepted through a channel we cannot
+    cryptographically verify, before attempting the login itself.
+
+    Two independent escape hatches exist and each gets its own event so
+    an auditor can grep for either: an unsigned payload
+    (``trust_unsigned``) and a proxy-injected header
+    (``trusted_proxy_acknowledged``). Best-effort — an audit failure
+    must never block a login.
+    """
+    emit = getattr(svc, "emit_audit", None)
+    if emit is None:
+        return
+    events: list[str] = []
+    if provider.settings.payload_format == "json":
+        events.append("user.sso_unsigned_accepted")
+    if provider.settings.source == "header":
+        events.append("user.sso_header_accepted")
+    for event_type in events:
+        try:
+            await emit(event_type, {
+                "provider_id": snap.id,
+                "provider_slug": snap.slug,
+                "source": provider.settings.source,
+                "source_key": provider.settings.source_key,
+                "via": via,
+            })
+        except Exception as exc:  # noqa: BLE001 — audit is best-effort
+            logger.warning("Degraded-trust audit failed (slug=%s): %s",
+                           snap.slug, exc)
+
+
+async def _complete_custom_profile(
+    request: Request, *, identity, provider: CustomProfileProvider, snap,
+):
+    """Shared tail for both custom-profile entry points: audit the trust
+    posture, resolve any link intent, mint the session.
+
+    Raises ``SSOAuthError`` when the service refuses the login; the two
+    callers render that differently (redirect vs JSON), so it isn't
+    swallowed here.
+    """
+    svc = _identity_service(request)
+    await _audit_degraded_trust(
+        svc, provider=provider, snap=snap, via=provider.settings.source,
+    )
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
+    return await svc.complete_sso_login(
+        identity,
+        provider_id=snap.id,
+        provider_slug=snap.slug,
+        linking_policy=snap.linking_policy,
+        link_intent_user_id=link_intent_user_id,
+    )
+
+
+async def _custom_profile_login_flow(
+    request: Request, *, slug: str, provider: CustomProfileProvider,
+    next_path: str,
+) -> Response:
+    """``GET /auth/{slug}/login`` for a custom-profile row.
+
+    Cookie and header sources are readable server-side, so they complete
+    right here as a plain redirect — no JS, and it works with an
+    HttpOnly corporate cookie. Browser-storage sources can't be read
+    from the server, so we bounce to the frontend page that reads the
+    key and posts it to ``/{slug}/browser-profile``.
+
+    Both paths matter for the 24h SSO re-auth bounce, which sends the
+    browser to this endpoint with ``force=1``.
+    """
+    snap = await _provider_snapshot(slug)
+    source = provider.settings.source
+
+    if source in BROWSER_STORAGE_SOURCES:
+        from urllib.parse import quote
+        target = f"/portal-login?next={quote(next_path)}&slug={quote(slug)}"
+        return RedirectResponse(target, status_code=status.HTTP_302_FOUND)
+
+    raw = (
+        request.headers.get(provider.settings.source_key)
+        if source == "header"
+        else request.cookies.get(provider.settings.source_key)
+    )
+
+    def _fail(reason: str) -> RedirectResponse:
+        logger.info("Custom profile login failed (slug=%s): %s", slug, reason)
+        return RedirectResponse(
+            _LOGIN_FAILURE_PATH, status_code=status.HTTP_302_FOUND,
+        )
+
+    if not raw:
+        return _fail(f"payload_missing_from_{source}")
+
+    try:
+        identity = provider.fetch_identity(raw)
+    except CustomProfileError as exc:
+        return _fail(f"payload_rejected:{exc}")
+
+    try:
+        user, tokens = await _complete_custom_profile(
+            request, identity=identity, provider=provider, snap=snap,
+        )
+    except SSOAuthError as exc:
+        if str(exc) == "unsafe_auto_link":
+            # Same recovery path as the OIDC callback: the login page
+            # renders the collision modal off these query params.
+            from urllib.parse import quote as _quote
+            logger.info("Custom profile login failed (slug=%s): %s", slug, exc)
+            return RedirectResponse(
+                f"/login?error_code=unsafe_auto_link&email={_quote(identity.email)}",
+                status_code=status.HTTP_302_FOUND,
+            )
+        return _fail(f"sso_login_rejected:{exc}")
+
+    response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
+    set_session_cookies(response, tokens)
+    if read_link_intent_cookie(request) is not None:
+        clear_link_intent_cookie(response)
+    logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
+                slug, user.id, source)
+    return response
+
+
+@router.post("/{slug}/browser-profile", response_model=SessionResponse,
+             response_model_by_alias=True)
+@limiter.limit("10/minute")
+async def custom_profile_browser_login(
+    slug: str,
+    request: Request,
+    response: Response,
+    body: _BrowserProfileBody,
+):
+    """Complete a custom-profile login from a payload the browser read
+    out of local/sessionStorage.
+
+    This is a fetch rather than a redirect because only JS can reach web
+    storage; the session cookies ride back on the response and the
+    caller navigates itself.
+
+    Rejected unless the row is a ``custom_profile`` whose source really
+    is browser storage — otherwise this endpoint would let a client hand
+    us a payload for a cookie- or header-sourced provider, bypassing the
+    channel the operator chose.
+    """
+    provider = await _resolve_provider(slug, request=request)
+    if not isinstance(provider, CustomProfileProvider):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Not a custom profile provider",
+        )
+    if provider.settings.source not in BROWSER_STORAGE_SOURCES:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Provider does not read its profile from browser storage",
+        )
+    snap = await _provider_snapshot(slug)
+
+    try:
+        identity = provider.fetch_identity(body.payload)
+    except CustomProfileError as exc:
+        # The precise reason is audited, not returned — a caller poking
+        # at this endpoint shouldn't learn why their payload failed.
+        logger.info("Custom profile login failed (slug=%s): %s", slug, exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "profile_rejected"},
+        )
+
+    try:
+        user, tokens = await _complete_custom_profile(
+            request, identity=identity, provider=provider, snap=snap,
+        )
+    except SSOAuthError as exc:
+        logger.info("Custom profile login rejected (slug=%s): %s", slug, exc)
+        detail: dict = {"error": str(exc)}
+        if str(exc) == "unsafe_auto_link":
+            detail["email"] = identity.email
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
+        )
+
+    set_session_cookies(response, tokens)
+    if read_link_intent_cookie(request) is not None:
+        clear_link_intent_cookie(response)
+    logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
+                slug, user.id, provider.settings.source)
+    return SessionResponse(user=user)

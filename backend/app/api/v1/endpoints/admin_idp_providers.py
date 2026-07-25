@@ -30,6 +30,7 @@ from backend.auth_service.providers import (
     DEFAULT_OIDC,
     DEFAULT_SAML,
     DEFAULT_CUSTOM,
+    DEFAULT_CUSTOM_PROFILE,
     get_registry,
 )
 
@@ -141,7 +142,12 @@ async def get_default_mapping(
 ):
     """Return the default claim mapping for a kind so the admin UI can
     pre-fill the editor when an operator starts a fresh provider."""
-    defaults = {"oidc": DEFAULT_OIDC, "saml2": DEFAULT_SAML, "custom": DEFAULT_CUSTOM}
+    defaults = {
+        "oidc": DEFAULT_OIDC,
+        "saml2": DEFAULT_SAML,
+        "custom": DEFAULT_CUSTOM,
+        "custom_profile": DEFAULT_CUSTOM_PROFILE,
+    }
     mapping = defaults.get(kind)
     if mapping is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown kind")

@@ -1004,8 +1004,27 @@ overrides.
 5. Wire the slug routes (`/auth/{slug}/...`) — most are kind-agnostic
    already; add new ones if your kind needs additional bindings
    (e.g. SAML `metadata` / `acs` / `sls`).
-6. Update `claim_mapper.DEFAULT_OAUTH2`.
-7. Add tests + a recipe to `SSO.md`.
+6. Update `claim_mapper.DEFAULT_OAUTH2` and register it in
+   `KIND_DEFAULTS`, plus the defaults map in
+   `admin_idp_providers.get_default_mapping` so the admin editor can
+   pre-fill it.
+7. Add any new secret field names to `idp_provider_repo._SECRET_FIELDS`
+   so they're redacted on the way back to the UI.
+8. Add the kind to `IdpKind` in `frontend/src/services/ssoAdminService.ts`
+   and to the `<select>` in `components/admin/ProviderForm.tsx`.
+9. Add tests + a recipe to `SSO.md`.
+
+`custom_profile` (`providers/custom_profile.py`) is the most recent
+worked example of all nine steps — including a kind that needs a
+non-redirect entry point (`POST /auth/{slug}/browser-profile`) and a
+kind-specific settings form rather than the JSON textarea.
+
+**Adding a new source to `custom_profile`** is much smaller than a new
+kind: add it to `VALID_SOURCES` (and to `BROWSER_STORAGE_SOURCES` if
+only JS can read it), teach `_custom_profile_login_flow` how to pull the
+raw string out of the request, and add the label to `SOURCE_LABELS` in
+`ProviderForm.tsx`. Everything downstream — verification, mapping,
+linking, reconciliation, auditing — is source-agnostic.
 
 ### 6.7 Touching `auth_service` — the isolation contract
 
@@ -1408,6 +1427,7 @@ attacks at the bottom of the section.
 | GET | `/api/v1/auth/{slug}/metadata` | — | none | `application/samlmetadata+xml` |
 | GET\|POST | `/api/v1/auth/{slug}/sls` | SAML* | cookie | 302 |
 | POST | `/api/v1/auth/{slug}/mock` | mock identity | dev-only env gate | `{ok}` + cookie |
+| POST | `/api/v1/auth/{slug}/browser-profile` | `{payload}` from web storage | signature/freshness server-side; 404 unless the row's source is browser storage | `{user}` + session cookies |
 
 #### Self-service identities
 
