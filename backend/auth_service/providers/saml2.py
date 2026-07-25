@@ -470,52 +470,6 @@ class SamlProvider:
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _attr_first(attrs: dict, keys: tuple[str, ...]) -> Optional[str]:
-    """Return the first value found under any of *keys*. SAML attributes
-    are typically lists; we pick the first element."""
-    for k in keys:
-        v = attrs.get(k)
-        if v is None:
-            continue
-        if isinstance(v, (list, tuple)):
-            for item in v:
-                if isinstance(item, str) and item.strip():
-                    return item.strip()
-        elif isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
-
-
-def _extract_groups(attrs: dict) -> tuple[str, ...]:
-    """Pull group membership out of the SAML attribute statement.
-
-    Accepts the configured ``SAML_GROUPS_ATTRIBUTE`` (default ``groups``)
-    and several common alternates IdPs use out of the box. Empty when
-    no usable attribute is present.
-    """
-    candidates = (
-        SAML_GROUPS_ATTRIBUTE,
-        "groups",
-        "memberOf",
-        "Groups",
-        "http://schemas.xmlsoap.org/claims/Group",
-        "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
-    )
-    for key in candidates:
-        raw = attrs.get(key)
-        if raw is None:
-            continue
-        if isinstance(raw, (list, tuple)):
-            out = [g.strip() for g in raw if isinstance(g, str) and g.strip()]
-        elif isinstance(raw, str):
-            out = [g.strip() for g in raw.split(",") if g.strip()] if "," in raw else [raw.strip()] if raw.strip() else []
-        else:
-            continue
-        if out:
-            return tuple(out)
-    return ()
-
-
 def _extract_authn_instant(auth) -> Optional[int]:
     """Read ``AuthnInstant`` from the parsed assertion.
 

@@ -1492,8 +1492,6 @@ by `source_event_id` UNIQUE.
 | `AUTH_COOKIE_DOMAIN` | (none) | cookie `Domain` |
 | `AUTH_COOKIE_SAMESITE` | `lax` | cookie `SameSite` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | 24h re-auth |
-| `OIDC_GROUPS_CLAIM` | `groups` | OIDC group-claim default name |
-| `SAML_GROUPS_ATTRIBUTE` | `groups` | SAML group-attribute default |
 | `ENV` | `dev` | prod-guard on custom IdP + .env auto-load |
 | `AUTH_CUSTOM_PROVIDER_ENABLED` | `false` | dev IdP gate |
 | `CREDENTIAL_ENCRYPTION_KEY` | (none) | Fernet for provider settings + connection creds |

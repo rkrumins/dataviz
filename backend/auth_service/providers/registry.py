@@ -175,8 +175,18 @@ class ProviderRegistry:
             return snap.id
 
     async def list_enabled(self) -> list[ProviderConfigSnapshot]:
-        """Return the public catalog (no settings, no secrets). Used
-        by ``GET /api/v1/auth/providers`` and the login UI."""
+        """Return the enabled provider snapshots backing the public catalog
+        (``GET /api/v1/auth/providers``) and the login UI.
+
+        These snapshots are NOT themselves public-safe: every
+        ``ProviderConfigSnapshot.settings`` carries the fully DECRYPTED
+        settings blob, ``client_secret`` and ``shared_secret`` included. The
+        route is what makes the response safe — ``ProviderSummary`` has no
+        settings field, and its ``config`` is filled from the ``_public_config``
+        whitelist. Keep that boundary at the route; a single extra field on
+        the response model would leak every IdP secret to an unauthenticated
+        caller.
+        """
         snaps = await self._loader.list_enabled()
         return [s for s in snaps if s.enabled]
 
