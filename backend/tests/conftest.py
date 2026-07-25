@@ -75,6 +75,14 @@ from backend.auth_service.cookies import CSRF_COOKIE_NAME
 from backend.auth_service.interface import User
 from backend.auth_service.providers import LocalIdentityProvider, register_provider
 from backend.auth_service.service import LocalIdentityService
+from backend.auth_service.providers import PROVIDER_BUILDERS
+from backend.auth_service.providers.registry import (
+    ProviderConfigSnapshot,
+    ProviderRegistry,
+    configure_registry,
+)
+from backend.app.db.repositories import idp_provider_repo as _idp_provider_repo
+from backend.app.db.repositories import user_identity_repo as _user_identity_repo
 
 
 # Process-wide provider registry: register the local provider once for
@@ -482,3 +490,84 @@ async def csrf_client(
         transport=transport, base_url="http://testserver",
     ) as client:
         yield client
+
+
+# ---------------------------------------------------------------------------
+# SSO fixtures
+#
+# Shared rather than per-module: any test that drives a slug-routed
+# ``/auth/{slug}/...`` endpoint needs the provider registry wired to the
+# per-test session, and any test that asserts on SSO auditing needs an
+# IdentityService with the SSO repos attached. The conftest default
+# ``test_client`` service is local-password only, so ``complete_sso_login``
+# would bail with ``identity_repo_unavailable``.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+async def registry(db_session):
+    """Wire the process registry to the per-test session so the
+    slug-routed endpoints resolve real ``idp_providers`` rows."""
+    class _Loader:
+        @staticmethod
+        def _snap(row):
+            return ProviderConfigSnapshot(
+                id=row.id, slug=row.slug, display_name=row.display_name,
+                kind=row.kind, enabled=bool(row.enabled),
+                priority=int(row.priority or 100),
+                settings=_idp_provider_repo.decrypt_settings(row.settings),
+                claim_mapping=_idp_provider_repo.parse_claim_mapping(row),
+                linking_policy=row.linking_policy,
+                button_label=row.button_label, button_icon=row.button_icon,
+            )
+
+        async def get_by_id(self, provider_id):
+            row = await _idp_provider_repo.get_provider(db_session, provider_id)
+            return self._snap(row) if row is not None else None
+
+        async def get_by_slug(self, slug):
+            row = await _idp_provider_repo.get_provider_by_slug(db_session, slug)
+            return self._snap(row) if row is not None else None
+
+        async def list_enabled(self):
+            rows = await _idp_provider_repo.list_providers(
+                db_session, only_enabled=True,
+            )
+            return [self._snap(r) for r in rows]
+
+    reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,
+                           ttl_seconds=0)
+    configure_registry(reg)
+    yield reg
+    await reg.invalidate()
+
+
+@pytest.fixture()
+def sso_events(db_session):
+    """Install an ``IdentityService`` on the app that has the SSO repos
+    wired (the conftest default is local-password only, so
+    ``complete_sso_login`` would bail with ``identity_repo_unavailable``).
+    Yields the captured outbox events."""
+    from backend.app.main import app
+
+    events: list[tuple[str, dict]] = []
+
+    @asynccontextmanager
+    async def _factory():
+        yield db_session
+
+    async def _outbox(session, event_type, payload):
+        events.append((event_type, payload))
+
+    previous = getattr(app.state, "identity_service", None)
+    app.state.identity_service = LocalIdentityService(
+        session_factory=_factory,
+        user_repo=_user_repo,
+        user_identity_repo=_user_identity_repo,
+        refresh_store_factory=lambda s: None,
+        outbox_emit=_outbox,
+        claims_resolver=None,
+    )
+    yield events
+    app.state.identity_service = previous
+
+

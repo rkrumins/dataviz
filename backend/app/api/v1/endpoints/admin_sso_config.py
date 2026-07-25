@@ -210,7 +210,7 @@ async def update_config(
         await user_repo.create_outbox_event(
             session, event_type="auth.config.updated",
             payload={
-                "actor": admin.id,
+                "actor_id": admin.id,
                 "sso_enabled": bool(row.sso_enabled),
                 "allow_local_login": bool(row.allow_local_login),
                 "allow_jit_provisioning": bool(row.allow_jit_provisioning),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -408,74 +409,6 @@ def test_default_mapping_shape_is_complete():
 # ── Route integration ────────────────────────────────────────────────
 
 
-@pytest.fixture()
-async def registry(db_session):
-    """Wire the process registry to the per-test session so the
-    slug-routed endpoints resolve real ``idp_providers`` rows."""
-    class _Loader:
-        @staticmethod
-        def _snap(row):
-            return ProviderConfigSnapshot(
-                id=row.id, slug=row.slug, display_name=row.display_name,
-                kind=row.kind, enabled=bool(row.enabled),
-                priority=int(row.priority or 100),
-                settings=idp_provider_repo.decrypt_settings(row.settings),
-                claim_mapping=idp_provider_repo.parse_claim_mapping(row),
-                linking_policy=row.linking_policy,
-                button_label=row.button_label, button_icon=row.button_icon,
-            )
-
-        async def get_by_id(self, provider_id):
-            row = await idp_provider_repo.get_provider(db_session, provider_id)
-            return self._snap(row) if row is not None else None
-
-        async def get_by_slug(self, slug):
-            row = await idp_provider_repo.get_provider_by_slug(db_session, slug)
-            return self._snap(row) if row is not None else None
-
-        async def list_enabled(self):
-            rows = await idp_provider_repo.list_providers(
-                db_session, only_enabled=True,
-            )
-            return [self._snap(r) for r in rows]
-
-    reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,
-                           ttl_seconds=0)
-    configure_registry(reg)
-    yield reg
-    await reg.invalidate()
-
-
-@pytest.fixture()
-def sso_events(db_session):
-    """Install an ``IdentityService`` on the app that has the SSO repos
-    wired (the conftest default is local-password only, so
-    ``complete_sso_login`` would bail with ``identity_repo_unavailable``).
-    Yields the captured outbox events."""
-    from backend.app.main import app
-
-    events: list[tuple[str, dict]] = []
-
-    @asynccontextmanager
-    async def _factory():
-        yield db_session
-
-    async def _outbox(session, event_type, payload):
-        events.append((event_type, payload))
-
-    previous = getattr(app.state, "identity_service", None)
-    app.state.identity_service = LocalIdentityService(
-        session_factory=_factory,
-        user_repo=user_repo,
-        user_identity_repo=user_identity_repo,
-        refresh_store_factory=lambda s: None,
-        outbox_emit=_outbox,
-        claims_resolver=None,
-    )
-    yield events
-    app.state.identity_service = previous
-
-
 async def _make_provider(db_session, **settings_over):
     settings = {
         "source": "local_storage", "source_key": "corp.user",
@@ -578,7 +511,12 @@ async def test_cookie_source_without_a_cookie_bounces_to_the_error_page(
         "/api/v1/auth/corp-portal/login", follow_redirects=False,
     )
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/login?sso_error=1"
+    location = resp.headers["location"]
+    # Generic to the user, but carrying a ref they can quote to an admin who
+    # can look the real reason up in the audit log.
+    assert location.startswith("/login?")
+    assert "sso_error=1" in location
+    assert re.search(r"ref=[0-9a-f]{8}", location)
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import secrets
 from typing import Optional
 
 import jwt as pyjwt
@@ -183,7 +184,60 @@ def _safe_next(raw: str | None) -> str:
     return raw
 
 
-_LOGIN_FAILURE_PATH = "/login?sso_error=1"
+def _failure_ref() -> str:
+    """A short handle for one failed sign-in.
+
+    SSO failures are deliberately opaque to the user — telling them which
+    of "expired assertion", "claim mapping resolved no email" or "JIT is
+    disabled" occurred would leak configuration to anyone who can reach the
+    login page. The cost is that a stuck user and the admin who can help
+    them have nothing in common to search on, so the reason we already
+    recorded stays unreachable.
+
+    This is the bridge: random enough not to be guessable or countable,
+    short enough to read down a phone line.
+    """
+    return secrets.token_hex(4)
+
+
+async def _record_sso_failure(
+    svc, *, ref: str, slug: str, provider_id: Optional[str], reason: str,
+) -> None:
+    """Write the failure to the audit log keyed by ``ref``.
+
+    Best-effort: a login that already failed must not also 500 because the
+    audit write did. Uses the standalone-transaction emitter so the record
+    survives the caller's rollback.
+    """
+    emit = getattr(svc, "emit_audit", None)
+    if emit is None:
+        return
+    try:
+        await emit("user.sso_login_failed", {
+            "ref": ref,
+            "provider_slug": slug,
+            "provider_id": provider_id,
+            # The precise reason is admin-only by construction: it lives
+            # here, never in the redirect the user sees.
+            "reason": reason,
+        })
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("SSO failure audit failed (slug=%s): %s", slug, exc)
+
+
+def _failure_redirect(ref: str, *, error_code: Optional[str] = None,
+                      email: Optional[str] = None) -> str:
+    """Build the login-page URL for a failed SSO attempt, carrying ``ref``."""
+    from urllib.parse import quote as _quote
+
+    params = [f"ref={ref}"]
+    if error_code:
+        params.append(f"error_code={_quote(error_code)}")
+        if email:
+            params.append(f"email={_quote(email)}")
+    else:
+        params.append("sso_error=1")
+    return "/login?" + "&".join(params)
 
 
 def _read_link_intent(request: Request, *, provider_id: str) -> Optional[str]:
@@ -539,33 +593,33 @@ async def oidc_callback(
     svc = _identity_service(request)
     snap = await _provider_snapshot(slug)
 
-    def _fail(reason: str, *, error_code: Optional[str] = None,
-              email: Optional[str] = None) -> RedirectResponse:
-        logger.info("OIDC callback failed (slug=%s): %s", slug, reason)
-        target = _LOGIN_FAILURE_PATH
-        if error_code:
-            params = f"error_code={error_code}"
-            if email:
-                from urllib.parse import quote as _quote
-                params += f"&email={_quote(email)}"
-            target = f"/login?{params}"
-        resp = RedirectResponse(target, status_code=status.HTTP_302_FOUND)
+    async def _fail(reason: str, *, error_code: Optional[str] = None,
+                    email: Optional[str] = None) -> RedirectResponse:
+        ref = _failure_ref()
+        logger.info("OIDC callback failed (slug=%s, ref=%s): %s", slug, ref, reason)
+        await _record_sso_failure(
+            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+        )
+        resp = RedirectResponse(
+            _failure_redirect(ref, error_code=error_code, email=email),
+            status_code=status.HTTP_302_FOUND,
+        )
         clear_oidc_cookie(resp)
         return resp
 
     if error or not code or not state:
-        return _fail(f"idp_error={error or 'missing_code_or_state'}")
+        return await _fail(f"idp_error={error or 'missing_code_or_state'}")
 
     raw_cookie = read_oidc_cookie(request)
     if not raw_cookie:
-        return _fail("missing_flow_cookie")
+        return await _fail("missing_flow_cookie")
     try:
         flow = decode_oidc_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return _fail(f"bad_flow_cookie:{exc}")
+        return await _fail(f"bad_flow_cookie:{exc}")
 
     if not hmac.compare_digest(str(flow.get("state", "")), state):
-        return _fail("state_mismatch")
+        return await _fail("state_mismatch")
 
     try:
         identity = await provider.fetch_identity(
@@ -574,7 +628,7 @@ async def oidc_callback(
             nonce=flow["nonce"],
         )
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
-        return _fail(f"token_or_idtoken:{exc}")
+        return await _fail(f"token_or_idtoken:{exc}")
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -591,9 +645,9 @@ async def oidc_callback(
         )
     except SSOAuthError as exc:
         if str(exc) == "unsafe_auto_link":
-            return _fail(str(exc), error_code="unsafe_auto_link",
+            return await _fail(str(exc), error_code="unsafe_auto_link",
                          email=identity.email)
-        return _fail(f"sso_login_rejected:{exc}")
+        return await _fail(f"sso_login_rejected:{exc}")
 
     response = RedirectResponse(
         _safe_next(flow.get("next")), status_code=status.HTTP_302_FOUND,
@@ -638,17 +692,17 @@ async def saml_acs(slug: str, request: Request):
     svc = _identity_service(request)
     snap = await _provider_snapshot(slug)
 
-    def _fail(reason: str, *, error_code: Optional[str] = None,
-              email: Optional[str] = None) -> RedirectResponse:
-        logger.info("SAML ACS failed (slug=%s): %s", slug, reason)
-        target = _LOGIN_FAILURE_PATH
-        if error_code:
-            from urllib.parse import quote as _quote
-            params = f"error_code={error_code}"
-            if email:
-                params += f"&email={_quote(email)}"
-            target = f"/login?{params}"
-        resp = RedirectResponse(target, status_code=status.HTTP_302_FOUND)
+    async def _fail(reason: str, *, error_code: Optional[str] = None,
+                    email: Optional[str] = None) -> RedirectResponse:
+        ref = _failure_ref()
+        logger.info("SAML ACS failed (slug=%s, ref=%s): %s", slug, ref, reason)
+        await _record_sso_failure(
+            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+        )
+        resp = RedirectResponse(
+            _failure_redirect(ref, error_code=error_code, email=email),
+            status_code=status.HTTP_302_FOUND,
+        )
         clear_saml_cookie(resp)
         return resp
 
@@ -656,17 +710,17 @@ async def saml_acs(slug: str, request: Request):
     saml_response = form.get("SAMLResponse")
     relay_state = form.get("RelayState")
     if not saml_response:
-        return _fail("missing_SAMLResponse")
+        return await _fail("missing_SAMLResponse")
 
     raw_cookie = read_saml_cookie(request)
     if not raw_cookie:
-        return _fail("missing_flow_cookie")
+        return await _fail("missing_flow_cookie")
     try:
         flow = decode_saml_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return _fail(f"bad_flow_cookie:{exc}")
+        return await _fail(f"bad_flow_cookie:{exc}")
     if not hmac.compare_digest(str(flow.get("rs", "")), str(relay_state or "")):
-        return _fail("relay_state_mismatch")
+        return await _fail("relay_state_mismatch")
 
     host, https, path = _request_https_host(request)
     try:
@@ -675,7 +729,7 @@ async def saml_acs(slug: str, request: Request):
             post_data={k: v for k, v in form.multi_items()},
         )
     except Exception as exc:  # noqa: BLE001
-        return _fail(f"saml_validate:{exc}")
+        return await _fail(f"saml_validate:{exc}")
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -692,9 +746,9 @@ async def saml_acs(slug: str, request: Request):
         )
     except SSOAuthError as exc:
         if str(exc) == "unsafe_auto_link":
-            return _fail(str(exc), error_code="unsafe_auto_link",
+            return await _fail(str(exc), error_code="unsafe_auto_link",
                          email=identity.email)
-        return _fail(f"sso_login_rejected:{exc}")
+        return await _fail(f"sso_login_rejected:{exc}")
 
     response = RedirectResponse(
         _safe_next(flow.get("next")), status_code=status.HTTP_302_FOUND,
@@ -802,10 +856,15 @@ async def _custom_login_flow(
         target = f"/dev-login?next={quote(next_path)}&slug={quote(slug)}"
         return RedirectResponse(target, status_code=status.HTTP_302_FOUND)
 
-    def _fail(reason: str) -> RedirectResponse:
-        logger.info("Custom IdP login failed (slug=%s): %s", slug, reason)
+    async def _fail(reason: str) -> RedirectResponse:
+        ref = _failure_ref()
+        logger.info("Custom IdP login failed (slug=%s, ref=%s): %s",
+                    slug, ref, reason)
+        await _record_sso_failure(
+            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+        )
         resp = RedirectResponse(
-            "/login?sso_error=1", status_code=status.HTTP_302_FOUND,
+            _failure_redirect(ref), status_code=status.HTTP_302_FOUND,
         )
         clear_mock_identity_cookie(resp)
         return resp
@@ -813,7 +872,7 @@ async def _custom_login_flow(
     try:
         identity = provider.fetch_identity(raw)
     except CustomIdentityError as exc:
-        return _fail(f"envelope_invalid:{exc}")
+        return await _fail(f"envelope_invalid:{exc}")
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -829,7 +888,7 @@ async def _custom_login_flow(
             assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
-        return _fail(f"sso_login_rejected:{exc}")
+        return await _fail(f"sso_login_rejected:{exc}")
 
     response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
     set_session_cookies(response, tokens)
@@ -941,19 +1000,27 @@ async def _custom_profile_login_flow(
         else request.cookies.get(provider.settings.source_key)
     )
 
-    def _fail(reason: str) -> RedirectResponse:
-        logger.info("Custom profile login failed (slug=%s): %s", slug, reason)
+    async def _fail(reason: str, *, error_code: Optional[str] = None,
+                    email: Optional[str] = None) -> RedirectResponse:
+        ref = _failure_ref()
+        logger.info("Custom profile login failed (slug=%s, ref=%s): %s",
+                    slug, ref, reason)
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=slug,
+            provider_id=snap.id, reason=reason,
+        )
         return RedirectResponse(
-            _LOGIN_FAILURE_PATH, status_code=status.HTTP_302_FOUND,
+            _failure_redirect(ref, error_code=error_code, email=email),
+            status_code=status.HTTP_302_FOUND,
         )
 
     if not raw:
-        return _fail(f"payload_missing_from_{source}")
+        return await _fail(f"payload_missing_from_{source}")
 
     try:
         identity = provider.fetch_identity(raw)
     except CustomProfileError as exc:
-        return _fail(f"payload_rejected:{exc}")
+        return await _fail(f"payload_rejected:{exc}")
 
     try:
         user, tokens = await _complete_custom_profile(
@@ -963,13 +1030,10 @@ async def _custom_profile_login_flow(
         if str(exc) == "unsafe_auto_link":
             # Same recovery path as the OIDC callback: the login page
             # renders the collision modal off these query params.
-            from urllib.parse import quote as _quote
-            logger.info("Custom profile login failed (slug=%s): %s", slug, exc)
-            return RedirectResponse(
-                f"/login?error_code=unsafe_auto_link&email={_quote(identity.email)}",
-                status_code=status.HTTP_302_FOUND,
+            return await _fail(
+                str(exc), error_code="unsafe_auto_link", email=identity.email,
             )
-        return _fail(f"sso_login_rejected:{exc}")
+        return await _fail(f"sso_login_rejected:{exc}")
 
     response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
     set_session_cookies(response, tokens)

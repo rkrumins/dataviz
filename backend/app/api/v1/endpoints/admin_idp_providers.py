@@ -200,7 +200,7 @@ async def create_provider(
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.created",
         payload={"provider_id": row.id, "slug": row.slug, "kind": row.kind,
-                 "actor": admin.id},
+                 "actor_id": admin.id},
     )
     # Bust the registry cache so the new provider is live immediately.
     try:
@@ -241,7 +241,7 @@ async def update_provider(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.updated",
-        payload={"provider_id": row.id, "slug": row.slug, "actor": admin.id,
+        payload={"provider_id": row.id, "slug": row.slug, "actor_id": admin.id,
                  "fields": [k for k, v in body.model_dump().items() if v is not None]},
     )
     try:
@@ -272,7 +272,7 @@ async def delete_provider(
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.deleted",
         payload={"provider_id": provider_id, "slug": row.slug,
-                 "actor": admin.id},
+                 "actor_id": admin.id},
     )
     try:
         await get_registry().invalidate(provider_id)

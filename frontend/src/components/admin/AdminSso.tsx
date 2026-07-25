@@ -1,11 +1,13 @@
 /**
  * AdminSso — admin surface for the SSO configuration.
  *
- * Four tabs:
+ * Five tabs:
  *   * Providers — list + create / edit / enable / disable / delete
  *   * Group mappings — list + create (role_binding or group_membership)
  *   * Settings — platform-wide SSO posture toggles
  *   * Find user — lookup by email, claim attribute, or free text
+ *   * Activity — sign-in outcomes and config changes, for debugging a
+ *     failed sign-in by the reference the user was shown
  *
  * The provider create/edit form lives in ``ProviderForm``; the visual
  * claim-mapping editor and its ``/test`` live preview live in
@@ -14,7 +16,7 @@
  * Gated by RequirePermission perm="system:admin" in the route.
  */
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, Search, Settings, ShieldOff } from 'lucide-react'
+import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, History, Search, Settings, ShieldOff } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -30,8 +32,9 @@ import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProviderForm } from './ProviderForm'
 import { AssurancePill } from './AssurancePill'
+import { SsoActivityTab } from './SsoActivityTab'
 
-type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
+type Tab = 'providers' | 'mappings' | 'settings' | 'lookup' | 'activity'
 
 
 function ErrorBanner({ message }: { message: string }) {
@@ -882,7 +885,7 @@ export function AdminSso() {
                 </p>
             </header>
             <nav className="flex gap-2 border-b border-white/10">
-                {(['providers', 'mappings', 'settings', 'lookup'] as Tab[]).map((t) => (
+                {(['providers', 'mappings', 'settings', 'lookup', 'activity'] as Tab[]).map((t) => (
                     <button
                         key={t}
                         onClick={() => setTab(t)}
@@ -896,10 +899,12 @@ export function AdminSso() {
                         {t === 'mappings' && <Plus className="w-3.5 h-3.5" />}
                         {t === 'settings' && <Settings className="w-3.5 h-3.5" />}
                         {t === 'lookup' && <Search className="w-3.5 h-3.5" />}
+                        {t === 'activity' && <History className="w-3.5 h-3.5" />}
                         {t === 'providers' ? 'Providers'
                             : t === 'mappings' ? 'Group mappings'
                             : t === 'settings' ? 'Settings'
-                            : 'Find user'}
+                            : t === 'lookup' ? 'Find user'
+                            : 'Activity'}
                     </button>
                 ))}
             </nav>
@@ -907,6 +912,7 @@ export function AdminSso() {
             {tab === 'mappings' && <MappingsTab />}
             {tab === 'settings' && <SettingsTab />}
             {tab === 'lookup' && <LookupTab />}
+            {tab === 'activity' && <SsoActivityTab />}
         </PageContainer>
     )
 }
