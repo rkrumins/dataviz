@@ -241,12 +241,16 @@ async def _require_sso_enabled(request: Request) -> None:
     """Raise 404 when the platform master kill-switch is off. We use
     404 (not 503) so an attacker can't probe the toggle's state."""
     svc = _identity_service(request)
-    try:
-        cfg = await svc.auth_config()
-    except AttributeError:
-        # Legacy service wiring without auth_config() — treat as
-        # "enabled" so existing tests pass unchanged.
+    # Check for the method rather than catching AttributeError around the
+    # await. The old form wrapped the CALL, so an AttributeError raised
+    # anywhere *inside* auth_config() — a None snapshot, a renamed repo
+    # field — was silently reinterpreted as "SSO is enabled". That is a
+    # kill-switch that fails open: an operator flips SSO off, a partly-broken
+    # config provider swallows it, and every /auth/{slug}/* route stays live.
+    if not hasattr(svc, "auth_config"):
+        # Legacy service wiring without auth_config() — treat as enabled.
         return
+    cfg = await svc.auth_config()
     if not cfg.sso_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
 
@@ -407,10 +411,8 @@ async def list_providers(request: Request):
     falls back to the password form.
     """
     svc = _identity_service(request)
-    try:
-        cfg = await svc.auth_config()
-    except AttributeError:
-        cfg = None
+    # See _require_sso_enabled: probe for the method, don't wrap the await.
+    cfg = await svc.auth_config() if hasattr(svc, "auth_config") else None
     if cfg is not None and not cfg.sso_enabled:
         return []
     try:
@@ -608,7 +610,11 @@ async def oidc_callback(
 
 
 @router.get("/{slug}/metadata")
-async def saml_metadata(slug: str):
+async def saml_metadata(slug: str, request: Request):
+    # ``request`` is required by _resolve_provider -> _require_sso_enabled.
+    # It was missing here, so this route raised NameError -> 500 on every
+    # call — and it is the route an operator needs to register the SP at
+    # the IdP, so SAML onboarding could never get past step one.
     provider = await _resolve_provider(slug, request=request)
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")

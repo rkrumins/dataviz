@@ -129,17 +129,43 @@ def decrypt_settings(blob: Optional[str]) -> dict:
         return {}
 
 
+REDACTION_MARKER = "********"
+
+
 def redact_settings(settings: dict) -> dict:
-    """Return a shallow copy with secret fields replaced by ``"********"``
-    so the admin UI can show that *something* is configured without
-    leaking the actual value. The presence of the marker also lets the
-    UI know to render a "rotate secret" button instead of an edit
-    box."""
+    """Return a shallow copy with secret fields replaced by
+    ``REDACTION_MARKER`` so the admin UI can show that *something* is
+    configured without leaking the actual value. The presence of the marker
+    also lets the UI know to render a "rotate secret" button instead of an
+    edit box."""
     out = dict(settings)
     for key in list(out.keys()):
         if key in _SECRET_FIELDS and out[key]:
-            out[key] = "********"
+            out[key] = REDACTION_MARKER
     return out
+
+
+def _reject_redaction_marker(settings: dict) -> None:
+    """Refuse a write that would store the redaction marker as a real value.
+
+    ``redact_settings`` puts ``"********"`` on the wire for every secret
+    field, and ``update_provider`` MERGES settings — so the natural
+    GET-mutate-PATCH round-trip a script or Terraform provider performs would
+    write the mask over the actual secret and silently brick that IdP. The
+    admin UI strips these client-side, but a client-side guard is not an
+    invariant. 400 is the right answer: it tells the caller to omit the field
+    (keep the existing secret) or send a new value (rotate it).
+    """
+    offenders = sorted(
+        k for k, v in settings.items()
+        if k in _SECRET_FIELDS and v == REDACTION_MARKER
+    )
+    if offenders:
+        raise ProviderValidationError(
+            f"settings {offenders} still hold the redaction marker "
+            f"'{REDACTION_MARKER}'. Omit a secret field to keep its stored "
+            "value, or send a new value to rotate it."
+        )
 
 
 async def create_provider(
@@ -161,6 +187,9 @@ async def create_provider(
         slug=slug, display_name=display_name, kind=kind,
         linking_policy=linking_policy, priority=priority,
     )
+    # Also guarded on create: cloning an existing provider by GET-then-POST is
+    # the other obvious way to store the mask as a real secret.
+    _reject_redaction_marker(settings or {})
     row = IdpProviderORM(
         slug=slug.strip().lower(),
         display_name=display_name.strip(),
@@ -214,6 +243,7 @@ async def update_provider(
             )
         row.linking_policy = linking_policy
     if settings is not None:
+        _reject_redaction_marker(settings)
         # Merge instead of replace so the admin UI can PATCH a single
         # secret without round-tripping every other field.
         existing = decrypt_settings(row.settings)
