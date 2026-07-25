@@ -12,7 +12,9 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+from fastapi import (
+    APIRouter, Body, Depends, HTTPException, Path, Request, status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -201,6 +203,38 @@ async def get_default_mapping(
     if mapping is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown kind")
     return mapping
+
+
+@router.get("/status")
+async def provider_health_status(
+    request: Request,
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Last known health for every enabled provider.
+
+    Reads the background sweep's cache and does **NO outbound work** — the
+    same contract ``providers.py:/status`` states for data sources, and for
+    the same reason: this is polled, and a polled endpoint that opens
+    sockets turns a dashboard into a load generator.
+
+    An empty result means the sweep has not run yet (or this replica does
+    not run schedulers), not that every provider is unhealthy.
+    """
+    cache = getattr(request.app.state, "idp_health_cache", None) or {}
+    return {
+        "providers": [
+            {
+                "providerId": h.provider_id,
+                "slug": h.slug,
+                "status": h.status,
+                "detail": h.detail,
+                "certNotAfter": h.cert_not_after,
+                "certDaysRemaining": h.cert_days_remaining,
+                "checkedAt": h.checked_at,
+            }
+            for h in cache.values()
+        ],
+    }
 
 
 @router.post("/discover", response_model=DiscoverResult,

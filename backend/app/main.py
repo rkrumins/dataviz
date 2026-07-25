@@ -947,6 +947,25 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
+    # IdP health sweep → app.state.idp_health_cache, read by the cache-only
+    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
+    # relay so replicas don't each probe every IdP. The cache is initialised
+    # unconditionally: a WEB replica serves an empty status rather than
+    # AttributeError-ing on a missing attribute.
+    _app.state.idp_health_cache = {}
+    _app.state._idp_health_shutdown = asyncio.Event()
+    _app.state._idp_health_task = None
+    if runs_scheduler():
+        from .services.idp_health import run_idp_health_loop
+        _app.state._idp_health_task = asyncio.create_task(
+            run_idp_health_loop(
+                get_jobs_session,
+                _app.state._idp_health_shutdown,
+                _app.state.idp_health_cache,
+            ),
+            name="idp-health",
+        )
+
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
     # returns 503 + Retry-After: 5. Setting this AFTER all sync init
@@ -1007,6 +1026,23 @@ async def lifespan(_app: FastAPI):
             _outbox_relay_task.cancel()
             try:
                 await _outbox_relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the IdP health sweep before DB pool teardown, same shape as the
+    # relay above. The loop waits on the shutdown event rather than
+    # sleeping, so this returns immediately instead of after its interval.
+    _idp_health_shutdown = getattr(_app.state, "_idp_health_shutdown", None)
+    _idp_health_task = getattr(_app.state, "_idp_health_task", None)
+    if _idp_health_shutdown is not None:
+        _idp_health_shutdown.set()
+    if _idp_health_task is not None and not _idp_health_task.done():
+        try:
+            await asyncio.wait_for(_idp_health_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _idp_health_task.cancel()
+            try:
+                await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
 

@@ -13,13 +13,13 @@ const ADMIN = '/api/v1/admin'
  *  ``idp_provider_repo`` and the ``ck_idp_providers_kind`` CHECK. */
 export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
 
-/** Where a ``custom_profile`` row reads its payload from. Cookie and
- *  header are read server-side; the two storage sources need the
- *  browser to read the key and POST it. */
 /** How much a provider's word is worth — derived server-side from kind +
  *  settings on every read, never stored. Ordered worst to best. */
 export type AssuranceLevel = 'unverified' | 'asserted' | 'verified'
 
+/** Where a ``custom_profile`` row reads its payload from. Cookie and
+ *  header are read server-side; the two storage sources need the
+ *  browser to read the key and POST it. */
 export type CustomProfileSource =
     | 'cookie' | 'local_storage' | 'session_storage' | 'header'
 
@@ -83,6 +83,18 @@ export interface UpdateProviderInput {
     linkingPolicy?: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     buttonLabel?: string | null
     buttonIcon?: string | null
+}
+
+export interface IdpHealth {
+    providerId: string
+    slug: string
+    /** ok | warning | unavailable | unknown. ``unknown`` means the sweep has
+     *  not run or the kind has nothing to probe — never "broken". */
+    status: string
+    detail?: string | null
+    certNotAfter?: string | null
+    certDaysRemaining?: number | null
+    checkedAt?: string | null
 }
 
 export interface DiscoverInput {
@@ -240,6 +252,14 @@ export const ssoAdminService = {
         return request<void>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
+        )
+    },
+
+    /** Last known IdP health from the background sweep. Reads a cache —
+     *  makes no outbound requests, so it is safe to poll. */
+    providerStatus(): Promise<{ providers: IdpHealth[] }> {
+        return request<{ providers: IdpHealth[] }>(
+            `${ADMIN}/idp-providers/status`,
         )
     },
 

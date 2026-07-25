@@ -22,6 +22,7 @@ import {
     ssoAdminService,
     type AuthConfig,
     type IdpGroupMapping,
+    type IdpHealth,
     type IdpProvider,
     type UserSummary,
 } from '@/services/ssoAdminService'
@@ -50,8 +51,50 @@ function ErrorBanner({ message }: { message: string }) {
 // ── Providers tab ──────────────────────────────────────────────────
 
 
+/** Last known health from the background sweep.
+ *
+ *  The payload that matters is certificate expiry: an expired SAML signing
+ *  cert takes every sign-in down at once, and the date was readable months
+ *  ahead. ``unknown`` means not probed yet, or a kind with nothing to probe
+ *  — it renders muted, never as an alarm. */
+function ProviderHealthCell({ health }: { health?: IdpHealth }) {
+    if (!health) {
+        return <span className="text-[11px] text-ink-muted">—</span>
+    }
+    const dot = {
+        ok: 'bg-emerald-400',
+        warning: 'bg-yellow-400',
+        unavailable: 'bg-red-400',
+        unknown: 'bg-gray-500',
+    }[health.status] ?? 'bg-gray-500'
+
+    const days = health.certDaysRemaining
+    const label =
+        days === null || days === undefined ? health.status
+        : days < 0 ? 'cert expired'
+        : `cert ${days}d`
+
+    return (
+        <span
+            title={health.detail ?? health.status}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px]"
+        >
+            <span className={cn('w-2 h-2 rounded-full shrink-0', dot)} />
+            <span className={cn(
+                health.status === 'unavailable' && 'text-red-400',
+                health.status === 'warning' && 'text-yellow-400',
+                health.status === 'unknown' && 'text-ink-muted',
+            )}>
+                {label}
+            </span>
+        </span>
+    )
+}
+
+
 function ProvidersTab() {
     const [rows, setRows] = useState<IdpProvider[]>([])
+    const [health, setHealth] = useState<Record<string, IdpHealth>>({})
     const [error, setError] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
     const [editingId, setEditingId] = useState<string | null>(null)
@@ -63,6 +106,17 @@ function ProvidersTab() {
             setError(null)
         } catch (err) {
             setError((err as Error).message)
+        }
+        // Health is a separate, non-fatal read: it comes from a background
+        // sweep, so a replica that runs no schedulers returns nothing and the
+        // provider list must still render.
+        try {
+            const status = await ssoAdminService.providerStatus()
+            setHealth(Object.fromEntries(
+                status.providers.map((h) => [h.providerId, h]),
+            ))
+        } catch {
+            setHealth({})
         }
     }, [])
 
@@ -119,6 +173,7 @@ function ProvidersTab() {
                         <th className="py-2">Slug</th>
                         <th>Display</th>
                         <th>Kind</th>
+                        <th>Health</th>
                         <th>Linking</th>
                         <th>Enabled</th>
                         <th></th>
@@ -136,6 +191,9 @@ function ProvidersTab() {
                                         level={p.assurance}
                                         reason={p.assuranceReason}
                                     />
+                                </td>
+                                <td>
+                                    <ProviderHealthCell health={health[p.id]} />
                                 </td>
                                 <td className="text-xs">{p.linkingPolicy}</td>
                                 <td>
@@ -174,7 +232,7 @@ function ProvidersTab() {
                             </tr>
                             {editingId === p.id && (
                                 <tr>
-                                    <td colSpan={6} className="pb-4">
+                                    <td colSpan={7} className="pb-4">
                                         <ProviderForm
                                             existing={p}
                                             onSaved={() => {
