@@ -229,6 +229,7 @@ Singleton row in `app_auth_config`:
 | `sso_enabled` | true | `/auth/providers` returns `[]`; `/auth/{slug}/*` 404s |
 | `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` |
 | `allow_jit_provisioning` | true | New IdP subjects with no email match raise `jit_disabled` |
+| `email_first_login` | **false** | `POST /auth/resolve` always answers `{"provider": null}`; the login page is byte-for-byte what it was |
 
 The PATCH endpoint refuses lockout scenarios:
 
@@ -284,6 +285,91 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `idp.provider.{created,updated,deleted}` | IdP provider CRUD |
 | `rbac.sso_mapping.{created,deleted}` | Group→target mapping CRUD |
 | `auth.config.updated` | platform posture switch changed |
+| `user.sso_login_failed` | any SSO sign-in failure, keyed by the `ref` the user was shown |
+
+### 1.13 Assurance level
+
+Every kind ends up calling `complete_sso_login` with a `ProviderIdentity`,
+and from there the platform treats them identically — but they did not all
+*earn* the same trust. Assurance makes that difference one word that can be
+shown in a list, stamped into an audit event, and used to refuse an
+escalation.
+
+| Level | Means | Which providers |
+|---|---|---|
+| `verified` | a signature over a third-party assertion was checked against a key we hold | `oidc`, `saml2`, `custom_profile` with `payload_format=jwt` |
+| `asserted` | a trusted network position vouched for it — sound when the proxy strips inbound copies, a full bypass when it does not, and we cannot tell which from here | `custom_profile` with `source=header` |
+| `unverified` | we cannot distinguish a genuine claim from a forged one | `custom_profile` with `trust_unsigned`, and the dev-only `custom` kind |
+
+**Derived on every read, never stored** (`auth_service/providers/assurance.py`).
+A column would be a second source of truth that drifts the moment an
+operator edits settings.
+
+It is enforced, not just displayed: a **privileged role**
+(`PLATFORM_ADMIN_ROLES`) may only be mapped from a `verified` provider.
+The check sits in `idp_group_mapping_repo` at mapping-creation time and is
+mirrored in the reconciler at login, so a mapping created before the guard
+existed — or inserted out of band — is still refused when it would take
+effect. `super_admin` is refused from *every* provider regardless of
+assurance; admin grants stay manual.
+
+### 1.14 Email-first login (Home Realm Discovery)
+
+Off by default (§1.9). When on, the login page asks for an address first
+and routes it to the matching provider, instead of showing every configured
+IdP as a button — which is a coin flip once an org has three of them, and
+publishes the org's IdP topology to anyone who loads `/login`.
+
+* Domains live on `idp_providers.email_domains` — plaintext JSON, no
+  secrets, normalised on write (`@Corp.Example` and `corp.example` are one
+  thing).
+* Matching is **exact**. `corp.example.com` does not resolve to a provider
+  claiming `example.com`; routing someone to the wrong IdP is worse than
+  not routing them at all.
+* `POST /auth/resolve` is deliberately **not an enumeration oracle**: a
+  miss from the feature being off, an unknown domain, a disabled provider,
+  or malformed input all return the same empty body. Rate limited like
+  `/login`, and CSRF-exempt because it is called before any session exists.
+* Additive: an address that matches nothing falls through to the password
+  form and the button row, so a wrong domain mapping cannot strand anyone.
+
+### 1.15 IdP health
+
+A background sweep (`app/services/idp_health.py`) probes every enabled
+provider every 15 minutes and writes `app.state.idp_health_cache`.
+`GET /admin/idp-providers/status` reads that cache and **opens no
+sockets** — the same contract the data-source health endpoint states.
+
+The payload that matters is **certificate expiry**: an expired SAML signing
+cert takes every sign-in down at once, and the date was readable months
+ahead. Warned at 30 days. It must be computed server-side —
+`idp_x509_cert` is a secret field and is redacted on read, so the UI can
+never parse it itself. OIDC has no cert dates; there "health" means
+discovery/JWKS reachability.
+
+The loop is gated on `runs_scheduler()` so replicas do not duplicate it,
+and shuts down instantly via `wait_for(shutdown.wait(), timeout=...)`
+rather than sleeping through a deploy. Note this is deliberately **not** a
+frontend sweep: the mount-time fan-out pattern was removed from
+`useProviderHealthSweep` as a P0.4 regression, and repeating it for IdPs
+would re-introduce a bug this codebase already paid for.
+
+### 1.16 Last assertion
+
+The most recent claims blob each provider sent, kept so an operator can
+build a claim mapping against what actually arrived rather than a sample
+typed from memory.
+
+* Fernet-encrypted at rest, same envelope as `settings`.
+* Written best-effort on every successful sign-in — a failure there must
+  never cost someone their login.
+* Credential-shaped values (`*token*`, `*secret*`, `*password*`, …) are
+  replaced with `********` **at capture**; the unredacted form is never
+  written. Keys stay so the shape is still visible.
+* **Never on `ProviderDTO`.** `GET /admin/idp-providers` reports only
+  `lastAssertionAt` so the UI can offer the button; the claims come from
+  `GET /admin/idp-providers/{id}/last-assertion`. That is deliberate — it
+  cannot leak by someone adding a field to the list response.
 
 ---
 
@@ -597,6 +683,83 @@ and inserts `default-oidc` / `default-saml2` provider rows
 UI; env vars become advisory. To restart from scratch: delete the
 row in the admin UI, set the env vars, restart.
 
+### 2.10 Onboard a provider by discovery (instead of typing 15 fields)
+
+Admin → SSO → Providers → **Add provider** → paste one of:
+
+* an **OIDC issuer URL** — the `.well-known/openid-configuration` is
+  fetched and `authorization_endpoint` / `token_endpoint` / `jwks_uri` /
+  `issuer` are filled in. Trailing slashes are normalised first; without
+  that an admin who pastes one gets a confusing issuer mismatch.
+* a **SAML metadata URL**, or the **metadata XML** itself — entity id,
+  SSO/SLO URLs, and the signing certificate are extracted.
+
+Then review and save. `POST /admin/idp-providers/discover` **never
+persists** — it fills a form. A probe failure is a structured
+`{"success": false, "error": ...}` result, not a 500: "your IdP is
+unreachable" is an answer, not a server fault. On an image without
+`libxmlsec1` the SAML half reports the capability as missing rather than
+crashing the router.
+
+### 2.11 Rehearse a sign-in before users do (dry run)
+
+`/test` rehearses the claim *mapping* against a pasted blob. The half that
+actually breaks in production — redirect URI registered at the IdP,
+signature verifies, clock skew, certificate still valid — is what this
+covers.
+
+1. Admin → SSO → Providers → the flask icon on the provider row.
+2. A new tab opens the real IdP login. **Sign in with your own account.**
+3. The callback reports what *would* have happened: which branch fires
+   (`provision_new` / `sign_in_existing` / `link_existing` / `rejected`),
+   which user would be touched, why a link would be refused, and which
+   group mappings would match.
+
+No session is minted and no rows are written — close the tab and you are
+still signed in as yourself. The marker cookie is minted only by
+`POST /admin/idp-providers/{id}/dry-run/start`, which requires
+`system:admin`; that is what keeps this from being a way for an anonymous
+caller to probe identities. It expires in 10 minutes.
+
+The collision-branch deny gate is shared code with the real login path, so
+a dry-run cannot disagree with the sign-in it rehearses about *why* a link
+is refused.
+
+### 2.12 Debug a failed sign-in from the reference the user was shown
+
+Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
+reason is deliberately withheld from that page — it is admin-only by
+construction and lives in the audit log instead.
+
+Admin → SSO → **Activity** → paste the ref. The `user.sso_login_failed`
+event carries the provider and the precise reason
+(`state_mismatch`, `token_or_idtoken:…`, `saml_validate:…`,
+`sso_login_rejected:jit_disabled`, …).
+
+The tab needs `system:audit:read` in addition to `system:admin` — the two
+do not imply each other.
+
+### 2.13 Map claims against what the IdP actually sent
+
+In the claim-mapping editor, **Load last assertion** pulls the most recent
+claims blob this provider sent (§1.16) into the sample box, then the live
+preview shows exactly what the current mapping would produce from it. This
+beats pasting a sample from the IdP's documentation, which is where most
+mapping bugs come from.
+
+The button 404s with an explanation until one has been captured — it is
+recorded on the next successful sign-in through that provider.
+
+### 2.14 Turn on email-first login
+
+1. Set each provider's **Email domains** (comma or space separated) in the
+   provider form. Do this **first**.
+2. Admin → SSO → Settings → **Email-first sign-in**.
+
+An address that matches nothing falls back to the password form and the
+button row, so nobody is stranded by a domain you missed. To reverse it,
+flip the switch off; the login page returns to exactly what it was.
+
 ---
 
 ## 3. How to verify the implementation is sound
@@ -613,10 +776,16 @@ JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_oidc_login_flow.py \
   backend/tests/test_auth_cookie_flow.py \
   backend/tests/test_auth_service_isolation.py \
-  backend/tests/test_sso_custom_profile.py
+  backend/tests/test_sso_custom_profile.py \
+  backend/tests/test_sso_assurance.py \
+  backend/tests/test_sso_activity.py \
+  backend/tests/test_sso_discovery.py \
+  backend/tests/test_idp_health.py \
+  backend/tests/test_sso_hrd_assertion.py \
+  backend/tests/test_sso_dry_run.py
 ```
 
-Expected: 149 passing.
+Expected: 233 passing.
 
 ```bash
 # Frontend: session cache, the claim mapper UI, and the silent
@@ -720,6 +889,18 @@ we go beyond the typical pattern:
   `allow_local_login` toggle refuses to land if it would lock out
   any admin. Most platforms make the operator manually verify; we
   enforce it.
+* **Assurance as an enforced property** (§1.13) — platforms that
+  support header-trusting or unsigned providers at all generally
+  treat their word as equal to a verified assertion. We rank it and
+  refuse to auto-grant a privileged role from a provider that only
+  asserts.
+* **Dry-run against the real IdP** (§2.11) — the usual offering is a
+  claim-mapping preview against a pasted blob, which does not test
+  the things that actually break. Rehearsing the full round trip
+  with nothing written is, as far as we know, not standard.
+* **Certificate expiry surfaced before it fires** (§1.15) — an
+  expired SAML signing cert is the classic Monday-morning lockout,
+  and the date was readable months ahead.
 
 Known follow-ups (not yet implemented):
 
@@ -745,7 +926,8 @@ backend/auth_service/
   core/
     config.py            # env + SSO_SESSION_MAX_AGE_HOURS + AUTH_CUSTOM_PROVIDER_ENABLED
     password.py          # argon2id + disabled-password sentinel + is_password_set()
-    tokens.py            # access/refresh/invite/oidc-state/saml-state/mock-identity/link-intent JWTs
+    tokens.py            # access/refresh/invite/oidc-state/saml-state/mock-identity/
+                         #   link-intent/dry-run JWTs
   providers/
     base.py              # ProviderIdentity dataclass (with groups, auth_time, attributes)
     claim_mapper.py      # configurable extraction (dotted JSONPath-lite + extras)
@@ -755,10 +937,11 @@ backend/auth_service/
     custom.py            # dev/demo cookie envelope
     custom_profile.py    # cookie / browser storage / proxy header ingest
     local.py             # email + password
+    assurance.py         # verified / asserted / unverified, derived from kind+settings
   app_auth_config.py     # AuthConfigSnapshot + provider Protocol + CachedAuthConfigProvider
   service.py             # LocalIdentityService (orchestrates login/refresh/SSO)
   interface.py           # User DTO + AuthError taxonomy
-  cookies.py             # session/OIDC/SAML/mock/link-intent cookie helpers
+  cookies.py             # session/OIDC/SAML/mock/link-intent/dry-run cookie helpers
   api/router.py          # /auth/* slug-routed endpoints
 
 backend/app/db/
@@ -774,9 +957,11 @@ backend/app/db/
     app_auth_config_repo.py  # singleton CRUD with optimistic version bump
   services/
     permission_service.py    # reconcile_sso_targets (both target types)
+    idp_health.py            # background probe loop -> app.state.idp_health_cache
 
 backend/app/api/v1/endpoints/
-  admin_idp_providers.py   # CRUD + /test dry-run
+  admin_idp_providers.py   # CRUD + /test mapping preview + /discover + /status
+                           #   + /dry-run/start + /last-assertion
   admin_idp_groups.py      # mapping CRUD (both target types)
   admin_user_identities.py # admin link/unlink
   admin_users_lookup.py    # /lookup (structured) + /search (fan-out)
@@ -793,6 +978,9 @@ backend/alembic/versions/
                                                   #  fit alembic_version VARCHAR(32))
   20260530_1200_display_rules.py                  # (main; re-pointed + renamed
                                                   #  from context_models_display_rules)
+  20260725_1200_custom_profile.py                 # custom_profile kind
+  20260725_1400_sso_hrd_assertion.py              # email_domains + last_assertion
+                                                  #  + email_first_login
 
 frontend/src/
   store/auth.ts                  # auth store (Zustand)

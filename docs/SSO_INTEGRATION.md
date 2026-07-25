@@ -232,7 +232,8 @@ isolated from `backend.app` (enforced by
 microservice without rewriting consumers; every DB-side concern is
 **injected** via constructor (`user_repo`, `user_identity_repo`,
 `refresh_store_factory`, `outbox_emit`, `claims_resolver`,
-`sso_role_reconciler`, `session_killer`, `auth_config_provider`).
+`sso_role_reconciler`, `sso_role_preview`, `session_killer`,
+`auth_config_provider`, `email_domain_resolver`, `assertion_recorder`).
 
 ### 3.2 Module-boundary contract (isolation)
 
@@ -361,16 +362,48 @@ Bootstrapping order (the `app.main.lifespan` entry point):
    5. `LocalIdentityService` constructed with every injected hook
       (user_repo, user_identity_repo, refresh_store_factory,
       outbox_emit, claims_resolver, sso_role_reconciler,
-      session_killer, auth_config_provider).
+      sso_role_preview, session_killer, auth_config_provider,
+      email_domain_resolver, assertion_recorder).
    6. `_app.state.identity_service = …` makes it reachable from
       every route via `request.app.state.identity_service`.
 3. FastAPI mounts `auth_session_router` at `/api/v1/auth` and
    every admin router under `/api/v1/admin/*`.
 
+   7. The IdP health loop is started **only if `runs_scheduler()`** —
+      see §3.6.
+
 If you ever touch the bootstrap order, run the auth suite — most
 isolation regressions surface as `RuntimeError("IdentityService not
 configured on app.state")` or `RuntimeError("ProviderRegistry not
 configured")` on the first request.
+
+### 3.6 The IdP health plane is a background loop, not a fan-out
+
+`GET /admin/idp-providers/status` **opens no sockets**. It reads
+`app.state.idp_health_cache`, which a background task
+(`app/services/idp_health.py`) refills every 15 minutes.
+
+Three constraints shaped that, and each one is load-bearing:
+
+* **Not a frontend sweep.** `useProviderHealthSweep` deliberately has *no*
+  interval — the mount-time fan-out was removed as a P0.4 regression
+  ("this storm hit the backend on every cold boot"). Doing it for IdPs
+  would re-introduce a bug this codebase already paid for. Mirror the
+  provider-warmup architecture instead.
+* **Gated on `runs_scheduler()`**, so N replicas do not run N sweeps
+  against the same IdPs.
+* **Shutdown via `await asyncio.wait_for(shutdown.wait(), timeout=interval)`**,
+  the idiom from `outbox_relay.py` — not a bare `asyncio.sleep`, which
+  would make every deploy wait out the interval.
+
+A replica that runs no schedulers serves an empty cache. That is expected:
+the provider list must render regardless, so the frontend treats the health
+read as separate and non-fatal.
+
+Certificate expiry must be computed **server-side** — `idp_x509_cert` is a
+secret field and is redacted on read, so the UI cannot parse it. Note
+`_normalise_cert()` returns headerless base64, so the parse path is
+`load_der_x509_certificate(b64decode(body))`, not the PEM loader.
 
 ---
 
@@ -1235,6 +1268,12 @@ group→target reconciliation, signup-source stamping.
 
 ### 9.1 User reports SSO login failed
 
+0. **Ask for the reference.** Every failure lands on
+   `/login?ref=<8 hex chars>&sso_error=1`. Paste that ref into Admin →
+   SSO → **Activity** and the `user.sso_login_failed` event gives you the
+   provider and the exact reason. The reason is deliberately absent from
+   the page the user sees, so this is the intended route — the SQL below
+   is the fallback for when you have an email but no ref.
 1. **Get the audit envelope** — ask the user for the URL they were
    bounced to. If `?sso_error=1` (no error_code), the failure is
    pre-`complete_sso_login` (signature, JWKS, replay). If
@@ -1261,6 +1300,10 @@ group→target reconciliation, signup-source stamping.
 
 ### 9.2 IdP rotated their certificate (SAML)
 
+You should not be finding out about this from a user. The health sweep
+(§3.6) reports certificate expiry in the provider list and warns from 30
+days out; an expired signing cert takes every sign-in down at once.
+
 1. PATCH the provider:
    ```bash
    curl -X PATCH /api/v1/admin/idp-providers/idp_xxx \
@@ -1269,6 +1312,9 @@ group→target reconciliation, signup-source stamping.
 2. Registry invalidates the cached provider; next request rebuilds
    it with the new cert.
 3. No restart needed.
+4. Confirm with a dry run (`SSO.md` §2.11) rather than waiting for a user
+   to try — it verifies the new cert against a real assertion and writes
+   nothing.
 
 For OIDC IdPs the JWKS endpoint is fetched on a `kid` miss
 (`oidc.py:_VERIFY_ERRORS` retry loop), so cert rotation Just
@@ -1402,13 +1448,25 @@ attacks at the bottom of the section.
 | `nx_refresh` | `/api/v1/auth/` | yes | yes | lax | 7 days | HS256 | `nexus-lineage:refresh` | `cookies.py` + `tokens.create_refresh_token` |
 | `nx_csrf` | `/` | **no** (FE reads it) | yes | lax | follows refresh | unsigned random | — | `cookies.py:set_session_cookies` |
 | `nx_oidc` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:oidc_state` | `cookies.py` + `tokens.create_oidc_state_token` |
-| `nx_saml` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:saml_state` | `cookies.py` + `tokens.create_saml_state_token` |
+| `nx_saml` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:saml_state` | `cookies.py` + `tokens.create_saml_state_token` |
 | `nx_mock_identity` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:mock_identity` | `cookies.py` + `tokens.create_mock_identity_token` |
-| `nx_link_intent` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:link_intent` | `cookies.py` + `tokens.create_link_intent_token` |
+| `nx_link_intent` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:link_intent` | `cookies.py` + `tokens.create_link_intent_token` |
+| `nx_dryrun` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:dryrun` | `cookies.py` + `tokens.create_dryrun_token` |
 | `nx_user_v1` (sessionStorage) | n/a (browser) | n/a | n/a | n/a | tab lifetime | n/a | n/a | `frontend/src/store/userCache.ts` |
 
 `Secure` and `SameSite` come from
-`auth_service/core/config.COOKIE_*` (env-overridable for dev).
+`auth_service/core/config.COOKIE_*` (env-overridable for dev) — **except**
+for the three cookies that have to survive a cross-site landing.
+
+`nx_saml`, `nx_link_intent` and `nx_dryrun` are `SameSite=None; Secure`
+unconditionally, ignoring `COOKIE_SECURE`. The SAML ACS is a cross-site
+top-level **POST**, which `Lax` explicitly withholds cookies from — under
+`Lax` the ACS handler never sees the flow cookie and the whole SP-initiated
+flow is dead, on every IdP. Browsers only send `SameSite=None` alongside
+`Secure`, so the two go together. Deriving `Secure` from config would
+reintroduce that bug in the off position, which is the configuration where
+it is hardest to notice. `nx_oidc` keeps the default: the OIDC callback is
+a cross-site **GET**, which `Lax` permits.
 
 ### 11.2 Endpoints (Phases 0–4)
 
@@ -1428,6 +1486,7 @@ attacks at the bottom of the section.
 | GET\|POST | `/api/v1/auth/{slug}/sls` | SAML* | cookie | 302 |
 | POST | `/api/v1/auth/{slug}/mock` | mock identity | dev-only env gate | `{ok}` + cookie |
 | POST | `/api/v1/auth/{slug}/browser-profile` | `{payload}` from web storage | signature/freshness server-side; 404 unless the row's source is browser storage | `{user}` + session cookies |
+| POST | `/api/v1/auth/resolve` | `{email}` | none — pre-session, CSRF-exempt, rate limited 20/min | `{provider}` or `{provider: null}`; every miss identical |
 
 #### Self-service identities
 
@@ -1445,7 +1504,11 @@ attacks at the bottom of the section.
 | POST | `/api/v1/admin/idp-providers` | create; 409 on slug conflict |
 | PATCH | `/api/v1/admin/idp-providers/{id}` | merge into settings; bumps registry cache |
 | DELETE | `/api/v1/admin/idp-providers/{id}` | 409 if identities exist |
-| POST | `/api/v1/admin/idp-providers/{id}/test` | dry-run claim mapping |
+| POST | `/api/v1/admin/idp-providers/{id}/test` | preview claim mapping against a pasted blob |
+| POST | `/api/v1/admin/idp-providers/discover` | fill the form from an OIDC issuer or SAML metadata; never persists; a probe failure is `{success:false,error}`, not a 500 |
+| GET | `/api/v1/admin/idp-providers/status` | last known health from the background sweep; **opens no sockets** |
+| POST | `/api/v1/admin/idp-providers/{id}/dry-run/start` | mints `nx_dryrun`; returns `{loginUrl}`. The callback then reports the would-be outcome and writes nothing |
+| GET | `/api/v1/admin/idp-providers/{id}/last-assertion` | the most recent claims blob, decrypted; 404 until one is captured |
 | GET | `/api/v1/admin/idp-providers/defaults/{kind}` | default mapping shape |
 | GET\|POST\|DELETE | `/api/v1/admin/idp-group-mappings` | listing + role_binding + group_membership target shapes |
 | GET\|POST\|DELETE | `/api/v1/admin/users/{user_id}/identities` | admin link/unlink |
@@ -1467,6 +1530,7 @@ Every admin endpoint is gated by `requires("system:admin")`.
 | `user.sso_link_denied` | unsafe_auto_link | `email, provider_id, external_id, reason, deny_reasons, linking_policy, email_verified, existing_status` |
 | `user.sso_jit_blocked` | `allow_jit_provisioning=false` | `email, provider_id, external_id, reason` |
 | `user.sso_session_expired` | 24h ceiling | `user_id, provider_slug, auth_time, elapsed_seconds` |
+| `user.sso_login_failed` | any SSO callback failure | `ref, provider_slug, provider_id, reason` — the `ref` is what the user sees at `/login?ref=…`; the reason never leaves the audit log |
 | `user.identity.linked` | self-service link | `user_id, provider_id, external_id, via` |
 | `user.identity.unlinked` | self-service unlink | `user_id, identity_id, via` |
 | `user.identity.admin_linked` | admin link | `user_id, identity_id, provider_id, external_id, actor` |
