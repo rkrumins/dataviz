@@ -28,6 +28,7 @@ import {
     type IdpProvider,
 } from '@/services/ssoAdminService'
 import { ClaimMappingEditor, type ClaimMapping } from './ClaimMappingEditor'
+import { DiscoverPanel } from './DiscoverPanel'
 import { cn } from '@/lib/utils'
 
 type LinkingPolicy = 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
@@ -371,6 +372,20 @@ export function ProviderForm({
         }
     }, [isProfile, profileSettings.source, profileSettings.source_key])
 
+    /** Merge discovered settings into the JSON editor without clobbering
+     *  anything the operator already typed — discovery supplies the fields
+     *  an IdP publishes, they supply the credentials. */
+    function mergeDiscovered(discovered: Record<string, unknown>) {
+        let current: Record<string, unknown> = {}
+        try {
+            current = JSON.parse(settingsJson)
+        } catch {
+            // Unparseable draft: discovery is still the better starting
+            // point, so replace rather than refuse.
+        }
+        setSettingsJson(JSON.stringify({ ...current, ...discovered }, null, 2))
+    }
+
     async function submit(e: React.FormEvent) {
         e.preventDefault()
 
@@ -473,15 +488,18 @@ export function ProviderForm({
                     onChange={setProfileSettings}
                 />
             ) : (
-                <label className="block text-xs">
-                    Settings (encrypted JSON)
-                    <textarea
-                        className={monoCls}
-                        rows={8}
-                        value={settingsJson}
-                        onChange={(e) => setSettingsJson(e.target.value)}
-                    />
-                </label>
+                <>
+                    <DiscoverPanel kind={kind} onDiscovered={mergeDiscovered} />
+                    <label className="block text-xs">
+                        Settings (encrypted JSON)
+                        <textarea
+                            className={monoCls}
+                            rows={8}
+                            value={settingsJson}
+                            onChange={(e) => setSettingsJson(e.target.value)}
+                        />
+                    </label>
+                </>
             )}
 
             <ClaimMappingEditor

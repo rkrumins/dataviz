@@ -85,6 +85,28 @@ export interface UpdateProviderInput {
     buttonIcon?: string | null
 }
 
+export interface DiscoverInput {
+    kind: IdpKind
+    /** OIDC: the issuer URL. */
+    issuer?: string
+    /** SAML: a metadata URL to fetch, or… */
+    metadataUrl?: string
+    /** …the metadata XML pasted directly. */
+    metadataXml?: string
+}
+
+export interface DiscoverResult {
+    success: boolean
+    /** Settings to merge into the form. Never contains secrets — the
+     *  operator still supplies client_id / client_secret themselves. */
+    settings: Record<string, unknown>
+    /** Endpoints read from the discovery document, for display. */
+    metadata: Record<string, unknown>
+    /** Non-fatal findings worth showing before the operator saves. */
+    warnings: string[]
+    error?: string | null
+}
+
 export interface TestMappingResult {
     providerId: string
     providerSlug: string
@@ -219,6 +241,19 @@ export const ssoAdminService = {
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
         )
+    },
+
+    /**
+     * Read a provider's own published configuration and derive its settings.
+     *
+     * Resolves even when the probe fails — the failure is in
+     * ``result.error``, not an exception, matching the backend contract.
+     * Only a malformed request rejects.
+     */
+    discover(body: DiscoverInput): Promise<DiscoverResult> {
+        return request<DiscoverResult>(`${ADMIN}/idp-providers/discover`, {
+            method: 'POST', body: JSON.stringify(body),
+        })
     },
 
     /** Dry-run claim mapping against a paste-in claims blob. */

@@ -35,6 +35,19 @@ from backend.auth_service.providers import (
     DEFAULT_CUSTOM_PROFILE,
     get_registry,
 )
+from backend.auth_service.providers.oidc import OidcError, discover_issuer
+
+# SAML metadata import is best-effort for the same reason the provider
+# itself is: an image without libxmlsec1 must still serve the rest of this
+# router. The endpoint reports the capability as missing rather than 500ing.
+try:
+    from backend.auth_service.providers.saml2 import (  # type: ignore
+        fetch_idp_metadata,
+        parse_idp_metadata,
+    )
+except ImportError:  # pragma: no cover - missing system dep
+    fetch_idp_metadata = None  # type: ignore[assignment]
+    parse_idp_metadata = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +113,32 @@ class UpdateProviderRequest(BaseModel):
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
 
 
+class DiscoverRequest(BaseModel):
+    """Body for ``POST /admin/idp-providers/discover``.
+
+    One of ``issuer`` (OIDC), ``metadataUrl`` or ``metadataXml`` (SAML).
+    Nothing is persisted — this fills a form, it does not create a row.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    kind: str
+    issuer: Optional[str] = None
+    metadata_url: Optional[str] = Field(default=None, alias="metadataUrl")
+    metadata_xml: Optional[str] = Field(default=None, alias="metadataXml")
+
+
+class DiscoverResult(BaseModel):
+    """Structured outcome. A probe failure is ``success=False`` with an
+    ``error``, never an exception — mirroring the data-source
+    ``/test-connection`` contract, because "your IdP is unreachable" is an
+    answer, not a server fault."""
+    model_config = ConfigDict(populate_by_name=True)
+    success: bool
+    settings: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
 class TestMappingRequest(BaseModel):
     """Body for ``POST /admin/idp-providers/{id}/test``.
 
@@ -162,6 +201,71 @@ async def get_default_mapping(
     if mapping is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown kind")
     return mapping
+
+
+@router.post("/discover", response_model=DiscoverResult,
+             response_model_by_alias=True)
+async def discover_provider_settings(
+    body: DiscoverRequest,
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Derive provider settings from the IdP's own published configuration.
+
+    Standing up an IdP meant hand-transcribing ~15 fields — issuer URLs,
+    entity ids, a base64 signing certificate — from one console into
+    another. Every one of those is a chance to introduce a typo that
+    surfaces days later as an opaque login failure. Both protocols publish
+    this information; this reads it.
+
+    Never persists, and never invents secrets: ``client_id`` /
+    ``client_secret`` are the operator's to supply.
+    """
+    kind = (body.kind or "").strip()
+
+    if kind == "oidc":
+        if not body.issuer:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "issuer is required to discover an OIDC provider",
+            )
+        try:
+            found = await discover_issuer(body.issuer)
+        except OidcError as exc:
+            return DiscoverResult(success=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001 — a probe never 500s
+            logger.warning("OIDC discovery failed (%s): %s", body.issuer, exc)
+            return DiscoverResult(success=False, error=str(exc))
+        return DiscoverResult(success=True, **found)
+
+    if kind == "saml2":
+        if parse_idp_metadata is None:
+            return DiscoverResult(
+                success=False,
+                error="SAML support is not available in this deployment.",
+            )
+        xml = body.metadata_xml
+        if not xml:
+            if not body.metadata_url:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "metadataUrl or metadataXml is required to discover a "
+                    "SAML provider",
+                )
+            try:
+                xml = await fetch_idp_metadata(body.metadata_url)
+            except Exception as exc:  # noqa: BLE001 — a probe never 500s
+                return DiscoverResult(success=False, error=str(exc))
+        try:
+            found = parse_idp_metadata(xml)
+        except Exception as exc:  # noqa: BLE001
+            return DiscoverResult(success=False, error=str(exc))
+        return DiscoverResult(success=True, **found)
+
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        f"discovery is not available for kind '{kind}'. Only 'oidc' and "
+        "'saml2' publish their configuration.",
+    )
 
 
 @router.post(
