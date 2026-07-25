@@ -384,16 +384,72 @@ async def test_reconcile_creates_revokes_reactivates(db_session):
 
 
 @pytest.mark.asyncio
+async def test_reconciler_refuses_a_privileged_mapping_inserted_out_of_band(
+    db_session,
+):
+    """The write-time guard is not the only line of defence, and must not be.
+
+    A ``super_admin`` mapping created before that guard was corrected — or
+    inserted straight into the table — would otherwise grant platform admin
+    on the very next SSO login. The reconciler re-checks, so an existing bad
+    row is inert rather than live.
+    """
+    from backend.app.db.models import IdpGroupRoleMappingORM
+    from backend.app.db.repositories import binding_repo, idp_provider_repo
+    from backend.app.services.permission_service import reconcile_sso_targets
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="entra-oob", display_name="Entra",
+        kind="oidc", settings={}, claim_mapping={},
+    )
+    # Bypass create_role_binding_mapping entirely — that is the point.
+    db_session.add(IdpGroupRoleMappingORM(
+        provider_id=provider.id,
+        idp_group="Admins",
+        target_type="role_binding",
+        role_name="super_admin",
+        scope_type="global",
+        scope_id=None,
+        target_group_id=None,
+        created_at="2026-01-01T00:00:00Z",
+    ))
+    await db_session.flush()
+
+    out = await reconcile_sso_targets(
+        db_session, user_id="usr_oob", idp_groups=["Admins"],
+        provider_id=provider.id,
+    )
+
+    assert out["created"] == 0
+    bindings = await binding_repo.list_for_subject(
+        db_session, subject_type="user", subject_id="usr_oob",
+    )
+    assert [b.role_name for b in bindings] == []
+
+
+@pytest.mark.asyncio
 async def test_mapping_repo_validates_role_existence(db_session):
     from backend.app.db.repositories import idp_group_mapping_repo
     from backend.app.db.repositories.idp_group_mapping_repo import (
         ForbiddenSsoRoleError, MappingValidationError,
     )
-    # Forbidden role.
+    # Forbidden: the legacy literal. ``system:admin`` is a permission id,
+    # not a role name, so this never actually protected anything — but a
+    # caller may still send it and must not fall through to "does not exist".
     with pytest.raises(ForbiddenSsoRoleError):
         await idp_group_mapping_repo.create_role_binding_mapping(
             db_session, idp_group="X",
             scope_type="global", scope_id=None, role_name="system:admin",
+        )
+    # Forbidden: the role that actually carries platform admin. This is the
+    # one that mattered — ``super_admin`` is a real, global, bindable role,
+    # so it passed every check in this validator and created a mapping that
+    # auto-granted full platform admin to an IdP group. Only a filter in the
+    # admin UI stood in the way, and the endpoint is reachable without it.
+    with pytest.raises(ForbiddenSsoRoleError):
+        await idp_group_mapping_repo.create_role_binding_mapping(
+            db_session, idp_group="X",
+            scope_type="global", scope_id=None, role_name="super_admin",
         )
     # Unknown role -> 400 (validates against canonical roles table).
     with pytest.raises(MappingValidationError, match="does not exist"):

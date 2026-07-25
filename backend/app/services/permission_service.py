@@ -51,7 +51,7 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.app.db.repositories.idp_group_mapping_repo import (
-    FORBIDDEN_AUTO_ROLE,
+    FORBIDDEN_AUTO_ROLES,
 )
 
 logger = logging.getLogger(__name__)
@@ -505,7 +505,12 @@ async def reconcile_sso_targets(
             - target without an existing row -> insert.
 
     Hard guardrails (mirroring the write-time validation):
-      * Mappings pointing at ``system:admin`` are skipped + warned.
+      * Mappings pointing at a never-auto-granted role
+        (``FORBIDDEN_AUTO_ROLES`` — ``super_admin``, plus the legacy
+        ``system:admin`` literal) are skipped + warned. This half matters
+        independently: a mapping created before the write-time guard was
+        corrected, or inserted out of band, must still be refused here
+        rather than silently granting platform admin on the next login.
       * Mappings whose target_group is ``is_protected=true`` are
         skipped + warned. (Operator can't normally create these; the
         check defends against out-of-band inserts.)
@@ -539,10 +544,10 @@ async def reconcile_sso_targets(
                 continue
             group_target_ids.add(m.target_group_id)
         else:
-            if m.role_name == FORBIDDEN_AUTO_ROLE:
+            if m.role_name in FORBIDDEN_AUTO_ROLES:
                 logger.warning(
                     "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
-                    FORBIDDEN_AUTO_ROLE, m.idp_group, m.id,
+                    m.role_name, m.idp_group, m.id,
                 )
                 continue
             if not m.role_name or not m.scope_type:

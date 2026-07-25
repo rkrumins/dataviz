@@ -12,10 +12,16 @@ A mapping links an IdP group name to ONE of two target types:
     composition once and the IdP-side group only carries
     correspondence.
 
-Validation happens here, not at the DB layer: we consult
-``role_repo`` (role exists + bindable in scope) and ``group_repo``
-(group exists + not soft-deleted + not ``is_protected``). The DB
-CHECK only enforces shape (which columns are NULL per target_type).
+Validation happens here, not at the DB layer: the role must exist and be
+bindable in the requested scope, and the target group must exist, not be
+soft-deleted and not be ``is_protected``. The DB CHECK only enforces
+shape (which columns are NULL per target_type).
+
+Note the checks are inlined rather than delegated to ``role_repo`` /
+``group_repo`` — see the comment in ``_validate_role_binding_target``.
+(This docstring used to claim it consulted those repos, which was never
+true, and that mismatch is part of why the forbidden-role guard went so
+long without anyone noticing it compared against a permission id.)
 
 The hot-path read is :func:`list_active_for_groups`, called by the
 reconciler on every SSO login and every refresh. Index
@@ -35,11 +41,26 @@ from backend.app.db.models import (
     IdpGroupRoleMappingORM,
     RoleORM,
 )
+from backend.common.roles import FORBIDDEN_AUTO_GRANT_ROLES
 
 
-# Role names that are forever excluded from auto-grant via SSO. Admin
-# grants must remain a deliberate human action with an audit trail.
-FORBIDDEN_AUTO_ROLE = "system:admin"
+# Roles that are forever excluded from auto-grant via SSO. Admin grants
+# must remain a deliberate human action with an audit trail.
+#
+# This used to be the bare string ``"system:admin"``, which is a
+# PERMISSION id, not a role name — the role that carries it is
+# ``super_admin``. So a mapping naming ``super_admin`` passed every check
+# here (the role exists, it is global, it is bindable) and auto-granted
+# full platform admin to whoever the IdP put in that group. The only
+# thing refusing it was a filter in the admin UI, and the endpoint is
+# reachable without the UI.
+#
+# ``common.roles.FORBIDDEN_AUTO_GRANT_ROLES`` already held the correct
+# set and its docstring already named this module as the guard; it was
+# simply never imported. The literal is kept in the set as well so a
+# caller that learned to send ``system:admin`` still gets refused rather
+# than falling through to "role does not exist".
+FORBIDDEN_AUTO_ROLES: frozenset[str] = FORBIDDEN_AUTO_GRANT_ROLES | {"system:admin"}
 
 
 def _now() -> str:
@@ -70,9 +91,9 @@ async def _validate_role_binding_target(
 ) -> None:
     if not role_name:
         raise MappingValidationError("role_name is required for role_binding targets")
-    if role_name == FORBIDDEN_AUTO_ROLE:
+    if role_name in FORBIDDEN_AUTO_ROLES:
         raise ForbiddenSsoRoleError(
-            f"IdP groups may not auto-grant {FORBIDDEN_AUTO_ROLE!r}; "
+            f"IdP groups may not auto-grant {role_name!r}; "
             "grant it via the standard admin role-binding flow."
         )
     if scope_type not in {"global", "workspace"}:
