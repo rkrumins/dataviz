@@ -1095,7 +1095,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Rate-limit 429 handler
+# Rate-limit 429 handler.
+#
+# ``app.state.limiter`` is not optional decoration: slowapi's handler does
+# ``request.app.state.limiter._inject_headers(...)`` (slowapi/extension.py),
+# so without it the handler ITSELF raises AttributeError and the client gets a
+# 500 with a stack trace instead of a 429 with Retry-After — on every
+# rate-limited endpoint, which is exactly the moment you least want an
+# unhandled error. Registering the same instance the routes decorate with
+# keeps the raised limit and the response headers consistent.
+from backend.auth_service.api.router import limiter as _auth_limiter
+
+app.state.limiter = _auth_limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Global handler for management DB failures — returns structured 503 instead of
