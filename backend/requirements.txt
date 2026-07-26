@@ -15,7 +15,7 @@ psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
 alembic>=1.18.5          # Schema migrations
 
 # Security (credential encryption + authentication)
-cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
+cryptography>=49.0.0     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
 argon2-cffi>=23.1.0      # Argon2id password hashing (OWASP recommended)
 PyJWT>=2.13.0            # Stateless JWT token creation / verification; >=2.13.0: crit-header bypass, JWKS confusion, decode DoS (GHSA-752w-5fwx-jx9f et al.)
 Authlib>=1.6.12          # OIDC ID-token verification (JWKS) + OAuth client; >=1.6.12: algorithm confusion, JWS crit bypass, JWE decompression bomb (PYSEC-2024-52 et al.)
