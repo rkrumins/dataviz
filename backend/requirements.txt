@@ -1,5 +1,5 @@
 # Core backend
-fastapi>=0.139.2         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
+fastapi>=0.140.0         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
 uvicorn[standard]>=0.51.0
 gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via Transfer-Encoding). WSGI server (uvicorn workers) for viz/graph.
 pydantic>=2.4.0          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
