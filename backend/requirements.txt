@@ -5,7 +5,7 @@ gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via 
 pydantic>=2.13.4          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
-FalkorDB>=1.6.1
+FalkorDB>=1.6.2
 redis>=8.0.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
