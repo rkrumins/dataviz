@@ -1533,7 +1533,7 @@ interface RoleOption {
 }
 
 
-function InviteForm({
+export function InviteForm({
     canGrantSuperAdmin, loading, onCancel, onSubmit, onSubmitBulk,
 }: {
     canGrantSuperAdmin: boolean
@@ -1544,6 +1544,17 @@ function InviteForm({
         emails: string[], role: string | null, opts: CreateInviteOptions,
     ) => void
 }) {
+    // Three steps, in the order the decisions actually depend on each
+    // other. Everything used to be on one screen: seven decisions, no
+    // starting point, and the safety settings last — so the summary that
+    // describes the whole invite sat below the fold, under the fields it
+    // was meant to check.
+    const [step, setStep] = useState<1 | 2 | 3>(1)
+    // Who the link is for. Asked FIRST because it is the only question
+    // whose answer constrains the others, and because it is the one the
+    // inviter already knows the answer to before opening this dialog.
+    const [audience, setAudience] = useState<Audience | null>(null)
+
     const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
     const [groups, setGroups] = useState<GroupResponse[] | null>(null)
@@ -1621,9 +1632,50 @@ function InviteForm({
         .map(s => s.trim())
         .filter(Boolean)
 
+    /** Choosing an audience carries its own safe defaults with it.
+     *
+     *  This is the point of asking first. The old form defaulted to
+     *  "anyone with the link · unlimited · 30 days" — the widest invite
+     *  it can mint — and left it to the admin to notice and narrow it.
+     *  An open link now arrives capped and short-lived, and the settings
+     *  a given audience cannot use are cleared rather than left to leak
+     *  into the submit. Both remain adjustable in step 3; the difference
+     *  is which way you have to move to get to the risky one. */
+    const pickAudience = (next: Audience) => {
+        setAudience(next)
+        setBulkMode(next === 'several')
+        if (next !== 'person') setEmail('')
+        if (next !== 'several') setBulkEmails('')
+        if (next !== 'domain') setEmailDomain('')
+        setMaxUses(next === 'person' ? 1 : next === 'domain' ? 25 : next === 'anyone' ? 5 : null)
+        setExpiresIn(next === 'domain' ? '30d' : '7d')
+    }
+
+    const domainValid = /^@?[^\s@]+\.[^\s@]+$/.test(emailDomain.trim())
+
+    // The audience question is answered in step 1, so its own field has
+    // to be filled before there is anything to advance to.
+    const audienceReady =
+        audience === 'person' ? emailValid
+        : audience === 'several' ? bulkEmailList.length > 0
+        : audience === 'domain' ? domainValid
+        : audience === 'anyone'
+
+    // A privileged role or a group attachment forces an email pin. That
+    // rule is unchanged — but it can now contradict an audience already
+    // chosen, so step 2 has to surface the conflict rather than silently
+    // disabling a button three screens later.
+    const audienceConflict = needsEmail && audience !== 'person' && audience !== 'several'
+
     const canSubmit = bulkMode
         ? bulkEmailList.length > 0 && (!needsWorkspacePick || !!workspaceId)
         : (!needsWorkspacePick || !!workspaceId) && (!needsEmail || emailValid)
+
+    const canAdvance = step === 1
+        ? audienceReady
+        : step === 2
+            ? (!needsWorkspacePick || !!workspaceId) && !audienceConflict
+            : canSubmit
 
     const expiresInHours = (() => {
         switch (expiresIn) {
@@ -1762,40 +1814,157 @@ function InviteForm({
             // stays sticky.
             className="flex-1 flex flex-col min-h-0 -mx-6"
         >
-            <p className="text-sm text-ink-secondary mb-4 px-6">
-                Generate a link that lets a new user sign up as a standard team member.
-                Optionally elevate them to an organization-wide role, or add them to groups.
-                Workspace-specific access is granted by each workspace's admin after signup.
-            </p>
+            <StepRail step={step} onGo={s => setStep(s)} maxReached={audienceReady ? 3 : 1} />
 
             {roles === null ? (
                 <div className="px-6"><RoleListSkeleton /></div>
             ) : (
                 <>
-                    {/* Scrollable body — wraps the role pickers + the
-                        two-column config grid + the live summary. The
-                        footer below sits outside this scroll region.
-                        Grid:
-                          * Left column has a 0 minimum so long role
-                            descriptions truncate inside the column
-                            instead of stealing width from the right
-                            rail.
-                          * Right column has an explicit 260px minimum
-                            so it can never collapse to a sliver (last
-                            bug: ``minmax(0,1fr)`` let it shrink to a
-                            1-character-wide vertical strip when role
-                            descriptions ate the available space). */}
                     <div className="flex-1 overflow-y-auto px-6 min-w-0">
-                        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.1fr)_minmax(260px,1fr)] gap-x-6 gap-y-0 min-w-0">
-                            {/* ── LEFT column — Role catalogue ─────────── */}
-                            <div>
-                                <SectionLabel>Choose a role</SectionLabel>
+                        <AnimatePresence mode="wait" initial={false}>
+
+                        {/* ── STEP 1 — Who is this for? ─────────────────
+                            The question the inviter can already answer,
+                            asked before anything they have to reason
+                            about. Each card states the constraint it
+                            applies, so the choice is legible as a safety
+                            decision and not just a delivery preference. */}
+                        {step === 1 && (
+                            <motion.div key="s1" {...STEP_MOTION}>
+                                <h3 className="text-base font-bold text-ink">Who is this link for?</h3>
+                                <p className="text-xs text-ink-muted mt-1 mb-4 leading-relaxed">
+                                    This sets how tightly the link is bound. You can adjust
+                                    everything before you generate it.
+                                </p>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                                    {AUDIENCES.map(a => (
+                                        <AudienceCard
+                                            key={a.value}
+                                            option={a}
+                                            selected={audience === a.value}
+                                            onSelect={() => pickAudience(a.value)}
+                                        />
+                                    ))}
+                                </div>
+
+                                {/* The chosen audience's own field, inline.
+                                    A recipient box with no audience picked
+                                    is a question without a subject.
+
+                                    Keyed enter animation, deliberately NOT
+                                    an AnimatePresence: switching audience
+                                    should swap the field at once. Staging an
+                                    exit made the old field linger over the
+                                    new one, so for a moment the form showed
+                                    a domain box for a link pinned to a
+                                    person. */}
+                                {audience && (
+                                        <motion.div
+                                            key={audience}
+                                            initial={{ opacity: 0, y: -4 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ duration: 0.15 }}
+                                            className="mt-5"
+                                        >
+                                            {audience === 'person' && (
+                                                <>
+                                                    <SectionLabel>Their email address</SectionLabel>
+                                                    <FieldWithIcon icon={AtSign}>
+                                                        <input
+                                                            type="email"
+                                                            autoFocus
+                                                            value={email}
+                                                            onChange={e => setEmail(e.target.value)}
+                                                            placeholder="user@company.com"
+                                                            className={INPUT_CLASS}
+                                                        />
+                                                    </FieldWithIcon>
+                                                    <FieldHint>
+                                                        The link refuses any signup whose email doesn&apos;t match,
+                                                        so forwarding it achieves nothing.
+                                                    </FieldHint>
+                                                </>
+                                            )}
+
+                                            {audience === 'several' && (
+                                                <>
+                                                    <SectionLabel>Their email addresses</SectionLabel>
+                                                    <textarea
+                                                        autoFocus
+                                                        value={bulkEmails}
+                                                        onChange={e => setBulkEmails(e.target.value)}
+                                                        rows={5}
+                                                        placeholder={'alice@company.com\nbob@company.com'}
+                                                        className="w-full bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] focus:border-indigo-500/40 rounded-xl px-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors font-mono"
+                                                    />
+                                                    <FieldHint>
+                                                        {bulkEmailList.length > 0
+                                                            ? `${bulkEmailList.length} ${bulkEmailList.length === 1 ? 'address' : 'addresses'} — one pinned link each, so every invitation can be revoked and traced on its own.`
+                                                            : 'One address per line, or separated by commas.'}
+                                                    </FieldHint>
+                                                </>
+                                            )}
+
+                                            {audience === 'domain' && (
+                                                <>
+                                                    <SectionLabel>Their email domain</SectionLabel>
+                                                    <FieldWithIcon icon={AtSign} className="max-w-xs">
+                                                        <input
+                                                            type="text"
+                                                            autoFocus
+                                                            value={emailDomain}
+                                                            onChange={e => setEmailDomain(e.target.value)}
+                                                            placeholder="company.com"
+                                                            className={INPUT_CLASS}
+                                                        />
+                                                    </FieldWithIcon>
+                                                    <FieldHint>
+                                                        {domainValid
+                                                            ? `Only @${emailDomain.trim().replace(/^@/, '')} addresses can use this link — safe to post in a team channel.`
+                                                            : 'The middle ground between anyone-with-the-link and pinning one address.'}
+                                                    </FieldHint>
+                                                </>
+                                            )}
+
+                                            {audience === 'anyone' && (
+                                                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-700 dark:text-amber-300">
+                                                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                                    <div className="text-xs leading-snug">
+                                                        <p className="font-semibold">Anyone who ends up with the URL can use it.</p>
+                                                        <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
+                                                            It has been capped at 5 people and 7 days to bound that.
+                                                            Both are adjustable in the last step, and you can revoke
+                                                            it at any time from Manage links.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </motion.div>
+                                )}
+                            </motion.div>
+                        )}
+
+                        {/* ── STEP 2 — What do they get? ────────────────
+                            Full width, so a privileged role's description
+                            is readable instead of truncated mid-sentence
+                            — these are the choices where knowing what you
+                            are granting matters most. */}
+                        {step === 2 && (
+                            <motion.div key="s2" {...STEP_MOTION}>
+                                <h3 className="text-base font-bold text-ink">What will they get?</h3>
+                                <p className="text-xs text-ink-muted mt-1 mb-4 leading-relaxed">
+                                    Everyone lands as a standard team member. Workspace access is
+                                    granted by each workspace&apos;s admin after they sign up.
+                                </p>
+
                                 <NoRoleCard
                                     option={noRole}
                                     selected={selectedRole === ''}
                                     onSelect={() => setSelectedRole('')}
                                 />
-                                <div className="space-y-3 mt-3 max-h-[360px] overflow-y-auto pr-1">
+
+                                <div className="mt-4 space-y-4">
                                     {platformTiers.length > 0 && (
                                         <RoleGroup
                                             title="Elevate to a privileged role"
@@ -1815,414 +1984,325 @@ function InviteForm({
                                         />
                                     )}
                                 </div>
-                            </div>
 
-                            {/* ── RIGHT column — Workspace + Groups + Email ──
-                                ``min-w-0`` lets the column shrink below its
-                                natural content width so long workspace / group /
-                                recipient strings truncate inside the column
-                                instead of pushing the modal to overflow. */}
-                            <div className="min-w-0 space-y-0 md:border-l md:border-glass-border md:pl-6 mt-5 md:mt-0">
-
-                    {/* ── Section 2 — Workspace (animated) ───────────── */}
-                    <AnimatePresence initial={false}>
-                        {isWorkspaceScoped && (
-                            <motion.div
-                                key="ws-section"
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                                exit={{ opacity: 0, height: 0 }}
-                                transition={{ duration: 0.18 }}
-                                className="overflow-hidden"
-                            >
-                                <div>
-                                    <SectionLabel>Workspace</SectionLabel>
-                                    {fixedWorkspaceId ? (
-                                        <div className="flex items-center gap-2.5 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-glass-border">
-                                            <Building2 className="w-4 h-4 text-ink-muted shrink-0" />
-                                            <div className="min-w-0 flex-1">
-                                                <p className="text-sm font-semibold text-ink truncate">
-                                                    {fixedWorkspace?.name ?? fixedWorkspaceId}
-                                                </p>
-                                                <p className="text-[11px] text-ink-muted">
-                                                    This custom role is fixed to this workspace.
-                                                </p>
-                                            </div>
-                                            <Lock className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-                                        </div>
-                                    ) : (
-                                        <WorkspacePicker
-                                            workspaces={workspaces}
-                                            value={workspaceId}
-                                            onChange={setWorkspaceId}
-                                        />
-                                    )}
-                                </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
-                    {/* ── Section 3 — Groups ─────────────────────────── */}
-                    <div className="mt-5">
-                        <SectionLabel>
-                            Add to Groups
-                            <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
-                                (optional)
-                            </span>
-                        </SectionLabel>
-                        <GroupsPicker
-                            groups={groups}
-                            selected={selectedGroups}
-                            onToggle={toggleGroup}
-                        />
-                        <p className="text-[11px] text-ink-muted mt-2">
-                            Group memberships apply across every workspace the
-                            group is bound to. Attaching groups makes the invite
-                            email-bound (we can't let a forwarded link grant
-                            unknown cross-workspace access).
-                        </p>
-                    </div>
-
-                    {/* ── Section 4 — Recipient (email) ──────────────── */}
-                    <div className="mt-5">
-                        <SectionLabel>
-                            Recipient
-                            {needsEmail ? (
-                                <span className="ml-1 text-amber-600 dark:text-amber-400 normal-case tracking-normal font-normal">
-                                    (required)
-                                </span>
-                            ) : (
-                                <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
-                                    (optional)
-                                </span>
-                            )}
-                        </SectionLabel>
-
-                        <AnimatePresence initial={false}>
-                            {/* Amber email-required callout — only when the
-                                requirement is active (privileged role or
-                                groups-without-override). */}
-                            {needsEmail && (
-                                <motion.div
-                                    key="priv-callout"
-                                    initial={{ opacity: 0, y: -4 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, y: -4 }}
-                                    transition={{ duration: 0.18 }}
-                                    className="p-3 mb-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300"
-                                >
-                                    <div className="flex items-start gap-2.5">
-                                        <Lock className="w-4 h-4 shrink-0 mt-0.5" />
-                                        <div className="text-xs leading-snug flex-1 min-w-0">
-                                            <p className="font-semibold">
-                                                {isPrivileged
-                                                    ? 'Privileged role — email required.'
-                                                    : 'Group attachments — email required.'}
-                                            </p>
-                                            <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
-                                                {isPrivileged
-                                                    ? 'This role grants admin or system perms. Pinning to an email stops a forwarded link from escalating someone else.'
-                                                    : 'Group memberships can reach across workspaces. Pinning to an email stops a forwarded link from granting the wrong identity that access.'}
-                                            </p>
-                                            {/* Override link — only when the
-                                                requirement is solely from groups
-                                                (not a privileged role) AND the
-                                                confirmation panel isn't already
-                                                open. */}
-                                            {overrideAvailable && !overrideConfirmOpen && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setOverrideConfirmOpen(true)
-                                                        setOverrideAck(false)
-                                                    }}
-                                                    className="mt-1.5 inline-flex items-center gap-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:underline"
-                                                >
-                                                    Make this a shareable group invite →
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* Inline confirmation panel. */}
-                                    <AnimatePresence initial={false}>
-                                        {overrideConfirmOpen && (
-                                            <motion.div
-                                                key="override-panel"
-                                                initial={{ opacity: 0, height: 0 }}
-                                                animate={{ opacity: 1, height: 'auto' }}
-                                                exit={{ opacity: 0, height: 0 }}
-                                                transition={{ duration: 0.18 }}
-                                                className="overflow-hidden"
-                                            >
-                                                <div className="mt-3 p-3 rounded-xl bg-canvas-elevated border border-amber-500/40 text-ink">
-                                                    <div className="flex items-start gap-2.5">
-                                                        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                                                        <div className="text-xs leading-snug flex-1 min-w-0">
-                                                            <p className="font-bold">Override the email pin?</p>
-                                                            <p className="mt-1 text-ink-secondary">
-                                                                Anyone with this link can sign up and join{' '}
-                                                                <span className="font-semibold text-ink">
-                                                                    {selectedGroupNames.join(', ')}
-                                                                </span>. Forwardable and reusable — only override for
-                                                                low-stakes, broadly-shared groups.
+                                {/* Workspace — only when the chosen role needs one. */}
+                                <AnimatePresence initial={false}>
+                                    {isWorkspaceScoped && (
+                                        <motion.div
+                                            key="ws-section"
+                                            initial={{ opacity: 0, height: 0 }}
+                                            animate={{ opacity: 1, height: 'auto' }}
+                                            exit={{ opacity: 0, height: 0 }}
+                                            transition={{ duration: 0.18 }}
+                                            className="overflow-hidden"
+                                        >
+                                            <div className="mt-5">
+                                                <SectionLabel>Workspace</SectionLabel>
+                                                {fixedWorkspaceId ? (
+                                                    <div className="flex items-center gap-2.5 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.08] dark:border-white/[0.10]">
+                                                        <Building2 className="w-4 h-4 text-ink-muted shrink-0" />
+                                                        <div className="min-w-0 flex-1">
+                                                            <p className="text-sm font-semibold text-ink truncate">
+                                                                {fixedWorkspace?.name ?? fixedWorkspaceId}
                                                             </p>
-                                                            <label className="mt-2.5 flex items-start gap-2 cursor-pointer select-none">
-                                                                <input
-                                                                    type="checkbox"
-                                                                    checked={overrideAck}
-                                                                    onChange={e => setOverrideAck(e.target.checked)}
-                                                                    className="mt-0.5 accent-amber-500 cursor-pointer"
-                                                                />
-                                                                <span className="text-[11px] text-ink-secondary">
-                                                                    I understand this link can be shared and reused
-                                                                    by multiple people.
-                                                                </span>
-                                                            </label>
-                                                            <div className="mt-3 flex items-center gap-2 flex-wrap">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        setOverrideConfirmOpen(false)
-                                                                        setOverrideAck(false)
-                                                                    }}
-                                                                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors whitespace-nowrap"
-                                                                >
-                                                                    Cancel
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    disabled={!overrideAck}
-                                                                    onClick={() => {
-                                                                        setAllowShareableGroups(true)
-                                                                        setOverrideConfirmOpen(false)
-                                                                    }}
-                                                                    className={cn(
-                                                                        "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap",
-                                                                        overrideAck
-                                                                            ? "bg-amber-500 text-white hover:brightness-110"
-                                                                            : "bg-amber-500/30 text-amber-700 dark:text-amber-300 cursor-not-allowed",
-                                                                    )}
-                                                                >
-                                                                    <Lock className="w-3 h-3" />
-                                                                    Make shareable
-                                                                </button>
-                                                            </div>
+                                                            <p className="text-[11px] text-ink-muted">
+                                                                This custom role is fixed to this workspace.
+                                                            </p>
                                                         </div>
+                                                        <Lock className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                                                    </div>
+                                                ) : (
+                                                    <WorkspacePicker
+                                                        workspaces={workspaces}
+                                                        value={workspaceId}
+                                                        onChange={setWorkspaceId}
+                                                    />
+                                                )}
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+
+                                <div className="mt-5">
+                                    <SectionLabel>
+                                        Add to groups
+                                        <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
+                                            (optional)
+                                        </span>
+                                    </SectionLabel>
+                                    <GroupsPicker
+                                        groups={groups}
+                                        selected={selectedGroups}
+                                        onToggle={toggleGroup}
+                                    />
+                                    <FieldHint>
+                                        Group memberships apply across every workspace the group is
+                                        bound to.
+                                    </FieldHint>
+                                </div>
+
+                                {/* The email-pin rule, and the way out of it.
+                                    It used to disable the submit button with
+                                    the explanation in a different column; now
+                                    it names the conflict with the audience
+                                    already chosen and offers the two real
+                                    resolutions. */}
+                                <AnimatePresence initial={false}>
+                                    {audienceConflict && (
+                                        <motion.div
+                                            key="conflict"
+                                            initial={{ opacity: 0, y: -4 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            exit={{ opacity: 0, y: -4 }}
+                                            transition={{ duration: 0.18 }}
+                                            className="mt-5 p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-700 dark:text-amber-300"
+                                        >
+                                            <div className="flex items-start gap-2.5">
+                                                <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                                                <div className="text-xs leading-snug flex-1 min-w-0">
+                                                    <p className="font-semibold">
+                                                        {isPrivileged
+                                                            ? 'A privileged role cannot go on a shareable link.'
+                                                            : 'Group attachments cannot go on a shareable link.'}
+                                                    </p>
+                                                    <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
+                                                        {isPrivileged
+                                                            ? 'This role grants admin or system permissions. Pinning to one address stops a forwarded link from escalating someone else.'
+                                                            : 'Group memberships can reach across workspaces. Pinning to one address stops a forwarded link from granting the wrong identity that access.'}
+                                                    </p>
+                                                    <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => { pickAudience('person'); setStep(1) }}
+                                                            className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-500 text-white hover:brightness-110 transition-all"
+                                                        >
+                                                            Pin it to one person
+                                                        </button>
+                                                        {overrideAvailable && !overrideConfirmOpen && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { setOverrideConfirmOpen(true); setOverrideAck(false) }}
+                                                                className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:underline"
+                                                            >
+                                                                Keep it shareable anyway →
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 </div>
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </motion.div>
-                            )}
+                                            </div>
 
-                            {/* Slate notice — shown when the override is
-                                active. Replaces the amber callout. */}
-                            {overrideActive && (
-                                <motion.div
-                                    key="override-active"
-                                    initial={{ opacity: 0, y: -4 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, y: -4 }}
-                                    transition={{ duration: 0.18 }}
-                                    className="flex items-start gap-2.5 p-3 mb-3 rounded-xl bg-slate-500/10 border border-slate-500/20 text-slate-700 dark:text-slate-300"
-                                >
-                                    <Users2 className="w-4 h-4 shrink-0 mt-0.5" />
-                                    <div className="text-xs leading-snug flex-1 min-w-0">
-                                        <p className="font-semibold">Shareable group invite</p>
-                                        <p className="mt-0.5 text-slate-700/80 dark:text-slate-300/80">
-                                            Anyone with this link can sign up and join the
-                                            selected {selectedGroupNames.length === 1 ? 'group' : 'groups'}.
-                                            Email is optional.
-                                        </p>
+                                            <AnimatePresence initial={false}>
+                                                {overrideConfirmOpen && (
+                                                    <motion.div
+                                                        key="override-panel"
+                                                        initial={{ opacity: 0, height: 0 }}
+                                                        animate={{ opacity: 1, height: 'auto' }}
+                                                        exit={{ opacity: 0, height: 0 }}
+                                                        transition={{ duration: 0.18 }}
+                                                        className="overflow-hidden"
+                                                    >
+                                                        <div className="mt-3 p-3 rounded-xl bg-canvas-elevated border border-amber-500/40 text-ink">
+                                                            <div className="flex items-start gap-2.5">
+                                                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                                <div className="text-xs leading-snug flex-1 min-w-0">
+                                                                    <p className="font-bold">Override the email pin?</p>
+                                                                    <p className="mt-1 text-ink-secondary">
+                                                                        Anyone with this link can sign up and join{' '}
+                                                                        <span className="font-semibold text-ink">
+                                                                            {selectedGroupNames.join(', ')}
+                                                                        </span>. Forwardable and reusable — only override for
+                                                                        low-stakes, broadly-shared groups.
+                                                                    </p>
+                                                                    <label className="mt-2.5 flex items-start gap-2 cursor-pointer select-none">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={overrideAck}
+                                                                            onChange={e => setOverrideAck(e.target.checked)}
+                                                                            className="mt-0.5 accent-amber-500 cursor-pointer"
+                                                                        />
+                                                                        <span className="text-[11px] text-ink-secondary">
+                                                                            I understand this link can be shared and reused
+                                                                            by multiple people.
+                                                                        </span>
+                                                                    </label>
+                                                                    <div className="mt-3 flex items-center gap-2 flex-wrap">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                setOverrideConfirmOpen(false)
+                                                                                setOverrideAck(false)
+                                                                            }}
+                                                                            className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors whitespace-nowrap"
+                                                                        >
+                                                                            Cancel
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={!overrideAck}
+                                                                            onClick={() => {
+                                                                                setAllowShareableGroups(true)
+                                                                                setOverrideConfirmOpen(false)
+                                                                            }}
+                                                                            className={cn(
+                                                                                "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap",
+                                                                                overrideAck
+                                                                                    ? "bg-amber-500 text-white hover:brightness-110"
+                                                                                    : "bg-amber-500/30 text-amber-700 dark:text-amber-300 cursor-not-allowed",
+                                                                            )}
+                                                                        >
+                                                                            <Lock className="w-3 h-3" />
+                                                                            Make shareable
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </motion.div>
+                                                )}
+                                            </AnimatePresence>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+
+                                {overrideActive && (
+                                    <div className="mt-5 flex items-start gap-2.5 p-3.5 rounded-xl bg-slate-500/10 border border-slate-500/20 text-slate-700 dark:text-slate-300">
+                                        <Users2 className="w-4 h-4 shrink-0 mt-0.5" />
+                                        <div className="text-xs leading-snug flex-1 min-w-0">
+                                            <p className="font-semibold">Shareable group invite</p>
+                                            <p className="mt-0.5 text-slate-700/80 dark:text-slate-300/80">
+                                                Anyone with this link can sign up and join the
+                                                selected {selectedGroupNames.length === 1 ? 'group' : 'groups'}.
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setAllowShareableGroups(false)}
+                                            className="p-1 -m-1 rounded-md text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                                            title="Require email instead"
+                                        >
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
                                     </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => setAllowShareableGroups(false)}
-                                        className="p-1 -m-1 rounded-md text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
-                                        title="Require email instead"
-                                    >
-                                        <X className="w-3.5 h-3.5" />
-                                    </button>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
+                                )}
+                            </motion.div>
+                        )}
 
-                        {/* One person or a team, same settings. Bulk mode is a
-                            mode rather than a separate dialog so the role,
-                            workspace, group and expiry pickers above are shared —
-                            a second copy of those is a second thing to keep in
-                            step. Every bulk link comes out pinned to its
-                            recipient, so each is separately revocable and each
-                            redemption is attributable. */}
-                        <div className="flex items-center gap-1.5 mb-2">
-                            {([false, true] as const).map(isBulk => (
+                        {/* ── STEP 3 — Review ───────────────────────────
+                            The sentence first, then the two settings that
+                            bound the link. It used to be the other way
+                            round and three scroll-lengths apart, which
+                            made the summary a footnote rather than the
+                            check it exists to be. */}
+                        {step === 3 && (
+                            <motion.div key="s3" {...STEP_MOTION}>
+                                <h3 className="text-base font-bold text-ink">Review and generate</h3>
+                                <p className="text-xs text-ink-muted mt-1 mb-4 leading-relaxed">
+                                    One last look at what this link does before it exists.
+                                </p>
+
+                                <InviteSummary
+                                    roleLabel={summaryRoleLabel}
+                                    workspaceName={summaryWorkspaceName}
+                                    groupNames={selectedGroupNames}
+                                    email={email.trim() || null}
+                                    emailRequired={needsEmail}
+                                    shareable={overrideActive}
+                                    expiresIn={expiresIn}
+                                    maxUses={bulkMode ? 1 : maxUses}
+                                    emailDomain={email.trim() ? null : (emailDomain.trim().replace(/^@/, '') || null)}
+                                    recipientCount={bulkMode ? bulkEmailList.length : 1}
+                                />
+
+                                <div className="mt-5">
+                                    <SectionLabel>Link expires in</SectionLabel>
+                                    <ChipRow
+                                        options={(['24h', '7d', '30d', '90d'] as const).map(v => ({ value: v, label: v }))}
+                                        value={expiresIn}
+                                        onChange={setExpiresIn}
+                                    />
+                                    <FieldHint>
+                                        After this window the link stops working. Whoever has it
+                                        will need a new one.
+                                    </FieldHint>
+                                </div>
+
+                                {/* Seats are meaningless for a pinned link —
+                                    one address, one account — so the control
+                                    only appears where it can actually do
+                                    something. */}
+                                {(audience === 'domain' || audience === 'anyone') && (
+                                    <div className="mt-5">
+                                        <SectionLabel>How many people can use it</SectionLabel>
+                                        <ChipRow
+                                            options={[
+                                                { value: 1, label: 'Just 1' },
+                                                { value: 5, label: 'Up to 5' },
+                                                { value: 25, label: 'Up to 25' },
+                                                { value: null, label: 'Unlimited' },
+                                            ]}
+                                            value={maxUses}
+                                            onChange={setMaxUses}
+                                        />
+                                        <FieldHint tone={maxUses === null ? 'warn' : undefined}>
+                                            {maxUses === null
+                                                ? 'Nothing closes this link but its expiry or a manual revoke.'
+                                                : `The link closes itself after ${maxUses} ${maxUses === 1 ? 'person signs' : 'people sign'} up.`}
+                                        </FieldHint>
+                                    </div>
+                                )}
+                            </motion.div>
+                        )}
+                        </AnimatePresence>
+                    </div>
+
+                    {/* ── Sticky footer — Back / Next / Generate ──────── */}
+                    <div className="px-6 pt-4 mt-0 border-t border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated/95 backdrop-blur">
+                        <div className="flex items-center justify-between gap-3 pb-1">
+                            <button
+                                type="button"
+                                onClick={step === 1 ? onCancel : () => setStep(s => (s - 1) as 1 | 2)}
+                                className="px-4 py-2.5 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors inline-flex items-center gap-1"
+                            >
+                                {step > 1 && <ChevronLeft className="w-4 h-4" />}
+                                {step === 1 ? 'Cancel' : 'Back'}
+                            </button>
+
+                            {step < 3 ? (
                                 <button
-                                    key={String(isBulk)}
                                     type="button"
-                                    onClick={() => setBulkMode(isBulk)}
+                                    disabled={!canAdvance}
+                                    onClick={() => setStep(s => (s + 1) as 2 | 3)}
                                     className={cn(
-                                        'px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors',
-                                        bulkMode === isBulk
-                                            ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
-                                            : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
+                                        'px-5 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-1.5 transition-all',
+                                        canAdvance
+                                            ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-indigo-500/20'
+                                            : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                                     )}
                                 >
-                                    {isBulk ? 'Several people' : 'One link'}
+                                    Continue
+                                    <ChevronRight className="w-4 h-4" />
                                 </button>
-                            ))}
+                            ) : (
+                                <button
+                                    type="button"
+                                    disabled={!canSubmit || loading}
+                                    onClick={submit}
+                                    className={cn(
+                                        'px-5 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-1.5 transition-all',
+                                        canSubmit && !loading
+                                            ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-indigo-500/20'
+                                            : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                                    )}
+                                >
+                                    {loading
+                                        ? <Loader2 className="w-4 h-4 animate-spin" />
+                                        : <Link2 className="w-4 h-4" />}
+                                    {bulkMode && bulkEmailList.length > 1
+                                        ? `Generate ${bulkEmailList.length} links`
+                                        : 'Generate link'}
+                                </button>
+                            )}
                         </div>
-
-                        {bulkMode ? (
-                            <textarea
-                                value={bulkEmails}
-                                onChange={e => setBulkEmails(e.target.value)}
-                                rows={5}
-                                placeholder={'alice@company.com\nbob@company.com'}
-                                className="w-full bg-canvas-elevated border border-glass-border focus:border-accent-lineage/40 rounded-xl px-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors font-mono"
-                            />
-                        ) : (
-                        <div className="relative group">
-                            <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
-                                <AtSign className="w-4 h-4" />
-                            </div>
-                            <input
-                                type="email"
-                                value={email}
-                                onChange={e => setEmail(e.target.value)}
-                                placeholder="user@company.com"
-                                className={cn(
-                                    "w-full bg-canvas-elevated border rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors",
-                                    needsEmail && !emailValid
-                                        ? "border-amber-500/40 focus:border-amber-500/60"
-                                        : "border-glass-border focus:border-accent-lineage/40",
-                                )}
-                            />
-                        </div>
-                        )}
-                        <p className={cn('text-[11px] text-ink-muted mt-1.5', !bulkMode && 'hidden')}>
-                            {bulkEmailList.length > 0
-                                ? `${bulkEmailList.length} ${bulkEmailList.length === 1 ? 'address' : 'addresses'} — one pinned link each, so every invitation can be revoked and traced on its own.`
-                                : 'One address per line, or separated by commas.'}
-                        </p>
-                        <p className={cn('text-[11px] text-ink-muted mt-1.5', bulkMode && 'hidden')}>
-                            {needsEmail
-                                ? "The link will refuse any signup whose email doesn't match."
-                                : overrideActive
-                                    ? "Optional — the link is shareable and reusable."
-                                    : "Leave blank for a shareable link, or pin to one email for a single-recipient invite."}
-                        </p>
-                    </div>
-                            {/* ── close RIGHT column ────────────────── */}
-                            </div>
-                        {/* ── close two-column grid ─────────────────── */}
-                        </div>
-
-                    {/* ── Section 5 — Access duration (full width) ───── */}
-                    <div className="border-t border-glass-border mt-5 pt-5 mb-5">
-                        <SectionLabel>Link expires in</SectionLabel>
-                        <div className="flex flex-wrap gap-2">
-                            {(['24h', '7d', '30d', '90d'] as const).map(opt => {
-                                const isSelected = expiresIn === opt
-                                return (
-                                    <button
-                                        key={opt}
-                                        type="button"
-                                        onClick={() => setExpiresIn(opt)}
-                                        className={cn(
-                                            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                                            isSelected
-                                                ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
-                                                : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
-                                        )}
-                                    >
-                                        {opt}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                        <p className="text-[11px] text-ink-muted mt-2">
-                            After this window, the link stops working. The user
-                            can still sign up — they'll need a new invite or admin approval.
-                        </p>
-                    </div>
-
-                    {/* ── Section 6 — How many people (full width) ───── */}
-                    <div className="border-t border-glass-border mt-5 pt-5 mb-5">
-                        <SectionLabel>How many people can use it</SectionLabel>
-                        <div className="flex flex-wrap gap-2">
-                            {([1, 5, 25, null] as const).map(opt => {
-                                const isSelected = maxUses === opt
-                                return (
-                                    <button
-                                        key={opt ?? 'unlimited'}
-                                        type="button"
-                                        onClick={() => setMaxUses(opt)}
-                                        className={cn(
-                                            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                                            isSelected
-                                                ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
-                                                : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
-                                        )}
-                                    >
-                                        {opt === null ? 'Unlimited' : opt === 1 ? 'Just 1' : `Up to ${opt}`}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                        <p className="text-[11px] text-ink-muted mt-2">
-                            {maxUses === null
-                                ? 'Anyone with the link can sign up until it expires. Set a cap if you might not control where it ends up.'
-                                : `The link closes itself after ${maxUses} ${maxUses === 1 ? 'person signs' : 'people sign'} up. You can revoke it sooner from Manage links.`}
-                        </p>
-                    </div>
-
-                    {/* ── Section 7 — Domain restriction (shareable only) ── */}
-                    {!email.trim() && (
-                        <div className="border-t border-glass-border mt-5 pt-5 mb-5">
-                            <SectionLabel>Restrict to an email domain (optional)</SectionLabel>
-                            <div className="relative group max-w-xs">
-                                <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
-                                    <AtSign className="w-4 h-4" />
-                                </div>
-                                <input
-                                    type="text"
-                                    value={emailDomain}
-                                    onChange={e => setEmailDomain(e.target.value)}
-                                    placeholder="company.com"
-                                    className="w-full bg-canvas-elevated border border-glass-border focus:border-accent-lineage/40 rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors"
-                                />
-                            </div>
-                            <p className="text-[11px] text-ink-muted mt-2">
-                                {emailDomain.trim()
-                                    ? `Only @${emailDomain.trim().replace(/^@/, '')} addresses can use this link — safe to post in a team channel.`
-                                    : 'The middle ground between anyone-with-the-link and pinning one address.'}
-                            </p>
-                        </div>
-                    )}
-
-                    {/* ── Live summary preview (full width) ──────────── */}
-                    <InviteSummary
-                        roleLabel={summaryRoleLabel}
-                        workspaceName={summaryWorkspaceName}
-                        groupNames={selectedGroupNames}
-                        email={email.trim() || null}
-                        emailRequired={needsEmail}
-                        shareable={overrideActive}
-                        expiresIn={expiresIn}
-                        maxUses={maxUses}
-                        emailDomain={email.trim() ? null : (emailDomain.trim().replace(/^@/, '') || null)}
-                    />
-                    {/* ── close scroll body ──────────────────────────── */}
-                    </div>
-
-                    {/* ── Sticky footer ──────────────────────────────── */}
-                    <div className="px-6 pt-4 mt-0 border-t border-glass-border bg-canvas-elevated/95 backdrop-blur">
-                        <ModalFooter onCancel={onCancel} onConfirm={submit}
-                            confirmLabel="Generate Link" confirmIcon={Link2}
-                            confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
-                            loading={loading} disabled={!canSubmit} />
                     </div>
                 </>
             )}
@@ -2230,6 +2310,220 @@ function InviteForm({
     )
 }
 
+
+/** Who a link is for. The first question, and the one that carries the
+ *  safe defaults — see `pickAudience`. */
+type Audience = 'person' | 'several' | 'domain' | 'anyone'
+
+const AUDIENCES: {
+    value: Audience
+    label: string
+    hint: string
+    icon: typeof Mail
+    tone: string
+}[] = [
+    {
+        value: 'person', label: 'One specific person', icon: Mail,
+        hint: 'Pinned to their email address. Nobody else can use it.',
+        tone: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/25',
+    },
+    {
+        value: 'several', label: 'Several people', icon: ListChecks,
+        hint: 'A separate pinned link each, so you can revoke them one at a time.',
+        tone: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/25',
+    },
+    {
+        value: 'domain', label: 'Anyone at a domain', icon: Building2,
+        hint: 'Only @yourcompany.com addresses. Safe to post in a team channel.',
+        tone: 'text-indigo-500 bg-indigo-500/10 border-indigo-500/25',
+    },
+    {
+        value: 'anyone', label: 'Anyone with the link', icon: Globe,
+        hint: 'Forwardable to anyone. Arrives capped and short-lived.',
+        tone: 'text-amber-500 bg-amber-500/10 border-amber-500/25',
+    },
+]
+
+const STEP_MOTION = {
+    initial: { opacity: 0, x: 8 },
+    animate: { opacity: 1, x: 0 },
+    exit: { opacity: 0, x: -8 },
+    transition: { duration: 0.16 },
+} as const
+
+/* Borders in this flow are `border-black/[0.08] dark:border-white/[0.10]`,
+ * not `border-glass-border`.
+ *
+ * In light mode that token is rgba(255,255,255,0.4) — a WHITE hairline. It
+ * works on the page background, where a `bg-canvas-elevated` card takes its
+ * edge from fill contrast. This dialog IS `bg-canvas-elevated`, so every
+ * unselected chip, role row, group row and text input inside it had no
+ * visible edge at all: the form read as floating text, and only whichever
+ * option happened to be selected looked like a control. */
+const INPUT_CLASS =
+    'w-full bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] focus:border-indigo-500/40 rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors'
+
+const STEP_TITLES = ['Who it’s for', 'What they get', 'Review'] as const
+
+/** Where you are, what is behind you, and what is left.
+ *
+ *  Completed steps are clickable — a wizard you cannot walk back through
+ *  is a worse form than the wall it replaced. Steps ahead of the furthest
+ *  one reached are not, because they depend on answers not yet given. */
+function StepRail({
+    step, maxReached, onGo,
+}: {
+    step: 1 | 2 | 3
+    maxReached: number
+    onGo: (s: 1 | 2 | 3) => void
+}) {
+    return (
+        <div className="flex items-center gap-2 px-6 pb-4">
+            {STEP_TITLES.map((title, i) => {
+                const n = (i + 1) as 1 | 2 | 3
+                const done = n < step
+                const current = n === step
+                const reachable = n <= Math.max(step, maxReached)
+                return (
+                    <button
+                        key={title}
+                        type="button"
+                        disabled={!reachable || current}
+                        onClick={() => onGo(n)}
+                        className={cn(
+                            'flex-1 flex items-center gap-2 rounded-xl px-3 py-2 border transition-colors text-left min-w-0',
+                            current
+                                ? 'border-indigo-500/40 bg-indigo-500/10'
+                                : done
+                                    ? 'border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.02] hover:border-indigo-500/30'
+                                    : 'border-black/[0.08] dark:border-white/[0.10] opacity-60',
+                            reachable && !current && 'cursor-pointer',
+                        )}
+                    >
+                        <span className={cn(
+                            'w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center shrink-0',
+                            current ? 'bg-accent-lineage text-white'
+                                : done ? 'bg-emerald-500 text-white'
+                                    : 'bg-black/[0.06] dark:bg-white/[0.08] text-ink-muted',
+                        )}>
+                            {done ? <Check className="w-3 h-3" /> : n}
+                        </span>
+                        <span className={cn(
+                            'text-[11px] font-semibold truncate',
+                            current ? 'text-accent-lineage' : done ? 'text-ink' : 'text-ink-muted',
+                        )}>
+                            {title}
+                        </span>
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+/** One audience choice. States the constraint it applies, not just its
+ *  name — the choice is a safety decision and should read like one. */
+function AudienceCard({
+    option, selected, onSelect,
+}: {
+    option: typeof AUDIENCES[number]
+    selected: boolean
+    onSelect: () => void
+}) {
+    const Icon = option.icon
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
+            className={cn(
+                'flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all',
+                selected
+                    ? 'border-accent-lineage bg-indigo-500/[0.07] shadow-sm'
+                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+            )}
+        >
+            <span className={cn(
+                'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
+                option.tone,
+            )}>
+                <Icon className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5">
+                    <span className={cn(
+                        'text-sm font-semibold block',
+                        selected ? 'text-accent-lineage' : 'text-ink',
+                    )}>
+                        {option.label}
+                    </span>
+                    {selected && <CheckCircle2 className="w-4 h-4 text-accent-lineage shrink-0" />}
+                </span>
+                <span className="text-[11px] text-ink-muted leading-snug block mt-0.5">
+                    {option.hint}
+                </span>
+            </span>
+        </button>
+    )
+}
+
+/** An input with a leading icon that lights up on focus. */
+function FieldWithIcon({
+    icon: Icon, className, children,
+}: {
+    icon: typeof AtSign
+    className?: string
+    children: React.ReactNode
+}) {
+    return (
+        <div className={cn('relative group', className)}>
+            <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors pointer-events-none">
+                <Icon className="w-4 h-4" />
+            </div>
+            {children}
+        </div>
+    )
+}
+
+function FieldHint({ children, tone }: { children: React.ReactNode; tone?: 'warn' }) {
+    return (
+        <p className={cn(
+            'text-[11px] mt-1.5 leading-relaxed',
+            tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted',
+        )}>
+            {children}
+        </p>
+    )
+}
+
+/** The expiry / seat-cap chip rows. Two copies of this markup had already
+ *  drifted apart in padding and hover treatment. */
+function ChipRow<T extends string | number | null>({
+    options, value, onChange,
+}: {
+    options: { value: T; label: string }[]
+    value: T
+    onChange: (v: T) => void
+}) {
+    return (
+        <div className="flex flex-wrap gap-2">
+            {options.map(opt => (
+                <button
+                    key={String(opt.value)}
+                    type="button"
+                    onClick={() => onChange(opt.value)}
+                    className={cn(
+                        'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                        value === opt.value
+                            ? 'border-accent-lineage bg-indigo-500/10 text-accent-lineage'
+                            : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                    )}
+                >
+                    {opt.label}
+                </button>
+            ))}
+        </div>
+    )
+}
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
     return (
@@ -2246,7 +2540,7 @@ function RoleListSkeleton() {
             {[0, 1, 2, 3].map(i => (
                 <div
                     key={i}
-                    className="h-14 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
+                    className="h-14 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
                 />
             ))}
         </div>
@@ -2286,7 +2580,7 @@ function RoleGroup({
                                 'w-full flex items-center gap-3 p-3 rounded-xl border-2 text-left transition-colors duration-150',
                                 isSelected
                                     ? 'border-accent-lineage bg-accent-lineage/5 shadow-sm'
-                                    : 'border-glass-border bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                         >
                             <div
@@ -2319,7 +2613,15 @@ function RoleGroup({
                                         </span>
                                     )}
                                 </div>
-                                <p className="text-[11px] text-ink-muted leading-snug mt-0.5 truncate">
+                                {/* NOT truncated. These descriptions are how
+                                    you tell "read-only across the tenancy"
+                                    from "manage every workspace", and the
+                                    single-line clamp cut every one of them
+                                    mid-sentence — on the privileged roles,
+                                    where knowing what you are granting
+                                    matters most. The step is full-width now,
+                                    so there is room to just say it. */}
+                                <p className="text-[11px] text-ink-muted leading-snug mt-0.5">
                                     {opt.sublabel}
                                 </p>
                             </div>
@@ -2344,7 +2646,7 @@ function WorkspacePicker({
 }) {
     if (workspaces === null) {
         return (
-            <div className="h-10 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse" />
+            <div className="h-10 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.02] animate-pulse" />
         )
     }
     if (workspaces.length === 0) {
@@ -2370,7 +2672,7 @@ function WorkspacePicker({
                                 'flex items-center gap-2 px-3 py-2 rounded-xl border text-left transition-colors',
                                 isSelected
                                     ? 'border-accent-lineage bg-accent-lineage/5 text-accent-lineage'
-                                    : 'border-glass-border bg-canvas-elevated text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                         >
                             <Building2 className="w-4 h-4 shrink-0" />
@@ -2396,7 +2698,7 @@ function WorkspacePicker({
             <select
                 value={value}
                 onChange={e => onChange(e.target.value)}
-                className="w-full appearance-none bg-canvas-elevated border border-glass-border rounded-xl pl-10 pr-9 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-lineage/40 transition-colors"
+                className="w-full appearance-none bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-10 pr-9 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-lineage/40 transition-colors"
             >
                 <option value="">Select a workspace…</option>
                 {workspaces.map(w => (
@@ -2427,7 +2729,7 @@ function NoRoleCard({
                 'w-full flex items-center gap-3 p-3.5 rounded-2xl border-2 text-left transition-colors duration-150',
                 selected
                     ? 'border-accent-lineage bg-gradient-to-br from-accent-lineage/8 to-accent-lineage/0 shadow-sm'
-                    : 'border-glass-border bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
             )}
         >
             <div className={cn(
@@ -2493,7 +2795,7 @@ function GroupsPicker({
                 {[0, 1].map(i => (
                     <div
                         key={i}
-                        className="h-12 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
+                        className="h-12 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
                     />
                 ))}
             </div>
@@ -2501,7 +2803,7 @@ function GroupsPicker({
     }
     if (groups.length === 0) {
         return (
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-glass-border text-ink-muted text-xs">
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-black/[0.08] dark:border-white/[0.10] text-ink-muted text-xs">
                 <Users2 className="w-3.5 h-3.5 shrink-0" />
                 <span>No groups defined yet — create one in <span className="font-semibold">Admin → Groups</span> to add new users to it on signup.</span>
             </div>
@@ -2546,7 +2848,7 @@ function GroupsPicker({
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search groups…"
-                        className="w-full bg-canvas-elevated border border-glass-border rounded-xl pl-9 pr-3 py-2 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40 transition-colors"
+                        className="w-full bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-9 pr-3 py-2 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40 transition-colors"
                     />
                 </div>
             )}
@@ -2555,7 +2857,7 @@ function GroupsPicker({
                 doesn't shift height as the user types. */}
             <div className="grid grid-cols-1 gap-1.5">
                 {pageItems.length === 0 ? (
-                    <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-glass-border text-ink-muted text-xs">
+                    <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-black/[0.08] dark:border-white/[0.10] text-ink-muted text-xs">
                         <Search className="w-3.5 h-3.5 shrink-0" />
                         <span>No groups match "{search}".</span>
                     </div>
@@ -2571,7 +2873,7 @@ function GroupsPicker({
                                     'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-colors',
                                     isSelected
                                         ? 'border-accent-lineage bg-accent-lineage/5'
-                                        : 'border-glass-border bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                        : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                                 )}
                             >
                                 <div className={cn(
@@ -2614,8 +2916,8 @@ function GroupsPicker({
                             className={cn(
                                 'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
                                 safePage === 0
-                                    ? 'border-glass-border text-ink-muted/40 cursor-not-allowed'
-                                    : 'border-glass-border text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    ? 'border-black/[0.08] dark:border-white/[0.10] text-ink-muted/40 cursor-not-allowed'
+                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                             title="Previous page"
                         >
@@ -2631,8 +2933,8 @@ function GroupsPicker({
                             className={cn(
                                 'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
                                 safePage >= totalPages - 1
-                                    ? 'border-glass-border text-ink-muted/40 cursor-not-allowed'
-                                    : 'border-glass-border text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    ? 'border-black/[0.08] dark:border-white/[0.10] text-ink-muted/40 cursor-not-allowed'
+                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                             title="Next page"
                         >
@@ -2775,7 +3077,7 @@ function BulkInviteResultList({
 
 function InviteSummary({
     roleLabel, workspaceName, groupNames, email, emailRequired, shareable, expiresIn,
-    maxUses, emailDomain,
+    maxUses, emailDomain, recipientCount = 1,
 }: {
     roleLabel: string | null
     workspaceName: string | null
@@ -2792,6 +3094,9 @@ function InviteSummary({
      *  place claiming to describe the whole invite. */
     maxUses: number | null
     emailDomain: string | null
+    /** Bulk mints one pinned link per address. Saying "usable once" about
+     *  a batch of twelve describes one link and hides eleven. */
+    recipientCount?: number
 }) {
     // Build a tiny sentence: "Activate a new account, [grant Role in
     // Workspace], [add to groups X, Y]. [Email-bound to a@x.com] or
@@ -2808,7 +3113,9 @@ function InviteSummary({
         parts.push(`add to ${groupNames.length === 1 ? 'group' : 'groups'} ${groupNames.join(', ')}`)
     }
 
-    const recipient = email
+    const recipient = recipientCount > 1
+        ? `${recipientCount} separate links, each pinned to one address.`
+        : email
         ? `Email-bound to ${email}.`
         : emailDomain
             // A domain restriction is the single most important thing to
@@ -2831,7 +3138,7 @@ function InviteSummary({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.15 }}
-            className="mt-2 mb-5 p-4 rounded-2xl bg-accent-lineage/5 border border-accent-lineage/20"
+            className="p-4 rounded-2xl bg-gradient-to-br from-indigo-500/[0.10] via-indigo-500/[0.05] to-emerald-500/[0.06] border border-indigo-500/25"
         >
             <p className="text-[10px] font-semibold uppercase tracking-wider text-accent-lineage mb-1.5">
                 This invite will

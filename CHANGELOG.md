@@ -89,6 +89,30 @@ of dropping a brand-new person onto a cold dashboard.
 up through your links, and when. Sending an invitation and never hearing whether it worked left
 you with no idea whether to follow up or let it expire.
 
+**Creating a link is a guided flow, not a wall.** "Invite by Link" asked seven questions
+at once — role, workspace, groups, recipient, expiry, seat cap, domain — with no starting
+point and the summary describing the whole invite parked below the fold, under the fields it
+was meant to check. It now asks three questions in the order they depend on each other: who
+the link is for, what they get, then a review. The first question is the one the inviter
+already knows the answer to before opening the dialog, and it is the only one that constrains
+the rest — so it now carries the defaults.
+
+**An open link arrives bounded.** Picking "anyone with the link" used to be the *default*
+state, at unlimited uses for 30 days — the widest invite the product can mint, reached by
+touching nothing. It now arrives capped at 5 people for 7 days and says so on the way past.
+Unlimited is still one click away; the difference is which direction you have to move to get
+there. A link pinned to one address defaults to a single seat and no longer offers a seat cap
+at all, because it cannot use one.
+
+**Privileged role descriptions are readable.** They were clamped to one line, so every one of
+them was cut mid-sentence — "Platform owner. Carries system:admin; implies every permission,
+…" — on exactly the choices where knowing what you are granting matters most.
+
+**The email-pin rule explains itself.** Attaching a privileged role or a group to a shareable
+link used to grey out the submit button with the explanation in a different column. It now
+names the conflict against the audience already chosen and offers both resolutions: pin it to
+one person, or take the documented override.
+
 **The links panel leads rather than lists.** It opens on what needs doing — how many links are
 live, how many people have joined, and how many are about to expire or run out of seats — and
 sorts by urgency so the link you came to deal with is at the top. You can create a link from
@@ -122,6 +146,12 @@ admin Features page reported both as "not implemented" and two drift-guard tests
 the `stage` exemption that `feature_wiring.py` documents and its sibling test already applied —
 experimental flags are not required to have a server gate yet, which is the whole reason the
 stage exists. Active flags are still checked in full.
+
+**Nothing in the invite dialog had an edge.** Every unselected chip, role row, group row and
+text input used the house `border-glass-border` recipe, which in light mode is a *white*
+hairline — so inside a dialog that is itself `bg-canvas-elevated`, the form rendered as
+floating text and only whichever option happened to be selected looked like a control. Same
+root cause as the rows below, fixed the same way, and limited to this flow.
 
 **Invite rows had no edges.** They used the house `border-glass-border` recipe, which in light
 mode is a *white* hairline — it works everywhere else because those cards sit on the page
