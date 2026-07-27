@@ -35,11 +35,11 @@ from __future__ import annotations
 import hmac
 import logging
 import secrets
-from typing import Optional
+from typing import Callable, Optional
 
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -351,6 +351,139 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
         ),
         media_type="text/html",
     )
+
+
+async def _dry_run_or_none(
+    request: Request, *, svc, snap, slug: str, identity,
+    clear_flow: Optional[Callable[[Response], None]] = None,
+    as_json: bool = False,
+) -> Optional[Response]:
+    """If this flow is a rehearsal, render the outcome and stop.
+
+    Called by **every** flow immediately after it has a verified identity
+    in hand — which is the half that actually breaks in production, and
+    the half worth rehearsing. Returning ``None`` means "not a dry-run,
+    carry on".
+
+    This exists as one function rather than an inline block per flow
+    because the inline version reached two of the four kinds. It was
+    missing from ``custom_profile``: the kind this whole surface was
+    built for, and the only one that can be ``unverified`` or
+    ``asserted`` — so the one where rehearsing matters most, because
+    nothing cryptographic is standing behind it.
+    """
+    if not _is_dryrun(request, provider_id=snap.id):
+        return None
+    outcome = await svc.preview_sso_login(
+        identity, provider_id=snap.id, linking_policy=snap.linking_policy,
+    )
+    resp: Response = (
+        JSONResponse({"dryRun": True, "outcome": outcome}) if as_json
+        else _dryrun_response(slug, outcome)
+    )
+    if clear_flow is not None:
+        clear_flow(resp)
+    clear_dryrun_cookie(resp)
+    return resp
+
+
+def _sso_failure_handler(
+    svc, *, slug: str, snap, log_label: str,
+    clear_flow: Optional[Callable[[Response], None]] = None,
+):
+    """Build the ``_fail`` closure each redirect-based flow needs.
+
+    The four flows had four copies of this differing only in a log prefix
+    and which cookie they cleared. One copy means a change to how failures
+    are recorded — the ref, the audit event, what the user is told —
+    lands everywhere at once.
+    """
+    async def _fail(reason: str, *, error_code: Optional[str] = None,
+                    email: Optional[str] = None) -> RedirectResponse:
+        ref = _failure_ref()
+        logger.info("%s failed (slug=%s, ref=%s): %s",
+                    log_label, slug, ref, reason)
+        await _record_sso_failure(
+            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+        )
+        resp = RedirectResponse(
+            _failure_redirect(ref, error_code=error_code, email=email),
+            status_code=status.HTTP_302_FOUND,
+        )
+        if clear_flow is not None:
+            clear_flow(resp)
+        return resp
+
+    return _fail
+
+
+async def _finish_sso_login(
+    request: Request, *, svc, snap, slug: str, identity, next_path: str,
+    fail, clear_flow: Optional[Callable[[Response], None]] = None,
+) -> Response:
+    """Everything between "we have a verified identity" and a response.
+
+    Rehearse-or-continue, resolve the link intent, complete the login, and
+    bounce to the post-login target with the session attached — or hand
+    back the failure redirect *fail* builds.
+
+    Every redirect-based flow (OIDC, SAML, custom, custom_profile) shares
+    this verbatim. It used to be copy-pasted, which is precisely why the
+    dry-run reached two of the four: adding a step here meant remembering
+    four call sites. Now it means one.
+    """
+    rehearsal = await _dry_run_or_none(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        clear_flow=clear_flow,
+    )
+    if rehearsal is not None:
+        return rehearsal
+
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
+
+    try:
+        user, tokens = await svc.complete_sso_login(
+            identity,
+            provider_id=snap.id,
+            provider_slug=snap.slug,
+            linking_policy=snap.linking_policy,
+            link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
+        )
+    except SSOAuthError as exc:
+        if str(exc) == "unsafe_auto_link":
+            # The login page renders its collision modal off these params.
+            return await fail(str(exc), error_code="unsafe_auto_link",
+                              email=identity.email)
+        return await fail(f"sso_login_rejected:{exc}")
+
+    logger.info("SSO login succeeded (kind=%s, slug=%s, user=%s)",
+                snap.kind, slug, user.id)
+    return _session_redirect(
+        request, next_path=next_path, tokens=tokens, clear_flow=clear_flow,
+    )
+
+
+def _session_redirect(
+    request: Request, *, next_path: str, tokens,
+    clear_flow: Optional[Callable[[Response], None]] = None,
+) -> RedirectResponse:
+    """The success tail every redirect-based SSO flow shares: bounce to
+    the post-login target with the session cookies attached, and clear the
+    in-flight handshake and link-intent cookies."""
+    response = RedirectResponse(
+        _safe_next(next_path), status_code=status.HTTP_302_FOUND,
+    )
+    set_session_cookies(response, tokens)
+    if clear_flow is not None:
+        clear_flow(response)
+    # Clear whenever a link-intent cookie was presented — matched or
+    # rejected — so a stale/replayed cookie can't be reused.
+    if read_link_intent_cookie(request) is not None:
+        clear_link_intent_cookie(response)
+    return response
 
 
 async def _require_sso_enabled(request: Request) -> None:
@@ -765,19 +898,10 @@ async def oidc_callback(
     svc = _identity_service(request)
     snap = await _provider_snapshot(slug)
 
-    async def _fail(reason: str, *, error_code: Optional[str] = None,
-                    email: Optional[str] = None) -> RedirectResponse:
-        ref = _failure_ref()
-        logger.info("OIDC callback failed (slug=%s, ref=%s): %s", slug, ref, reason)
-        await _record_sso_failure(
-            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
-        )
-        resp = RedirectResponse(
-            _failure_redirect(ref, error_code=error_code, email=email),
-            status_code=status.HTTP_302_FOUND,
-        )
-        clear_oidc_cookie(resp)
-        return resp
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="OIDC callback",
+        clear_flow=clear_oidc_cookie,
+    )
 
     if error or not code or not state:
         return await _fail(f"idp_error={error or 'missing_code_or_state'}")
@@ -807,48 +931,11 @@ async def oidc_callback(
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
         return await _fail(f"token_or_idtoken:{exc}")
 
-    # A rehearsal stops here: the assertion has been verified, which is the
-    # half that actually breaks, and the rest is reported rather than done.
-    if _is_dryrun(request, provider_id=snap.id):
-        outcome = await svc.preview_sso_login(
-            identity, provider_id=snap.id,
-            linking_policy=snap.linking_policy,
-        )
-        resp = _dryrun_response(slug, outcome)
-        clear_oidc_cookie(resp)
-        clear_dryrun_cookie(resp)
-        return resp
-
-    link_intent_user_id = await _resolve_link_intent(
-        request, svc, provider_id=snap.id,
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=flow.get("next"), fail=_fail,
+        clear_flow=clear_oidc_cookie,
     )
-
-    try:
-        user, tokens = await svc.complete_sso_login(
-            identity,
-            provider_id=snap.id,
-            provider_slug=snap.slug,
-            linking_policy=snap.linking_policy,
-            link_intent_user_id=link_intent_user_id,
-            assurance=assurance_for(snap.kind, snap.settings),
-        )
-    except SSOAuthError as exc:
-        if str(exc) == "unsafe_auto_link":
-            return await _fail(str(exc), error_code="unsafe_auto_link",
-                         email=identity.email)
-        return await _fail(f"sso_login_rejected:{exc}")
-
-    response = RedirectResponse(
-        _safe_next(flow.get("next")), status_code=status.HTTP_302_FOUND,
-    )
-    set_session_cookies(response, tokens)
-    clear_oidc_cookie(response)
-    # Clear whenever a link-intent cookie was presented — matched or
-    # rejected — so a stale/replayed cookie can't be reused.
-    if read_link_intent_cookie(request) is not None:
-        clear_link_intent_cookie(response)
-    logger.info("OIDC login succeeded (slug=%s, user=%s)", slug, user.id)
-    return response
 
 
 # ── SAML metadata / ACS / SLO ────────────────────────────────────────
@@ -881,19 +968,10 @@ async def saml_acs(slug: str, request: Request):
     svc = _identity_service(request)
     snap = await _provider_snapshot(slug)
 
-    async def _fail(reason: str, *, error_code: Optional[str] = None,
-                    email: Optional[str] = None) -> RedirectResponse:
-        ref = _failure_ref()
-        logger.info("SAML ACS failed (slug=%s, ref=%s): %s", slug, ref, reason)
-        await _record_sso_failure(
-            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
-        )
-        resp = RedirectResponse(
-            _failure_redirect(ref, error_code=error_code, email=email),
-            status_code=status.HTTP_302_FOUND,
-        )
-        clear_saml_cookie(resp)
-        return resp
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="SAML ACS",
+        clear_flow=clear_saml_cookie,
+    )
 
     form = await request.form()
     saml_response = form.get("SAMLResponse")
@@ -920,47 +998,11 @@ async def saml_acs(slug: str, request: Request):
     except Exception as exc:  # noqa: BLE001
         return await _fail(f"saml_validate:{exc}")
 
-    # See the OIDC callback: a rehearsal reports and stops.
-    if _is_dryrun(request, provider_id=snap.id):
-        outcome = await svc.preview_sso_login(
-            identity, provider_id=snap.id,
-            linking_policy=snap.linking_policy,
-        )
-        resp = _dryrun_response(slug, outcome)
-        clear_saml_cookie(resp)
-        clear_dryrun_cookie(resp)
-        return resp
-
-    link_intent_user_id = await _resolve_link_intent(
-        request, svc, provider_id=snap.id,
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=flow.get("next"), fail=_fail,
+        clear_flow=clear_saml_cookie,
     )
-
-    try:
-        user, tokens = await svc.complete_sso_login(
-            identity,
-            provider_id=snap.id,
-            provider_slug=snap.slug,
-            linking_policy=snap.linking_policy,
-            link_intent_user_id=link_intent_user_id,
-            assurance=assurance_for(snap.kind, snap.settings),
-        )
-    except SSOAuthError as exc:
-        if str(exc) == "unsafe_auto_link":
-            return await _fail(str(exc), error_code="unsafe_auto_link",
-                         email=identity.email)
-        return await _fail(f"sso_login_rejected:{exc}")
-
-    response = RedirectResponse(
-        _safe_next(flow.get("next")), status_code=status.HTTP_302_FOUND,
-    )
-    set_session_cookies(response, tokens)
-    clear_saml_cookie(response)
-    # Clear whenever a link-intent cookie was presented — matched or
-    # rejected — so a stale/replayed cookie can't be reused.
-    if read_link_intent_cookie(request) is not None:
-        clear_link_intent_cookie(response)
-    logger.info("SAML login succeeded (slug=%s, user=%s)", slug, user.id)
-    return response
 
 
 @router.api_route("/{slug}/sls", methods=["GET", "POST"])
@@ -1056,49 +1098,21 @@ async def _custom_login_flow(
         target = f"/dev-login?next={quote(next_path)}&slug={quote(slug)}"
         return RedirectResponse(target, status_code=status.HTTP_302_FOUND)
 
-    async def _fail(reason: str) -> RedirectResponse:
-        ref = _failure_ref()
-        logger.info("Custom IdP login failed (slug=%s, ref=%s): %s",
-                    slug, ref, reason)
-        await _record_sso_failure(
-            svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
-        )
-        resp = RedirectResponse(
-            _failure_redirect(ref), status_code=status.HTTP_302_FOUND,
-        )
-        clear_mock_identity_cookie(resp)
-        return resp
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="Custom IdP login",
+        clear_flow=clear_mock_identity_cookie,
+    )
 
     try:
         identity = provider.fetch_identity(raw)
     except CustomIdentityError as exc:
         return await _fail(f"envelope_invalid:{exc}")
 
-    link_intent_user_id = await _resolve_link_intent(
-        request, svc, provider_id=snap.id,
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=next_path, fail=_fail,
+        clear_flow=clear_mock_identity_cookie,
     )
-
-    try:
-        user, tokens = await svc.complete_sso_login(
-            identity,
-            provider_id=snap.id,
-            provider_slug=snap.slug,
-            linking_policy=snap.linking_policy,
-            link_intent_user_id=link_intent_user_id,
-            assurance=assurance_for(snap.kind, snap.settings),
-        )
-    except SSOAuthError as exc:
-        return await _fail(f"sso_login_rejected:{exc}")
-
-    response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
-    set_session_cookies(response, tokens)
-    clear_mock_identity_cookie(response)
-    # Clear whenever a link-intent cookie was presented — matched or
-    # rejected — so a stale/replayed cookie can't be reused.
-    if read_link_intent_cookie(request) is not None:
-        clear_link_intent_cookie(response)
-    logger.info("Custom IdP login succeeded (slug=%s, user=%s)", slug, user.id)
-    return response
 
 
 # ── Custom profile IdP (cookie / browser storage / header) ───────────
@@ -1200,19 +1214,10 @@ async def _custom_profile_login_flow(
         else request.cookies.get(provider.settings.source_key)
     )
 
-    async def _fail(reason: str, *, error_code: Optional[str] = None,
-                    email: Optional[str] = None) -> RedirectResponse:
-        ref = _failure_ref()
-        logger.info("Custom profile login failed (slug=%s, ref=%s): %s",
-                    slug, ref, reason)
-        await _record_sso_failure(
-            _identity_service(request), ref=ref, slug=slug,
-            provider_id=snap.id, reason=reason,
-        )
-        return RedirectResponse(
-            _failure_redirect(ref, error_code=error_code, email=email),
-            status_code=status.HTTP_302_FOUND,
-        )
+    svc = _identity_service(request)
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="Custom profile login",
+    )
 
     if not raw:
         return await _fail(f"payload_missing_from_{source}")
@@ -1222,26 +1227,15 @@ async def _custom_profile_login_flow(
     except CustomProfileError as exc:
         return await _fail(f"payload_rejected:{exc}")
 
-    try:
-        user, tokens = await _complete_custom_profile(
-            request, identity=identity, provider=provider, snap=snap,
-        )
-    except SSOAuthError as exc:
-        if str(exc) == "unsafe_auto_link":
-            # Same recovery path as the OIDC callback: the login page
-            # renders the collision modal off these query params.
-            return await _fail(
-                str(exc), error_code="unsafe_auto_link", email=identity.email,
-            )
-        return await _fail(f"sso_login_rejected:{exc}")
-
-    response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
-    set_session_cookies(response, tokens)
-    if read_link_intent_cookie(request) is not None:
-        clear_link_intent_cookie(response)
-    logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
-                slug, user.id, source)
-    return response
+    # The degraded-trust audit is this kind's own step; everything after
+    # it is the shared tail.
+    await _audit_degraded_trust(
+        svc, provider=provider, snap=snap, via=source,
+    )
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=next_path, fail=_fail,
+    )
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
@@ -1287,6 +1281,15 @@ async def custom_profile_browser_login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "profile_rejected"},
         )
+
+    # JSON rather than the HTML page the redirect flows get: this endpoint
+    # is reached by fetch(), so a page would never be seen.
+    rehearsal = await _dry_run_or_none(
+        request, svc=_identity_service(request), snap=snap, slug=slug,
+        identity=identity, as_json=True,
+    )
+    if rehearsal is not None:
+        return rehearsal
 
     try:
         user, tokens = await _complete_custom_profile(
