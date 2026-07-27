@@ -272,7 +272,7 @@ the steady state), `deprecated` (on its way out; gates being removed). All flags
 
 ## Frontend configuration
 
-- **API URL**: Set `VITE_FEATURES_API_URL` for the full features endpoint, or `VITE_API_BASE_URL` for the API root (e.g. `https://api.example.com` → `/api/v1/admin/features`).
+- **API URL**: Same-origin — the frontend calls the relative path `/api/v1/admin/features` (proxied by the frontend nginx `location /api/`), exactly like every other service. There is no per-service API-base override.
 - **Fallback**: When the API is unavailable, the frontend uses generated fallback data. From the repo root, run `cd frontend && npm run generate:features-fallback` (requires Python and backend seed at `backend/app/db/seed_feature_registry.py`). This writes `frontend/src/generated/featuresFallback.json`. Regenerate after changing the backend seed so the fallback stays in sync.
 - **Fail-safe**: `featuresService.get()` never throws. Order: (1) API, (2) fallback JSON (loaded at runtime), (3) hard-coded defaults (e.g. `signupEnabled: false`, `editModeEnabled: true`, `traceEnabled: true`, `allowedViewModes`) so the app never hangs or crashes when the backend or fallback file is missing or corrupt.
 

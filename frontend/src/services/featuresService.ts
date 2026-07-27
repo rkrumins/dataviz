@@ -1,24 +1,17 @@
 /**
  * Features Service — CRUD for admin feature flags.
- * API base URL is configurable via env (VITE_FEATURES_API_URL or VITE_API_BASE_URL).
+ * Same-origin: every endpoint is a relative `/api/v1/...` path, like the rest of the app.
  * When API is unavailable, uses generated fallback (see scripts/generate-features-fallback).
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessage } from '@/lib/errorMessage'
 
-function getFeaturesApiUrl(): string {
-  if (import.meta.env.VITE_FEATURES_API_URL) {
-    return import.meta.env.VITE_FEATURES_API_URL
-  }
-  const base = import.meta.env.VITE_API_BASE_URL
-  if (base) {
-    const b = String(base).replace(/\/$/, '')
-    return `${b}/api/v1/admin/features`
-  }
-  return '/api/v1/admin/features'
-}
-
-const FEATURES_API = getFeaturesApiUrl()
+// Same-origin, behind the frontend nginx `location /api/` proxy — matches catalogService,
+// authService, and every other service. This was previously env-derived
+// (VITE_FEATURES_API_URL / VITE_API_BASE_URL); a base URL carrying a path segment resolved this
+// PATCH outside `/api/`, so it hit nginx's SPA `try_files` fallback and came back as a 405 while
+// the rest of the app (all relative `/api/v1/...`) kept working.
+const FEATURES_API = '/api/v1/admin/features'
 
 /** Public (unauthenticated) values endpoint — the admin URL minus `/admin`. */
 function getPublicValuesUrl(): string {
