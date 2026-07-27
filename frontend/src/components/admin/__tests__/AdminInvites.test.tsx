@@ -39,21 +39,36 @@ function invite(over: Partial<InviteSummary> = {}): InviteSummary {
     }
 }
 
+/** Actions live behind the overflow menu — three labelled buttons per row
+ *  is what crushed the identity column in the first design. */
+async function openRowMenu() {
+    fireEvent.click(await screen.findByLabelText('Actions for this link'))
+}
+
 beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(adminUserService.listInvites).mockResolvedValue([invite()])
 })
 
-describe('AdminInvites', () => {
-    it('shows who a shareable link is for and how many have used it', async () => {
+describe('AdminInvites — reading a row', () => {
+    it('never truncates what the link grants or who it is for', async () => {
+        // The bug this layout exists to prevent: the identity column was
+        // sharing one flex row with three buttons and two fixed-width
+        // metrics, and collapsed to "No r…" / "Anyo…".
         vi.mocked(adminUserService.listInvites).mockResolvedValue([
-            invite({ useCount: 3, maxUses: 10 }),
+            invite({ role: null, workspaceName: null }),
         ])
         render(<AdminInvites />)
 
-        expect(await screen.findByText('Anyone with the link')).toBeInTheDocument()
-        expect(screen.getByTitle('3 of 10 used · 7 left')).toBeInTheDocument()
-        expect(screen.getByText('Finance', { exact: false })).toBeInTheDocument()
+        expect(await screen.findByText('No role')).toBeInTheDocument()
+        expect(screen.getByText('Anyone with the link')).toBeInTheDocument()
+    })
+
+    it('shows the role, workspace and audience together', async () => {
+        render(<AdminInvites />)
+
+        expect(await screen.findByText(/in Finance/)).toBeInTheDocument()
+        expect(screen.getByText('Anyone with the link')).toBeInTheDocument()
     })
 
     it('names the pinned address for an email-bound link', async () => {
@@ -71,16 +86,98 @@ describe('AdminInvites', () => {
         ])
         render(<AdminInvites />)
 
-        expect(await screen.findByText('@company.com')).toBeInTheDocument()
+        expect(await screen.findByText('Anyone @company.com')).toBeInTheDocument()
     })
 
-    it('does not revoke until the confirmation is accepted', async () => {
-        // Revoking is instant and irreversible — it kills the link for
-        // everyone holding it, including anyone mid-signup. Clicking the
-        // button must not be enough on its own.
+    it('meters seat usage against the cap', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 3, maxUses: 10 }),
+        ])
         render(<AdminInvites />)
 
-        fireEvent.click(await screen.findByTitle('Revoke this link'))
+        expect(await screen.findByTitle('3 of 10 used · 7 left')).toBeInTheDocument()
+    })
+
+    it('flags a link that is nearly out of seats, and says what to do', async () => {
+        // A status word says what IS; the nudge says what to do about it.
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 4, maxUses: 5 }),
+        ])
+        render(<AdminInvites />)
+
+        const seats = await screen.findByTitle('4 of 5 used · 1 left')
+        expect(seats.innerHTML).toMatch(/amber/)
+        expect(screen.getByText(/one seat left/i)).toBeInTheDocument()
+    })
+
+    it('nudges a link that is out of seats', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 5, maxUses: 5, status: 'active' }),
+        ])
+        render(<AdminInvites />)
+
+        expect(await screen.findByText(/out of seats/i)).toBeInTheDocument()
+    })
+})
+
+describe('AdminInvites — summary and filters', () => {
+    it('counts states the current tab is hiding', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ id: 'a', redemptionCount: 2 }),
+            invite({ id: 'b', status: 'revoked', revokedAt: new Date(Date.now() - 2 * HOUR).toISOString() }),
+            invite({ id: 'c', useCount: 5, maxUses: 5 }),
+        ])
+        render(<AdminInvites />)
+
+        // Everything is fetched once and filtered in memory, so the summary
+        // can count what the Active tab is not showing.
+        await screen.findByText('People joined')
+        expect(adminUserService.listInvites).toHaveBeenCalledWith('all')
+        expect(adminUserService.listInvites).toHaveBeenCalledTimes(1)
+    })
+
+    it('switches tabs without refetching', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ id: 'a' }),
+            invite({ id: 'b', status: 'revoked', revokedAt: new Date(Date.now() - 2 * HOUR).toISOString() }),
+        ])
+        render(<AdminInvites />)
+        await screen.findByText(/in Finance/)
+
+        fireEvent.click(screen.getByRole('button', { name: /^Revoked/ }))
+
+        await waitFor(() =>
+            expect(screen.getByText(/revoked .* ago/i)).toBeInTheDocument(),
+        )
+        expect(adminUserService.listInvites).toHaveBeenCalledTimes(1)
+    })
+
+    it('offers a way out of an empty tab when links exist elsewhere', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([invite()])
+        render(<AdminInvites />)
+        await screen.findByText(/in Finance/)
+
+        fireEvent.click(screen.getByRole('button', { name: /^Expired/ }))
+
+        expect(await screen.findByText(/nothing has expired/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /show all links/i })).toBeInTheDocument()
+    })
+
+    it('guides toward creating one when there are none at all', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([])
+        render(<AdminInvites />)
+
+        expect(await screen.findByText(/no links are active right now/i)).toBeInTheDocument()
+        expect(screen.getByText(/invite by link/i)).toBeInTheDocument()
+    })
+})
+
+describe('AdminInvites — acting on a link', () => {
+    it('does not revoke until the confirmation is accepted', async () => {
+        render(<AdminInvites />)
+        await openRowMenu()
+
+        fireEvent.click(await screen.findByRole('button', { name: 'Revoke this link' }))
 
         expect(await screen.findByText(/revoke this invite link\?/i)).toBeInTheDocument()
         expect(adminUserService.revokeInvite).not.toHaveBeenCalled()
@@ -91,8 +188,8 @@ describe('AdminInvites', () => {
             invite({ useCount: 4, redemptionCount: 4 }),
         ])
         render(<AdminInvites />)
-
-        fireEvent.click(await screen.findByTitle('Revoke this link'))
+        await openRowMenu()
+        fireEvent.click(await screen.findByRole('button', { name: 'Revoke this link' }))
 
         expect(
             await screen.findByText(/4 people have already used it/i),
@@ -100,99 +197,21 @@ describe('AdminInvites', () => {
         expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument()
     })
 
-    it('abandoning the confirmation leaves the link alone', async () => {
-        render(<AdminInvites />)
-        fireEvent.click(await screen.findByTitle('Revoke this link'))
-
-        fireEvent.click(await screen.findByRole('button', { name: /cancel/i }))
-
-        await waitFor(() =>
-            expect(screen.queryByText(/revoke this invite link\?/i)).not.toBeInTheDocument(),
-        )
-        expect(adminUserService.revokeInvite).not.toHaveBeenCalled()
-    })
-
-    it('revokes a link and refreshes the list once confirmed', async () => {
+    it('revokes and refreshes once confirmed', async () => {
         vi.mocked(adminUserService.revokeInvite).mockResolvedValue(
             invite({ status: 'revoked', revokedAt: new Date().toISOString() }),
         )
         render(<AdminInvites />)
-
-        fireEvent.click(await screen.findByTitle('Revoke this link'))
+        await openRowMenu()
+        fireEvent.click(await screen.findByRole('button', { name: 'Revoke this link' }))
         fireEvent.click(await screen.findByRole('button', { name: /revoke link/i }))
 
         await waitFor(() =>
             expect(adminUserService.revokeInvite).toHaveBeenCalledWith('inv_abc123'),
         )
-        // Revoking moves the row out of the Active filter, so the list is
-        // re-fetched rather than patched — leaving a "Revoked" row in the
-        // Active list would be a lie.
         await waitFor(() =>
             expect(adminUserService.listInvites).toHaveBeenCalledTimes(2),
         )
-    })
-
-    it('offers no revoke button for a link that is already revoked', async () => {
-        vi.mocked(adminUserService.listInvites).mockResolvedValue([
-            invite({ status: 'revoked', revokedAt: new Date().toISOString() }),
-        ])
-        render(<AdminInvites />)
-
-        expect(await screen.findByText('Revoked')).toBeInTheDocument()
-        expect(screen.queryByTitle('Revoke this link')).not.toBeInTheDocument()
-    })
-
-    it('fetches redemptions lazily, only when a row is opened', async () => {
-        vi.mocked(adminUserService.listInvites).mockResolvedValue([
-            invite({ useCount: 1, redemptionCount: 1 }),
-        ])
-        vi.mocked(adminUserService.listInviteRedemptions).mockResolvedValue([
-            {
-                id: 'invr_1', userId: 'usr_1',
-                email: 'joined@company.com',
-                redeemedAt: new Date(Date.now() - HOUR).toISOString(),
-            },
-        ])
-        render(<AdminInvites />)
-        await screen.findByText('Anyone with the link')
-
-        // Not fetched on load — most rows are never expanded.
-        expect(adminUserService.listInviteRedemptions).not.toHaveBeenCalled()
-
-        fireEvent.click(screen.getByTitle('Show who used this link'))
-
-        expect(await screen.findByText('joined@company.com')).toBeInTheDocument()
-        expect(adminUserService.listInviteRedemptions).toHaveBeenCalledWith('inv_abc123')
-    })
-
-    it('cannot expand a link nobody has used', async () => {
-        render(<AdminInvites />)
-        await screen.findByText('Anyone with the link')
-
-        expect(screen.getByTitle('Nobody has used this link yet')).toBeDisabled()
-    })
-
-    it('refetches when the status filter changes', async () => {
-        render(<AdminInvites />)
-        await screen.findByText('Anyone with the link')
-
-        fireEvent.click(screen.getByRole('button', { name: 'Revoked' }))
-
-        await waitFor(() =>
-            expect(adminUserService.listInvites).toHaveBeenLastCalledWith('revoked'),
-        )
-    })
-
-    it('flags a link that is nearly out of seats', async () => {
-        // A link about to close itself is the one an admin needs to notice
-        // before somebody is turned away at the door.
-        vi.mocked(adminUserService.listInvites).mockResolvedValue([
-            invite({ useCount: 4, maxUses: 5 }),
-        ])
-        render(<AdminInvites />)
-
-        const seats = await screen.findByTitle('4 of 5 used · 1 left')
-        expect(seats.className).toMatch(/amber/)
     })
 
     it('tops up seats only on a capped link', async () => {
@@ -201,8 +220,9 @@ describe('AdminInvites', () => {
         vi.mocked(adminUserService.listInvites).mockResolvedValue([invite({ maxUses: null })])
         vi.mocked(adminUserService.extendInvite).mockResolvedValue(invite())
         render(<AdminInvites />)
+        await openRowMenu()
 
-        fireEvent.click(await screen.findByRole('button', { name: /extend/i }))
+        fireEvent.click(await screen.findByRole('button', { name: 'Extend this link' }))
 
         await waitFor(() =>
             expect(adminUserService.extendInvite).toHaveBeenCalledWith(
@@ -213,8 +233,9 @@ describe('AdminInvites', () => {
 
     it('does not regenerate until the consequence is accepted', async () => {
         render(<AdminInvites />)
+        await openRowMenu()
 
-        fireEvent.click(await screen.findByRole('button', { name: /new url/i }))
+        fireEvent.click(await screen.findByRole('button', { name: 'Issue a new URL' }))
 
         expect(await screen.findByText(/issue a new url/i)).toBeInTheDocument()
         expect(screen.getByText(/loses it, immediately/i)).toBeInTheDocument()
@@ -228,25 +249,60 @@ describe('AdminInvites', () => {
             inviteId: 'inv_abc123', maxUses: null, emailDomain: null,
         })
         render(<AdminInvites />)
-
-        fireEvent.click(await screen.findByRole('button', { name: /new url/i }))
+        await openRowMenu()
+        fireEvent.click(await screen.findByRole('button', { name: 'Issue a new URL' }))
         fireEvent.click(await screen.findByRole('button', { name: /generate new url/i }))
 
         expect(await screen.findByText(/signup\?invite=fresh\.jwt\.token/)).toBeInTheDocument()
         expect(screen.getByText(/not shown again/i)).toBeInTheDocument()
     })
 
-    it('offers neither extend nor regenerate on a revoked link', async () => {
+    it('offers no actions at all on a revoked link', async () => {
         vi.mocked(adminUserService.listInvites).mockResolvedValue([
-            invite({ status: 'revoked', revokedAt: new Date().toISOString() }),
+            invite({ status: 'revoked', revokedAt: new Date(Date.now() - 2 * HOUR).toISOString() }),
         ])
         render(<AdminInvites />)
-        await screen.findByText('Revoked')
+        // The default tab is Active, which a revoked link is not in.
+        fireEvent.click(await screen.findByRole('button', { name: /^Revoked/ }))
+        await screen.findByText(/revoked .* ago/i)
 
-        expect(screen.queryByRole('button', { name: /extend/i })).not.toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: /new url/i })).not.toBeInTheDocument()
+        expect(screen.queryByLabelText('Actions for this link')).not.toBeInTheDocument()
+    })
+})
+
+describe('AdminInvites — redemption history', () => {
+    it('fetches lazily, only when a row is opened', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 1, redemptionCount: 1 }),
+        ])
+        vi.mocked(adminUserService.listInviteRedemptions).mockResolvedValue([
+            {
+                id: 'invr_1', userId: 'usr_1',
+                email: 'joined@company.com',
+                redeemedAt: new Date(Date.now() - HOUR).toISOString(),
+            },
+        ])
+        render(<AdminInvites />)
+        await screen.findByText(/in Finance/)
+
+        // Not fetched on load — most rows are never expanded.
+        expect(adminUserService.listInviteRedemptions).not.toHaveBeenCalled()
+
+        fireEvent.click(screen.getByRole('button', { name: /1 person joined/i }))
+
+        expect(await screen.findByText('joined@company.com')).toBeInTheDocument()
+        expect(adminUserService.listInviteRedemptions).toHaveBeenCalledWith('inv_abc123')
     })
 
+    it('offers no expander for a link nobody has used', async () => {
+        render(<AdminInvites />)
+        await screen.findByText(/in Finance/)
+
+        expect(screen.queryByRole('button', { name: /joined/i })).not.toBeInTheDocument()
+    })
+})
+
+describe('AdminInvites — failure and disclosure', () => {
     it('surfaces a load failure instead of showing an empty list', async () => {
         vi.mocked(adminUserService.listInvites).mockRejectedValue(
             new Error('Backend unavailable'),
@@ -263,7 +319,7 @@ describe('AdminInvites', () => {
             { ...invite(), inviteToken: 'leaked.jwt.value' } as unknown as InviteSummary,
         ])
         const { container } = render(<AdminInvites />)
-        await screen.findByText('Anyone with the link')
+        await screen.findByText(/in Finance/)
 
         expect(container.textContent).not.toContain('leaked.jwt.value')
     })

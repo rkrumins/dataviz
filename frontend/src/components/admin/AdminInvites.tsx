@@ -6,14 +6,24 @@
  * worked for every reader until it expired, up to ninety days later,
  * and nobody could tell it had happened.
  *
+ * Layout note, learned the hard way. The first version put the identity,
+ * the seat count, the expiry and three labelled buttons in ONE flex row.
+ * The buttons and the fixed-width metadata starved the `flex-1` identity
+ * column, and the two things a reader actually needs — what the link
+ * grants and who it is for — truncated to "No r…" and "Anyo…". Actions
+ * now collapse into an overflow menu and metadata sits on its own line,
+ * so the identity can never be squeezed by a control again.
+ *
  * Lives in its own file rather than inside AdminUsers.tsx, which is
  * already 2600+ lines.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import * as Popover from '@radix-ui/react-popover'
 import {
-    AlertCircle, Ban, CalendarPlus, Check, ChevronDown, Copy,
-    Infinity as InfinityIcon, Link2, Loader2, RefreshCw, RotateCw, Users, X,
+    AlertCircle, Ban, CalendarPlus, Check, ChevronDown, Copy, Globe,
+    Infinity as InfinityIcon, Link2, Loader2, Mail, MoreHorizontal,
+    RefreshCw, RotateCw, ShieldCheck, Users, X,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -26,22 +36,24 @@ import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 
-const STATUS_FILTERS = [
+type Status = InviteSummary['status']
+
+const STATUS_FILTERS: { value: Status | 'all'; label: string }[] = [
     { value: 'active', label: 'Active' },
     { value: 'revoked', label: 'Revoked' },
     { value: 'expired', label: 'Expired' },
     { value: 'exhausted', label: 'Used up' },
     { value: 'all', label: 'All' },
-] as const
+]
 
-const STATUS_STYLES: Record<InviteSummary['status'], string> = {
+const STATUS_STYLES: Record<Status, string> = {
     active: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
     revoked: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
     expired: 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border',
     exhausted: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
 }
 
-const STATUS_LABELS: Record<InviteSummary['status'], string> = {
+const STATUS_LABELS: Record<Status, string> = {
     active: 'Active',
     revoked: 'Revoked',
     expired: 'Expired',
@@ -62,43 +74,142 @@ const HOUR_MS = 1000 * 60 * 60
  *  — a link with two hours left is the one worth noticing. Parsing goes
  *  through `toUtcDate` so a timestamp without an offset is not skewed by
  *  the viewer's timezone. */
-function expiresIn(iso: string): { label: string; tone: string } {
+function expiresIn(iso: string): { label: string; tone: string; urgent: boolean } {
     const d = toUtcDate(iso)
-    if (!d) return { label: '—', tone: 'text-ink-muted' }
+    if (!d) return { label: '—', tone: 'text-ink-muted', urgent: false }
 
     const ms = d.getTime() - Date.now()
-    if (ms <= 0) return { label: 'expired', tone: 'text-ink-muted' }
+    if (ms <= 0) return { label: 'Expired', tone: 'text-ink-muted', urgent: false }
 
     const hours = ms / HOUR_MS
     const label =
-        hours < 1 ? `in ${Math.max(1, Math.round(ms / 60000))}m`
-        : hours < 48 ? `in ${Math.round(hours)}h`
-        : `in ${Math.round(hours / 24)}d`
+        hours < 1 ? `Expires in ${Math.max(1, Math.round(ms / 60000))}m`
+        : hours < 48 ? `Expires in ${Math.round(hours)}h`
+        : `Expires in ${Math.round(hours / 24)}d`
 
     return {
         label,
-        tone: hours < 24 ? 'text-amber-500' : hours < 72 ? 'text-ink-secondary' : 'text-ink-muted',
+        tone: hours < 24 ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted',
+        urgent: hours < 24,
     }
 }
 
-/** Seats remaining, or null when the link is uncapped. Drives the amber
- *  "nearly gone" cue — a link about to close itself is the one an admin
- *  needs to notice before someone is turned away. */
+/** Seats remaining, or null when the link is uncapped. */
 function seatsLeft(invite: InviteSummary): number | null {
     if (invite.maxUses === null) return null
     return Math.max(0, invite.maxUses - invite.useCount)
 }
 
-/** Who the link is for — the single most important column. */
-function audienceOf(invite: InviteSummary): { label: string; shareable: boolean } {
-    if (invite.email) return { label: invite.email, shareable: false }
-    if (invite.emailDomain) return { label: `@${invite.emailDomain}`, shareable: true }
-    return { label: 'Anyone with the link', shareable: true }
+/** Who the link is for — with the icon that says which KIND of audience
+ *  it is, so the distinction survives at a glance and does not rest on
+ *  reading the string. */
+function audienceOf(invite: InviteSummary) {
+    if (invite.email) {
+        return { label: invite.email, icon: Mail, hint: 'Only this address can use it' }
+    }
+    if (invite.emailDomain) {
+        return {
+            label: `Anyone @${invite.emailDomain}`,
+            icon: ShieldCheck,
+            hint: 'Restricted to one email domain',
+        }
+    }
+    return { label: 'Anyone with the link', icon: Globe, hint: 'No restriction on who can use it' }
+}
+
+/**
+ * Seat meter — a single ratio against a limit.
+ *
+ * Per the form heuristic this is a meter, not a chart: the fill carries
+ * severity and the unfilled track is a lighter step of the SAME ramp, so
+ * the state reads across the whole bar rather than only where it stops.
+ * Colour never carries the meaning alone — the count sits beside it.
+ */
+function SeatMeter({ invite }: { invite: InviteSummary }) {
+    const left = seatsLeft(invite)
+
+    if (invite.maxUses === null) {
+        return (
+            <span
+                className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
+                title={`${invite.useCount} used, no limit`}
+            >
+                <Users className="w-3.5 h-3.5" />
+                <span className="tabular-nums">{invite.useCount}</span>
+                <span className="text-ink-muted/60">/</span>
+                <InfinityIcon className="w-3.5 h-3.5" />
+            </span>
+        )
+    }
+
+    const pct = Math.min(100, Math.round((invite.useCount / invite.maxUses) * 100))
+    // Severity along one ramp: the fill darkens/warms as the link fills up
+    // and the track is a lighter step of the SAME hue, so the state reads
+    // across the whole bar rather than only where the fill stops.
+    const remaining = left ?? 0
+    const ramp =
+        remaining === 0 ? { fill: 'bg-red-500', track: 'bg-red-500/15', text: 'text-red-600 dark:text-red-400' }
+        : remaining <= 1 ? { fill: 'bg-amber-500', track: 'bg-amber-500/15', text: 'text-amber-600 dark:text-amber-400' }
+        : { fill: 'bg-accent-lineage', track: 'bg-accent-lineage/15', text: 'text-ink-muted' }
+
+    return (
+        <span
+            className="inline-flex items-center gap-2 text-xs"
+            title={`${invite.useCount} of ${invite.maxUses} used · ${left} left`}
+        >
+            <Users className={cn('w-3.5 h-3.5', ramp.text)} />
+            <span className={cn('tabular-nums', ramp.text)}>
+                {invite.useCount}
+                <span className="text-ink-muted/60">/</span>
+                {invite.maxUses}
+            </span>
+            <span className={cn('h-1.5 w-14 rounded-full overflow-hidden shrink-0', ramp.track)}>
+                <span
+                    className={cn('block h-full rounded-full transition-all duration-500', ramp.fill)}
+                    style={{ width: `${pct}%` }}
+                />
+            </span>
+        </span>
+    )
+}
+
+/** Label · value. Proportional figures, not tabular — a standalone
+ *  number at this size looks loose when every digit is `0`-width. */
+function StatTile({
+    label, value, tone = 'text-ink', icon: Icon,
+}: {
+    label: string
+    value: number
+    tone?: string
+    icon: typeof Users
+}) {
+    return (
+        <div className="flex-1 min-w-0 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2.5">
+            <div className="flex items-center gap-1.5 text-ink-muted mb-0.5">
+                <Icon className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider truncate">
+                    {label}
+                </span>
+            </div>
+            <p className={cn('text-xl font-semibold leading-none', tone)}>{value}</p>
+        </div>
+    )
+}
+
+/** Initial-only avatar. Enough to make a list of addresses scannable
+ *  without pretending we have profile pictures for people who signed up
+ *  ninety seconds ago. */
+function Initial({ email }: { email: string }) {
+    return (
+        <span className="w-6 h-6 rounded-full bg-accent-lineage/10 text-accent-lineage text-[10px] font-bold flex items-center justify-center shrink-0 uppercase">
+            {email.charAt(0)}
+        </span>
+    )
 }
 
 export function AdminInvites() {
     const [invites, setInvites] = useState<InviteSummary[]>([])
-    const [status, setStatus] = useState<string>('active')
+    const [status, setStatus] = useState<Status | 'all'>('active')
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [revoking, setRevoking] = useState<string | null>(null)
@@ -118,20 +229,22 @@ export function AdminInvites() {
 
     // A counter rather than calling a fetch function directly: it keeps
     // every setState inside the effect on the far side of an await, and
-    // the cancellation flag stops a slow response for one filter landing
-    // after the user has already switched to another.
+    // the cancellation flag stops a slow response landing over a newer one.
     const [reloadToken, setReloadToken] = useState(0)
-
-    const reload = useCallback(() => {
+    const reload = () => {
         setLoading(true)
         setReloadToken(n => n + 1)
-    }, [])
+    }
 
+    // Fetch EVERYTHING once and filter in memory. The volume is bounded
+    // (the endpoint caps at 500) and it buys two things: switching tabs is
+    // instant instead of a spinner per click, and the summary above can
+    // count states the current tab is hiding.
     useEffect(() => {
         let cancelled = false
         void (async () => {
             try {
-                const rows = await adminUserService.listInvites(status)
+                const rows = await adminUserService.listInvites('all')
                 if (cancelled) return
                 setInvites(rows)
                 setError(null)
@@ -142,28 +255,44 @@ export function AdminInvites() {
             }
         })()
         return () => { cancelled = true }
-    }, [status, reloadToken])
+    }, [reloadToken])
+
+    const counts = useMemo(() => {
+        const by = (s: Status) => invites.filter(i => i.status === s).length
+        return {
+            active: by('active'),
+            revoked: by('revoked'),
+            expired: by('expired'),
+            exhausted: by('exhausted'),
+            all: invites.length,
+            joined: invites.reduce((n, i) => n + i.redemptionCount, 0),
+            // Links that will stop working on their own within a day, or
+            // are down to their last seat — the ones worth acting on now.
+            attention: invites.filter(i =>
+                i.status === 'active'
+                && (expiresIn(i.expiresAt).urgent || (seatsLeft(i) !== null && seatsLeft(i)! <= 1)),
+            ).length,
+        }
+    }, [invites])
+
+    const visible = useMemo(
+        () => (status === 'all' ? invites : invites.filter(i => i.status === status)),
+        [invites, status],
+    )
 
     const handleRevoke = async (invite: InviteSummary) => {
         setRevoking(invite.id)
         setError(null)
         try {
-            const updated = await adminUserService.revokeInvite(invite.id)
+            await adminUserService.revokeInvite(invite.id)
             setConfirming(null)
-            // Say what actually happened, not just "done". An admin
-            // revoking a link wants to know it stopped working, and
-            // whether anyone had already got in through it.
             showToast(
                 'success',
                 invite.useCount > 0
                     ? `Link revoked. It had already been used ${invite.useCount} time${invite.useCount === 1 ? '' : 's'}.`
                     : 'Link revoked. It stopped working immediately.',
             )
-            // Reload rather than patching in place: revoking usually
-            // moves the row out of the current filter, and leaving a
-            // "Revoked" row sitting in the Active list is a lie.
-            if (status === 'active') reload()
-            else setInvites(prev => prev.map(i => (i.id === updated.id ? updated : i)))
+            reload()
         } catch (err: unknown) {
             const msg = messageOf(err, 'Could not revoke this link')
             setError(msg)
@@ -179,7 +308,7 @@ export function AdminInvites() {
             const updated = await adminUserService.extendInvite(invite.id, {
                 expiresInHours: 24 * 30,
                 // Only top up a capped link. Adding seats to an uncapped
-                // one would silently impose a cap that was never there.
+                // one would silently impose a limit that was never there.
                 additionalUses: invite.maxUses === null ? null : 5,
             })
             showToast(
@@ -214,7 +343,7 @@ export function AdminInvites() {
     }
 
     // Redemptions are fetched only when a row is opened — most rows are
-    // never expanded, and the list endpoint already carries the count.
+    // never expanded, and the list already carries the count.
     const toggleExpand = async (invite: InviteSummary) => {
         if (expanded === invite.id) {
             setExpanded(null)
@@ -233,22 +362,50 @@ export function AdminInvites() {
 
     return (
         <div className="space-y-4">
+            {/* At a glance, before the list. Answers "is anything wrong?"
+                without making somebody read every row to find out. */}
+            {!loading && invites.length > 0 && (
+                <div className="flex items-stretch gap-2">
+                    <StatTile label="Active" value={counts.active} icon={Link2} />
+                    <StatTile label="People joined" value={counts.joined} icon={Users} />
+                    <StatTile
+                        label="Need attention"
+                        value={counts.attention}
+                        icon={AlertCircle}
+                        tone={counts.attention > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-ink'}
+                    />
+                </div>
+            )}
+
             <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-1.5">
-                    {STATUS_FILTERS.map(f => (
-                        <button
-                            key={f.value}
-                            onClick={() => setStatus(f.value)}
-                            className={cn(
-                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                                status === f.value
-                                    ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
-                                    : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
-                            )}
-                        >
-                            {f.label}
-                        </button>
-                    ))}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                    {STATUS_FILTERS.map(f => {
+                        const n = counts[f.value]
+                        return (
+                            <button
+                                key={f.value}
+                                onClick={() => setStatus(f.value)}
+                                className={cn(
+                                    'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5',
+                                    status === f.value
+                                        ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                        : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
+                                )}
+                            >
+                                {f.label}
+                                {/* The count is the point of a filter chip — it
+                                    says whether clicking is worth it. */}
+                                {n > 0 && (
+                                    <span className={cn(
+                                        'tabular-nums',
+                                        status === f.value ? 'text-accent-lineage/70' : 'text-ink-muted',
+                                    )}>
+                                        {n}
+                                    </span>
+                                )}
+                            </button>
+                        )
+                    })}
                 </div>
                 <button
                     onClick={reload}
@@ -269,179 +426,136 @@ export function AdminInvites() {
 
             {loading ? (
                 // Skeleton rows rather than a spinner: the list keeps its
-                // shape, so the panel doesn't collapse and jump when data
-                // lands. Matches the drawer's AccessSkeleton next door.
+                // shape, so the panel doesn't collapse and jump when data lands.
                 <ul className="space-y-2" aria-busy="true" aria-label="Loading invite links">
                     {[0, 1, 2].map(i => (
-                        <li
-                            key={i}
-                            className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex items-center gap-3"
-                        >
-                            <div className="h-5 w-16 rounded-md bg-black/5 dark:bg-white/5 animate-pulse" />
-                            <div className="flex-1 space-y-1.5">
-                                <div className="h-3.5 w-40 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
-                                <div className="h-3 w-56 rounded bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
+                        <li key={i} className="rounded-xl border border-glass-border bg-canvas-elevated p-3.5 space-y-2.5">
+                            <div className="flex items-center gap-2.5">
+                                <div className="h-5 w-16 rounded-md bg-black/5 dark:bg-white/5 animate-pulse" />
+                                <div className="h-3.5 w-44 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
                             </div>
-                            <div className="h-3.5 w-10 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
-                            <div className="h-3.5 w-20 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
+                            <div className="h-3 w-64 rounded bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
+                            <div className="h-3 w-52 rounded bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
                         </li>
                     ))}
                 </ul>
-            ) : invites.length === 0 ? (
-                <div className="text-center py-12">
-                    <Link2 className="w-8 h-8 mx-auto mb-3 text-ink-muted/40" />
-                    <p className="text-sm text-ink-muted">
-                        {status === 'active'
-                            ? 'No invite links are currently active.'
-                            : `No ${status} invite links.`}
-                    </p>
-                </div>
+            ) : visible.length === 0 ? (
+                <EmptyState status={status} hasAny={invites.length > 0} onShowAll={() => setStatus('all')} />
             ) : (
                 <ul className="space-y-2">
-                    {invites.map(invite => {
+                    {visible.map(invite => {
                         const audience = audienceOf(invite)
+                        const AudienceIcon = audience.icon
                         const isOpen = expanded === invite.id
                         const rows = redemptions[invite.id]
+                        const expiry = expiresIn(invite.expiresAt)
+                        const left = seatsLeft(invite)
+                        const live = invite.status !== 'revoked'
+                        const busy = busyId === invite.id || revoking === invite.id
+
                         return (
                             <li
                                 key={invite.id}
-                                className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden"
+                                className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden transition-colors hover:border-accent-lineage/25"
                             >
-                                <div className="flex items-center gap-3 p-3 flex-wrap">
-                                    <span
-                                        className={cn(
-                                            'px-2 py-0.5 rounded-md text-[11px] font-semibold border shrink-0',
-                                            STATUS_STYLES[invite.status],
-                                        )}
-                                    >
-                                        {STATUS_LABELS[invite.status]}
-                                    </span>
-
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-sm font-medium text-ink truncate">
-                                            {invite.role
-                                                ? roleVisualFor(invite.role).label
-                                                : 'No role'}
-                                            {invite.workspaceName && (
-                                                <span className="text-ink-muted font-normal">
-                                                    {' '}in {invite.workspaceName}
-                                                </span>
-                                            )}
-                                        </p>
-                                        <p className="text-xs text-ink-muted truncate">
-                                            {audience.label}
-                                            {invite.groupNames.length > 0 && (
-                                                <> · {invite.groupNames.join(', ')}</>
-                                            )}
-                                        </p>
-                                    </div>
-
-                                    <div
-                                        className={cn(
-                                            'text-xs flex items-center gap-1 shrink-0 tabular-nums',
-                                            seatsLeft(invite) !== null && seatsLeft(invite)! <= 1
-                                                ? 'text-amber-500 font-medium'
-                                                : 'text-ink-muted',
-                                        )}
-                                        title={
-                                            invite.maxUses === null
-                                                ? `${invite.useCount} used, no limit`
-                                                : `${invite.useCount} of ${invite.maxUses} used · ${seatsLeft(invite)} left`
-                                        }
-                                    >
-                                        <Users className="w-3.5 h-3.5" />
-                                        {invite.useCount}
-                                        {' / '}
-                                        {invite.maxUses ?? (
-                                            <InfinityIcon className="w-3.5 h-3.5 inline" />
-                                        )}
-                                    </div>
-
-                                    {/* The exact instant lives in the tooltip — "in 3d"
-                                        is for scanning, and nobody can act on it when
-                                        they actually need to know when. */}
-                                    <p
-                                        className={cn(
-                                            'text-xs shrink-0 w-24 text-right',
-                                            invite.status === 'revoked'
-                                                ? 'text-ink-muted'
-                                                : expiresIn(invite.expiresAt).tone,
-                                        )}
-                                        title={
-                                            invite.status === 'revoked' && invite.revokedAt
-                                                ? `Revoked ${formatUtc(invite.revokedAt)}`
-                                                : `Expires ${formatUtc(invite.expiresAt)}`
-                                        }
-                                    >
-                                        {invite.status === 'revoked' && invite.revokedAt
-                                            ? `Revoked ${timeAgo(invite.revokedAt)}`
-                                            : `Expires ${expiresIn(invite.expiresAt).label}`}
-                                    </p>
-
-                                    <button
-                                        onClick={() => void toggleExpand(invite)}
-                                        disabled={invite.redemptionCount === 0}
-                                        title={
-                                            invite.redemptionCount === 0
-                                                ? 'Nobody has used this link yet'
-                                                : 'Show who used this link'
-                                        }
-                                        className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                                    >
-                                        <ChevronDown
+                                <div className="p-3.5">
+                                    {/* Identity line. Nothing fixed-width sits beside
+                                        it except the menu button, so it always gets
+                                        the room it needs. */}
+                                    <div className="flex items-start gap-2.5">
+                                        <span
                                             className={cn(
-                                                'w-4 h-4 transition-transform',
-                                                isOpen && 'rotate-180',
+                                                'px-2 py-0.5 rounded-md text-[11px] font-semibold border shrink-0 mt-0.5',
+                                                STATUS_STYLES[invite.status],
                                             )}
-                                        />
-                                    </button>
-
-                                    {/* Extend keeps the shared URL alive; regenerate
-                                        replaces it. Both stay on this one row, so an
-                                        invitation keeps a single history instead of
-                                        fragmenting every time it is renewed. */}
-                                    {invite.status !== 'revoked' && (
-                                        <>
-                                            <button
-                                                onClick={() => void handleExtend(invite)}
-                                                disabled={busyId === invite.id}
-                                                title={
-                                                    invite.maxUses === null
-                                                        ? 'Give this link another 30 days — the URL you shared keeps working'
-                                                        : 'Give this link another 30 days and 5 more seats — the URL you shared keeps working'
-                                                }
-                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                                            >
-                                                {busyId === invite.id
-                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                    : <CalendarPlus className="w-3.5 h-3.5" />}
-                                                Extend
-                                            </button>
-                                            <button
-                                                onClick={() => setRotating(invite)}
-                                                disabled={busyId === invite.id}
-                                                title="Issue a new URL — every link already sent stops working"
-                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                                            >
-                                                <RotateCw className="w-3.5 h-3.5" />
-                                                New URL
-                                            </button>
-                                        </>
-                                    )}
-                                    {invite.status !== 'revoked' && (
-                                        <button
-                                            onClick={() => setConfirming(invite)}
-                                            disabled={revoking === invite.id}
-                                            title="Revoke this link"
-                                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/10 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                                         >
-                                            {revoking === invite.id ? (
-                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            ) : (
-                                                <Ban className="w-3.5 h-3.5" />
+                                            {STATUS_LABELS[invite.status]}
+                                        </span>
+
+                                        <div className="min-w-0 flex-1">
+                                            <p className="text-sm font-medium text-ink">
+                                                {invite.role
+                                                    ? roleVisualFor(invite.role).label
+                                                    : 'No role'}
+                                                {invite.workspaceName && (
+                                                    <span className="text-ink-muted font-normal">
+                                                        {' '}in {invite.workspaceName}
+                                                    </span>
+                                                )}
+                                            </p>
+                                            <p
+                                                className="text-xs text-ink-muted flex items-center gap-1.5 mt-0.5"
+                                                title={audience.hint}
+                                            >
+                                                <AudienceIcon className="w-3 h-3 shrink-0" />
+                                                <span className="truncate">{audience.label}</span>
+                                            </p>
+                                            {invite.groupNames.length > 0 && (
+                                                <p className="text-xs text-ink-muted mt-0.5 truncate">
+                                                    Joins {invite.groupNames.join(', ')}
+                                                </p>
                                             )}
-                                            Revoke
-                                        </button>
+                                        </div>
+
+                                        {busy ? (
+                                            <Loader2 className="w-4 h-4 animate-spin text-ink-muted shrink-0 mt-1" />
+                                        ) : (
+                                            <RowActions
+                                                invite={invite}
+                                                live={live}
+                                                onExtend={() => void handleExtend(invite)}
+                                                onRegenerate={() => setRotating(invite)}
+                                                onRevoke={() => setConfirming(invite)}
+                                            />
+                                        )}
+                                    </div>
+
+                                    {/* Metadata line — its own row, so a control can
+                                        never squeeze the identity above it again. */}
+                                    <div className="flex items-center gap-3 flex-wrap mt-2.5 pl-[3.4rem]">
+                                        <SeatMeter invite={invite} />
+
+                                        <span
+                                            className={cn('text-xs', invite.status === 'revoked' ? 'text-ink-muted' : expiry.tone)}
+                                            title={
+                                                invite.status === 'revoked' && invite.revokedAt
+                                                    ? `Revoked ${formatUtc(invite.revokedAt)}`
+                                                    : `Expires ${formatUtc(invite.expiresAt)}`
+                                            }
+                                        >
+                                            {invite.status === 'revoked' && invite.revokedAt
+                                                ? `Revoked ${timeAgo(invite.revokedAt)}`
+                                                : expiry.label}
+                                        </span>
+
+                                        {invite.redemptionCount > 0 && (
+                                            <button
+                                                onClick={() => void toggleExpand(invite)}
+                                                className="text-xs text-accent-lineage hover:underline flex items-center gap-1"
+                                            >
+                                                {invite.redemptionCount}{' '}
+                                                {invite.redemptionCount === 1 ? 'person' : 'people'} joined
+                                                <ChevronDown
+                                                    className={cn(
+                                                        'w-3 h-3 transition-transform',
+                                                        isOpen && 'rotate-180',
+                                                    )}
+                                                />
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {/* The nudge, only where there is something to do.
+                                        A status word tells you what IS; this tells you
+                                        what to do about it. */}
+                                    {live && (expiry.urgent || left === 0 || left === 1) && (
+                                        <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-2 pl-[3.4rem]">
+                                            {left === 0
+                                                ? 'Out of seats — extend it to let more people in.'
+                                                : left === 1
+                                                    ? 'One seat left. Extend it if more people still need to join.'
+                                                    : 'Expiring today. Extend it if it is still needed.'}
+                                        </p>
                                     )}
                                 </div>
 
@@ -453,7 +567,7 @@ export function AdminInvites() {
                                             exit={{ height: 0, opacity: 0 }}
                                             className="border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]"
                                         >
-                                            <div className="p-3 space-y-1.5">
+                                            <div className="p-3 pl-[3.4rem] space-y-2">
                                                 {rows === undefined ? (
                                                     <p className="text-xs text-ink-muted">Loading…</p>
                                                 ) : rows.length === 0 ? (
@@ -462,13 +576,13 @@ export function AdminInvites() {
                                                     </p>
                                                 ) : (
                                                     rows.map(r => (
-                                                        <div
-                                                            key={r.id}
-                                                            className="flex items-center justify-between text-xs"
-                                                        >
-                                                            <span className="text-ink">{r.email}</span>
+                                                        <div key={r.id} className="flex items-center gap-2.5">
+                                                            <Initial email={r.email} />
+                                                            <span className="text-xs text-ink truncate flex-1 min-w-0">
+                                                                {r.email}
+                                                            </span>
                                                             <span
-                                                                className="text-ink-muted"
+                                                                className="text-[11px] text-ink-muted shrink-0"
                                                                 title={formatUtc(r.redeemedAt)}
                                                             >
                                                                 {timeAgo(r.redeemedAt)}
@@ -496,7 +610,7 @@ export function AdminInvites() {
                 message={
                     confirming
                         ? [
-                            `Anyone holding this link stops being able to sign up, immediately.`,
+                            'Anyone holding this link stops being able to sign up, immediately.',
                             confirming.useCount > 0
                                 ? `${confirming.useCount} ${confirming.useCount === 1 ? 'person has' : 'people have'} already used it — their accounts are not affected.`
                                 : 'Nobody has used it yet.',
@@ -537,7 +651,7 @@ export function AdminInvites() {
                         initial={{ opacity: 0, y: 8 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: 8 }}
-                        className="mt-4 p-4 rounded-2xl bg-accent-lineage/5 border border-accent-lineage/20"
+                        className="p-4 rounded-2xl bg-accent-lineage/5 border border-accent-lineage/20"
                     >
                         <div className="flex items-start justify-between gap-3 mb-2">
                             <div>
@@ -575,6 +689,135 @@ export function AdminInvites() {
                     </motion.div>
                 )}
             </AnimatePresence>
+        </div>
+    )
+}
+
+/**
+ * Row actions, collapsed.
+ *
+ * Three labelled buttons per row is what crushed the identity column in
+ * the first version. A menu costs one extra click on actions nobody
+ * performs often — extending or replacing a link is rare, revoking is
+ * rarer — and buys back the width the reader needs on every row.
+ */
+function RowActions({
+    invite, live, onExtend, onRegenerate, onRevoke,
+}: {
+    invite: InviteSummary
+    live: boolean
+    onExtend: () => void
+    onRegenerate: () => void
+    onRevoke: () => void
+}) {
+    const [open, setOpen] = useState(false)
+
+    if (!live) {
+        return <span className="w-7 shrink-0" aria-hidden />
+    }
+
+    const item = 'w-full text-left px-3 py-2 text-xs flex items-start gap-2.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors'
+
+    return (
+        <Popover.Root open={open} onOpenChange={setOpen}>
+            <Popover.Trigger asChild>
+                <button
+                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
+                    title="Actions for this link"
+                    aria-label="Actions for this link"
+                >
+                    <MoreHorizontal className="w-4 h-4" />
+                </button>
+            </Popover.Trigger>
+            <Popover.Portal>
+                <Popover.Content
+                    align="end"
+                    sideOffset={6}
+                    className="w-64 bg-canvas-elevated border border-glass-border rounded-xl shadow-lg z-50 overflow-hidden animate-in fade-in zoom-in-95"
+                >
+                    {/* Each action says what it does to the URL already shared —
+                        that is the only difference that matters between them. */}
+                    <button className={item} aria-label="Extend this link" onClick={() => { setOpen(false); onExtend() }}>
+                        <CalendarPlus className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+                        <span>
+                            <span className="font-medium text-ink block">Extend</span>
+                            <span className="text-ink-muted">
+                                {invite.maxUses === null
+                                    ? '30 more days. The URL you shared keeps working.'
+                                    : '30 more days and 5 more seats. The URL you shared keeps working.'}
+                            </span>
+                        </span>
+                    </button>
+                    <button className={item} aria-label="Issue a new URL" onClick={() => { setOpen(false); onRegenerate() }}>
+                        <RotateCw className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+                        <span>
+                            <span className="font-medium text-ink block">New URL</span>
+                            <span className="text-ink-muted">
+                                Same invitation, new address. Every URL already sent stops working.
+                            </span>
+                        </span>
+                    </button>
+                    <div className="border-t border-glass-border" />
+                    <button
+                        className={cn(item, 'text-red-600 dark:text-red-400')}
+                        aria-label="Revoke this link"
+                        onClick={() => { setOpen(false); onRevoke() }}
+                    >
+                        <Ban className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span>
+                            <span className="font-medium block">Revoke</span>
+                            <span className="text-ink-muted">
+                                Stops working for everyone, immediately.
+                            </span>
+                        </span>
+                    </button>
+                </Popover.Content>
+            </Popover.Portal>
+        </Popover.Root>
+    )
+}
+
+/** Empty states that say what to do next, not just that there is nothing
+ *  here. "No revoked links" is good news and should read as such; an
+ *  empty Active tab when other links exist is a wrong-tab problem, not an
+ *  empty estate. */
+function EmptyState({
+    status, hasAny, onShowAll,
+}: {
+    status: Status | 'all'
+    hasAny: boolean
+    onShowAll: () => void
+}) {
+    const copy: Record<string, { title: string; body: string }> = {
+        active: {
+            title: 'No links are active right now',
+            body: 'Use “Invite by Link” to create one. It will appear here so you can track and revoke it.',
+        },
+        revoked: { title: 'Nothing has been revoked', body: 'Links you kill will be listed here.' },
+        expired: { title: 'Nothing has expired', body: 'Links that run out of time will be listed here.' },
+        exhausted: { title: 'No link has run out of seats', body: 'Capped links that fill up will be listed here.' },
+        all: {
+            title: 'No invite links yet',
+            body: 'Use “Invite by Link” to create one. Every link you create is tracked here — who used it, and when.',
+        },
+    }
+    const { title, body } = copy[status] ?? copy.all
+
+    return (
+        <div className="text-center py-12 px-6">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-black/[0.03] dark:bg-white/[0.04] flex items-center justify-center">
+                <Link2 className="w-5 h-5 text-ink-muted/50" />
+            </div>
+            <p className="text-sm font-medium text-ink">{title}</p>
+            <p className="text-xs text-ink-muted mt-1 max-w-xs mx-auto leading-relaxed">{body}</p>
+            {hasAny && status !== 'all' && (
+                <button
+                    onClick={onShowAll}
+                    className="mt-3 text-xs font-medium text-accent-lineage hover:underline"
+                >
+                    Show all links
+                </button>
+            )}
         </div>
     )
 }

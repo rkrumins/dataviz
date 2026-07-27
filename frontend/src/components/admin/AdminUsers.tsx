@@ -1121,7 +1121,7 @@ export function AdminUsers() {
                             {modal.kind === 'invite' && (
                                 <>
                                     <ModalHeader icon={Link2} iconBg="bg-accent-lineage/10 border-accent-lineage/20" iconColor="text-accent-lineage"
-                                        title="Invite by Link" subtitle="Generate a shareable signup link" onClose={closeModal} />
+                                        title="Invite by Link" subtitle="Create a link that carries a role, workspace and groups" onClose={closeModal} />
 
                                     {bulkResult ? (
                                         <BulkInviteResultList
@@ -1348,7 +1348,7 @@ export function AdminUsers() {
                                 <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">Invite links</p>
                                 <h2 className="text-base font-bold text-ink">Outstanding links</h2>
                                 <p className="text-[11px] text-ink-muted">
-                                    Revoke a link to stop it working immediately.
+                                    Track who has joined, extend, replace or revoke.
                                 </p>
                             </div>
                             <button
