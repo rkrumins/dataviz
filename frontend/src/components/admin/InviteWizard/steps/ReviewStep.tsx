@@ -6,9 +6,10 @@
  * replaces had the sentence last, three scroll-lengths below the fields it
  * described, which made it a footnote rather than the check it exists to be.
  */
-import { Mail, Users, Clock, Shield, Building2, Globe, ListChecks, Pencil } from 'lucide-react'
+import { Mail, Users, Clock, Shield, Building2, Globe, ListChecks, Pencil, ClipboardCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InviteSummary } from '../results'
+import { StepColumn, StepHero, StepBlock } from '../ui'
 import type { InviteWizardState, WizardStep } from '../useInviteWizard'
 
 function Row({
@@ -44,7 +45,7 @@ function Row({
             <button
                 type="button"
                 onClick={onEdit}
-                className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all shrink-0"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-ink-muted group-hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
             >
                 <Pencil className="w-3 h-3" />
                 Change
@@ -66,12 +67,15 @@ export function ReviewStep({
         : Globe
 
     return (
-        <div>
-            <h3 className="text-lg font-bold text-ink">Review and generate</h3>
-            <p className="text-sm text-ink-muted mt-1 mb-5 leading-relaxed">
-                One last look at what this link does before it exists.
-            </p>
+        <StepColumn wide>
+            <StepHero
+                pill="Last look"
+                pillIcon={ClipboardCheck}
+                title="Review and generate"
+                subtitle="What this link will do, before it exists. Any row can be changed without losing the rest."
+            />
 
+            <StepBlock delay={0.04}>
             <InviteSummary
                 roleLabel={w.roleLabel}
                 workspaceName={w.workspaceName}
@@ -84,8 +88,10 @@ export function ReviewStep({
                 emailDomain={w.email.trim() ? null : (w.emailDomain.trim().replace(/^@/, '') || null)}
                 recipientCount={w.bulkMode ? w.bulkEmailList.length : 1}
             />
+            </StepBlock>
 
-            <div className="mt-5 rounded-2xl border border-black/[0.08] dark:border-white/[0.10] overflow-hidden bg-canvas-elevated">
+            <StepBlock delay={0.08}>
+            <div className="rounded-2xl border-2 border-black/[0.10] dark:border-white/[0.12] overflow-hidden bg-canvas-elevated">
                 <Row
                     icon={audienceIcon}
                     label="Who it's for"
@@ -115,6 +121,7 @@ export function ReviewStep({
                     onEdit={() => onEdit('safety')}
                 />
             </div>
-        </div>
+            </StepBlock>
+        </StepColumn>
     )
 }

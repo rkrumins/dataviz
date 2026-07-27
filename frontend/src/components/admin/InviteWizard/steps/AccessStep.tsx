@@ -6,12 +6,12 @@
  * knowing what you are granting matters most.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { Building2, Lock, AlertCircle, Users2, X } from 'lucide-react'
+import { Building2, Lock, AlertCircle, Users2, X, KeyRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-    SectionLabel, FieldHint, RoleListSkeleton, RoleGroup, NoRoleCard,
-    WorkspacePicker, GroupsPicker,
+    RoleListSkeleton, RoleGroup, NoRoleCard, WorkspacePicker, GroupsPicker,
 } from '../pickers'
+import { StepColumn, StepHero, StepBlock, FieldLabel, Hint } from '../ui'
 import type { InviteWizardState } from '../useInviteWizard'
 
 export function AccessStep({
@@ -23,20 +23,22 @@ export function AccessStep({
     if (w.roles === null) return <RoleListSkeleton />
 
     return (
-        <div>
-            <h3 className="text-lg font-bold text-ink">What will they get?</h3>
-            <p className="text-sm text-ink-muted mt-1 mb-5 leading-relaxed">
-                Everyone lands as a standard team member. Workspace access is granted by
-                each workspace&apos;s admin after they sign up.
-            </p>
+        <StepColumn wide>
+            <StepHero
+                pill="Access"
+                pillIcon={KeyRound}
+                title="What will they get?"
+                subtitle="Everyone lands as a standard team member. Workspace access is granted by each workspace's admin after they sign up."
+            />
 
+            <StepBlock delay={0.04}>
             <NoRoleCard
                 option={w.noRole}
                 selected={w.selectedRole === ''}
                 onSelect={() => w.setSelectedRole('')}
             />
 
-            <div className="mt-5 space-y-5">
+            <div className="space-y-5">
                 {w.platformTiers.length > 0 && (
                     <RoleGroup
                         title="Elevate to a privileged role"
@@ -56,6 +58,7 @@ export function AccessStep({
                     />
                 )}
             </div>
+            </StepBlock>
 
             <AnimatePresence initial={false}>
                 {w.isWorkspaceScoped && (
@@ -68,7 +71,7 @@ export function AccessStep({
                         className="overflow-hidden"
                     >
                         <div className="mt-6">
-                            <SectionLabel>Workspace</SectionLabel>
+                            <FieldLabel required>Workspace</FieldLabel>
                             {w.fixedWorkspaceId ? (
                                 <div className="flex items-center gap-2.5 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.08] dark:border-white/[0.10]">
                                     <Building2 className="w-4 h-4 text-ink-muted shrink-0" />
@@ -94,22 +97,17 @@ export function AccessStep({
                 )}
             </AnimatePresence>
 
-            <div className="mt-6">
-                <SectionLabel>
-                    Add to groups
-                    <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
-                        (optional)
-                    </span>
-                </SectionLabel>
+            <StepBlock delay={0.08}>
+                <FieldLabel hint="(optional)">Add to groups</FieldLabel>
                 <GroupsPicker
                     groups={w.groups}
                     selected={w.selectedGroups}
                     onToggle={w.toggleGroup}
                 />
-                <FieldHint>
+                <Hint>
                     Group memberships apply across every workspace the group is bound to.
-                </FieldHint>
-            </div>
+                </Hint>
+            </StepBlock>
 
             {/* The email-pin rule, and the way out of it. It used to disable
                 the submit button with the explanation in another column; it
@@ -123,7 +121,7 @@ export function AccessStep({
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -4 }}
                         transition={{ duration: 0.18 }}
-                        className="mt-6 p-4 rounded-xl bg-amber-500/[0.08] border border-amber-500/25 text-amber-700 dark:text-amber-300"
+                        className="p-4 rounded-2xl bg-amber-500/[0.08] border-2 border-amber-500/25 text-amber-700 dark:text-amber-300"
                     >
                         <div className="flex items-start gap-3">
                             <Lock className="w-4 h-4 shrink-0 mt-0.5" />
@@ -227,7 +225,7 @@ export function AccessStep({
             </AnimatePresence>
 
             {w.overrideActive && (
-                <div className="mt-6 flex items-start gap-3 p-4 rounded-xl bg-slate-500/10 border border-slate-500/25 text-slate-700 dark:text-slate-300">
+                <div className="flex items-start gap-3 p-4 rounded-2xl bg-slate-500/10 border-2 border-slate-500/25 text-slate-700 dark:text-slate-300">
                     <Users2 className="w-4 h-4 shrink-0 mt-0.5" />
                     <div className="text-xs leading-relaxed flex-1 min-w-0">
                         <p className="font-semibold">Shareable group invite</p>
@@ -246,6 +244,6 @@ export function AccessStep({
                     </button>
                 </div>
             )}
-        </div>
+        </StepColumn>
     )
 }

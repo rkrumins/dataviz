@@ -11,7 +11,7 @@
 import { motion } from 'framer-motion'
 import { Clock, Users, ShieldCheck, ShieldAlert, Shield } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { SectionLabel, FieldHint, ChipRow } from '../pickers'
+import { StepColumn, StepHero, StepBlock, FieldLabel, BigChipRow, Hint } from '../ui'
 import type { InviteWizardState, Expiry } from '../useInviteWizard'
 
 const BANDS = {
@@ -54,14 +54,16 @@ export function SafetyStep({ w }: { w: InviteWizardState }) {
     ].filter(Boolean) as string[]
 
     return (
-        <div>
-            <h3 className="text-lg font-bold text-ink">How far should it reach?</h3>
-            <p className="text-sm text-ink-muted mt-1 mb-5 leading-relaxed">
-                A link is a credential. These two settings are what close it when you
-                are not watching.
-            </p>
+        <StepColumn>
+            <StepHero
+                pill="Safety"
+                pillIcon={BandIcon}
+                tone={w.exposure.band === 'wide' ? 'amber' : w.exposure.band === 'narrow' ? 'emerald' : 'indigo'}
+                title="How far should it reach?"
+                subtitle="A link is a credential. These two settings are what close it when you are not watching."
+            />
 
-            {/* ── Exposure meter ─────────────────────────────────────── */}
+            <StepBlock delay={0.04}>
             <div className={cn('rounded-2xl border p-5 transition-colors', band.ring)}>
                 <div className="flex items-center gap-3 mb-3">
                     <span className={cn(
@@ -102,54 +104,62 @@ export function SafetyStep({ w }: { w: InviteWizardState }) {
                 </div>
             </div>
 
-            {/* ── Expiry ─────────────────────────────────────────────── */}
-            <div className="mt-6">
-                <SectionLabel>
-                    <Clock className="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5" />
+            </StepBlock>
+
+            <StepBlock delay={0.08}>
+                <FieldLabel>
+                    <Clock className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
                     Link expires in
-                </SectionLabel>
-                <ChipRow
-                    options={(['24h', '7d', '30d', '90d'] as const).map(v => ({ value: v as Expiry, label: v }))}
+                </FieldLabel>
+                <BigChipRow
+                    options={[
+                        { value: '24h' as Expiry, label: '24 hours', sublabel: 'same-day' },
+                        { value: '7d' as Expiry, label: '7 days', sublabel: 'a week' },
+                        { value: '30d' as Expiry, label: '30 days', sublabel: 'a month' },
+                        { value: '90d' as Expiry, label: '90 days', sublabel: 'a quarter' },
+                    ]}
                     value={w.expiresIn}
                     onChange={w.setExpiresIn}
                 />
-                <FieldHint>
+                <Hint>
                     After this window the link stops working. Whoever has it will need a new one.
-                </FieldHint>
-            </div>
+                </Hint>
+            </StepBlock>
 
             {/* Seats are meaningless for a pinned link — one address, one
                 account — so the control only appears where it can act. */}
             {(w.audience === 'domain' || w.audience === 'anyone') && (
-                <div className="mt-6">
-                    <SectionLabel>
-                        <Users className="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5" />
+                <StepBlock delay={0.12}>
+                    <FieldLabel>
+                        <Users className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
                         How many people can use it
-                    </SectionLabel>
-                    <ChipRow
+                    </FieldLabel>
+                    <BigChipRow
                         options={[
-                            { value: 1, label: 'Just 1' },
-                            { value: 5, label: 'Up to 5' },
-                            { value: 25, label: 'Up to 25' },
-                            { value: null, label: 'Unlimited' },
+                            { value: 1, label: 'Just 1', sublabel: 'single use' },
+                            { value: 5, label: 'Up to 5', sublabel: 'a handful' },
+                            { value: 25, label: 'Up to 25', sublabel: 'a team' },
+                            { value: null, label: 'Unlimited', sublabel: 'no cap' },
                         ]}
                         value={w.maxUses}
                         onChange={w.setMaxUses}
                     />
-                    <FieldHint tone={w.maxUses === null ? 'warn' : undefined}>
+                    <Hint tone={w.maxUses === null ? 'warn' : undefined}>
                         {w.maxUses === null
                             ? 'Nothing closes this link but its expiry or a manual revoke.'
                             : `The link closes itself after ${w.maxUses} ${w.maxUses === 1 ? 'person signs' : 'people sign'} up.`}
-                    </FieldHint>
-                </div>
+                    </Hint>
+                </StepBlock>
             )}
 
             {w.bulkMode && (
-                <div className="mt-6 text-xs text-ink-muted leading-relaxed">
-                    Each of the {w.bulkEmailList.length} links is pinned to one address and
-                    good for one signup, so there is no seat cap to set.
-                </div>
+                <StepBlock delay={0.12}>
+                    <p className="text-xs text-ink-muted leading-relaxed text-center">
+                        Each of the {w.bulkEmailList.length} links is pinned to one address and
+                        good for one signup, so there is no seat cap to set.
+                    </p>
+                </StepBlock>
             )}
-        </div>
+        </StepColumn>
     )
 }

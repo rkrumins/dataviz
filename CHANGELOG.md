@@ -101,6 +101,12 @@ review*, in that order because the first question is the only one that constrain
 — and the one the inviter can already answer before opening the dialog, so it carries the
 defaults for everything downstream.
 
+**The link itself gets a proper hand-off.** Generating one used to drop a result card into
+the same modal shell. It now ends on a success screen: the URL as the hero, monospaced and
+copyable in one press, with what the link grants, who it is for, its seats and its lifetime as
+tiles beneath — and a plain statement that this is the only time the URL is shown, because the
+links list deliberately never returns it again.
+
 **A link's reach is visible before it is minted.** The safety step shows how far the invite
 actually reaches — audience, seat cap, lifetime and role, as a single meter with the reasons
 written beside it — so "anyone · unlimited · 90 days · org admin" feels different from "one

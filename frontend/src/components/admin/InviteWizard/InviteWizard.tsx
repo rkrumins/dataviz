@@ -36,7 +36,8 @@ import { AudienceStep } from './steps/AudienceStep'
 import { AccessStep } from './steps/AccessStep'
 import { SafetyStep } from './steps/SafetyStep'
 import { ReviewStep } from './steps/ReviewStep'
-import { InviteResultCard, BulkInviteResultList } from './results'
+import { BulkInviteResultList } from './results'
+import { SuccessPhase } from './steps/SuccessPhase'
 
 const STEPS: { id: WizardStep; title: string; icon: typeof Users }[] = [
     { id: 'audience', title: "Who it's for", icon: Users },
@@ -244,13 +245,12 @@ export function InviteWizard({
                                         onClose={onClose}
                                     />
                                 ) : result ? (
-                                    <InviteResultCard
+                                    <SuccessPhase
                                         result={result}
                                         inviteUrl={inviteUrl}
                                         copied={copied}
                                         onCopy={onCopy}
-                                        onAnother={onAnother}
-                                        onClose={onClose}
+                                        expiresLabel={w.expiresIn}
                                     />
                                 ) : w.step === 'audience' ? (
                                     <AudienceStep w={w} />
@@ -274,6 +274,26 @@ export function InviteWizard({
                                     <span>{wm}</span>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {/* ── Success footer. A success screen whose only way
+                        out is the X leaves the user hunting for the exit. ── */}
+                    {succeeded && !bulkResult && (
+                        <div className="flex items-center justify-end gap-3 px-8 py-5 border-t border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.02] shrink-0">
+                            <button
+                                onClick={onAnother}
+                                className="px-5 py-2.5 rounded-xl font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                            >
+                                Create another
+                            </button>
+                            <button
+                                onClick={onClose}
+                                className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md transition-colors duration-150"
+                            >
+                                <Check className="w-4 h-4" />
+                                Done
+                            </button>
                         </div>
                     )}
 

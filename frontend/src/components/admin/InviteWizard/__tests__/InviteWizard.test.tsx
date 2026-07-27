@@ -160,7 +160,7 @@ describe('InviteWizard — an open link arrives bounded', () => {
         fireEvent.click(screen.getByText('Anyone with the link'))
         await goNext(S2); await goNext(S3)
 
-        fireEvent.click(screen.getByRole('button', { name: /^Unlimited$/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Unlimited/ }))
         expect(screen.getByText(/nothing closes this link but its expiry or a manual revoke/i))
             .toBeInTheDocument()
 
@@ -186,8 +186,8 @@ describe('InviteWizard — reach', () => {
         await screen.findByText(/who is this link for/i)
         fireEvent.click(screen.getByText('Anyone with the link'))
         await goNext(S2); await goNext(S3)
-        fireEvent.click(screen.getByRole('button', { name: /^Unlimited$/ }))
-        fireEvent.click(screen.getByRole('button', { name: /^90d$/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Unlimited/ }))
+        fireEvent.click(screen.getByRole('button', { name: /90 days/ }))
 
         expect(screen.getByText('Wide')).toBeInTheDocument()
     })
