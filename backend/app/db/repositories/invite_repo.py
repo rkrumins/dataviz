@@ -282,6 +282,26 @@ async def list_redemptions(
     return list(result.scalars().all())
 
 
+async def recent_redemptions_for_creator(
+    session: AsyncSession, created_by: str, *, limit: int = 20,
+) -> list[tuple[InviteRedemptionORM, InviteORM]]:
+    """Who has come in through MY links lately, newest first.
+
+    The other half of an invitation. Sending one and never hearing
+    whether it was used makes the whole thing feel like shouting into a
+    void — and an admin who cannot tell has no idea whether to follow
+    up or let it expire.
+    """
+    result = await session.execute(
+        select(InviteRedemptionORM, InviteORM)
+        .join(InviteORM, InviteORM.id == InviteRedemptionORM.invite_id)
+        .where(InviteORM.created_by == created_by)
+        .order_by(InviteRedemptionORM.redeemed_at.desc())
+        .limit(limit)
+    )
+    return [(row[0], row[1]) for row in result.all()]
+
+
 async def redemption_counts(
     session: AsyncSession, invite_ids: Sequence[str],
 ) -> dict[str, int]:

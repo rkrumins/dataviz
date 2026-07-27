@@ -47,6 +47,7 @@ from backend.common.models.auth import (
     BulkInviteResult,
     CreateInviteRequest,
     ExtendInviteRequest,
+    InviteActivityItem,
     InviteRedemptionResponse,
     InviteSummaryResponse,
     InviteTokenResponse,
@@ -96,6 +97,48 @@ async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
 # ── Authenticated user routes ─────────────────────────────────────────
 
 router = APIRouter()
+
+
+@router.get("/me/invite-activity", response_model=list[InviteActivityItem])
+async def my_invite_activity(
+    limit: int = Query(20, ge=1, le=50),
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """People who have signed up through links I created, newest first.
+
+    The other half of an invitation. Sending one and never hearing
+    whether it was used makes the whole thing feel like shouting into a
+    void, and leaves the sender with no idea whether to follow up or let
+    it expire.
+
+    Scoped to the caller's own links — an invitation is a personal act,
+    and this answers "did mine work?", not "who joined the company".
+    """
+    from backend.app.db.repositories import invite_repo, workspace_repo
+
+    rows = await invite_repo.recent_redemptions_for_creator(
+        session, current_user.id, limit=limit,
+    )
+    ws_names: dict[str, Optional[str]] = {}
+    out: list[InviteActivityItem] = []
+    for redemption, invite in rows:
+        if invite.workspace_id and invite.workspace_id not in ws_names:
+            ws = await workspace_repo.get_workspace_orm(session, invite.workspace_id)
+            ws_names[invite.workspace_id] = ws.name if ws else None
+        out.append(InviteActivityItem(
+            id=redemption.id,
+            email=redemption.email,
+            userId=redemption.user_id,
+            redeemedAt=redemption.redeemed_at,
+            inviteId=invite.id,
+            role=invite.role,
+            workspaceId=invite.workspace_id,
+            workspaceName=(
+                ws_names.get(invite.workspace_id) if invite.workspace_id else None
+            ),
+        ))
+    return out
 
 
 @router.get("/me", response_model=UserPublicResponse)

@@ -314,6 +314,20 @@ class BulkInviteResponse(BaseModel):
     expires_at: str = Field(alias="expiresAt")
 
 
+class InviteActivityItem(BaseModel):
+    """Somebody joined through one of my links."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: str
+    user_id: str = Field(alias="userId")
+    redeemed_at: str = Field(alias="redeemedAt")
+    invite_id: str = Field(alias="inviteId")
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+
+
 class RedeemInviteRequest(BaseModel):
     """Apply an invite to the already-authenticated caller — the SSO
     route into an invitation."""

@@ -603,6 +603,58 @@ async def test_redemptions_for_an_unknown_invite_is_404(test_client: AsyncClient
     assert r.status_code == 404
 
 
+# ── invite activity (the other half of an invitation) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_activity_reports_who_joined_through_my_links(
+    test_client: AsyncClient, db_session,
+):
+    """Sending a link and never hearing whether it worked leaves the
+    sender with no idea whether to follow up or let it expire."""
+    db_session.add(WorkspaceORM(id="ws_act", name="Activity"))
+    await db_session.commit()
+
+    minted = (await _mint(
+        test_client, role="workspace_member", workspaceId="ws_act",
+    )).json()
+
+    empty = await test_client.get("/api/v1/users/me/invite-activity")
+    assert empty.status_code == 200
+    assert empty.json() == []
+
+    await _signup(test_client, email="joiner@example.com", token=minted["inviteToken"])
+    _resync_csrf(test_client)
+
+    r = await test_client.get("/api/v1/users/me/invite-activity")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert len(rows) == 1
+    assert rows[0]["email"] == "joiner@example.com"
+    assert rows[0]["role"] == "workspace_member"
+    assert rows[0]["workspaceName"] == "Activity"
+    assert rows[0]["inviteId"] == minted["inviteId"]
+
+
+@pytest.mark.asyncio
+async def test_activity_is_scoped_to_my_own_links(
+    test_client: AsyncClient, db_session,
+):
+    """An invitation is a personal act. This answers "did mine work?",
+    not "who joined the company"."""
+    minted = (await _mint(test_client)).json()
+    row = await invite_repo.get(db_session, minted["inviteId"])
+    row.created_by = "usr_somebody_else"
+    await db_session.commit()
+
+    await _signup(test_client, email="theirs@example.com", token=minted["inviteToken"])
+    _resync_csrf(test_client)
+
+    r = await test_client.get("/api/v1/users/me/invite-activity")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 # ── signup_source ────────────────────────────────────────────────────
 
 

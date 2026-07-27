@@ -61,6 +61,34 @@ dialog tells you how many live links that will kill before you flip it.
 remedies. A recipient is now told whether the link was revoked, ran out of seats, expired, or
 whether invite links are switched off entirely.
 
+**Accept an invite with single sign-on.** An invite meant one thing: choose a password. In an
+SSO-only deployment that asked the invitee to invent one that login would then refuse. The
+invite page now offers **Continue with &lt;your IdP&gt;**, and the invitation is applied once the
+handshake has proved who they are. An invite is only applied to an account with no access yet —
+somebody already set up has already been onboarded, and a forwarded link must not add grants to
+an established account.
+
+**Invite several people at once.** One list of addresses, one set of settings, one
+email-pinned link per person — pinned rather than shared, so each is separately revocable and
+each redemption is attributable. Partial success is reported per row: one address already
+having an account does not cost the others their invitations.
+
+**Extend or replace a link without losing its history.** **Extend** buys another 30 days (and
+more seats on a capped link) while the URL you already shared keeps working. **New URL** issues
+a fresh link and stops every URL already sent, keeping the role, groups, seat count and the
+record of who has joined on the same invitation. Previously both meant minting a replacement,
+which split one invitation across two rows and stranded its history on the dead one.
+
+**A capped link says so.** "2 spots left · Expires in 3 days" on the signup page, so the person
+who clicks one too late is not the only one who ever finds out there was a limit.
+
+**Invited users land somewhere useful.** Redemption opens the Getting Started hub once instead
+of dropping a brand-new person onto a cold dashboard.
+
+**The notification bell does something.** Its first real content is invite activity: who signed
+up through your links, and when. Sending an invitation and never hearing whether it worked left
+you with no idea whether to follow up or let it expire.
+
 ### Security
 
 Auto sign-in makes the signup endpoint's enumeration-safe response distinguishable for someone

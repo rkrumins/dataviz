@@ -81,6 +81,18 @@ export interface BulkInviteResponse {
     expiresAt: string
 }
 
+/** Phase 15: somebody joined through one of MY links. */
+export interface InviteActivityItem {
+    id: string
+    email: string
+    userId: string
+    redeemedAt: string
+    inviteId: string
+    role: string | null
+    workspaceId: string | null
+    workspaceName: string | null
+}
+
 export interface InviteRedemption {
     id: string
     userId: string
@@ -210,6 +222,13 @@ export const adminUserService = {
             `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/revoke`,
             { method: 'POST' },
         )
+    },
+
+    /** People who signed up through links I created, newest first.
+     *  Scoped to the caller — this answers "did my invitation work?",
+     *  not "who joined the company". */
+    listMyInviteActivity(): Promise<InviteActivityItem[]> {
+        return authFetch<InviteActivityItem[]>('/api/v1/users/me/invite-activity')
     },
 
     /** One email-pinned link per address, from one set of settings.
