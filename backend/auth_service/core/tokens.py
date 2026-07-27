@@ -168,6 +168,18 @@ def decode_refresh_token(token: str) -> RefreshClaims:
 
 # ── Invite tokens ────────────────────────────────────────────────────
 
+def invite_expiry(expires_in_hours: int) -> str:
+    """When an invite minted now would lapse, as an ISO string.
+
+    Shared with ``create_invite_token`` so extending or regenerating a
+    link cannot compute a different deadline from the one issuing it —
+    the row and the token have to agree on the instant a link dies.
+    """
+    return (
+        datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+    ).isoformat()
+
+
 def create_invite_token(
     role: str,
     created_by: str,
@@ -177,6 +189,7 @@ def create_invite_token(
     email: str | None = None,
     group_ids: list[str] | None = None,
     jti: str | None = None,
+    token_version: int | None = None,
 ) -> tuple[str, str]:
     """Create a signed invite JWT. Returns (token, expires_at_iso).
 
@@ -217,6 +230,12 @@ def create_invite_token(
         payload["group_ids"] = list(group_ids)
     if jti is not None:
         payload["jti"] = jti
+    if token_version is not None:
+        # ``tv``: which generation of this link the URL belongs to.
+        # Regenerating bumps the row's version, which strands every URL
+        # minted at an older one. Omitted when None so tokens issued
+        # before rotation existed stay byte-identical.
+        payload["tv"] = token_version
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at.isoformat()
 

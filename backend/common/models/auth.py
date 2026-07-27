@@ -276,6 +276,21 @@ class InviteTokenResponse(BaseModel):
     email_domain: Optional[str] = Field(default=None, alias="emailDomain")
 
 
+class ExtendInviteRequest(BaseModel):
+    """Give an existing link more time, and optionally more seats.
+
+    ``additional_uses`` is relative to what has ALREADY been used, so
+    "add 5" means five more people can join — not five more than the
+    original cap, which on a spent link would be none.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=2160)
+    additional_uses: Optional[int] = Field(
+        None, alias="additionalUses", ge=1, le=1000,
+    )
+
+
 class InviteSummaryResponse(BaseModel):
     """One row in the admin's list of outstanding links.
 
@@ -342,3 +357,11 @@ class InviteVerifyResponse(BaseModel):
     #: One of: ``expired`` | ``revoked`` | ``exhausted`` | ``domain_mismatch``
     #: | ``links_disabled`` | ``invalid``.
     reason: Optional[str] = None
+    #: Seats left on a capped link; None when uncapped. Surfaced so a
+    #: capped link can say "2 spots left" rather than silently failing
+    #: for whoever clicks one too late — the person turned away is the
+    #: one who most needed to know the limit existed.
+    seats_remaining: Optional[int] = Field(default=None, alias="seatsRemaining")
+    #: When the link stops working, so the page can show the deadline
+    #: rather than only discovering it after a failed submit.
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")

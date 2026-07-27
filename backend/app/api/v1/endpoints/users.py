@@ -42,6 +42,7 @@ from backend.common.models.auth import (
     ApproveRejectRequest,
     ChangeRoleRequest,
     CreateInviteRequest,
+    ExtendInviteRequest,
     InviteRedemptionResponse,
     InviteSummaryResponse,
     InviteTokenResponse,
@@ -794,6 +795,48 @@ async def create_invite(
 # half of that — the list an admin can actually act on.
 
 
+async def _invite_summary(session: AsyncSession, invite) -> InviteSummaryResponse:
+    """Project one row into the shape the admin list renders.
+
+    Four endpoints return this now (revoke, extend, regenerate, and the
+    list's per-row build), and a projection copied four times is one that
+    disagrees with itself the first time a field is added.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    counts = await invite_repo.redemption_counts(session, [invite.id])
+    gids = invite_repo.group_ids_of(invite)
+    gnames = []
+    for gid in gids:
+        grp = await group_repo.get_group_by_id(session, gid)
+        gnames.append(grp.name if grp else gid)
+    ws = (
+        await workspace_repo.get_workspace_orm(session, invite.workspace_id)
+        if invite.workspace_id else None
+    )
+    return InviteSummaryResponse(
+        id=invite.id,
+        role=invite.role,
+        workspaceId=invite.workspace_id,
+        workspaceName=ws.name if ws else None,
+        email=invite.email,
+        emailDomain=invite.email_domain,
+        groupIds=gids,
+        groupNames=gnames,
+        maxUses=invite.max_uses,
+        useCount=invite.use_count,
+        redemptionCount=counts.get(invite.id, 0),
+        status=invite_repo.status_of(invite),
+        createdBy=invite.created_by,
+        createdAt=invite.created_at,
+        expiresAt=invite.expires_at,
+        revokedAt=invite.revoked_at,
+        revokedBy=invite.revoked_by,
+    )
+
+
 @admin_router.get("/invites", response_model=list[InviteSummaryResponse])
 async def list_invites(
     status_filter: str = Query(
@@ -911,36 +954,144 @@ async def revoke_invite(
         "Invite %s revoked by admin %s after %d use(s)",
         invite.id, admin.id, invite.use_count,
     )
-    counts = await invite_repo.redemption_counts(session, [invite.id])
-    gids = invite_repo.group_ids_of(invite)
-    gnames = [
-        (grp.name if grp else gid)
-        for gid, grp in [
-            (gid, await group_repo.get_group_by_id(session, gid)) for gid in gids
-        ]
-    ]
-    ws = (
-        await workspace_repo.get_workspace_orm(session, invite.workspace_id)
-        if invite.workspace_id else None
+    return await _invite_summary(session, invite)
+
+
+async def _load_own_invite(session, invite_id: str, admin, claims):
+    """Fetch a link the caller is allowed to act on, else 404.
+
+    404 rather than 403 for someone else's link: a caller who may not
+    act on it should not learn that it exists.
+    """
+    from backend.app.db.repositories import invite_repo
+
+    invite = await invite_repo.get(session, invite_id)
+    if invite is None or (
+        invite.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+    return invite
+
+
+@admin_router.post("/invites/{invite_id}/extend", response_model=InviteSummaryResponse)
+async def extend_invite(
+    invite_id: str,
+    body: ExtendInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Give a link more time, and optionally more seats.
+
+    The URL already shared keeps working — that is the point. Before
+    this, a link nearing expiry meant minting a replacement, which split
+    one invitation across two rows and left the redemption history on
+    the dead one.
+    """
+    from backend.auth_service.core.tokens import invite_expiry
+    from backend.app.db.repositories import invite_repo
+
+    await _load_own_invite(session, invite_id, admin, claims)
+
+    expires_at = invite_expiry(body.expires_in_hours)
+    invite = await invite_repo.extend(
+        session, invite_id,
+        expires_at=expires_at,
+        additional_uses=body.additional_uses,
     )
-    return InviteSummaryResponse(
-        id=invite.id,
+    if invite is None:
+        # Revoked. Extending would quietly undo a decision somebody made.
+        raise HTTPException(
+            status_code=409,
+            detail="This link was revoked and cannot be extended. Create a new one.",
+        )
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_extended",
+        payload={
+            "invite_id": invite.id, "expires_at": expires_at,
+            "additional_uses": body.additional_uses,
+            "extended_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s extended by %s to %s (+%s seats)",
+        invite.id, admin.id, expires_at, body.additional_uses,
+    )
+    return await _invite_summary(session, invite)
+
+
+@admin_router.post(
+    "/invites/{invite_id}/regenerate", response_model=InviteTokenResponse,
+)
+async def regenerate_invite(
+    invite_id: str,
+    body: ExtendInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Issue a fresh URL for the same invitation.
+
+    Every URL already handed out stops working — that is what separates
+    this from ``extend``. Use it when the link has been lost, or has gone
+    somewhere it shouldn't but the invitation itself is still wanted.
+    The role, scope, groups, seat cap and redemption history all stay on
+    the one row, so the invitation keeps a single audit trail across the
+    rotation instead of fragmenting into a new one.
+    """
+    from backend.app.auth.jwt import create_invite_token
+    from backend.auth_service.core.tokens import invite_expiry
+    from backend.app.db.repositories import invite_repo
+
+    await _load_own_invite(session, invite_id, admin, claims)
+
+    expires_at = invite_expiry(body.expires_in_hours)
+    invite = await invite_repo.regenerate(session, invite_id, expires_at=expires_at)
+    if invite is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This link was revoked and cannot be regenerated. Create a new one.",
+        )
+
+    token, expires_at = create_invite_token(
+        role=invite.role,
+        created_by=invite.created_by,
+        expires_in_hours=body.expires_in_hours,
+        workspace_id=invite.workspace_id,
+        email=invite.email,
+        group_ids=invite_repo.group_ids_of(invite) or None,
+        jti=invite.id,
+        token_version=invite.token_version,
+    )
+    invite.expires_at = expires_at
+    await session.flush()
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_regenerated",
+        payload={
+            "invite_id": invite.id,
+            "token_version": invite.token_version,
+            "regenerated_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s regenerated by %s (now version %s) — previous URLs are dead",
+        invite.id, admin.id, invite.token_version,
+    )
+    return InviteTokenResponse(
+        inviteToken=token,
         role=invite.role,
         workspaceId=invite.workspace_id,
-        workspaceName=ws.name if ws else None,
         email=invite.email,
-        emailDomain=invite.email_domain,
-        groupIds=gids,
-        groupNames=gnames,
+        groupIds=invite_repo.group_ids_of(invite) or None,
+        expiresAt=expires_at,
+        inviteId=invite.id,
         maxUses=invite.max_uses,
-        useCount=invite.use_count,
-        redemptionCount=counts.get(invite.id, 0),
-        status=invite_repo.status_of(invite),
-        createdBy=invite.created_by,
-        createdAt=invite.created_at,
-        expiresAt=invite.expires_at,
-        revokedAt=invite.revoked_at,
-        revokedBy=invite.revoked_by,
+        emailDomain=invite.email_domain,
     )
 
 

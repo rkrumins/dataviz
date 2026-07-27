@@ -172,6 +172,60 @@ async def revoke(
     return invite
 
 
+async def extend(
+    session: AsyncSession,
+    invite_id: str,
+    *,
+    expires_at: str,
+    additional_uses: Optional[int] = None,
+) -> Optional[InviteORM]:
+    """Push out a link's expiry, and optionally raise its seat cap.
+
+    On the SAME row, deliberately. Minting a replacement was the only
+    option before, which split one invitation across two rows and left
+    the redemption history attached to the dead one — so "who came in
+    through this?" got harder to answer every time a link was renewed.
+
+    Refuses a revoked link: revocation is a decision, and quietly
+    resurrecting it by extending would undo that decision without
+    anyone choosing to.
+    """
+    invite = await get(session, invite_id)
+    if invite is None or invite.revoked_at is not None:
+        return None
+
+    invite.expires_at = expires_at
+    if additional_uses is not None and invite.max_uses is not None:
+        # Raise the ceiling relative to what has ALREADY been used, so
+        # "add 5 seats" means five more people can join — not five more
+        # than the original cap, which for a spent link would be none.
+        invite.max_uses = invite.use_count + additional_uses
+    await session.flush()
+    return invite
+
+
+async def regenerate(
+    session: AsyncSession, invite_id: str, *, expires_at: str,
+) -> Optional[InviteORM]:
+    """Issue a fresh URL for the same invitation.
+
+    Bumps ``token_version``, which strands every URL already handed out,
+    and resets the clock. The row — its role, scope, groups, seat cap and
+    redemption history — is untouched, which is the whole point: this is
+    the same invitation with a new address, not a new invitation.
+
+    Refuses a revoked link, for the same reason ``extend`` does.
+    """
+    invite = await get(session, invite_id)
+    if invite is None or invite.revoked_at is not None:
+        return None
+
+    invite.token_version = int(invite.token_version or 1) + 1
+    invite.expires_at = expires_at
+    await session.flush()
+    return invite
+
+
 async def record_redemption(
     session: AsyncSession,
     *,

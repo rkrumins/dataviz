@@ -2082,6 +2082,13 @@ class InviteORM(Base):
     expires_at = Column(Text, nullable=False)                # ISO
     revoked_at = Column(Text, nullable=True)
     revoked_by = Column(Text, nullable=True)
+    #: Bumped when a link is regenerated. The token carries the version
+    #: it was minted at, so raising this invalidates every URL already
+    #: handed out WITHOUT discarding the row — which is what lets one
+    #: invitation keep a single redemption history across a rotation.
+    #: Tokens minted before this column existed carry no version and are
+    #: read as version 1, so they keep working.
+    token_version = Column(Integer, nullable=False, default=1)
 
     # No `status` column: revoked / expired / exhausted / active are all
     # derivable from the columns above, and a stored copy is one more

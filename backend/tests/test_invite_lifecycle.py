@@ -55,6 +55,32 @@ async def _verify(test_client, token):
     return await test_client.get(f"/api/v1/auth/verify-invite?token={token}")
 
 
+def _resync_csrf(test_client):
+    """Echo the CURRENT csrf cookie back as the header, the way the real
+    frontend does.
+
+    An invited signup auto-signs-in, and issuing a session rotates the
+    CSRF cookie — so this one client, which is impersonating an admin
+    AND redeeming invites, ends up sending a header that no longer
+    matches its own cookie. A browser re-reads the cookie on every
+    state-changing request; this is that, in one line. (The mismatch is
+    an artifact of one client playing both parts — a real admin and a
+    real invitee are different browsers.)
+    """
+    from backend.auth_service.cookies import (
+        ACCESS_COOKIE_NAME, CSRF_COOKIE_NAME, REFRESH_COOKIE_NAME,
+    )
+    from backend.tests.conftest import _TEST_CSRF_TOKEN
+
+    # Drop everything the signup's session put on this client — including
+    # the second nx_csrf it added on a different domain — then re-pin the
+    # fixture's token so the double-submit matches again.
+    for cookie in list(test_client.cookies.jar):
+        if cookie.name in (ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, CSRF_COOKIE_NAME):
+            test_client.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
+    test_client.cookies.set(CSRF_COOKIE_NAME, _TEST_CSRF_TOKEN)
+
+
 # ── the row exists and the token points at it ────────────────────────
 
 
@@ -206,6 +232,29 @@ async def test_max_uses_closes_the_link_when_the_seats_run_out(
 
 
 @pytest.mark.asyncio
+async def test_verify_reports_seats_left_so_the_page_can_warn(
+    test_client: AsyncClient,
+):
+    """Being turned away at the door is the worst moment to discover a
+    limit existed. The page can only say "2 spots left" if we tell it."""
+    minted = (await _mint(test_client, maxUses=3)).json()
+    token = minted["inviteToken"]
+
+    v = (await _verify(test_client, token)).json()
+    assert v["seatsRemaining"] == 3
+    assert v["expiresAt"] == minted["expiresAt"]
+
+    await _signup(test_client, email="seat-a@example.com", token=token)
+    assert (await _verify(test_client, token)).json()["seatsRemaining"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_link_reports_no_seat_limit(test_client: AsyncClient):
+    token = (await _mint(test_client)).json()["inviteToken"]
+    assert (await _verify(test_client, token)).json()["seatsRemaining"] is None
+
+
+@pytest.mark.asyncio
 async def test_unlimited_by_default(test_client: AsyncClient):
     token = (await _mint(test_client)).json()["inviteToken"]
     for i in range(4):
@@ -272,6 +321,153 @@ async def test_a_seat_is_not_burned_by_an_existing_email(
     r = await _signup(test_client, email="genuine@example.com", token=token)
     assert r.status_code == 201, r.text
     assert await user_repo.get_user_by_email(db_session, "genuine@example.com") is not None
+
+
+# ── extend / regenerate ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_extending_keeps_the_url_working(test_client: AsyncClient, db_session):
+    """The point of extend: the link already shared stays valid. Minting
+    a replacement was the only option before, which split one invitation
+    across two rows and stranded its history on the dead one."""
+    minted = (await _mint(test_client, expiresInHours=1)).json()
+    token = minted["inviteToken"]
+
+    row = await invite_repo.get(db_session, minted["inviteId"])
+    row.expires_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    await db_session.commit()
+    assert (await _verify(test_client, token)).json()["reason"] == "expired"
+
+    r = await test_client.post(
+        f"/api/v1/admin/users/invites/{minted['inviteId']}/extend",
+        json={"expiresInHours": 72},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
+
+    # Same URL, alive again.
+    assert (await _verify(test_client, token)).json()["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_extending_adds_seats_relative_to_what_was_used(
+    test_client: AsyncClient, db_session,
+):
+    """'Add 2 seats' must mean two more people can join. Adding to the
+    original cap would mean nothing at all on a spent link."""
+    minted = (await _mint(test_client, maxUses=1)).json()
+    token = minted["inviteToken"]
+    await _signup(test_client, email="filled@example.com", token=token)
+    _resync_csrf(test_client)
+    assert (await _verify(test_client, token)).json()["reason"] == "exhausted"
+
+    r = await test_client.post(
+        f"/api/v1/admin/users/invites/{minted['inviteId']}/extend",
+        json={"expiresInHours": 72, "additionalUses": 2},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["maxUses"] == 3          # 1 used + 2 more
+    assert r.json()["useCount"] == 1
+
+    assert (await _verify(test_client, token)).json()["seatsRemaining"] == 2
+
+
+@pytest.mark.asyncio
+async def test_regenerating_kills_every_url_already_handed_out(
+    test_client: AsyncClient, db_session,
+):
+    """The line between regenerate and extend. If the old URL survived,
+    rotation would be theatre."""
+    minted = (await _mint(test_client)).json()
+    old_token = minted["inviteToken"]
+    assert (await _verify(test_client, old_token)).json()["valid"] is True
+
+    r = await test_client.post(
+        f"/api/v1/admin/users/invites/{minted['inviteId']}/regenerate",
+        json={"expiresInHours": 72},
+    )
+    assert r.status_code == 200, r.text
+    new_token = r.json()["inviteToken"]
+    assert new_token != old_token
+    assert r.json()["inviteId"] == minted["inviteId"]   # same invitation
+
+    old = (await _verify(test_client, old_token)).json()
+    assert old["valid"] is False
+    assert old["reason"] == "superseded", (
+        "the holder of a stale URL must be told it was replaced, not sent "
+        "chasing an 'invalid link'"
+    )
+    assert (await _verify(test_client, new_token)).json()["valid"] is True
+
+    su = await _signup(test_client, email="stale@example.com", token=old_token)
+    assert su.status_code == 400
+    assert "replaced" in su.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_regenerating_preserves_the_invitation_and_its_history(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.models import GroupORM, WorkspaceORM
+
+    db_session.add(WorkspaceORM(id="ws_rot", name="Rotation"))
+    db_session.add(GroupORM(id="grp_rot", name="Rotators"))
+    await db_session.commit()
+
+    minted = (await _mint(
+        test_client, role="workspace_member", workspaceId="ws_rot",
+        groupIds=["grp_rot"], allowShareableWithGroups=True, maxUses=5,
+    )).json()
+    await _signup(test_client, email="early@example.com", token=minted["inviteToken"])
+    _resync_csrf(test_client)
+
+    r = await test_client.post(
+        f"/api/v1/admin/users/invites/{minted['inviteId']}/regenerate",
+        json={"expiresInHours": 72},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["role"] == "workspace_member"
+    assert r.json()["workspaceId"] == "ws_rot"
+    assert r.json()["maxUses"] == 5
+
+    # The redemption that happened before the rotation is still attached.
+    hist = await test_client.get(
+        f"/api/v1/admin/users/invites/{minted['inviteId']}/redemptions"
+    )
+    assert [row["email"] for row in hist.json()] == ["early@example.com"]
+
+    listed = await test_client.get("/api/v1/admin/users/invites?status=all")
+    row = next(i for i in listed.json() if i["id"] == minted["inviteId"])
+    assert row["useCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_link_can_be_neither_extended_nor_regenerated(
+    test_client: AsyncClient,
+):
+    """Revocation is a decision. Reviving it by extending would undo
+    that decision without anybody choosing to."""
+    invite_id = (await _mint(test_client)).json()["inviteId"]
+    await test_client.post(f"/api/v1/admin/users/invites/{invite_id}/revoke")
+
+    for verb in ("extend", "regenerate"):
+        r = await test_client.post(
+            f"/api/v1/admin/users/invites/{invite_id}/{verb}",
+            json={"expiresInHours": 72},
+        )
+        assert r.status_code == 409, f"{verb}: {r.text}"
+        assert "revoked" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_extend_and_regenerate_404_for_an_unknown_link(test_client: AsyncClient):
+    for verb in ("extend", "regenerate"):
+        r = await test_client.post(
+            f"/api/v1/admin/users/invites/inv_nope/{verb}",
+            json={"expiresInHours": 72},
+        )
+        assert r.status_code == 404
 
 
 # ── expiry ───────────────────────────────────────────────────────────
@@ -464,18 +660,27 @@ def test_the_migration_and_the_orm_agree():
 
     from backend.app.db.models import InviteORM, InviteRedemptionORM
 
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "alembic" / "versions" / "20260727_1200_invites.py"
-    )
-    spec = importlib.util.spec_from_file_location("_invites_migration", path)
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
+    # Every migration touching these tables, in order. Append here when
+    # you add another — that is the point of the test: a column added to
+    # the ORM and not to a migration passes every other test in the suite
+    # and fails on deploy.
+    versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    chain = [
+        "20260727_1200_invites.py",
+        "20260727_1400_invite_token_version.py",
+    ]
+    migrations = []
+    for name in chain:
+        spec = importlib.util.spec_from_file_location(f"_m_{name}", versions / name)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        migrations.append(mod)
 
     engine = sa.create_engine("sqlite://")
     with engine.connect() as conn:
-        with Operations.context(MigrationContext.configure(conn)):
-            migration.upgrade()
+        for mod in migrations:
+            with Operations.context(MigrationContext.configure(conn)):
+                mod.upgrade()
         inspector = sa.inspect(conn)
 
         for model in (InviteORM, InviteRedemptionORM):
@@ -488,8 +693,9 @@ def test_the_migration_and_the_orm_agree():
             )
 
         # And it must roll back cleanly, or a bad deploy cannot be undone.
-        with Operations.context(MigrationContext.configure(conn)):
-            migration.downgrade()
+        for mod in reversed(migrations):
+            with Operations.context(MigrationContext.configure(conn)):
+                mod.downgrade()
         assert "invites" not in sa.inspect(conn).get_table_names()
 
 

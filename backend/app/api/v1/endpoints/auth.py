@@ -63,6 +63,10 @@ _INVITE_REFUSALS = {
         "This invite link has already been used the maximum number of times. "
         "Ask your administrator for a new one."
     ),
+    "superseded": (
+        "This invite link has been replaced by a newer one. Ask whoever "
+        "sent it for the current link."
+    ),
     "invalid": "Invite link is invalid or has expired.",
     "email_mismatch": "This invite is for a different email address.",
     "domain_mismatch": "This invite link only accepts email addresses from a specific domain.",
@@ -136,6 +140,7 @@ class ResolvedInvite:
     __slots__ = (
         "valid", "reason", "invite_id", "role", "workspace_id",
         "email", "email_domain", "group_ids", "created_by",
+        "seats_remaining", "expires_at",
     )
 
     def __init__(
@@ -145,6 +150,8 @@ class ResolvedInvite:
         email_domain: Optional[str] = None,
         group_ids: Optional[list[str]] = None,
         created_by: Optional[str] = None,
+        seats_remaining: Optional[int] = None,
+        expires_at: Optional[str] = None,
     ):
         self.valid = valid
         self.reason = reason
@@ -155,6 +162,8 @@ class ResolvedInvite:
         self.email_domain = email_domain
         self.group_ids = group_ids or []
         self.created_by = created_by
+        self.seats_remaining = seats_remaining
+        self.expires_at = expires_at
 
 
 async def resolve_invite(session, token: str) -> ResolvedInvite:
@@ -213,6 +222,16 @@ async def resolve_invite(session, token: str) -> ResolvedInvite:
         # was minted against a different database.
         return ResolvedInvite(valid=False, reason="invalid")
 
+    # A URL from before the link was regenerated. The row is alive and
+    # may even be in active use — this particular URL is not, and saying
+    # "invalid" would send the holder chasing the wrong problem.
+    # Missing ``tv`` means the token predates rotation, so it reads as
+    # generation 1 and keeps working.
+    if int(payload.get("tv") or 1) != int(invite.token_version or 1):
+        return ResolvedInvite(
+            valid=False, reason="superseded", invite_id=invite.id,
+        )
+
     status_now = invite_repo.status_of(invite)
     if status_now != "active":
         return ResolvedInvite(valid=False, reason=status_now, invite_id=invite.id)
@@ -226,6 +245,11 @@ async def resolve_invite(session, token: str) -> ResolvedInvite:
         email_domain=invite.email_domain,
         group_ids=invite_repo.group_ids_of(invite),
         created_by=invite.created_by,
+        seats_remaining=(
+            None if invite.max_uses is None
+            else max(0, invite.max_uses - invite.use_count)
+        ),
+        expires_at=invite.expires_at,
     )
 
 
@@ -731,4 +755,6 @@ async def verify_invite(
         email=resolved.email,
         groupIds=group_ids or None,
         groupNames=group_names or None,
+        seatsRemaining=resolved.seats_remaining,
+        expiresAt=resolved.expires_at,
     )

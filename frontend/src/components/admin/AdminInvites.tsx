@@ -12,8 +12,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-    AlertCircle, Ban, ChevronDown, Infinity as InfinityIcon,
-    Link2, Loader2, RefreshCw, Users,
+    AlertCircle, Ban, CalendarPlus, Check, ChevronDown, Copy,
+    Infinity as InfinityIcon, Link2, Loader2, RefreshCw, RotateCw, Users, X,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -108,6 +108,12 @@ export function AdminInvites() {
     // holding it, including people mid-signup. Every other destructive
     // action on this page confirms first; this one was the exception.
     const [confirming, setConfirming] = useState<InviteSummary | null>(null)
+    const [rotating, setRotating] = useState<InviteSummary | null>(null)
+    // A regenerated URL is shown once, here, and never again — the list
+    // deliberately never returns tokens.
+    const [rotatedUrl, setRotatedUrl] = useState<string | null>(null)
+    const [rotatedCopied, setRotatedCopied] = useState(false)
+    const [busyId, setBusyId] = useState<string | null>(null)
     const { showToast } = useToast()
 
     // A counter rather than calling a fetch function directly: it keeps
@@ -164,6 +170,46 @@ export function AdminInvites() {
             showToast('error', msg)
         } finally {
             setRevoking(null)
+        }
+    }
+
+    const handleExtend = async (invite: InviteSummary) => {
+        setBusyId(invite.id)
+        try {
+            const updated = await adminUserService.extendInvite(invite.id, {
+                expiresInHours: 24 * 30,
+                // Only top up a capped link. Adding seats to an uncapped
+                // one would silently impose a cap that was never there.
+                additionalUses: invite.maxUses === null ? null : 5,
+            })
+            showToast(
+                'success',
+                invite.maxUses === null
+                    ? 'Link extended by 30 days. The URL you shared still works.'
+                    : `Link extended by 30 days, now usable ${updated.maxUses} times total.`,
+            )
+            reload()
+        } catch (err: unknown) {
+            showToast('error', messageOf(err, 'Could not extend this link'))
+        } finally {
+            setBusyId(null)
+        }
+    }
+
+    const handleRegenerate = async (invite: InviteSummary) => {
+        setBusyId(invite.id)
+        try {
+            const fresh = await adminUserService.regenerateInvite(invite.id, {
+                expiresInHours: 24 * 30,
+            })
+            setRotating(null)
+            setRotatedUrl(`${window.location.origin}/signup?invite=${fresh.inviteToken}`)
+            showToast('success', 'New link created. Every previous URL has stopped working.')
+            reload()
+        } catch (err: unknown) {
+            showToast('error', messageOf(err, 'Could not regenerate this link'))
+        } finally {
+            setBusyId(null)
         }
     }
 
@@ -350,6 +396,38 @@ export function AdminInvites() {
                                         />
                                     </button>
 
+                                    {/* Extend keeps the shared URL alive; regenerate
+                                        replaces it. Both stay on this one row, so an
+                                        invitation keeps a single history instead of
+                                        fragmenting every time it is renewed. */}
+                                    {invite.status !== 'revoked' && (
+                                        <>
+                                            <button
+                                                onClick={() => void handleExtend(invite)}
+                                                disabled={busyId === invite.id}
+                                                title={
+                                                    invite.maxUses === null
+                                                        ? 'Give this link another 30 days — the URL you shared keeps working'
+                                                        : 'Give this link another 30 days and 5 more seats — the URL you shared keeps working'
+                                                }
+                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                                            >
+                                                {busyId === invite.id
+                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                    : <CalendarPlus className="w-3.5 h-3.5" />}
+                                                Extend
+                                            </button>
+                                            <button
+                                                onClick={() => setRotating(invite)}
+                                                disabled={busyId === invite.id}
+                                                title="Issue a new URL — every link already sent stops working"
+                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                                            >
+                                                <RotateCw className="w-3.5 h-3.5" />
+                                                New URL
+                                            </button>
+                                        </>
+                                    )}
                                     {invite.status !== 'revoked' && (
                                         <button
                                             onClick={() => setConfirming(invite)}
@@ -432,6 +510,71 @@ export function AdminInvites() {
                 onConfirm={() => { if (confirming) void handleRevoke(confirming) }}
                 onCancel={() => setConfirming(null)}
             />
+
+            <ConfirmDialog
+                open={rotating !== null}
+                title="Issue a new URL for this link?"
+                message={
+                    'Everyone still holding the old URL loses it, immediately. '
+                    + 'The role, groups, seat count and the record of who has already '
+                    + 'joined all stay on this same invitation — only the address changes. '
+                    + 'The new URL is shown once, so copy it before closing.'
+                }
+                confirmLabel="Generate new URL"
+                confirmIcon={RotateCw}
+                confirmColor="bg-accent-lineage hover:brightness-110 shadow-md"
+                loading={busyId !== null}
+                onConfirm={() => { if (rotating) void handleRegenerate(rotating) }}
+                onCancel={() => setRotating(null)}
+            />
+
+            {/* Shown once. The list never returns tokens, so closing this
+                without copying means regenerating again. Say so, rather
+                than letting someone discover it. */}
+            <AnimatePresence>
+                {rotatedUrl && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 8 }}
+                        className="mt-4 p-4 rounded-2xl bg-accent-lineage/5 border border-accent-lineage/20"
+                    >
+                        <div className="flex items-start justify-between gap-3 mb-2">
+                            <div>
+                                <p className="text-[10px] font-semibold uppercase tracking-wider text-accent-lineage">
+                                    New link
+                                </p>
+                                <p className="text-[11px] text-ink-muted mt-0.5">
+                                    Copy it now — it is not shown again.
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => { setRotatedUrl(null); setRotatedCopied(false) }}
+                                className="p-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                title="Dismiss"
+                            >
+                                <X className="w-3.5 h-3.5" />
+                            </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <code className="flex-1 min-w-0 truncate text-[11px] text-ink bg-canvas-elevated border border-glass-border rounded-lg px-2.5 py-2">
+                                {rotatedUrl}
+                            </code>
+                            <button
+                                onClick={async () => {
+                                    await navigator.clipboard.writeText(rotatedUrl)
+                                    setRotatedCopied(true)
+                                    setTimeout(() => setRotatedCopied(false), 2000)
+                                }}
+                                className="p-2 rounded-lg bg-accent-lineage text-white hover:brightness-110 transition-all shrink-0"
+                                title="Copy link"
+                            >
+                                {rotatedCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                            </button>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </div>
     )
 }

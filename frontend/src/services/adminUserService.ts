@@ -196,6 +196,32 @@ export const adminUserService = {
         )
     },
 
+    /** Give a link more time (and optionally more seats). The URL
+     *  already shared keeps working. */
+    extendInvite(
+        inviteId: string,
+        opts: { expiresInHours: number; additionalUses?: number | null },
+    ): Promise<InviteSummary> {
+        const body: Record<string, unknown> = { expiresInHours: opts.expiresInHours }
+        if (opts.additionalUses) body.additionalUses = opts.additionalUses
+        return authFetch<InviteSummary>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/extend`,
+            { method: 'POST', body: JSON.stringify(body) },
+        )
+    },
+
+    /** Issue a fresh URL for the same invitation. Every URL already
+     *  handed out stops working — that is the difference from extend. */
+    regenerateInvite(
+        inviteId: string,
+        opts: { expiresInHours: number },
+    ): Promise<InviteResponse> {
+        return authFetch<InviteResponse>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/regenerate`,
+            { method: 'POST', body: JSON.stringify({ expiresInHours: opts.expiresInHours }) },
+        )
+    },
+
     listInviteRedemptions(inviteId: string): Promise<InviteRedemption[]> {
         return authFetch<InviteRedemption[]>(
             `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/redemptions`,

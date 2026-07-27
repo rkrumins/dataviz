@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles } from 'lucide-react'
+import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles, Clock } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
@@ -8,6 +8,7 @@ import { useFeature, useFeaturesStore } from '@/store/features'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { toUtcDate } from '@/lib/timeAgo'
 
 // Lazy-load zxcvbn to keep the initial bundle small
 let zxcvbnInstance: import('@zxcvbn-ts/core').ZxcvbnFactory | null = null
@@ -31,6 +32,18 @@ async function loadZxcvbn() {
 
 const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
 const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
+
+/** "Expires in 3 days" — the deadline in words, from a UTC-safe parse. */
+function inviteDeadline(iso: string): string | null {
+    const d = toUtcDate(iso)
+    if (!d) return null
+    const ms = d.getTime() - Date.now()
+    if (ms <= 0) return 'Expired'
+    const hours = ms / 3_600_000
+    if (hours < 1) return `Expires in ${Math.max(1, Math.round(ms / 60_000))} minutes`
+    if (hours < 48) return `Expires in ${Math.round(hours)} hours`
+    return `Expires in ${Math.round(hours / 24)} days`
+}
 
 /** What to tell someone whose link doesn't work. Each of these has a
  *  different remedy, and only the first is "ask for a new one" — the
@@ -75,6 +88,10 @@ export function SignUpPage() {
     // different remedies; "invalid or expired" told the recipient nothing
     // they could act on.
     const [inviteReason, setInviteReason] = useState<string | null>(null)
+    // Phase 15: a capped link should say so. Being turned away at the door
+    // is the worst moment to discover the limit existed.
+    const [inviteSeatsLeft, setInviteSeatsLeft] = useState<number | null>(null)
+    const [inviteExpiresAt, setInviteExpiresAt] = useState<string | null>(null)
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
@@ -117,6 +134,8 @@ export function SignUpPage() {
         authService.verifyInvite(inviteToken).then((res) => {
             setInviteValid(res.valid)
             setInviteReason(res.reason ?? null)
+            setInviteSeatsLeft(res.seatsRemaining ?? null)
+            setInviteExpiresAt(res.expiresAt ?? null)
             setInviteRole(res.role)
             setInviteWorkspaceName(res.workspaceName ?? null)
             setInviteGroupNames(res.groupNames ?? null)
@@ -265,6 +284,28 @@ export function SignUpPage() {
                                 {inviteEmail ? (
                                     <> This invite is for <span className="font-semibold">{inviteEmail}</span>.</>
                                 ) : null}
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Scarcity, stated plainly. A capped or soon-to-expire link
+                        that says nothing turns the person who clicks it one too
+                        late into the only one who finds out there was a limit. */}
+                    {inviteToken && inviteValid && (inviteSeatsLeft !== null || inviteExpiresAt) && (
+                        <div className="flex items-center gap-2.5 p-2.5 mb-4 rounded-xl bg-amber-500/[0.07] border border-amber-500/20">
+                            <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                            <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                                {inviteSeatsLeft !== null && (
+                                    <span className="font-semibold">
+                                        {inviteSeatsLeft === 0
+                                            ? 'No spots left'
+                                            : inviteSeatsLeft === 1
+                                                ? 'Last spot on this link'
+                                                : `${inviteSeatsLeft} spots left`}
+                                    </span>
+                                )}
+                                {inviteSeatsLeft !== null && inviteExpiresAt ? ' · ' : null}
+                                {inviteExpiresAt ? inviteDeadline(inviteExpiresAt) : null}
                             </p>
                         </div>
                     )}

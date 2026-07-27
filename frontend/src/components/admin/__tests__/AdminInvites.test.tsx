@@ -6,6 +6,8 @@ vi.mock('@/services/adminUserService', () => ({
         listInvites: vi.fn(),
         revokeInvite: vi.fn(),
         listInviteRedemptions: vi.fn(),
+        extendInvite: vi.fn(),
+        regenerateInvite: vi.fn(),
     },
 }))
 
@@ -191,6 +193,58 @@ describe('AdminInvites', () => {
 
         const seats = await screen.findByTitle('4 of 5 used · 1 left')
         expect(seats.className).toMatch(/amber/)
+    })
+
+    it('tops up seats only on a capped link', async () => {
+        // Adding seats to an uncapped link would silently impose a limit
+        // that was never there.
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([invite({ maxUses: null })])
+        vi.mocked(adminUserService.extendInvite).mockResolvedValue(invite())
+        render(<AdminInvites />)
+
+        fireEvent.click(await screen.findByRole('button', { name: /extend/i }))
+
+        await waitFor(() =>
+            expect(adminUserService.extendInvite).toHaveBeenCalledWith(
+                'inv_abc123', { expiresInHours: 720, additionalUses: null },
+            ),
+        )
+    })
+
+    it('does not regenerate until the consequence is accepted', async () => {
+        render(<AdminInvites />)
+
+        fireEvent.click(await screen.findByRole('button', { name: /new url/i }))
+
+        expect(await screen.findByText(/issue a new url/i)).toBeInTheDocument()
+        expect(screen.getByText(/loses it, immediately/i)).toBeInTheDocument()
+        expect(adminUserService.regenerateInvite).not.toHaveBeenCalled()
+    })
+
+    it('shows the regenerated URL once, and says so', async () => {
+        vi.mocked(adminUserService.regenerateInvite).mockResolvedValue({
+            inviteToken: 'fresh.jwt.token', role: null, workspaceId: null,
+            email: null, groupIds: null, expiresAt: new Date().toISOString(),
+            inviteId: 'inv_abc123', maxUses: null, emailDomain: null,
+        })
+        render(<AdminInvites />)
+
+        fireEvent.click(await screen.findByRole('button', { name: /new url/i }))
+        fireEvent.click(await screen.findByRole('button', { name: /generate new url/i }))
+
+        expect(await screen.findByText(/signup\?invite=fresh\.jwt\.token/)).toBeInTheDocument()
+        expect(screen.getByText(/not shown again/i)).toBeInTheDocument()
+    })
+
+    it('offers neither extend nor regenerate on a revoked link', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ status: 'revoked', revokedAt: new Date().toISOString() }),
+        ])
+        render(<AdminInvites />)
+        await screen.findByText('Revoked')
+
+        expect(screen.queryByRole('button', { name: /extend/i })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /new url/i })).not.toBeInTheDocument()
     })
 
     it('surfaces a load failure instead of showing an empty list', async () => {

@@ -207,6 +207,11 @@ export const authService = {
             | 'expired' | 'revoked' | 'exhausted'
             | 'domain_mismatch' | 'links_disabled' | 'invalid'
             | null
+        /** Phase 15: seats left on a capped link (null = uncapped) and
+         *  when it stops working, so the page can show the limits up
+         *  front instead of only on a failed submit. */
+        seatsRemaining?: number | null
+        expiresAt?: string | null
     }> {
         return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
