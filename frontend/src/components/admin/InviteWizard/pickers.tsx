@@ -133,7 +133,7 @@ export function RoleGroup({
                             className={cn(
                                 'w-full flex items-center gap-3 p-3 rounded-xl border-2 text-left transition-colors duration-150',
                                 isSelected
-                                    ? 'border-accent-lineage bg-accent-lineage/5 shadow-sm'
+                                    ? 'border-accent-lineage bg-indigo-500/5 shadow-sm'
                                     : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                         >
@@ -225,8 +225,8 @@ export function WorkspacePicker({
                             className={cn(
                                 'flex items-center gap-2 px-3 py-2 rounded-xl border text-left transition-colors',
                                 isSelected
-                                    ? 'border-accent-lineage bg-accent-lineage/5 text-accent-lineage'
-                                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    ? 'border-accent-lineage bg-indigo-500/5 text-accent-lineage'
+                                    : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated text-ink hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                         >
                             <Building2 className="w-4 h-4 shrink-0" />
@@ -252,7 +252,7 @@ export function WorkspacePicker({
             <select
                 value={value}
                 onChange={e => onChange(e.target.value)}
-                className="w-full appearance-none bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-10 pr-9 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-lineage/40 transition-colors"
+                className="w-full appearance-none bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-10 pr-9 py-2.5 text-sm text-ink focus:outline-none focus:border-indigo-500/40 transition-colors"
             >
                 <option value="">Select a workspace…</option>
                 {workspaces.map(w => (
@@ -282,7 +282,7 @@ export function NoRoleCard({
             className={cn(
                 'w-full flex items-center gap-3 p-3.5 rounded-2xl border-2 text-left transition-colors duration-150',
                 selected
-                    ? 'border-accent-lineage bg-gradient-to-br from-accent-lineage/8 to-accent-lineage/0 shadow-sm'
+                    ? 'border-accent-lineage bg-gradient-to-br from-indigo-500/8 to-indigo-500/0 shadow-sm'
                     : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
             )}
         >
@@ -380,7 +380,7 @@ export function GroupsPicker({
                             key={g.id}
                             type="button"
                             onClick={() => onToggle(g.id)}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20 hover:bg-accent-lineage/15 transition-colors"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-indigo-500/10 text-accent-lineage border border-indigo-500/20 hover:bg-indigo-500/15 transition-colors"
                             title="Remove from invite"
                         >
                             <Users2 className="w-3 h-3" />
@@ -402,7 +402,7 @@ export function GroupsPicker({
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search groups…"
-                        className="w-full bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-9 pr-3 py-2 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40 transition-colors"
+                        className="w-full bg-canvas-elevated border border-black/[0.08] dark:border-white/[0.10] rounded-xl pl-9 pr-3 py-2 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500/40 transition-colors"
                     />
                 </div>
             )}
@@ -426,8 +426,8 @@ export function GroupsPicker({
                                 className={cn(
                                     'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-colors',
                                     isSelected
-                                        ? 'border-accent-lineage bg-accent-lineage/5'
-                                        : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                        ? 'border-accent-lineage bg-indigo-500/5'
+                                        : 'border-black/[0.08] dark:border-white/[0.10] bg-canvas-elevated hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                                 )}
                             >
                                 <div className={cn(
@@ -471,7 +471,7 @@ export function GroupsPicker({
                                 'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
                                 safePage === 0
                                     ? 'border-black/[0.08] dark:border-white/[0.10] text-ink-muted/40 cursor-not-allowed'
-                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                             title="Previous page"
                         >
@@ -488,7 +488,7 @@ export function GroupsPicker({
                                 'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
                                 safePage >= totalPages - 1
                                     ? 'border-black/[0.08] dark:border-white/[0.10] text-ink-muted/40 cursor-not-allowed'
-                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                    : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:text-ink hover:border-indigo-500/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
                             )}
                             title="Next page"
                         >

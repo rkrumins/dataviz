@@ -266,7 +266,7 @@ export function InviteResultCard({
                             "p-2.5 rounded-xl transition-colors shrink-0",
                             copied
                                 ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                                : "bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20",
+                                : "bg-indigo-500/10 text-accent-lineage hover:bg-indigo-500/20",
                         )}
                         title={copied ? 'Copied' : 'Copy to clipboard'}
                     >
@@ -339,7 +339,7 @@ export function InviteResultCard({
                 </button>
                 <button
                     onClick={onClose}
-                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150 shadow-sm shadow-accent-lineage/20"
+                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150 shadow-sm shadow-indigo-500/20"
                 >
                     Done
                 </button>

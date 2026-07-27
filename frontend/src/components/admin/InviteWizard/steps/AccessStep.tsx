@@ -5,8 +5,11 @@
  * clamped to one line and cut mid-sentence. These are the choices where
  * knowing what you are granting matters most.
  */
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Building2, Lock, AlertCircle, Users2, X, KeyRound } from 'lucide-react'
+import {
+    Building2, Lock, AlertCircle, Users2, X, KeyRound, ShieldPlus, ChevronDown,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     RoleListSkeleton, RoleGroup, NoRoleCard, WorkspacePicker, GroupsPicker,
@@ -20,7 +23,14 @@ export function AccessStep({
     w: InviteWizardState
     onFixAudience: () => void
 }) {
+    const [elevateOpen, setElevateOpen] = useState(false)
+
     if (w.roles === null) return <RoleListSkeleton />
+
+    const elevateCount = w.platformTiers.length + w.customRoles.length
+    const elevated = w.selectedRole !== ''
+    // Never collapse a selection out of sight.
+    const open = elevateOpen || elevated
 
     return (
         <StepColumn wide>
@@ -38,26 +48,93 @@ export function AccessStep({
                 onSelect={() => w.setSelectedRole('')}
             />
 
-            <div className="space-y-5">
-                {w.platformTiers.length > 0 && (
-                    <RoleGroup
-                        title="Elevate to a privileged role"
-                        subtitle="Optional. Grants access across the whole organization."
-                        options={w.platformTiers}
-                        selected={w.selectedRole}
-                        onSelect={w.setSelectedRole}
-                    />
-                )}
-                {w.customRoles.length > 0 && (
-                    <RoleGroup
-                        title="Custom roles"
-                        subtitle="Created by your team. How they work depends on the role."
-                        options={w.customRoles}
-                        selected={w.selectedRole}
-                        onSelect={w.setSelectedRole}
-                    />
-                )}
-            </div>
+            {/* Elevation is optional, rare, and tall — four role cards
+                permanently expanded pushed the groups picker off the
+                bottom of the step. Collapsed by default so the safe
+                default is the whole step; opens on demand, and stays open
+                whenever a role is actually selected so the choice is
+                never hidden behind a closed disclosure. */}
+            {elevateCount > 0 && (
+                <div className={cn(
+                    'mt-4 rounded-2xl border-2 transition-colors',
+                    elevated
+                        ? 'border-amber-500/30 bg-amber-500/[0.04]'
+                        : 'border-black/[0.10] dark:border-white/[0.12]',
+                )}>
+                    <button
+                        type="button"
+                        onClick={() => setElevateOpen(o => !o)}
+                        aria-expanded={open}
+                        className="w-full flex items-center gap-3 p-4 text-left"
+                    >
+                        <span className={cn(
+                            'w-9 h-9 rounded-xl border flex items-center justify-center shrink-0',
+                            elevated
+                                ? 'bg-amber-500/10 border-amber-500/25 text-amber-500'
+                                : 'bg-black/[0.03] dark:bg-white/[0.05] border-black/[0.07] dark:border-white/[0.09] text-ink-muted',
+                        )}>
+                            <ShieldPlus className="w-4.5 h-4.5" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                            <span className="block text-sm font-semibold text-ink">
+                                Give them more than that
+                            </span>
+                            <span className="block text-xs text-ink-muted mt-0.5">
+                                {elevated
+                                    ? `Selected: ${w.roleLabel}`
+                                    : `${elevateCount} organization-wide ${elevateCount === 1 ? 'role' : 'roles'} available — optional`}
+                            </span>
+                        </span>
+                        <ChevronDown className={cn(
+                            'w-4 h-4 text-ink-muted shrink-0 transition-transform duration-200',
+                            open && 'rotate-180',
+                        )} />
+                    </button>
+
+                    <AnimatePresence initial={false}>
+                        {open && (
+                            <motion.div
+                                key="elevate"
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: 'auto' }}
+                                exit={{ opacity: 0, height: 0 }}
+                                transition={{ duration: 0.18 }}
+                                className="overflow-hidden"
+                            >
+                                <div className="px-4 pb-4 space-y-5">
+                                    {w.platformTiers.length > 0 && (
+                                        <RoleGroup
+                                            title="Organization-wide"
+                                            subtitle="Applies everywhere, not just one workspace."
+                                            options={w.platformTiers}
+                                            selected={w.selectedRole}
+                                            onSelect={w.setSelectedRole}
+                                        />
+                                    )}
+                                    {w.customRoles.length > 0 && (
+                                        <RoleGroup
+                                            title="Custom roles"
+                                            subtitle="Created by your team. How they work depends on the role."
+                                            options={w.customRoles}
+                                            selected={w.selectedRole}
+                                            onSelect={w.setSelectedRole}
+                                        />
+                                    )}
+                                    {elevated && (
+                                        <button
+                                            type="button"
+                                            onClick={() => w.setSelectedRole('')}
+                                            className="text-xs font-semibold text-ink-secondary hover:text-ink hover:underline"
+                                        >
+                                            Clear — go back to standard user
+                                        </button>
+                                    )}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+            )}
             </StepBlock>
 
             <AnimatePresence initial={false}>

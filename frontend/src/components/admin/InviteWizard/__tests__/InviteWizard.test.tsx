@@ -60,6 +60,13 @@ async function goNext(heading: RegExp) {
     await screen.findByText(heading)
 }
 const S2 = /what will they get/i
+
+/** Elevation is collapsed by default — that is the point of it, so the
+ *  groups picker is reachable without scrolling. Open it to get at the
+ *  privileged roles. */
+function openElevate() {
+    fireEvent.click(screen.getByRole('button', { name: /give them more than that/i }))
+}
 const S3 = /how far should it reach/i
 const S4 = /review and generate/i
 
@@ -198,6 +205,7 @@ describe('InviteWizard — the email-pin rule survives the split', () => {
         setup()
         await toDomainStep2()
 
+        openElevate()
         fireEvent.click(await screen.findByText('Org admin'))
         expect(screen.getByText(/cannot go on a shareable link/i)).toBeInTheDocument()
         expect(nextBtn()).toBeDisabled()
@@ -216,6 +224,7 @@ describe('InviteWizard — the email-pin rule survives the split', () => {
         })
         await goNext(S2)
 
+        openElevate()
         fireEvent.click(await screen.findByText('Org admin'))
         expect(screen.queryByText(/cannot go on a shareable link/i)).not.toBeInTheDocument()
         expect(nextBtn()).toBeEnabled()
@@ -224,10 +233,39 @@ describe('InviteWizard — the email-pin rule survives the split', () => {
     it('shows a privileged role description in full, not clamped to a line', async () => {
         setup()
         await toDomainStep2()
+        openElevate()
         const desc = await screen.findByText(
             'Cross-workspace operator — manage every workspace plus create new ones.',
         )
         expect(desc.className).not.toMatch(/\btruncate\b/)
+    })
+})
+
+describe('InviteWizard — the access step stays short', () => {
+    it('keeps the groups picker reachable by collapsing role elevation', async () => {
+        setup()
+        await toDomainStep2()
+
+        // Groups are visible without opening anything.
+        expect(screen.getByText(/add to groups/i)).toBeInTheDocument()
+        // The privileged roles are not competing for that space.
+        expect(screen.queryByText('Org admin')).not.toBeInTheDocument()
+
+        openElevate()
+        expect(await screen.findByText('Org admin')).toBeInTheDocument()
+    })
+
+    it('will not hide a chosen role behind a collapsed disclosure', async () => {
+        setup()
+        await toDomainStep2()
+        openElevate()
+        fireEvent.click(await screen.findByText('Org admin'))
+
+        // Collapsing is refused while a role is selected — the summary
+        // says which, and the role list stays put.
+        fireEvent.click(screen.getByRole('button', { name: /give them more than that/i }))
+        expect(screen.getByText('Org admin')).toBeInTheDocument()
+        expect(screen.getByText(/selected: org admin/i)).toBeInTheDocument()
     })
 })
 

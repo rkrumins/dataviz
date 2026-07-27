@@ -8,7 +8,10 @@
  * can see are defaults you can disagree with.
  */
 import { motion } from 'framer-motion'
-import { Mail, ListChecks, Building2, Globe, CheckCircle2, AlertCircle, UserPlus } from 'lucide-react'
+import {
+    Mail, ListChecks, Building2, Globe, CheckCircle2, AlertCircle, UserPlus,
+    Users, Clock, SlidersHorizontal,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     StepColumn, StepHero, StepBlock, FieldLabel, BigInput, BigTextarea, Hint,
@@ -21,31 +24,39 @@ const AUDIENCES: {
     hint: string
     icon: typeof Mail
     tone: string
-    defaults: string
+    /** The two limits this choice starts with, in plain words.
+     *
+     *  These used to be one uppercase token — "1 SEAT · 7 DAYS" — which
+     *  read as a property of the audience rather than an editable starting
+     *  point, and did not say what a "seat" was. Split into labelled
+     *  values with their own icons, under a rule, so the card separates
+     *  what the choice IS from what it SETS. */
+    seats: string
+    life: string
 }[] = [
     {
         value: 'person', label: 'One specific person', icon: Mail,
         hint: 'Pinned to their email address. Forwarding it achieves nothing.',
         tone: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/25',
-        defaults: '1 seat · 7 days',
+        seats: '1 person', life: '7 days',
     },
     {
         value: 'several', label: 'Several people', icon: ListChecks,
         hint: 'A separate pinned link each, revocable and traceable on its own.',
         tone: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/25',
-        defaults: 'one link each · 7 days',
+        seats: '1 each', life: '7 days',
     },
     {
         value: 'domain', label: 'Anyone at a domain', icon: Building2,
         hint: 'Only addresses at one domain — safe to post in a team channel.',
         tone: 'text-indigo-500 bg-indigo-500/10 border-indigo-500/25',
-        defaults: '25 seats · 30 days',
+        seats: 'Up to 25', life: '30 days',
     },
     {
         value: 'anyone', label: 'Anyone with the link', icon: Globe,
         hint: 'Forwardable to whoever ends up with the URL.',
         tone: 'text-amber-500 bg-amber-500/10 border-amber-500/25',
-        defaults: '5 seats · 7 days',
+        seats: 'Up to 5', life: '7 days',
     },
 ]
 
@@ -60,6 +71,14 @@ export function AudienceStep({ w }: { w: InviteWizardState }) {
             />
 
             <StepBlock delay={0.04}>
+                {/* The limits on each card are a starting point, not a
+                    property of the audience. Saying so once here beats
+                    repeating it on four cards — or leaving it unsaid, which
+                    is what made the row read as fixed. */}
+                <p className="flex items-center justify-center gap-1.5 text-[11px] text-ink-muted mb-3">
+                    <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+                    Each choice sets limits that suit it. You can change them on the Safety step.
+                </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {AUDIENCES.map(a => {
                         const Icon = a.icon
@@ -98,13 +117,36 @@ export function AudienceStep({ w }: { w: InviteWizardState }) {
                                         </span>
                                     </span>
                                 </div>
+                                {/* What this choice SETS, under a rule that
+                                    separates it from what the choice IS. */}
                                 <span className={cn(
-                                    'text-[10px] font-semibold uppercase tracking-wider self-start px-2 py-1 rounded-lg',
+                                    'flex items-stretch gap-3 pt-3 border-t',
                                     selected
-                                        ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
-                                        : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted',
+                                        ? 'border-indigo-500/20'
+                                        : 'border-black/[0.07] dark:border-white/[0.09]',
                                 )}>
-                                    {a.defaults}
+                                    {([
+                                        { icon: Users, label: 'Who can use it', value: a.seats },
+                                        { icon: Clock, label: 'Stays live for', value: a.life },
+                                    ] as const).map(m => {
+                                        const MetaIcon = m.icon
+                                        return (
+                                            <span key={m.label} className="flex-1 min-w-0">
+                                                <span className="flex items-center gap-1 text-ink-muted">
+                                                    <MetaIcon className="w-3 h-3 shrink-0" />
+                                                    <span className="text-[10px] font-medium truncate">
+                                                        {m.label}
+                                                    </span>
+                                                </span>
+                                                <span className={cn(
+                                                    'block text-xs font-semibold mt-0.5 truncate',
+                                                    selected ? 'text-indigo-600 dark:text-indigo-400' : 'text-ink',
+                                                )}>
+                                                    {m.value}
+                                                </span>
+                                            </span>
+                                        )
+                                    })}
                                 </span>
                             </button>
                         )
