@@ -19,7 +19,7 @@ import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
-import { VISIBILITY_META as VIS_META, grantedByCopy } from '@/types/viewVisibility'
+import { grantedByCopy, visibilityMeta } from '@/types/viewVisibility'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -44,8 +44,6 @@ function tagColor(tag: string) {
   return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]
 }
 
-const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> =
-  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, { icon: m.icon, label: m.label }]))
 
 const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
   warning: { color: 'text-amber-500', tooltip: 'Data source may have changed' },
@@ -188,7 +186,7 @@ export function ExplorerViewCard({
   // Glyph = the user's chosen icon (config.icon) when set; tile color stays
   // type identity so mixed grids remain colour-coded by view type.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
-  const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
+  const vis = visibilityMeta(view.visibility)
   const VisIcon = vis.icon
   const tags = view.tags ?? []
   const visibleTags = tags.slice(0, 3)

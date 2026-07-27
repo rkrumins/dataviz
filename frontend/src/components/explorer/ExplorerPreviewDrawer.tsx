@@ -41,7 +41,7 @@ import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWor
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
-import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
+import { visibilityMeta } from '@/types/viewVisibility'
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -66,8 +66,6 @@ interface ExplorerPreviewDrawerProps {
 
 // ─── Constants ──────────────────────────────────────────────────
 
-const VISIBILITY_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> =
-  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, { label: m.label, icon: m.icon }]))
 
 // View type theme comes from the SHARED resolver — see viewTypeMeta() /
 // viewTypeLabel() in lib/viewUtils. No local map (that duplication is what let
@@ -438,7 +436,7 @@ export function ExplorerPreviewDrawer({
                   size="md"
                 />
                 {(() => {
-                  const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
+                  const vis = visibilityMeta(view.visibility)
                   const VisIcon = vis.icon
                   return (
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-3 py-1 text-xs font-medium text-ink-muted">

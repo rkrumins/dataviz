@@ -102,37 +102,6 @@ def get_delegation(request: Optional[Request]) -> Optional[ViewDelegation]:
     return getattr(request.state, STATE_ATTR, None)
 
 
-def require_within_scope(request: Request, urns: list[str]) -> None:
-    """Assert every URN is inside the caller's delegated scope.
-
-    A no-op for non-delegates. For delegates, an out-of-scope URN is a 403
-    rather than a silent drop: the caller asked for something they are not
-    entitled to, and quietly returning fewer rows would make that look
-    like an empty result.
-    """
-    delegation = get_delegation(request)
-    if delegation is None:
-        return
-    allowed = set(delegation.scope.root_urns)
-    if not allowed:
-        # The view declares no explicit roots (its scope is derived at
-        # query time from rootEntityTypes). Nothing to check here; the
-        # handler's own containment clamp applies.
-        return
-    outside = [u for u in urns if u not in allowed]
-    if outside:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": "outside_view_scope",
-                "view_id": delegation.view_id,
-                "message": (
-                    "Requested nodes lie outside the view you have access to"
-                ),
-            },
-        )
-
-
 def _denied(permission: str, workspace_id: Optional[str]) -> HTTPException:
     """The same typed 403 body ``requires(...)`` produces."""
     scope_obj = (
@@ -280,6 +249,5 @@ __all__ = [
     "STATE_ATTR",
     "ViewDelegation",
     "get_delegation",
-    "require_within_scope",
     "requires_ws_read_or_view_delegate",
 ]

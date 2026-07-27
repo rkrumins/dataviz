@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, Link2, Lock, Box, Database, ExternalLink, Pencil, Check, Trash2, RotateCcw, History } from 'lucide-react'
+import { Heart, Link2, Box, Database, ExternalLink, Pencil, Check, Trash2, RotateCcw, History } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
@@ -10,7 +10,7 @@ import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
-import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
+import { visibilityMeta } from '@/types/viewVisibility'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -20,8 +20,6 @@ import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
 // lib/viewUtils. Do not reintroduce a local map (that drift is what made the
 // recents strip show a different icon/colour for the same view).
 
-const VISIBILITY_ICON: Record<string, React.ElementType> =
-  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, m.icon]))
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -73,7 +71,7 @@ export function ExplorerListRow({
   const typeMeta = viewTypeMeta(view.viewType)
   // Glyph = user-chosen icon when set; tile colors stay type identity.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
-  const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
+  const VisIcon = visibilityMeta(view.visibility).icon
   const isDeleted = !!view.deletedAt
   const [activityOpen, setActivityOpen] = useState(false)
 
