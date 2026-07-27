@@ -64,9 +64,11 @@ so names read in plain language. See [Reading Lineage](/guide/reading-lineage).
 
 ## Collaboration and sharing etiquette
 
-- **Share at the right scope.** Personal for drafts, Team for shared references,
-  Enterprise for genuinely canonical Views. Don't default everything to
-  Enterprise — it creates noise.
+- **Share at the right scope.** Private for drafts, Workspace for shared
+  references, Enterprise for genuinely canonical Views, Public only for the
+  handful that need no introduction. Don't default everything wide — it
+  creates noise, and hovering a tier will tell you how many people it adds
+  before you commit.
 - **Least access first.** Grant the narrowest visibility/role that works; widen on
   request. See [Users & Access](/guide/users-access).
 - **Co-own important Views.** Add an *editor* grant to a colleague so a key View

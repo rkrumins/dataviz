@@ -22,7 +22,7 @@ Each **View card** shows:
 - the **name** and **description**,
 - the **creator** and **workspace**,
 - the **favourite count** (a quick popularity signal), and
-- a **visibility badge** — Personal, Team, or Enterprise.
+- a **visibility badge** — Private, Workspace, Enterprise, or Public. Hover it and it tells you why *you* can see this View.
 
 ### Find what you need
 
@@ -68,9 +68,10 @@ Learn to interpret what you see in [Reading Lineage](/guide/reading-lineage).
 
 | Visibility | Who can open it |
 | --- | --- |
-| **Personal** | Only you |
-| **Team** | Everyone in the workspace |
-| **Enterprise** | Everyone in the organisation |
+| **Private** | You, anyone you share it with, and your workspace's admins |
+| **Workspace** | Everyone with access to that workspace |
+| **Enterprise** | Everyone in the organisation, including people outside that workspace |
+| **Public** | Everyone signed in to the platform |
 
 In addition, a View's owner can **explicitly share** it with specific people or
 groups as an *editor* or *viewer*, even across the boundaries above. If you

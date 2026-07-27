@@ -9,6 +9,100 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — View visibility rebuilt
+
+Visibility decided which Views you could *find*. It did not decide who could *read* them, and it
+did not carry access to the data they showed. Four reported problems, one root cause.
+
+### Security
+
+- **Private Views were readable by every member of their workspace.** Read access passed if any
+  of three independent layers passed, and one of them was "holds `workspace:view:read` in this
+  workspace" — checked without reference to the tier. `private` and `workspace` were therefore
+  the same tier for anyone inside the workspace. The behaviour was codified as intended in the
+  test suite; that test is now inverted.
+- **`GET /views/facets` had no authentication at all**, and returned every creator's display name
+  and **email address** plus tags spanning private Views — an anonymous directory dump.
+- **`GET /views/stats` was an anonymous oracle.** Unrestricted filters plus counts meant
+  `?visibility=private&createdBy=<victim>&search=<term>` narrowed to specific private View names,
+  descriptions and tags.
+- **`/views/popular` returned every workspace-tier View to every caller**, member or not, and the
+  endpoint deliberately routed around the access filter.
+- **`total`/`hasMore` counted the unfiltered set** while rows were filtered afterwards, so
+  `total - len(items)` was an exact count of what a caller was denied.
+- **Favouriting had no access check** — an existence oracle for arbitrary View ids, and a way to
+  write into an owner's activity timeline and inflate a View's trending rank.
+- **`PUT /views/{id}` could set `visibility`** behind the weaker edit gate, bypassing the
+  creator-or-workspace-admin rule the dedicated route enforces.
+
+### Added
+
+- **Public tier.** Reaches every signed-in account, workspace access or not. Authenticated-only —
+  no anonymous access, no share tokens.
+- **Enterprise Views can now actually be opened.** Reading a View carries a delegated, read-only
+  grant to the data that View shows, confined to its saved scope. Previously the View opened to
+  an empty canvas because every data call behind it 403'd.
+- **"Why can I see this?"** Every View reports which rule granted you access, on its badge.
+- **"Who will be able to see this?"** Hovering a tier in the share dialog shows who would gain
+  access before you apply it.
+- **Time-bound shares.** Per-View shares can expire, like workspace access already could.
+- **Tier changes are audited** — `rbac.view.visibility_widened` / `_narrowed` reach
+  `auth_audit_log`, where the `org_auditor` role looks. Promotion was previously the only
+  access-widening mutation with no security trail.
+- Confirmation before a bulk change that widens access, with per-View outcomes instead of
+  "Some views could not be updated".
+
+### Changed
+
+- Authorization moved from a Python loop at one endpoint into a SQL predicate applied by the
+  repository, so counts and pagination describe the authorized population and every future query
+  is filtered by default. A contract test fails the build if a View-returning function stops
+  requiring a read scope.
+- `enterprise` now means "holds a binding in some workspace" rather than "is authenticated" —
+  which is what `public` means. There was previously no tier between "this workspace" and
+  "everyone".
+- "Shared with me" reads actual shares instead of approximating them as a tier filter.
+- The tier vocabulary had 5 backend and ~15 frontend definitions, already drifted in wording and
+  spelling. Both sides now have one.
+
+### Removed
+
+- `context_models.visibility` — same column and CHECK as Views, no reader or writer anywhere.
+- The `isPublic` boolean on the frontend View type. It collapsed the tier on the way in and
+  expanded it back on the way out, so opening a Workspace View in the wizard silently promoted
+  it to the whole organisation.
+- `RBAC_ENFORCE_VIEWS` no longer covers reads. With authorization in the query there is no
+  legacy behaviour to fall back to — an unscoped read is a full table dump, not a legacy mode.
+
+### Upgrading
+
+Two migrations: `20260727_1200_view_public_tier` (widens the Views tier CHECK, drops the dead
+`context_models.visibility`) and `20260727_1300_grant_expiry`.
+
+**Users will lose access to Views they can see today.** This is the fix, but it is still an
+access removal. Run the read-only report first to see who is affected:
+
+```
+python -m backend.scripts.report_private_view_exposure
+```
+
+- Every `private` View that was de-facto workspace-shared becomes invisible to teammates. Owners
+  who intended those to be shared should set them to **Workspace**.
+- Accounts with no workspace binding lose `enterprise` Views and keep only `public` ones.
+
+`GET /views/` `total` and `hasMore` change meaning — they become accurate, so paging shifts for
+non-admins.
+
+### Known limitations
+
+- Delegated data access covers the canvas render path and read-only context-model templates.
+  Node-detail drill-down on the main graph router is not delegable yet, so a non-member opening
+  a shared View can paint and expand it but not open every side panel.
+- `/views/facets` and `/views/stats` are scoped to the caller but still aggregate globally
+  within that scope; they are not additionally narrowed by the caller's other active filters.
+
+---
+
 ## [0.2.0] — 2026-07-19 — Versioned Graph: rollback, admin flag, and enable-VC at scale
 
 Version control for a data graph becomes usable on a *real* graph: you can turn it on for a

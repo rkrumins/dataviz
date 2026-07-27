@@ -239,6 +239,68 @@ by the resolver's category filter anyway. The AdminUsers UI dropdown
 enforces the same restriction and hides `super_admin` when the caller
 lacks `system:admin`.
 
+### View access
+
+A view's **visibility tier** decides who can reach it; explicit
+`resource_grants` extend that to named subjects. Nothing else grants read.
+
+| Tier         | Readable by                                                          |
+|--------------|----------------------------------------------------------------------|
+| `private`    | creator + explicit grants + `workspace:admin` of the view's workspace |
+| `workspace`  | + anyone who can read views in that workspace                        |
+| `enterprise` | + anyone holding a binding in **any** workspace                      |
+| `public`     | + **any** authenticated account, binding or not                      |
+
+The tiers form a strictly widening ladder. `public` is authenticated-only
+— there is no anonymous or logged-out access to any view, and no share
+tokens.
+
+`enterprise` means "in the organisation". There is no organizations table
+in this codebase, so "holds a binding somewhere" is the proxy, computed
+from `claims.ws_perms` with no extra query. Note `org_auditor`
+(`system:org-viewer`) reaches `workspace`-tier views everywhere but not
+`private`: its shortcut only fires for `:read` permissions, and the
+private branch checks `workspace:admin`.
+
+> **This changed.** Read used to pass if ANY of three independent layers
+> passed, one of which was "holds `workspace:view:read` in the view's
+> workspace" — evaluated without reference to the tier. Workspace
+> membership therefore opened every view in that workspace, making
+> `private` and `workspace` the same tier for anyone inside it.
+> Membership is now the implementation of the `workspace` tier rather
+> than a parallel path around it.
+
+Enforcement is a **SQL predicate** (`view_access.readable_views_predicate`),
+applied by `view_repo._apply_view_filters` to every listing. It used to be
+a Python loop at one endpoint, which made `total`/`hasMore` over-report by
+exactly the number of views the caller could not see and left every other
+repo consumer unfiltered by default.
+`tests/test_view_repo_read_scope.py` fails the build when a view-returning
+repo function stops requiring a `ViewReadScope`.
+
+`ViewResponse.grantedBy` reports **why** the caller can see each view —
+`creator`, `grant`, `tier:enterprise`, `workspace-admin`, … — so "why can
+I see this?" is answerable from the UI.
+
+### Delegated data access
+
+Reading a view now carries access to the data it shows. The routes that
+render a view are gated on `workspace:datasource:read`, which an
+`enterprise` or `public` reader does not hold by definition — so those
+views opened to an empty canvas. `auth/view_delegation.py` lets a caller
+who can read view V pass `?viewId=V` and reach a small allow-list of read
+routes (the canvas bootstrap/expand pair and the read-only context-model
+templates), confined to that view's resolved scope via `ViewScopeResolver`.
+Mutation, resync and metadata-catalogue routes are not delegable.
+
+### Tier changes are audited
+
+`rbac.view.visibility_widened` (severity `warning`) and
+`rbac.view.visibility_narrowed` (`info`) land in `auth_audit_log` next to
+role changes. Promotion is an access-widening mutation and was previously
+recorded only in the per-view product timeline, which never reaches the
+security trail the `org_auditor` role exists to read.
+
 ### View-grants gating
 
 `/views/{view_id}/grants` is gated by the router-level FastAPI
@@ -288,8 +350,12 @@ keeps a fail-closed probe for sensitive permissions like `system:admin`
 
 ### Time-bound bindings
 
-`RoleBindingORM.expires_at` auto-expires a binding — contractor, temp,
-or on-call access. The resolver always honours it, and the admin API
+Both `RoleBindingORM.expires_at` and `ResourceGrantORM.expires_at`
+auto-expire — contractor, temp, or on-call access, and time-bound view
+shares. They share `binding_repo.is_expired` so the two cannot drift on
+what "expired" means (it fails **open** on an unparseable timestamp: a bad
+write must not silently revoke legitimate access). Per-view shares were
+permanent until this existed — the one access path that could not lapse. The resolver always honours it, and the admin API
 surfaces it:
 
 * `POST /admin/workspaces/{ws}/members` accepts `expiresAt` (ISO
@@ -402,6 +468,10 @@ Compliance recipe: "Who promoted Alice last week?" → filter
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |
 | Migration                              | `backend/alembic/versions/20260603_1100_rbac_uplift.py`       |
+| View access evaluator + SQL predicate  | `backend/app/services/view_access.py`                         |
+| Visibility tiers (single source)       | `backend/common/view_visibility.py` / `frontend/src/types/viewVisibility.ts` |
+| Delegated data access                  | `backend/app/auth/view_delegation.py`                         |
+| Tier × caller regression matrix        | `backend/tests/test_view_visibility_matrix.py`                |
 | Regression tests                       | `backend/tests/test_rbac_phase5.py`                           |
 
 ## Related docs

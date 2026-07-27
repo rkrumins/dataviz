@@ -56,7 +56,7 @@ return whenever a word trips you up.
 | **Scope** | Where access applies — **global** (whole platform) or **workspace**. |
 | **Group** | A set of users managed and granted access together. |
 | **Resource Grant** | Explicit share of a single resource (e.g. a View) to a person/group. |
-| **Visibility** | A View's reach: Personal, Team, or Enterprise. |
+| **Visibility** | A View's reach: Private, Workspace, Enterprise, or Public — a widening ladder. Public still requires signing in. |
 | **My Access** | The page showing what *you* are allowed to do. |
 | **Approval** | The admin step that activates a pending signup. |
 | **Audit Trail** | A log of sensitive changes (e.g. ontology lifecycle). |

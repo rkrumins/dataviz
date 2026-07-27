@@ -30,9 +30,20 @@ Set when you create the View, changeable later:
 
 | Visibility | Who can open |
 | --- | --- |
-| **Personal** | Just you |
-| **Team** | Everyone in the workspace |
-| **Enterprise** | Everyone in the organisation |
+| **Private** | You, anyone you share it with, and your workspace's admins |
+| **Workspace** | Everyone with access to the View's workspace |
+| **Enterprise** | Everyone in the organisation — including people outside this workspace |
+| **Public** | Everyone signed in to the platform, workspace access or not |
+
+Each tier reaches everyone the one above it reaches, plus more. **Public**
+still requires signing in — there is no link that works logged out.
+
+> **Note:** *Private* means private. Being a member of the workspace does
+> not let you open someone else's Private View; only the owner, people
+> they've shared it with explicitly, and workspace admins can.
+
+Hover a tier in the share dialog and it tells you who would gain access
+before you apply it. The badge on any View tells you why *you* can see it.
 
 ### 2. Explicit shares (resource grants)
 Beyond visibility, you can grant **specific people or groups** access to an
@@ -42,6 +53,9 @@ individual View, with a role:
 | --- | --- |
 | **Viewer** | Open and explore the View |
 | **Editor** | Open, modify, and re-save the View |
+
+Shares can be time-bound — pick a duration and access lapses on its own,
+the same way workspace access does.
 
 Explicit shares are perfect for co-ownership ("let Dana edit this") or for
 reaching someone outside the View's normal visibility. See the broader access
@@ -81,7 +95,8 @@ visibility.
 
 Views accumulate. A little maintenance keeps the gallery trustworthy:
 
-1. **Promote** Views that prove broadly useful (Personal → Team → Enterprise).
+1. **Promote** Views that prove broadly useful (Private → Workspace →
+   Enterprise → Public). Widening several at once asks you to confirm.
 2. **Retire** Views that are stale or superseded — delete or clearly rename them
    (e.g. prefix with `[deprecated]`).
 3. **Standardise** names and tags during housekeeping passes.
@@ -95,7 +110,8 @@ See recommended cadence and conventions in [Ways of Working](/guide/ways-of-work
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| A teammate can't find your View | Visibility too narrow, or wrong workspace — widen visibility or share explicitly |
+| A teammate can't find your View | Visibility too narrow, or wrong workspace — widen visibility or share explicitly. Note a *Private* View is invisible to teammates even in the same workspace |
+| Someone outside the workspace opens an Enterprise View but sees nothing | Fixed — reading a View now carries access to the data it shows, scoped to that View |
 | View opens empty | You're in the wrong workspace, or its data source changed — open **Workspaces** from the sidebar to confirm you're in the right one |
 | Can't edit a View | You have *viewer* access only — ask the owner for an *editor* grant |
 

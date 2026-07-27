@@ -104,7 +104,7 @@ instantly.
    [Ways of Working](/guide/ways-of-working)).
 3. Choose which **entity types** stay visible and, optionally, organise nodes
    into **layers**.
-4. Set **visibility** — *Personal*, *Team*, or *Enterprise*.
+4. Set **visibility** — *Private*, *Workspace*, *Enterprise*, or *Public*.
 5. Confirm. Your View now appears in the gallery.
 
 Finally, click the **★ favourite** icon on any View to pin it to your sidebar's

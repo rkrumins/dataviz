@@ -102,9 +102,13 @@ A **View** is a *saved snapshot of an exploration*: which nodes are shown, the
 layout, the filters, the layers, and the granularity. Views are how knowledge is
 captured and shared. Each View has a **visibility**:
 
-- **Personal** — just you.
-- **Team** — everyone in the workspace.
-- **Enterprise** — everyone in the organisation.
+- **Private** — you, anyone you share it with, and your workspace's admins.
+- **Workspace** — everyone with access to the View's workspace.
+- **Enterprise** — everyone in the organisation, including people outside
+  that workspace.
+- **Public** — everyone signed in to the platform, workspace access or not.
+
+Each reaches everyone the one above it reaches, plus more.
 
 You can **favourite** views for one-click access. See
 [Browsing Views](/guide/browsing-views) and [Creating Views](/guide/creating-views).

@@ -266,6 +266,9 @@ Content-Type: application/json
 | `/api/v1/lenses/{id}/rules` | POST | Add rule to lens |
 | `/api/v1/physical/sync` | POST | Trigger metadata sync from sources |
 | `/api/v1/views` | GET/POST | Saved view management |
+| `/api/v1/views/{id}/visibility` | PUT | Change a view's tier (`private` \| `workspace` \| `enterprise` \| `public`) |
+| `/api/v1/views/{id}/visibility-preview` | GET | Who would gain access at a given tier |
+| `/api/v1/views/{id}/grants` | GET/POST/DELETE | Explicit per-view shares, optionally time-bound |
 | `/api/v1/search` | GET | Full-text search across entities |
 
 ---

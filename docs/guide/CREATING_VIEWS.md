@@ -78,11 +78,14 @@ audience:
 
 | Visibility | Reaches | Use when |
 | --- | --- | --- |
-| **Personal** | Just you | A work-in-progress or private bookmark |
-| **Team** | The workspace | The team's shared reference |
-| **Enterprise** | The organisation | A canonical, broadly useful View |
+| **Private** | Just you, plus anyone you share it with and your workspace's admins | A work-in-progress or private bookmark |
+| **Workspace** | Everyone with access to the workspace | The team's shared reference |
+| **Enterprise** | The organisation, including people outside this workspace | A canonical, broadly useful View |
+| **Public** | Everyone signed in to the platform | A View that should need no introduction |
 
-You can always widen visibility later, or share explicitly with specific people —
+Start narrow. Hovering a tier shows who would gain access before you pick
+it, and you can always widen later, or share explicitly with specific
+people —
 see [Managing Views](/guide/managing-views).
 
 ---
@@ -98,7 +101,7 @@ suggestions in [Ways of Working](/guide/ways-of-working).
 
 ## After you save
 
-- Your View appears in the **gallery** and (for Team/Enterprise) becomes
+- Your View appears in the **gallery** and (for Workspace and wider) becomes
   discoverable by others.
 - **Favourite** it (★) to pin it to your sidebar quick-access.
 - Iterate freely — open it, refine, and re-save. To hand it off or co-own it,
