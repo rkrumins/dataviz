@@ -25,8 +25,10 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_META } from '@/types/viewVisibility'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
-export type ViewVisibility = 'private' | 'workspace' | 'enterprise'
+export type { ViewVisibility }
 
 export interface ViewTitleMenuProps {
   viewName: string
@@ -47,24 +49,17 @@ export interface ViewTitleMenuProps {
 const POPOVER_WIDTH = 260
 
 // Plain-language visibility copy — short label on the row, the full sentence
-// in `title` so the badge stays calm but the meaning is a hover away.
-const VISIBILITY: Record<ViewVisibility, { label: string; hint: string; Icon: LucideIcons.LucideIcon }> = {
-  private: {
-    label: 'Private',
-    hint: 'Private — only people it’s shared with',
-    Icon: LucideIcons.Lock,
-  },
-  workspace: {
-    label: 'Workspace',
-    hint: 'Workspace — everyone in this workspace',
-    Icon: LucideIcons.Building2,
-  },
-  enterprise: {
-    label: 'Enterprise',
-    hint: 'Enterprise — the whole organisation',
-    Icon: LucideIcons.Globe,
-  },
-}
+// in `title` so the badge stays calm but the meaning is a hover away. Both
+// come from the shared tier definitions so this badge can never describe a
+// tier differently from the dialog that sets it.
+const VISIBILITY: Record<ViewVisibility, { label: string; hint: string; Icon: LucideIcons.LucideIcon }> =
+  Object.fromEntries(
+    Object.entries(VISIBILITY_META).map(([tier, meta]) => [tier, {
+      label: meta.label,
+      hint: `${meta.label} — ${meta.description.toLowerCase()}`,
+      Icon: meta.icon,
+    }]),
+  ) as Record<ViewVisibility, { label: string; hint: string; Icon: LucideIcons.LucideIcon }>
 
 export function ViewTitleMenu({
   viewName,

@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    X, Link2, Check, Lock, Users, Globe, UserPlus, UserCog, Users2,
+    X, Link2, Check, UserPlus, UserCog, Users2,
     Search, Loader2, Eye, Pencil, Trash2, AlertCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -29,6 +29,8 @@ import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 
 type GrantRole = 'editor' | 'viewer'
@@ -38,36 +40,24 @@ type SubjectType = 'user' | 'group'
 interface ShareViewDialogProps {
     viewId: string
     viewName: string
-    currentVisibility: 'private' | 'workspace' | 'enterprise'
+    currentVisibility: ViewVisibility
     isOpen: boolean
     onClose: () => void
-    onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
+    onVisibilityChange?: (visibility: ViewVisibility) => void
 }
 
 
-const VISIBILITY_OPTIONS = [
-    {
-        id: 'private' as const,
-        label: 'Private',
-        description: 'Only you (and workspace admins) can see this view',
-        icon: Lock,
-        accent: 'indigo',
-    },
-    {
-        id: 'workspace' as const,
-        label: 'Workspace',
-        description: 'All members of the view\'s workspace can access',
-        icon: Users,
-        accent: 'sky',
-    },
-    {
-        id: 'enterprise' as const,
-        label: 'Enterprise',
-        description: 'Anyone in the organization can access (broadly visible)',
-        icon: Globe,
-        accent: 'amber',
-    },
-] as const
+// Narrowest → widest, from the shared tier definitions. The labels and
+// descriptions used to be written out here AND in four other selectors,
+// and they had drifted: the same tier was "Only you can see this view" in
+// the wizard and "Only you (and workspace admins)…" here.
+const VISIBILITY_OPTIONS = VISIBILITY_ORDER.map(id => ({
+    id,
+    label: VISIBILITY_META[id].label,
+    description: VISIBILITY_META[id].description,
+    icon: VISIBILITY_META[id].icon,
+    accent: VISIBILITY_META[id].accent,
+}))
 
 
 const GRANT_ROLES: { id: GrantRole; label: string; icon: typeof Eye }[] = [
@@ -404,9 +394,7 @@ export function ShareViewDialog({
                     {/* Footer */}
                     <div className="px-6 py-3 border-t border-glass-border bg-glass-base/20 shrink-0">
                         <p className="text-[11px] text-ink-muted text-center leading-relaxed">
-                            {visibility === 'private' && 'Only the creator and workspace admins can access this view.'}
-                            {visibility === 'workspace' && 'All workspace members can access this view.'}
-                            {visibility === 'enterprise' && 'Anyone in the organization can access this view.'}
+                            {`Can access: ${VISIBILITY_META[visibility].reach}.`}
                             {grants && grants.length > 0 && (
                                 <> Plus <span className="font-semibold text-ink-secondary">{grants.length} explicit share{grants.length !== 1 ? 's' : ''}</span>.</>
                             )}

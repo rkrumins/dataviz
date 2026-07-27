@@ -5,6 +5,8 @@
  * Everything is configurable - no hardcoded entity types.
  */
 
+import type { ViewVisibility } from './viewVisibility'
+
 // ============================================
 // ENTITY SCHEMA DEFINITIONS
 // ============================================
@@ -190,7 +192,15 @@ export interface ViewConfiguration {
 
   // Permissions
   isDefault: boolean;
-  isPublic: boolean;
+  /**
+   * The view's visibility tier. This was `isPublic: boolean`, which could
+   * not represent the tier and lost information in both directions: the
+   * API→config bridge collapsed every non-private tier to `true`, and the
+   * wizard expanded `true` back to `'enterprise'` — so opening a
+   * workspace-tier view in the wizard silently promoted it to the whole
+   * organisation.
+   */
+  visibility: ViewVisibility;
   createdBy: string;
   createdAt: string;
   updatedAt: string;

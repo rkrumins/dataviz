@@ -26,6 +26,7 @@ import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import { EditorActions } from './header/EditorActions'
 import { ViewTitleMenu } from './header/ViewTitleMenu'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 export interface ContextViewHeaderProps {
   // Search
@@ -107,7 +108,7 @@ export interface ContextViewHeaderProps {
   // With neither capability, the title stays a plain label (calm-view rule).
   canEditView?: boolean
   canShareView?: boolean
-  viewVisibility?: 'private' | 'workspace' | 'enterprise'
+  viewVisibility?: ViewVisibility
   onRenameView?: (name: string) => void
   onEditViewDetails?: () => void
   onShareView?: () => void

@@ -78,6 +78,7 @@ import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
 
 import { BasicsStep } from './steps/BasicsStep'
+import type { ViewVisibility } from '@/types/viewVisibility'
 import { LayoutStep } from './steps/LayoutStep'
 import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
@@ -126,7 +127,7 @@ export interface WizardFormData {
     name: string
     description: string
     icon: string
-    visibility: 'private' | 'workspace' | 'enterprise'
+    visibility: ViewVisibility
     tags: string[]
     dataSourceId?: string
     layoutType: 'graph' | 'hierarchy' | 'reference'
@@ -923,7 +924,7 @@ function ViewWizardBody({
                 name: editingView.name,
                 description: editingView.description ?? '',
                 icon: editingView.icon ?? 'Layout',
-                visibility: (editingView as any).visibility ?? (editingView.isPublic ? 'enterprise' : 'private'),
+                visibility: editingView.visibility ?? 'private',
                 tags: (editingView as any).tags ?? [],
                 dataSourceId: editingView.dataSourceId ?? undefined,
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',

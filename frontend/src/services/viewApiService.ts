@@ -7,6 +7,7 @@
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
 import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
+import type { ViewVisibility } from '@/types/viewVisibility'
 import { authFetch } from './apiClient'
 
 // ============================================
@@ -31,7 +32,13 @@ export interface View {
      */
     layoutType?: string
     config: Record<string, any>    // Full ViewConfiguration shape
-    visibility: 'private' | 'workspace' | 'enterprise'
+    visibility: ViewVisibility
+    /**
+     * Why THIS caller can see this view — 'creator', 'grant',
+     * 'tier:workspace', … Per-caller, computed server-side. Absent on
+     * write responses.
+     */
+    grantedBy?: string | null
     createdBy?: string
     /** Human-readable creator name resolved server-side from the users table. */
     createdByName?: string
@@ -598,7 +605,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         entityOverrides: cfg.entityOverrides ?? {},
         grouping: cfg.grouping,
         isDefault: false,
-        isPublic: view.visibility !== 'private',
+        visibility: view.visibility,
         createdBy: view.createdBy ?? '',
         createdAt: view.createdAt,
         updatedAt: view.updatedAt,

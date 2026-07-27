@@ -49,6 +49,7 @@ import { AggregationProgressBanner } from '@/components/explorer/AggregationProg
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -161,7 +162,7 @@ export function ExplorerPage() {
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [previewEditMode, setPreviewEditMode] = useState(false)
-  const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
+  const [shareView, setShareView] = useState<{ id: string; name: string; visibility: ViewVisibility } | null>(null)
 
   // Card click → open the detail drawer to view; the pencil → open it in
   // details-edit mode. The full builder stays behind "Edit layout & scope".
@@ -445,7 +446,7 @@ export function ExplorerPage() {
     showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
   }, [selectedIds, removeViewFromList, showToast])
 
-  const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
+  const handleBulkVisibility = useCallback(async (visibility: ViewVisibility) => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
     const count = ids.length

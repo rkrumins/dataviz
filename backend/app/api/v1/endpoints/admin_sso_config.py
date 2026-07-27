@@ -34,7 +34,7 @@ from backend.app.db.models import (
     UserORM,
 )
 from backend.app.db.repositories import app_auth_config_repo, user_repo
-from backend.app.db.repositories.binding_repo import _is_expired
+from backend.app.db.repositories.binding_repo import is_expired
 from backend.common.roles import RoleName
 from backend.app.db.repositories.app_auth_config_repo import (
     ConflictingVersion,
@@ -103,7 +103,7 @@ async def _super_admin_user_ids(session: AsyncSession) -> set[str]:
     direct_user_ids: set[str] = set()
     group_ids: set[str] = set()
     for b in bindings.scalars().all():
-        if _is_expired(b.expires_at, now=now):
+        if is_expired(b.expires_at, now=now):
             continue
         if b.subject_type == "user":
             direct_user_ids.add(b.subject_id)

@@ -188,13 +188,34 @@ class ViewGrantResponse(BaseModel):
     granted_at: str = Field(alias="grantedAt")
     granted_by: Optional[str] = Field(default=None, alias="grantedBy")
     subject: ViewGrantSubject
+    # NULL = permanent. Same convention as RoleBindingAuditRow.expires_at.
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
 
 
 class ViewGrantCreateRequest(BaseModel):
+    """Share one view with a user or group at a narrow role.
+
+    Accepts the same expiry pair as ``WorkspaceMemberCreateRequest`` —
+    ``expiresAt`` (ISO timestamp) or ``expiresIn`` (``"24h"`` / ``"7d"`` /
+    ``"2w"``), never both, neither meaning permanent. Workspace bindings
+    have had time-bounding since Phase 7; per-view shares had no
+    equivalent, so every share ever made was permanent.
+    """
     model_config = ConfigDict(populate_by_name=True)
     subject_type: str = Field(alias="subjectType")
     subject_id: str = Field(alias="subjectId")
     role: str  # "editor" | "viewer"
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+
+    @model_validator(mode="after")
+    def _normalise_expiry(self) -> "ViewGrantCreateRequest":
+        if self.expires_at and self.expires_in:
+            raise ValueError("Pass either expiresAt OR expiresIn, not both")
+        if self.expires_in:
+            self.expires_at = _parse_duration_to_expires_at(self.expires_in)
+            self.expires_in = None
+        return self
 
 
 # ── Audit / role-binding debug ──────────────────────────────────────

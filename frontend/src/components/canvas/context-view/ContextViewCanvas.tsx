@@ -78,6 +78,7 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
 import type { ViewLayerConfig, DisplayRuleConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -1038,9 +1039,9 @@ export function ContextViewCanvas({
   // Share open — the menu hides the row while unknown).
   const [viewDetailsOpen, setViewDetailsOpen] = useState(false)
   const [shareSeed, setShareSeed] = useState<
-    { id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null
+    { id: string; name: string; visibility: ViewVisibility } | null
   >(null)
-  const [viewVisibility, setViewVisibility] = useState<'private' | 'workspace' | 'enterprise' | undefined>(undefined)
+  const [viewVisibility, setViewVisibility] = useState<ViewVisibility | undefined>(undefined)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).

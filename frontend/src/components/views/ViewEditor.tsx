@@ -99,7 +99,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       },
       entityOverrides: {},
       isDefault: false,
-      isPublic: true,
+      visibility: 'private',
       createdBy: 'user',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

@@ -5,6 +5,7 @@ import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, Eye, X, Globe, Users, Lock, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 interface ExplorerBulkActionsProps {
   selectedCount: number
@@ -12,12 +13,12 @@ interface ExplorerBulkActionsProps {
    *  that can't delete every selected view (creator OR
    *  workspace:view:delete in each view's workspace). */
   onDelete?: () => void
-  onChangeVisibility: (visibility: 'private' | 'workspace' | 'enterprise') => void
+  onChangeVisibility: (visibility: ViewVisibility) => void
   onClearSelection: () => void
 }
 
 const VISIBILITY_OPTIONS: Array<{
-  value: 'private' | 'workspace' | 'enterprise'
+  value: ViewVisibility
   label: string
   icon: React.ElementType
   description: string

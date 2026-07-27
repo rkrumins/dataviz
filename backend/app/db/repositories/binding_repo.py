@@ -21,8 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import RoleBindingORM
 
 
-def _is_expired(expires_at: Optional[str], *, now: datetime) -> bool:
-    """True if a time-bound binding has lapsed.
+def is_expired(expires_at: Optional[str], *, now: datetime) -> bool:
+    """True if a time-bound grant or binding has lapsed.
+
+    Public because ``grant_repo`` shares it. The two tables must agree on
+    what "expired" means down to the parse behaviour below — two copies
+    of this would be two chances to drift on a security check.
 
     ``expires_at`` is a nullable ISO-8601 string (NULL = never expires).
     Parsed defensively: a value we can't parse is treated as
@@ -181,7 +185,7 @@ async def list_for_user_with_groups(
     now = datetime.now(timezone.utc)
     return [
         b for b in result.scalars().all()
-        if not _is_expired(b.expires_at, now=now)
+        if not is_expired(b.expires_at, now=now)
     ]
 
 
@@ -215,7 +219,7 @@ async def list_for_scope(
     if include_expired:
         return rows
     now = datetime.now(timezone.utc)
-    return [b for b in rows if not _is_expired(b.expires_at, now=now)]
+    return [b for b in rows if not is_expired(b.expires_at, now=now)]
 
 
 async def find_binding(

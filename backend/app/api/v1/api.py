@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from backend.app.auth.dependencies import requires
+from backend.app.auth.view_delegation import requires_ws_read_or_view_delegate
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
@@ -294,9 +295,21 @@ api_router.include_router(
     dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
 )
 # Batched canvas contract (open/expand) — /api/v1/{ws_id}/graph/canvas/*
+#
+# DELEGABLE. A view's visibility tier decides who can open it, but until
+# now every route that renders one required workspace:datasource:read in
+# its workspace — which an ``enterprise`` or ``public`` reader does not
+# have, by definition. The view opened to an empty canvas. These two
+# routes accept ``?viewId=`` and confine the caller to that view's
+# resolved scope instead; see backend/app/auth/view_delegation.py.
+#
+# Both routes here are reads. The allow-list is deliberately this small:
+# ``assets`` below has POST/DELETE and ``assignments`` computes, so
+# neither is delegable, and the main graph router carries the mutation
+# surface. A delegate can paint a view and expand within it. Nothing else.
 api_router.include_router(
     canvas.router, prefix="/{ws_id}/graph", tags=["canvas:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(requires_ws_read_or_view_delegate(workspace="ws_id"))],
 )
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(
@@ -304,7 +317,9 @@ api_router.include_router(
     dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
 )
 # Context models: /api/v1/{ws_id}/context-models
+# DELEGABLE — both routes are read-only template lookups, and a view
+# cannot be rendered without the layout template it references.
 api_router.include_router(
     context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(requires_ws_read_or_view_delegate(workspace="ws_id"))],
 )

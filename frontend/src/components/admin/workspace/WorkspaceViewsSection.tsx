@@ -53,8 +53,9 @@ import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
-type Visibility = 'private' | 'workspace' | 'enterprise'
+type Visibility = ViewVisibility
 
 interface WorkspaceViewsSectionProps {
     wsId: string

@@ -1939,6 +1939,11 @@ class ResourceGrantORM(Base):
     role_name = Column(Text, nullable=False)      # editor | viewer (narrow)
     granted_at = Column(Text, nullable=False, default=_now)
     granted_by = Column(Text, nullable=True)
+    # Nullable ISO-8601; NULL = permanent. Mirrors RoleBindingORM.expires_at
+    # and is evaluated by the same ``binding_repo.is_expired``. Without it
+    # a per-view share was the one access path on the platform that could
+    # never lapse — "shared once, shared forever".
+    expires_at = Column(Text, nullable=True, default=None)
 
     __table_args__ = (
         UniqueConstraint(

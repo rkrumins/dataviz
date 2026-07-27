@@ -190,6 +190,7 @@ async def list_grants(
                 granted_at=g.granted_at,
                 granted_by=g.granted_by,
                 subject=subject,
+                expires_at=g.expires_at,
             )
         )
     return out
@@ -242,6 +243,7 @@ async def create_grant(
             subject_id=body.subject_id,
             role_name=body.role,
             granted_by=user.id,
+            expires_at=body.expires_at,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -257,6 +259,7 @@ async def create_grant(
             "subject_id": body.subject_id,
             "role": body.role,
             "actor_id": user.id,
+            "expires_at": body.expires_at,
         },
     )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
@@ -276,6 +279,7 @@ async def create_grant(
         granted_at=grant.granted_at,
         granted_by=grant.granted_by,
         subject=subject,
+        expires_at=grant.expires_at,
     )
 
 

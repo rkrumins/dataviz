@@ -11,12 +11,16 @@ the design plan for the full action matrix.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select, delete, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ResourceGrantORM
+# Shared with role bindings on purpose: the two tables must agree on what
+# "expired" means, including the fail-open parse behaviour.
+from backend.app.db.repositories.binding_repo import is_expired
 
 
 VALID_RESOURCE_TYPES = {"view"}
@@ -42,6 +46,7 @@ async def create_grant(
     subject_id: str,
     role_name: str,
     granted_by: Optional[str] = None,
+    expires_at: Optional[str] = None,
 ) -> ResourceGrantORM:
     _validate(resource_type, subject_type, role_name)
     grant = ResourceGrantORM(
@@ -51,6 +56,7 @@ async def create_grant(
         subject_id=subject_id,
         role_name=role_name,
         granted_by=granted_by,
+        expires_at=expires_at,
     )
     session.add(grant)
     await session.flush()
@@ -86,7 +92,12 @@ async def list_grants_for_user_with_groups(
     group_ids: list[str],
     resource_type: Optional[str] = None,
 ) -> list[ResourceGrantORM]:
-    """Every grant the user inherits — direct or via group membership."""
+    """Every LIVE grant the user inherits — direct or via group membership.
+
+    Expired grants are dropped here rather than at the call sites, so an
+    access check can never accidentally honour a lapsed share: this is the
+    only path the evaluator uses to answer "does a grant apply?".
+    """
     direct = and_(
         ResourceGrantORM.subject_type == "user",
         ResourceGrantORM.subject_id == user_id,
@@ -103,7 +114,11 @@ async def list_grants_for_user_with_groups(
     if resource_type is not None:
         stmt = stmt.where(ResourceGrantORM.resource_type == resource_type)
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    now = datetime.now(timezone.utc)
+    return [
+        g for g in result.scalars().all()
+        if not is_expired(g.expires_at, now=now)
+    ]
 
 
 async def find_grant(

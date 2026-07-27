@@ -8,6 +8,7 @@
 import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import * as viewApi from './viewApiService'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 // ============================================
 // Types
@@ -25,7 +26,7 @@ export interface CreateViewRequest {
     workspaceId: string
     dataSourceId?: string
     contextModelId?: string
-    visibility?: 'private' | 'workspace' | 'enterprise'
+    visibility?: ViewVisibility
     tags?: string[]
 }
 
@@ -39,7 +40,7 @@ export interface UpdateViewRequest {
     visibleRelationshipTypes?: string[]
     fieldFilters?: FieldFilter[]
     contextModelId?: string
-    visibility?: 'private' | 'workspace' | 'enterprise'
+    visibility?: ViewVisibility
     tags?: string[]
 }
 

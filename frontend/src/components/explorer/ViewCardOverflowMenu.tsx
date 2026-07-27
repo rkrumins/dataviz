@@ -7,18 +7,19 @@ import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, Histor
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import type { ViewVisibility } from '@/types/viewVisibility'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
   viewName: string
-  visibility: 'private' | 'workspace' | 'enterprise'
+  visibility: ViewVisibility
   onEdit?: () => void
   /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
   onEditLayout?: () => void
   editDisabled?: boolean
   onDelete: () => void
   onShare: () => void
-  onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
+  onVisibilityChange?: (visibility: ViewVisibility) => void
 }
 
 export function ViewCardOverflowMenu({
