@@ -5,7 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { useFeature, useFeaturesStore } from '@/store/features'
-import { authService } from '@/services/authService'
+import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { toUtcDate } from '@/lib/timeAgo'
@@ -92,6 +92,11 @@ export function SignUpPage() {
     // is the worst moment to discover the limit existed.
     const [inviteSeatsLeft, setInviteSeatsLeft] = useState<number | null>(null)
     const [inviteExpiresAt, setInviteExpiresAt] = useState<string | null>(null)
+    // Phase 15: SSO providers, offered only to an invite holder. Without
+    // this, an invitee at an SSO org is asked to invent a password that
+    // local login then refuses — and whether they can get in at all
+    // depends on their IdP marking the email verified.
+    const [ssoProviders, setSsoProviders] = useState<SsoProviderSummary[]>([])
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
@@ -127,6 +132,15 @@ export function SignUpPage() {
     }, [selfSignupBlocked, navigate])
 
     useEffect(() => { clearError() }, [clearError])
+
+    // Only fetched when an invite is in hand: a stranger on an open
+    // signup page has no business being offered the company IdP.
+    useEffect(() => {
+        if (!inviteToken) return
+        authService.listProviders()
+            .then(setSsoProviders)
+            .catch(() => setSsoProviders([]))
+    }, [inviteToken])
 
     // Verify invite token on mount
     useEffect(() => {
@@ -347,6 +361,35 @@ export function SignUpPage() {
                             </motion.div>
                         ) : (
                             <form onSubmit={handleSubmit} className="space-y-4">
+                                {/* Accept the invite with the company identity
+                                    provider. Offered FIRST: where SSO exists it is
+                                    almost always the right door, and in an SSO-only
+                                    deployment it is the only one that works — a
+                                    password chosen below would be refused at login.
+                                    The invite rides along in `next` and is applied
+                                    once the handshake has proved who they are. */}
+                                {inviteToken && inviteValid && ssoProviders.length > 0 && (
+                                    <div className="space-y-2">
+                                        {ssoProviders.map(p => (
+                                            <a
+                                                key={p.id}
+                                                href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${encodeURIComponent(`/invite/accept?invite=${inviteToken}`)}`}
+                                                className="w-full h-11 rounded-xl border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 text-sm font-semibold text-ink transition-colors flex items-center justify-center gap-2"
+                                            >
+                                                <ShieldCheck className="w-4 h-4 text-accent-lineage" />
+                                                {p.buttonLabel || `Continue with ${p.displayName}`}
+                                            </a>
+                                        ))}
+                                        <div className="flex items-center gap-3 pt-1">
+                                            <div className="flex-1 h-px bg-glass-border" />
+                                            <span className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">
+                                                or use a password
+                                            </span>
+                                            <div className="flex-1 h-px bg-glass-border" />
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* Name Row */}
                                 <div className="grid grid-cols-2 gap-3">
                                     <div className="space-y-1.5">

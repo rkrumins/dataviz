@@ -226,6 +226,22 @@ export const authService = {
         return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
     },
 
+    /** Apply an invite to the already-signed-in user. The SSO route
+     *  into an invitation: the provider handshake authenticates them,
+     *  this grants what the link carried. */
+    redeemInvite(inviteToken: string): Promise<{
+        applied: boolean
+        message: string
+        role?: string | null
+        workspaceId?: string | null
+        redirectTo: string
+    }> {
+        return request(`${AUTH_API}/redeem-invite`, {
+            method: 'POST',
+            body: JSON.stringify({ inviteToken }),
+        })
+    },
+
     /** Logged-in user's linked SSO identities + whether they have a
      *  password set. Drives ``/me/identities`` page. */
     listMyIdentities(): Promise<IdentitiesResponse> {

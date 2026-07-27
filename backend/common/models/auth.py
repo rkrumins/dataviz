@@ -276,6 +276,27 @@ class InviteTokenResponse(BaseModel):
     email_domain: Optional[str] = Field(default=None, alias="emailDomain")
 
 
+class RedeemInviteRequest(BaseModel):
+    """Apply an invite to the already-authenticated caller — the SSO
+    route into an invitation."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    invite_token: str = Field(alias="inviteToken", min_length=1)
+
+
+class RedeemInviteResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: False when the invite was valid but there was nothing to apply —
+    #: the account already had access. Not an error: they are signed in,
+    #: which is what they were trying to do.
+    applied: bool
+    message: str
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    redirect_to: str = Field(alias="redirectTo")
+
+
 class ExtendInviteRequest(BaseModel):
     """Give an existing link more time, and optionally more seats.
 

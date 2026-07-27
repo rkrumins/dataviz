@@ -32,7 +32,10 @@ from backend.common.models.auth import (
     ForgotPasswordRequest,
     ResetPasswordRequest,
     InviteVerifyResponse,
+    RedeemInviteRequest,
+    RedeemInviteResponse,
 )
+from backend.app.auth.dependencies import get_current_user
 from backend.app.api.v1.feature_gate import feature_disabled
 from backend.app.services.feature_flags import feature_flags
 
@@ -694,6 +697,152 @@ async def reset_password(
 
     logger.info("Password reset completed for user %s", user.id)
     return {"message": "Password has been reset successfully. You can now sign in."}
+
+
+# ── POST /auth/redeem-invite ─────────────────────────────────────────
+
+@router.post("/redeem-invite", response_model=RedeemInviteResponse)
+@limiter.limit("20/minute")
+async def redeem_invite(
+    request: Request,
+    body: RedeemInviteRequest,
+    user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Apply an invite to the CURRENTLY SIGNED-IN user.
+
+    This is how an invite is redeemed through SSO. Signing up used to
+    mean "choose a password", which in an SSO-only deployment asked the
+    invitee to invent one that local login would then refuse — and left
+    them dependent on their IdP marking the email verified for the
+    account to be reachable at all. Now the invite page can hand them to
+    their identity provider and settle up here afterwards.
+
+    Deliberately NOT in ``auth_service``: that package is being prepared
+    for extraction and may not import from ``backend.app``, where roles,
+    groups and the invite ledger live. Routing the invite through the
+    SSO flow's own ``next`` path and finishing here keeps the boundary
+    intact — the auth service carries an opaque string it never has to
+    understand.
+
+    Only applies to a user with NO role bindings. An invite is an
+    onboarding instrument: somebody who already has access has already
+    been onboarded, and letting a forwarded link add grants to an
+    established account would turn every shareable invite into an
+    escalation path. This also keeps the SSO route consistent with the
+    password route, which can only ever create a new account.
+    """
+    from backend.app.db.repositories import binding_repo, invite_repo
+
+    if not await feature_flags.is_enabled_self_session(
+            "inviteLinksEnabled", default=INVITE_LINKS_FAIL_OPEN):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invite links are turned off for this deployment.",
+        )
+
+    resolved = await resolve_invite(session, body.invite_token)
+    if not resolved.valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_INVITE_REFUSALS.get(
+                resolved.reason, "Invite link is invalid or has expired.",
+            ),
+        )
+
+    # The pin and domain rules apply to the identity that actually
+    # arrived, whatever route it came in by.
+    mismatch = _email_matches_invite(resolved, user.email)
+    if mismatch:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_INVITE_REFUSALS[mismatch],
+        )
+
+    existing_bindings = await binding_repo.list_for_subject(
+        session, subject_type="user", subject_id=user.id,
+    )
+    if existing_bindings:
+        logger.info(
+            "Invite %s not applied to %s: the account already has access.",
+            resolved.invite_id, user.id,
+        )
+        return RedeemInviteResponse(
+            applied=False,
+            message="You already have access — signing you in.",
+            redirectTo="/",
+        )
+
+    if resolved.invite_id is not None:
+        if not await invite_repo.try_consume(session, resolved.invite_id):
+            invite = await invite_repo.get(session, resolved.invite_id)
+            reason = invite_repo.status_of(invite) if invite else "invalid"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_INVITE_REFUSALS.get(
+                    reason, "Invite link is invalid or has expired.",
+                ),
+            )
+
+    if resolved.role:
+        await _grant_invite_role(
+            session,
+            user_id=user.id,
+            role=resolved.role,
+            workspace_id=resolved.workspace_id,
+            granted_by=resolved.created_by,
+        )
+
+    attached: list[str] = []
+    if resolved.group_ids:
+        from backend.app.db.repositories import group_repo
+        for gid in resolved.group_ids:
+            grp = await group_repo.get_group_by_id(session, gid)
+            if grp is None:
+                continue
+            try:
+                await group_repo.add_member(
+                    session, gid, user.id, added_by=resolved.created_by,
+                )
+                attached.append(gid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to add %s to group %s: %s — continuing.",
+                    user.id, gid, exc,
+                )
+
+    if resolved.invite_id is not None:
+        await invite_repo.record_redemption(
+            session,
+            invite_id=resolved.invite_id,
+            user_id=user.id,
+            email=user.email,
+        )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_redeemed_via_sso",
+        payload={
+            "user_id": user.id, "email": user.email,
+            "invite_id": resolved.invite_id, "role": resolved.role,
+            "workspace_id": resolved.workspace_id,
+            "group_ids": attached, "invited_by": resolved.created_by,
+        },
+    )
+    logger.info(
+        "Invite %s redeemed via SSO by %s (role=%s ws=%s groups=%d)",
+        resolved.invite_id, user.id, resolved.role,
+        resolved.workspace_id, len(attached),
+    )
+    return RedeemInviteResponse(
+        applied=True,
+        message="You're all set.",
+        role=resolved.role,
+        workspaceId=resolved.workspace_id,
+        redirectTo=(
+            f"/workspaces/{resolved.workspace_id}"
+            if resolved.workspace_id else "/"
+        ),
+    )
 
 
 # ── GET /auth/verify-invite ──────────────────────────────────────────

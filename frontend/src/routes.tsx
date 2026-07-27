@@ -44,6 +44,7 @@ const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m =>
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
 const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
+const InviteAcceptPage = lazy(() => import('@/components/auth/InviteAcceptPage').then(m => ({ default: m.InviteAcceptPage })))
 
 // Docs (public, self-contained layout)
 const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
@@ -87,6 +88,11 @@ export const router = createBrowserRouter([
   // /login and dropped their token on the way. The gate therefore lives INSIDE SignUpPage,
   // the only component that can see both the invite and the load state.
   { path: '/signup', element: <Lazy><SignUpPage /></Lazy> },
+  // Where an SSO-redeemed invite lands: the provider handshake proves who
+  // they are, this applies what the link carried. Ungated for the same
+  // reason /signup is — an invite is the exception the signup switch exists
+  // to create, and the server is the enforcement either way.
+  { path: '/invite/accept', element: <Lazy><InviteAcceptPage /></Lazy> },
   // Public docs
   {
     path: '/docs',

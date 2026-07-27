@@ -34,6 +34,7 @@ vi.mock('@/services/authService', () => ({
             groupNames: ['Engineering'],
             email: null,
         }),
+        listProviders: vi.fn().mockResolvedValue([]),
     },
 }))
 
@@ -62,7 +63,18 @@ function resetFeatures(over: Partial<{ loaded: boolean; signupEnabled: boolean }
 
 beforeEach(() => {
     navigateSpy.mockClear()
-    vi.mocked(authService.verifyInvite).mockClear()
+    // Re-establish implementations, not just call history: `mockClear`
+    // leaves a previous test's `mockResolvedValue` in place, so a case
+    // that returns an invalid invite would silently poison every test
+    // declared after it.
+    vi.mocked(authService.verifyInvite).mockReset().mockResolvedValue({
+        valid: true,
+        role: 'workspace_viewer',
+        workspaceName: 'Finance',
+        groupNames: ['Engineering'],
+        email: null,
+    })
+    vi.mocked(authService.listProviders).mockReset().mockResolvedValue([])
     resetFeatures()
     useAuthStore.setState({ isAuthenticated: false, isLoading: false, error: null })
 })
@@ -144,6 +156,59 @@ describe('SignUpPage — a link that will not work', () => {
         renderAt('/signup?invite=tok_dead')
 
         expect(await screen.findByText(/you can still sign up/i)).toBeInTheDocument()
+    })
+})
+
+describe('SignUpPage — accepting an invite with SSO', () => {
+    const OKTA = {
+        id: 'idp_1', slug: 'okta', displayName: 'Okta',
+        kind: 'oidc', priority: 0, buttonLabel: null, buttonIcon: null,
+    }
+
+    it('offers the identity provider, carrying the invite through the handshake', async () => {
+        // Without this an invitee at an SSO org is asked to invent a
+        // password that local login then refuses.
+        vi.mocked(authService.listProviders).mockResolvedValue([OKTA])
+        renderAt('/signup?invite=tok_abc')
+
+        const link = await screen.findByRole('link', { name: /continue with okta/i })
+        expect(link).toHaveAttribute(
+            'href',
+            '/api/v1/auth/okta/login?next=' +
+            encodeURIComponent('/invite/accept?invite=tok_abc'),
+        )
+        // The password form stays available — SSO is offered, not forced.
+        expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument()
+    })
+
+    it('does not offer SSO to someone without an invite', async () => {
+        // A stranger on an open signup page has no business being handed
+        // the company IdP.
+        vi.mocked(authService.listProviders).mockResolvedValue([OKTA])
+        resetFeatures({ loaded: true, signupEnabled: true })
+        renderAt('/signup')
+
+        await screen.findByLabelText(/^email$/i)
+        expect(screen.queryByRole('link', { name: /continue with/i })).not.toBeInTheDocument()
+        expect(authService.listProviders).not.toHaveBeenCalled()
+    })
+
+    it('does not offer SSO for a dead invite', async () => {
+        vi.mocked(authService.listProviders).mockResolvedValue([OKTA])
+        vi.mocked(authService.verifyInvite).mockResolvedValue({
+            valid: false, role: null, reason: 'revoked',
+        })
+        renderAt('/signup?invite=tok_dead')
+
+        await screen.findByText(/revoked/i)
+        expect(screen.queryByRole('link', { name: /continue with/i })).not.toBeInTheDocument()
+    })
+
+    it('renders the password form normally when no provider is configured', async () => {
+        renderAt('/signup?invite=tok_abc')
+
+        expect(await screen.findByLabelText(/^email$/i)).toBeInTheDocument()
+        expect(screen.queryByText(/or use a password/i)).not.toBeInTheDocument()
     })
 })
 

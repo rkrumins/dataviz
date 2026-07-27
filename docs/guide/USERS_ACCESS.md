@@ -68,12 +68,29 @@ Privileged roles — anything granting workspace admin or system permissions —
 always require a pinned email, so a forwarded link cannot escalate someone you
 did not intend.
 
+**Single sign-on.** If your deployment has an identity provider configured, an
+invite link offers **Continue with &lt;your IdP&gt;** alongside the password form —
+and in an SSO-only deployment that is the only route that works, since a
+password chosen on the signup form would be refused at login. The provider
+handshake proves who the person is; the invite's role, workspace and groups are
+applied immediately afterwards. An invite is only applied to an account that has
+no access yet: somebody who is already set up has already been onboarded, so a
+forwarded link cannot add grants to an established account.
+
 **Managing what you have handed out.** **Admin → Users → Manage links** lists
 every outstanding link with its usage (`3 / 10`), who created it, when it
-expires, and exactly who has redeemed it. **Revoke** kills a link immediately,
-whatever its expiry or remaining seats — the first thing to reach for if one
-ends up somewhere it shouldn't. Tokens are never shown again after creation; to
-re-share, mint a new link so it can be revoked separately.
+expires, and exactly who has redeemed it. Three actions:
+
+- **Extend** — another 30 days, plus 5 more seats on a capped link. The URL you
+  already shared keeps working.
+- **New URL** — issues a fresh link for the same invitation and stops every URL
+  already sent from working. The role, groups, seat count and the record of who
+  has joined all stay put, so one invitation keeps one history. Shown once.
+- **Revoke** — kills the link immediately, whatever its expiry or remaining
+  seats. The first thing to reach for if one ends up somewhere it shouldn't.
+
+Tokens are never shown again after creation, so a read-only list cannot become
+somewhere credentials are harvested. Use **New URL** if you have lost the link.
 
 **Who can invite.** Platform administrators can invite anyone, anywhere.
 Workspace admins can invite into workspaces they administer, limited to
