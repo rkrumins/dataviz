@@ -61,7 +61,7 @@ async def test_redeeming_grants_the_role_and_lands_in_the_workspace(
     r = await _redeem(test_client, minted["inviteToken"])
     assert r.status_code == 200, r.text
     assert r.json()["applied"] is True
-    assert r.json()["redirectTo"] == "/workspaces/ws_sso"
+    assert r.json()["redirectTo"] == "/workspaces/ws_sso?welcome=invite"
 
     bindings = await binding_repo.list_for_subject(
         db_session, subject_type="user", subject_id=SSO_USER_ID,

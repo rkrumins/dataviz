@@ -71,7 +71,7 @@ async def test_invited_signup_returns_a_session(test_client: AsyncClient, db_ses
     body = r.json()
     assert body["autoSignedIn"] is True
     assert body["user"]["email"] == "landed@example.com"
-    assert body["redirectTo"] == "/"
+    assert body["redirectTo"] == "/?welcome=invite"
 
     # The three session cookies, same as a real login.
     names = {c for c in r.cookies}
@@ -105,7 +105,7 @@ async def test_a_workspace_invite_lands_you_in_that_workspace(
     )).json()["inviteToken"]
 
     r = await _signup(test_client, email="scoped@example.com", token=token)
-    assert r.json()["redirectTo"] == "/workspaces/ws_land"
+    assert r.json()["redirectTo"] == "/workspaces/ws_land?welcome=invite"
 
 
 # ── who must NOT get a session ───────────────────────────────────────

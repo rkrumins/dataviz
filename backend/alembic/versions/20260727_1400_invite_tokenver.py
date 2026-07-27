@@ -25,7 +25,7 @@ from typing import Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260727_1400_invite_token_version"
+revision: str = "20260727_1400_invite_tokenver"
 down_revision: Union[str, None] = "20260727_1200_invites"
 branch_labels = None
 depends_on = None

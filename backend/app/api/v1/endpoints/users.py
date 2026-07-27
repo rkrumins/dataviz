@@ -33,6 +33,7 @@ from backend.app.api.v1.endpoints.auth import (
     INVITE_LINKS_FAIL_OPEN,
 )
 from backend.app.api.v1.feature_gate import feature_disabled
+from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
@@ -41,6 +42,9 @@ from backend.common.models.auth import (
     AdminResetPasswordRequest,
     ApproveRejectRequest,
     ChangeRoleRequest,
+    BulkInviteRequest,
+    BulkInviteResponse,
+    BulkInviteResult,
     CreateInviteRequest,
     ExtendInviteRequest,
     InviteRedemptionResponse,
@@ -709,38 +713,19 @@ async def create_invite(
         role_is_privileged=role_is_privileged,
     )
 
-    # Allocate the id before minting so the token and its ledger row can be
-    # created from a SINGLE encode. Minting twice — once for the expiry,
-    # again for the jti — would leave the row's expires_at a few
-    # microseconds behind the token's exp, and the two would disagree about
-    # the instant a link dies.
-    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
-    token, expires_at = create_invite_token(
-        role=body.role,
-        created_by=admin.id,
-        expires_in_hours=body.expires_in_hours,
-        workspace_id=resolved_workspace_id,
-        email=body.email,
-        group_ids=resolved_group_ids or None,
-        jti=invite_id,
-    )
-    # An email pin is strictly narrower than a domain restriction, so a
-    # link carrying both is really just pinned. Drop the redundant field
-    # rather than storing a constraint that can never bind.
-    resolved_domain = None if body.email else body.email_domain
-    invite = await invite_repo.create(
+    token, expires_at, invite = await _mint_invite(
         session,
-        invite_id=invite_id,
+        created_by=admin.id,
         role=body.role,
         workspace_id=resolved_workspace_id,
         email=body.email,
-        email_domain=resolved_domain,
+        email_domain=body.email_domain,
         group_ids=resolved_group_ids,
         shareable_groups_override=is_shareable_groups_override,
         max_uses=body.max_uses,
-        expires_at=expires_at,
-        created_by=admin.id,
+        expires_in_hours=body.expires_in_hours,
     )
+    resolved_domain = invite.email_domain
 
     # Phase 14: distinct audit event when the shareable-groups override
     # was used, so an auditor can review who bypassed the email-pin
@@ -793,6 +778,63 @@ async def create_invite(
 # An invite used to be a fire-and-forget JWT: once handed out there was no
 # way to see it, count it, or stop it. These three endpoints are the other
 # half of that — the list an admin can actually act on.
+
+
+async def _mint_invite(
+    session: AsyncSession,
+    *,
+    created_by: str,
+    role: Optional[str],
+    workspace_id: Optional[str],
+    email: Optional[str],
+    email_domain: Optional[str],
+    group_ids: list[str],
+    shareable_groups_override: bool,
+    max_uses: Optional[int],
+    expires_in_hours: int,
+):
+    """Issue one token and its ledger row. Returns (token, expires_at, row).
+
+    Shared by the single and bulk endpoints — a bulk invite is a single
+    invite repeated, and two copies of this would drift the first time a
+    field is added.
+    """
+    from backend.app.auth.jwt import create_invite_token
+    from backend.app.db.repositories import invite_repo
+
+    # Allocate the id before minting so the token and its ledger row can be
+    # created from a SINGLE encode. Minting twice — once for the expiry,
+    # again for the jti — would leave the row's expires_at a few
+    # microseconds behind the token's exp, and the two would disagree about
+    # the instant a link dies.
+    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
+    token, expires_at = create_invite_token(
+        role=role,
+        created_by=created_by,
+        expires_in_hours=expires_in_hours,
+        workspace_id=workspace_id,
+        email=email,
+        group_ids=group_ids or None,
+        jti=invite_id,
+        token_version=1,
+    )
+    # An email pin is strictly narrower than a domain restriction, so a
+    # link carrying both is really just pinned. Drop the redundant field
+    # rather than storing a constraint that can never bind.
+    invite = await invite_repo.create(
+        session,
+        invite_id=invite_id,
+        role=role,
+        workspace_id=workspace_id,
+        email=email,
+        email_domain=None if email else email_domain,
+        group_ids=group_ids,
+        shareable_groups_override=shareable_groups_override,
+        max_uses=max_uses,
+        expires_at=expires_at,
+        created_by=created_by,
+    )
+    return token, expires_at, invite
 
 
 async def _invite_summary(session: AsyncSession, invite) -> InviteSummaryResponse:
@@ -957,6 +999,210 @@ async def revoke_invite(
     return await _invite_summary(session, invite)
 
 
+@admin_router.post(
+    "/invite/bulk",
+    response_model=BulkInviteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_bulk_invites(
+    body: BulkInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One email-pinned link per address, from one set of settings.
+
+    Onboarding a team meant repeating the same form once per person.
+    This is that, once — and every link comes out pinned to its
+    recipient, so each is separately revocable and each redemption is
+    attributable to the person it was meant for. A single shared link
+    would be less work and strictly worse: it would tell you only that
+    somebody used it.
+
+    Partial success is the norm and is reported per row rather than
+    failing the batch: one address already having an account must not
+    cost the other nineteen their invitations.
+
+    The email-pin rules that govern single invites are satisfied here by
+    construction — every link IS pinned — so a privileged role or an
+    attached group needs no extra opt-in.
+    """
+    from backend.app.db.repositories import (
+        group_repo, role_repo, workspace_repo,
+    )
+
+    if not await feature_flags.is_enabled_self_session(
+            "inviteLinksEnabled", default=INVITE_LINKS_FAIL_OPEN):
+        raise feature_disabled("inviteLinksEnabled")
+
+    # Validate the SETTINGS once. They are identical for every row, so
+    # re-checking per address would just be the same query N times.
+    resolved_group_ids: list[str] = []
+    if body.group_ids:
+        for gid in body.group_ids:
+            grp = await group_repo.get_group_by_id(session, gid)
+            if grp is None:
+                raise HTTPException(400, detail=f"Unknown group '{gid}'")
+            if getattr(grp, "is_protected", False):
+                raise HTTPException(
+                    400,
+                    detail=(
+                        f"Group '{grp.name}' is protected and cannot be "
+                        f"added through invite links."
+                    ),
+                )
+            resolved_group_ids.append(gid)
+
+    resolved_workspace_id: Optional[str] = None
+    role_perms: list[str] = []
+    role_is_privileged = False
+    if body.role is not None:
+        role = await role_repo.get_role(session, body.role)
+        if role is None:
+            raise HTTPException(400, detail=f"Unknown role '{body.role}'")
+        bundles = await role_repo.role_names_with_permissions(session, [body.role])
+        role_perms = bundles.get(body.role, [])
+        role_is_privileged = _role_is_privileged(role_perms)
+
+        is_workspace_role = (
+            body.role in _WORKSPACE_TEMPLATE_ROLES or role.scope_type == "workspace"
+        )
+        if is_workspace_role:
+            if role.scope_type == "workspace":
+                resolved_workspace_id = role.scope_id
+                if body.workspace_id and body.workspace_id != role.scope_id:
+                    raise HTTPException(
+                        400,
+                        detail=(
+                            f"Role '{body.role}' is scoped to workspace "
+                            f"'{role.scope_id}' and cannot be invited into a "
+                            f"different workspace."
+                        ),
+                    )
+            else:
+                if not body.workspace_id:
+                    raise HTTPException(
+                        400,
+                        detail=(
+                            f"Role '{body.role}' is workspace-scoped; a "
+                            f"workspace must be selected for the invite."
+                        ),
+                    )
+                resolved_workspace_id = body.workspace_id
+            if not await workspace_repo.get_workspace_orm(session, resolved_workspace_id):
+                raise HTTPException(
+                    404, detail=f"Workspace '{resolved_workspace_id}' not found",
+                )
+            if not await role_repo.role_is_bindable_in_scope(
+                session, role_name=body.role,
+                binding_scope_type="workspace",
+                binding_scope_id=resolved_workspace_id,
+            ):
+                raise HTTPException(
+                    400,
+                    detail=(
+                        f"Role '{body.role}' cannot be bound in workspace "
+                        f"'{resolved_workspace_id}'."
+                    ),
+                )
+        elif body.workspace_id:
+            raise HTTPException(
+                400,
+                detail=(
+                    f"Role '{body.role}' is global and cannot be "
+                    f"workspace-scoped."
+                ),
+            )
+
+    await _enforce_invite_ceiling(
+        claims, body,
+        resolved_workspace_id=resolved_workspace_id,
+        role_perms=role_perms,
+        role_is_privileged=role_is_privileged,
+    )
+
+    results: list[BulkInviteResult] = []
+    created = 0
+    expires_at = ""
+    seen: set[str] = set()
+
+    for raw in body.emails:
+        addr = (raw or "").strip().lower()
+        if not addr or "@" not in addr or addr.startswith("@") or addr.endswith("@"):
+            results.append(BulkInviteResult(
+                email=raw, outcome="invalid_email",
+                detail="Not a valid email address.",
+            ))
+            continue
+        if addr in seen:
+            results.append(BulkInviteResult(
+                email=addr, outcome="duplicate",
+                detail="Listed more than once.",
+            ))
+            continue
+        seen.add(addr)
+
+        # Someone with an account does not need an invitation, and minting
+        # one would produce a link that can never be redeemed — the signup
+        # path refuses a taken address.
+        if await user_repo.get_user_by_email(session, addr) is not None:
+            results.append(BulkInviteResult(
+                email=addr, outcome="already_a_user",
+                detail="Already has an account.",
+            ))
+            continue
+
+        try:
+            token, expires_at, invite = await _mint_invite(
+                session,
+                created_by=admin.id,
+                role=body.role,
+                workspace_id=resolved_workspace_id,
+                email=addr,
+                email_domain=None,
+                group_ids=resolved_group_ids,
+                shareable_groups_override=False,
+                max_uses=body.max_uses,
+                expires_in_hours=body.expires_in_hours,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bulk invite failed for %s: %s", addr, exc)
+            results.append(BulkInviteResult(
+                email=addr, outcome="failed",
+                detail="Could not create a link for this address.",
+            ))
+            continue
+
+        created += 1
+        results.append(BulkInviteResult(
+            email=addr, outcome="created",
+            inviteToken=token, inviteId=invite.id,
+        ))
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invites_created_bulk",
+        payload={
+            "created": created,
+            "requested": len(body.emails),
+            "role": body.role,
+            "workspace_id": resolved_workspace_id,
+            "group_ids": resolved_group_ids,
+            "created_by": admin.id,
+        },
+    )
+    logger.info(
+        "Bulk invite by %s: %d created of %d requested (role=%s ws=%s)",
+        admin.id, created, len(body.emails), body.role, resolved_workspace_id,
+    )
+    return BulkInviteResponse(
+        created=created,
+        skipped=len(results) - created,
+        results=results,
+        expiresAt=expires_at or invite_expiry(body.expires_in_hours),
+    )
+
+
 async def _load_own_invite(session, invite_id: str, admin, claims):
     """Fetch a link the caller is allowed to act on, else 404.
 
@@ -989,7 +1235,6 @@ async def extend_invite(
     one invitation across two rows and left the redemption history on
     the dead one.
     """
-    from backend.auth_service.core.tokens import invite_expiry
     from backend.app.db.repositories import invite_repo
 
     await _load_own_invite(session, invite_id, admin, claims)
@@ -1043,7 +1288,6 @@ async def regenerate_invite(
     rotation instead of fragmenting into a new one.
     """
     from backend.app.auth.jwt import create_invite_token
-    from backend.auth_service.core.tokens import invite_expiry
     from backend.app.db.repositories import invite_repo
 
     await _load_own_invite(session, invite_id, admin, claims)

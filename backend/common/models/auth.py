@@ -276,6 +276,44 @@ class InviteTokenResponse(BaseModel):
     email_domain: Optional[str] = Field(default=None, alias="emailDomain")
 
 
+class BulkInviteRequest(CreateInviteRequest):
+    """One email-pinned link per address, from the same settings.
+
+    Inherits every rule of a single invite — role, workspace, groups,
+    expiry, seat cap — because a bulk invite IS a single invite repeated,
+    and re-declaring the fields is how the two drift apart.
+
+    ``email`` on the parent is ignored here; ``emails`` supplies it. A
+    pinned link per person, rather than one shared link, is the point:
+    each is separately revocable and separately attributable.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    emails: list[str] = Field(min_length=1, max_length=200)
+
+
+class BulkInviteResult(BaseModel):
+    """What happened for one address."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str
+    #: created | already_a_user | invalid_email | duplicate | failed
+    outcome: str
+    invite_token: Optional[str] = Field(default=None, alias="inviteToken")
+    invite_id: Optional[str] = Field(default=None, alias="inviteId")
+    #: Why it did not produce a link, when it did not.
+    detail: Optional[str] = None
+
+
+class BulkInviteResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    created: int
+    skipped: int
+    results: list[BulkInviteResult]
+    expires_at: str = Field(alias="expiresAt")
+
+
 class RedeemInviteRequest(BaseModel):
     """Apply an invite to the already-authenticated caller — the SSO
     route into an invitation."""

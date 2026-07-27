@@ -21,6 +21,7 @@ import {
 import {
     adminUserService,
     type AdminUserResponse,
+    type BulkInviteResponse,
     type CreateInviteOptions,
     type InviteResponse,
 } from '@/services/adminUserService'
@@ -226,6 +227,7 @@ export function AdminUsers() {
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
+    const [bulkResult, setBulkResult] = useState<BulkInviteResponse | null>(null)
     const inviteLinksEnabled = useFeature('inviteLinksEnabled')
     const [invitesOpen, setInvitesOpen] = useState(false)
 
@@ -448,6 +450,28 @@ export function AdminUsers() {
             setSuccessMsg('Invite link generated')
         } catch (err: any) {
             setError(err.message || 'Failed to create invite')
+        } finally {
+            setInviteLoading(false)
+        }
+    }
+
+    const handleCreateBulkInvites = async (
+        emails: string[],
+        role: string | null,
+        opts: CreateInviteOptions,
+    ) => {
+        setInviteLoading(true)
+        setError(null)
+        try {
+            const resp = await adminUserService.createBulkInvites(emails, role, opts)
+            setBulkResult(resp)
+            setSuccessMsg(
+                resp.created === emails.length
+                    ? `${resp.created} invite links created`
+                    : `${resp.created} of ${emails.length} invite links created`,
+            )
+        } catch (err: any) {
+            setError(err.message || 'Failed to create invites')
         } finally {
             setInviteLoading(false)
         }
@@ -1099,7 +1123,13 @@ export function AdminUsers() {
                                     <ModalHeader icon={Link2} iconBg="bg-accent-lineage/10 border-accent-lineage/20" iconColor="text-accent-lineage"
                                         title="Invite by Link" subtitle="Generate a shareable signup link" onClose={closeModal} />
 
-                                    {inviteResult ? (
+                                    {bulkResult ? (
+                                        <BulkInviteResultList
+                                            result={bulkResult}
+                                            onAnother={() => setBulkResult(null)}
+                                            onClose={closeModal}
+                                        />
+                                    ) : inviteResult ? (
                                         <InviteResultCard
                                             result={inviteResult}
                                             inviteUrl={inviteUrl}
@@ -1114,6 +1144,7 @@ export function AdminUsers() {
                                             loading={inviteLoading}
                                             onCancel={closeModal}
                                             onSubmit={handleCreateInvite}
+                                            onSubmitBulk={handleCreateBulkInvites}
                                         />
                                     )}
                                 </>
@@ -1495,12 +1526,15 @@ interface RoleOption {
 
 
 function InviteForm({
-    canGrantSuperAdmin, loading, onCancel, onSubmit,
+    canGrantSuperAdmin, loading, onCancel, onSubmit, onSubmitBulk,
 }: {
     canGrantSuperAdmin: boolean
     loading: boolean
     onCancel: () => void
     onSubmit: (role: string | null, opts: CreateInviteOptions) => void
+    onSubmitBulk: (
+        emails: string[], role: string | null, opts: CreateInviteOptions,
+    ) => void
 }) {
     const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
@@ -1515,6 +1549,9 @@ function InviteForm({
     // is what every invite used to be.
     const [maxUses, setMaxUses] = useState<number | null>(null)
     const [emailDomain, setEmailDomain] = useState('')
+    // Phase 15: several people at once. Same settings, one pinned link each.
+    const [bulkMode, setBulkMode] = useState(false)
+    const [bulkEmails, setBulkEmails] = useState('')
     // Phase 14: opt-in override for shareable group invites. Default
     // OFF (groups → email required); flips to ON only after the admin
     // explicitly acknowledges the warning. Re-disables automatically
@@ -1569,9 +1606,16 @@ function InviteForm({
     }, [overrideAvailable, allowShareableGroups])
 
     const emailValid = /.+@.+\..+/.test(email.trim())
-    const canSubmit =
-        (!needsWorkspacePick || !!workspaceId)
-        && (!needsEmail || emailValid)
+    // Accept whatever separator someone's source used — a pasted column,
+    // a comma-joined list, a mail client's semicolons.
+    const bulkEmailList = bulkEmails
+        .split(/[\s,;]+/)
+        .map(s => s.trim())
+        .filter(Boolean)
+
+    const canSubmit = bulkMode
+        ? bulkEmailList.length > 0 && (!needsWorkspacePick || !!workspaceId)
+        : (!needsWorkspacePick || !!workspaceId) && (!needsEmail || emailValid)
 
     const expiresInHours = (() => {
         switch (expiresIn) {
@@ -1584,6 +1628,14 @@ function InviteForm({
 
     const submit = () => {
         if (!canSubmit) return
+        if (bulkMode) {
+            onSubmitBulk(bulkEmailList, selectedRole || null, {
+                workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
+                groupIds: hasGroups ? Array.from(selectedGroups) : null,
+                expiresInHours,
+            })
+            return
+        }
         onSubmit(selectedRole || null, {
             workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
             email: email.trim() ? email.trim() : null,
@@ -1989,6 +2041,40 @@ function InviteForm({
                             )}
                         </AnimatePresence>
 
+                        {/* One person or a team, same settings. Bulk mode is a
+                            mode rather than a separate dialog so the role,
+                            workspace, group and expiry pickers above are shared —
+                            a second copy of those is a second thing to keep in
+                            step. Every bulk link comes out pinned to its
+                            recipient, so each is separately revocable and each
+                            redemption is attributable. */}
+                        <div className="flex items-center gap-1.5 mb-2">
+                            {([false, true] as const).map(isBulk => (
+                                <button
+                                    key={String(isBulk)}
+                                    type="button"
+                                    onClick={() => setBulkMode(isBulk)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors',
+                                        bulkMode === isBulk
+                                            ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                            : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
+                                    )}
+                                >
+                                    {isBulk ? 'Several people' : 'One link'}
+                                </button>
+                            ))}
+                        </div>
+
+                        {bulkMode ? (
+                            <textarea
+                                value={bulkEmails}
+                                onChange={e => setBulkEmails(e.target.value)}
+                                rows={5}
+                                placeholder={'alice@company.com\nbob@company.com'}
+                                className="w-full bg-canvas-elevated border border-glass-border focus:border-accent-lineage/40 rounded-xl px-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors font-mono"
+                            />
+                        ) : (
                         <div className="relative group">
                             <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
                                 <AtSign className="w-4 h-4" />
@@ -2006,7 +2092,13 @@ function InviteForm({
                                 )}
                             />
                         </div>
-                        <p className="text-[11px] text-ink-muted mt-1.5">
+                        )}
+                        <p className={cn('text-[11px] text-ink-muted mt-1.5', !bulkMode && 'hidden')}>
+                            {bulkEmailList.length > 0
+                                ? `${bulkEmailList.length} ${bulkEmailList.length === 1 ? 'address' : 'addresses'} — one pinned link each, so every invitation can be revoked and traced on its own.`
+                                : 'One address per line, or separated by commas.'}
+                        </p>
+                        <p className={cn('text-[11px] text-ink-muted mt-1.5', bulkMode && 'hidden')}>
                             {needsEmail
                                 ? "The link will refuse any signup whose email doesn't match."
                                 : overrideActive
@@ -2550,6 +2642,129 @@ function GroupsPicker({
 // A small receipt above the Generate Link button that explains in
 // plain English what the invite will do. Builds entirely from the
 // form's live state so it adapts as the user changes anything.
+/** Per-address outcome of a bulk invite.
+ *
+ *  Every created link is shown in full, because there is no second
+ *  chance to see it — and "Copy all" exists because pasting twenty
+ *  URLs one at a time is the kind of chore that makes people go back
+ *  to one shared link. */
+function BulkInviteResultList({
+    result, onAnother, onClose,
+}: {
+    result: BulkInviteResponse
+    onAnother: () => void
+    onClose: () => void
+}) {
+    const [copiedAll, setCopiedAll] = useState(false)
+    const [copiedOne, setCopiedOne] = useState<string | null>(null)
+
+    const urlFor = (token: string) => `${window.location.origin}/signup?invite=${token}`
+    const created = result.results.filter(r => r.outcome === 'created')
+    const skipped = result.results.filter(r => r.outcome !== 'created')
+
+    const OUTCOME_COPY: Record<string, string> = {
+        already_a_user: 'Already has an account',
+        invalid_email: 'Not a valid address',
+        duplicate: 'Listed more than once',
+        failed: 'Could not be created',
+    }
+
+    return (
+        <div className="p-6 space-y-4">
+            <div className="flex items-center gap-2.5">
+                <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+                <p className="text-sm font-semibold text-ink">
+                    {result.created} {result.created === 1 ? 'link' : 'links'} created
+                    {result.skipped > 0 && (
+                        <span className="text-ink-muted font-normal">
+                            {' '}· {result.skipped} skipped
+                        </span>
+                    )}
+                </p>
+            </div>
+
+            {created.length > 0 && (
+                <>
+                    <button
+                        onClick={async () => {
+                            await navigator.clipboard.writeText(
+                                created.map(r => `${r.email}\t${urlFor(r.inviteToken!)}`).join('\n'),
+                            )
+                            setCopiedAll(true)
+                            setTimeout(() => setCopiedAll(false), 2000)
+                        }}
+                        className="w-full h-10 rounded-xl bg-accent-lineage text-white text-sm font-semibold hover:brightness-110 transition-all flex items-center justify-center gap-2"
+                    >
+                        {copiedAll ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        {copiedAll ? 'Copied' : 'Copy all as email + link'}
+                    </button>
+
+                    <ul className="space-y-1.5 max-h-64 overflow-y-auto">
+                        {created.map(r => (
+                            <li
+                                key={r.email}
+                                className="flex items-center gap-2 text-xs bg-canvas-elevated border border-glass-border rounded-lg px-2.5 py-2"
+                            >
+                                <span className="text-ink font-medium truncate w-40 shrink-0">{r.email}</span>
+                                <code className="flex-1 min-w-0 truncate text-ink-muted">
+                                    {urlFor(r.inviteToken!)}
+                                </code>
+                                <button
+                                    onClick={async () => {
+                                        await navigator.clipboard.writeText(urlFor(r.inviteToken!))
+                                        setCopiedOne(r.email)
+                                        setTimeout(() => setCopiedOne(null), 2000)
+                                    }}
+                                    className="p-1 rounded text-ink-muted hover:text-ink shrink-0"
+                                    title={`Copy ${r.email}'s link`}
+                                >
+                                    {copiedOne === r.email
+                                        ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                        : <Copy className="w-3.5 h-3.5" />}
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                </>
+            )}
+
+            {skipped.length > 0 && (
+                <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted mb-1.5">
+                        Skipped
+                    </p>
+                    <ul className="space-y-1">
+                        {skipped.map((r, i) => (
+                            <li key={`${r.email}-${i}`} className="flex items-center justify-between text-xs">
+                                <span className="text-ink-secondary truncate">{r.email}</span>
+                                <span className="text-ink-muted shrink-0 ml-3">
+                                    {OUTCOME_COPY[r.outcome] ?? r.detail}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+                <button
+                    onClick={onAnother}
+                    className="text-xs font-medium text-ink-secondary hover:text-ink transition-colors"
+                >
+                    Invite more people
+                </button>
+                <button
+                    onClick={onClose}
+                    className="px-4 py-2 rounded-xl text-sm font-medium text-ink border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                    Done
+                </button>
+            </div>
+        </div>
+    )
+}
+
+
 function InviteSummary({
     roleLabel, workspaceName, groupNames, email, emailRequired, shareable, expiresIn,
     maxUses, emailDomain,

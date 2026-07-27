@@ -65,6 +65,22 @@ export interface InviteSummary {
     revokedBy: string | null
 }
 
+/** Phase 15: what happened for one address in a bulk invite. */
+export interface BulkInviteResult {
+    email: string
+    outcome: 'created' | 'already_a_user' | 'invalid_email' | 'duplicate' | 'failed'
+    inviteToken: string | null
+    inviteId: string | null
+    detail: string | null
+}
+
+export interface BulkInviteResponse {
+    created: number
+    skipped: number
+    results: BulkInviteResult[]
+    expiresAt: string
+}
+
 export interface InviteRedemption {
     id: string
     userId: string
@@ -194,6 +210,26 @@ export const adminUserService = {
             `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/revoke`,
             { method: 'POST' },
         )
+    },
+
+    /** One email-pinned link per address, from one set of settings.
+     *  Partial success is normal and reported per row. */
+    createBulkInvites(
+        emails: string[],
+        role: string | null,
+        opts: CreateInviteOptions = {},
+    ): Promise<BulkInviteResponse> {
+        const body: Record<string, unknown> = {
+            emails,
+            expiresInHours: opts.expiresInHours ?? 72,
+        }
+        if (role) body.role = role
+        if (opts.workspaceId) body.workspaceId = opts.workspaceId
+        if (opts.groupIds && opts.groupIds.length > 0) body.groupIds = opts.groupIds
+        return authFetch<BulkInviteResponse>(`${ADMIN_USERS_API}/invite/bulk`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
     },
 
     /** Give a link more time (and optionally more seats). The URL

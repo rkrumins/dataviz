@@ -667,7 +667,7 @@ def test_the_migration_and_the_orm_agree():
     versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
     chain = [
         "20260727_1200_invites.py",
-        "20260727_1400_invite_token_version.py",
+        "20260727_1400_invite_tokenver.py",
     ]
     migrations = []
     for name in chain:

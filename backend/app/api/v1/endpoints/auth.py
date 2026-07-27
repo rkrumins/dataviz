@@ -56,6 +56,19 @@ limiter = Limiter(key_func=get_remote_address)
 #: already invited. The costs are not symmetric in the same direction here.
 INVITE_LINKS_FAIL_OPEN = True
 
+
+def _invite_landing(workspace_id: Optional[str]) -> str:
+    """Where a freshly-invited user lands.
+
+    ``?welcome=invite`` opens the Getting Started hub once. Redemption
+    drops somebody straight into the app who has never seen it before,
+    and a dashboard full of unfamiliar things is a poor first screen.
+    The frontend strips the parameter immediately, so a refresh or a
+    shared URL does not keep re-welcoming them.
+    """
+    base = f"/workspaces/{workspace_id}" if workspace_id else "/"
+    return f"{base}?welcome=invite"
+
 #: Why a link was refused, in words the recipient can act on. "Invalid or
 #: expired" covered four different situations and only one of them means
 #: "ask for a new link" — the others mean "ask the person who sent it".
@@ -609,10 +622,7 @@ async def signup(
                 message="Account created. Welcome aboard.",
                 autoSignedIn=True,
                 user=user_dto,
-                redirectTo=(
-                    f"/workspaces/{invite_workspace_id}"
-                    if invite_workspace_id else "/"
-                ),
+                redirectTo=_invite_landing(invite_workspace_id),
             )
         return SignUpResponse(message="Account created and activated. You can now sign in.")
     else:
@@ -838,10 +848,7 @@ async def redeem_invite(
         message="You're all set.",
         role=resolved.role,
         workspaceId=resolved.workspace_id,
-        redirectTo=(
-            f"/workspaces/{resolved.workspace_id}"
-            if resolved.workspace_id else "/"
-        ),
+        redirectTo=_invite_landing(resolved.workspace_id),
     )
 
 
