@@ -8,19 +8,7 @@
  * Actions (open, favourite, share) float top-right on hover.
  */
 import { Link } from 'react-router-dom'
-import {
-  Heart,
-  Globe,
-  Users,
-  Lock,
-  Box,
-  ExternalLink,
-  Pencil,
-  AlertTriangle,
-  Check,
-  RotateCcw,
-  Trash2,
-} from 'lucide-react'
+import { Heart, Box, ExternalLink, Pencil, AlertTriangle, Check, RotateCcw, Trash2 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
@@ -31,6 +19,7 @@ import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { VISIBILITY_META as VIS_META, grantedByCopy } from '@/types/viewVisibility'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -55,11 +44,8 @@ function tagColor(tag: string) {
   return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]
 }
 
-const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> = {
-  enterprise: { icon: Globe, label: 'Enterprise' },
-  workspace: { icon: Users, label: 'Workspace' },
-  private: { icon: Lock, label: 'Private' },
-}
+const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> =
+  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, { icon: m.icon, label: m.label }]))
 
 const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
   warning: { color: 'text-amber-500', tooltip: 'Data source may have changed' },
@@ -131,6 +117,8 @@ function MiniPreview({ viewType }: { viewType: string }) {
 // ─── Props ───────────────────────────────────────────────────────
 export interface ExplorerViewCardProps {
   view: View
+  /** Mirrors view_access.can_change_visibility; hides the tier submenu. */
+  canChangeVisibility?: boolean
   onToggleFavourite: () => void
   onShare: () => void
   onPreview?: () => void
@@ -163,6 +151,7 @@ function initials(name?: string): string {
 // ─── Component ───────────────────────────────────────────────────
 export function ExplorerViewCard({
   view,
+  canChangeVisibility,
   onToggleFavourite,
   onShare,
   onPreview,
@@ -360,6 +349,7 @@ export function ExplorerViewCard({
             editDisabled={editDisabled}
             onDelete={() => onDelete?.()}
             onShare={onShare}
+            canChangeVisibility={canChangeVisibility}
           />
             </>
           )}
@@ -393,7 +383,10 @@ export function ExplorerViewCard({
             providerType={providerInfo?.providerType}
             hideWorkspace={hideWorkspaceInScope}
           />
-          <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
+          <span
+            className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
+            title={grantedByCopy(view.grantedBy) ?? vis.label}
+          >
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}
           </span>

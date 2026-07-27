@@ -108,3 +108,28 @@ export function isWidening(from: unknown, to: unknown): boolean {
     const b = VISIBILITY_ORDER.indexOf(isViewVisibility(to) ? to : DEFAULT_VISIBILITY)
     return b > a
 }
+
+/**
+ * Why a given caller can see a given view. Mirrors
+ * `backend/app/services/view_access.py: ReadReason`, stamped per-caller on
+ * `View.grantedBy`.
+ *
+ * This exists because nothing in the product could answer "why can I see
+ * this view?" — which is why a visibility leak took a code audit to
+ * diagnose rather than a glance at a tooltip.
+ */
+export const GRANTED_BY_COPY: Record<string, string> = {
+    'creator': 'You created this view',
+    'grant': 'Shared with you directly',
+    'workspace-admin': 'You administer this view’s workspace',
+    'system-admin': 'You’re a platform administrator',
+    'tier:workspace': 'Shared with this view’s workspace',
+    'tier:enterprise': 'Shared with the whole organisation',
+    'tier:public': 'Shared with everyone on the platform',
+}
+
+/** Human sentence for a `grantedBy` value, or null when it's absent. */
+export function grantedByCopy(reason: unknown): string | null {
+    if (typeof reason !== 'string') return null
+    return GRANTED_BY_COPY[reason] ?? null
+}

@@ -29,7 +29,7 @@ const CATEGORY_HINTS: Record<string, string> = {
   'my-views': "You haven't created any views yet. Save a view from a workspace to see it here.",
   'my-favourites': "You haven't favorited any views yet. Click the star on any view to add it to your favorites.",
   'recently-added': 'No views have been created in the last 7 days.',
-  'shared-with-me': 'No views have been shared at workspace or enterprise level.',
+  'shared-with-me': 'Nobody has shared a view with you yet.',
   'needs-attention': 'All views are healthy — no broken or stale views found.',
   'deleted': 'No deleted views found. Deleted views appear here for 30 days before permanent removal.',
 }

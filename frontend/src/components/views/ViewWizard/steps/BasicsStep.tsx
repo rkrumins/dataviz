@@ -6,25 +6,7 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
-import {
-    Layout,
-    Network,
-    Layers,
-    BarChart3,
-    GitBranch,
-    Workflow,
-    Database,
-    Box,
-    Sparkles,
-    Lock,
-    Users,
-    Globe,
-    X,
-    Plus,
-    AlertTriangle,
-    Check,
-    Loader2,
-} from 'lucide-react'
+import { Layout, Network, Layers, BarChart3, GitBranch, Workflow, Database, Box, Sparkles, X, Plus, AlertTriangle, Check, Loader2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -33,6 +15,7 @@ import { checkBlankGraphName } from '@/services/versioningApiService'
 import { GRAPH_NAME_RE, slugifyGraphName } from '../blankModel'
 import { buildNameSuggestions } from '../nameSuggestions'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
 
 // ============================================
 // Types
@@ -69,26 +52,12 @@ const ICON_OPTIONS = [
 // Component
 // ============================================
 
-const VISIBILITY_OPTIONS = [
-    {
-        id: 'private' as const,
-        label: 'Private',
-        description: 'Only you can see this view',
-        icon: Lock,
-    },
-    {
-        id: 'workspace' as const,
-        label: 'Workspace',
-        description: 'All members of this workspace',
-        icon: Users,
-    },
-    {
-        id: 'enterprise' as const,
-        label: 'Enterprise',
-        description: 'Anyone in the organization',
-        icon: Globe,
-    },
-]
+const VISIBILITY_OPTIONS = VISIBILITY_ORDER.map(id => ({
+    id,
+    label: VISIBILITY_META[id].label,
+    description: VISIBILITY_META[id].description,
+    icon: VISIBILITY_META[id].icon,
+}))
 
 export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)

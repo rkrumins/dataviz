@@ -1,20 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import {
-  Heart,
-  Link2,
-  Globe,
-  Users,
-  Lock,
-  Box,
-  Database,
-  ExternalLink,
-  Pencil,
-  Check,
-  Trash2,
-  RotateCcw,
-  History,
-} from 'lucide-react'
+import { Heart, Link2, Lock, Box, Database, ExternalLink, Pencil, Check, Trash2, RotateCcw, History } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
@@ -24,6 +10,7 @@ import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -33,11 +20,8 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 // lib/viewUtils. Do not reintroduce a local map (that drift is what made the
 // recents strip show a different icon/colour for the same view).
 
-const VISIBILITY_ICON: Record<string, React.ElementType> = {
-  enterprise: Globe,
-  workspace: Users,
-  private: Lock,
-}
+const VISIBILITY_ICON: Record<string, React.ElementType> =
+  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, m.icon]))
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */

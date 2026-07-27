@@ -39,6 +39,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
+import { BulkVisibilityConfirmDialog } from '@/components/explorer/BulkVisibilityConfirmDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
@@ -49,6 +50,7 @@ import { AggregationProgressBanner } from '@/components/explorer/AggregationProg
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
+import { VISIBILITY_META, isWidening } from '@/types/viewVisibility'
 import type { ViewVisibility } from '@/types/viewVisibility'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -171,6 +173,9 @@ export function ExplorerPage() {
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
+  const [bulkVisibilityConfirm, setBulkVisibilityConfirm] = useState<
+    { visibility: ViewVisibility; count: number; widening: number } | null
+  >(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   
   // no-op callback for aggregation banner (informational only — no longer gates view creation)
@@ -389,6 +394,19 @@ export function ExplorerPage() {
     return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
   }, [currentUser?.id])
 
+  // BE rule (view_access.can_change_visibility): creator OR
+  // workspace:admin on the view's workspace. There was no client-side
+  // mirror of this at all, so the tier selector rendered on every card
+  // for every user and only failed on save.
+  //
+  // Not memoized: it reads the auth store imperatively, which the React
+  // Compiler cannot see through, and a plain predicate over two fields is
+  // cheaper than the memo would be anyway.
+  const canChangeVisibility = (view: View): boolean => {
+    if (currentUser?.id && view.createdBy === currentUser.id) return true
+    return useAuthStore.getState().can('workspace:admin', view.workspaceId)
+  }
+
   const handleDeleteRequest = useCallback((view: View) => {
     if (!canDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
@@ -446,19 +464,49 @@ export function ExplorerPage() {
     showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
   }, [selectedIds, removeViewFromList, showToast])
 
+  /** Fan out the change and report per-view outcomes, not a shrug. */
+  const applyBulkVisibility = useCallback(async (
+    visibility: ViewVisibility, ids: string[], count: number,
+  ) => {
+    const results = await Promise.allSettled(
+      ids.map(id => updateViewVisibility(id, visibility)),
+    )
+    const failed = results.filter(r => r.status === 'rejected').length
+    setSelectedIds(new Set())
+    setBulkVisibilityConfirm(null)
+    refetch()
+    const label = VISIBILITY_META[visibility].label
+    if (failed === 0) {
+      showToast('success', `Set ${count} view${count !== 1 ? 's' : ''} to ${label}`)
+    } else if (failed === count) {
+      showToast('error', `Could not change visibility on any of the ${count} views`)
+    } else {
+      showToast(
+        'warning',
+        `Set ${count - failed} of ${count} views to ${label}; ${failed} failed`,
+      )
+    }
+  }, [showToast, refetch])
+
   const handleBulkVisibility = useCallback(async (visibility: ViewVisibility) => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
     const count = ids.length
-    try {
-      await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
-      setSelectedIds(new Set())
-      refetch()
-      showToast('success', `Updated visibility to "${visibility}" for ${count} view${count !== 1 ? 's' : ''}`)
-    } catch {
-      showToast('error', 'Some views could not be updated')
+
+    // Widening in bulk deserves a beat of friction: this is the one
+    // gesture that can expose N views to the whole organisation in a
+    // single click, and it used to do so with no confirmation and a
+    // shrug ("Some views could not be updated") on partial failure.
+    const widening = views.filter(
+      v => ids.includes(v.id) && isWidening(v.visibility, visibility),
+    )
+    if (widening.length > 0) {
+      setBulkVisibilityConfirm({ visibility, count, widening: widening.length })
+      return
     }
-  }, [selectedIds, showToast, refetch])
+    await applyBulkVisibility(visibility, ids, count)
+  }, [selectedIds, views, applyBulkVisibility])
+
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -704,6 +752,7 @@ export function ExplorerPage() {
                     onEditLayout={() => openViewEditor(v.id)}
                     editDisabled={false}
                     onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
+                    canChangeVisibility={canChangeVisibility(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     onTagClick={handleTagClick}
@@ -792,6 +841,7 @@ export function ExplorerPage() {
                       onEditLayout={() => openViewEditor(v.id)}
                       editDisabled={false}
                       onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
+                    canChangeVisibility={canChangeVisibility(v)}
                       onRestore={() => handleRestore(v)}
                       onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                       onTagClick={handleTagClick}
@@ -892,6 +942,21 @@ export function ExplorerPage() {
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}
         permanent={parsed.category === 'deleted'}
+      />
+      <BulkVisibilityConfirmDialog
+        isOpen={bulkVisibilityConfirm !== null}
+        visibility={bulkVisibilityConfirm?.visibility ?? 'private'}
+        count={bulkVisibilityConfirm?.count ?? 0}
+        wideningCount={bulkVisibilityConfirm?.widening ?? 0}
+        onCancel={() => setBulkVisibilityConfirm(null)}
+        onConfirm={() => {
+          if (!bulkVisibilityConfirm) return
+          void applyBulkVisibility(
+            bulkVisibilityConfirm.visibility,
+            Array.from(selectedIds),
+            bulkVisibilityConfirm.count,
+          )
+        }}
       />
       <KeyboardShortcutsDialog
         isOpen={shortcutsOpen}

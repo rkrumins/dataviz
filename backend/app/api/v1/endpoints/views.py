@@ -46,7 +46,7 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_repo
 from backend.app.db.repositories import view_activity_repo
-from backend.app.db.repositories import grant_repo, user_repo
+from backend.app.db.repositories import binding_repo, grant_repo, user_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
@@ -57,6 +57,7 @@ from backend.auth_service.interface import User
 from backend.common.view_visibility import (
     DEFAULT_VISIBILITY,
     VISIBILITY_VALUES,
+    ViewVisibility,
     is_valid_visibility,
 )
 from backend.common.models.management import (
@@ -368,6 +369,15 @@ async def get_view_stats(
     search: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     favourited_only: bool = Query(False, alias="favouritedOnly"),
+    shared_with_me: bool = Query(
+        False,
+        alias="sharedWithMe",
+        description=(
+            "Only views explicitly shared with the caller via resource_grants "
+            "(directly or through a group). Distinct from a visibility filter: "
+            "a team-wide view nobody shared is not 'shared with me'."
+        ),
+    ),
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
@@ -405,6 +415,7 @@ async def get_view_stats(
         tags=tags,
         user_id=_user_id(user),
         favourited_only=favourited_only,
+        shared_with_me=shared_with_me,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
@@ -437,6 +448,15 @@ async def list_views(
     limit: int = Query(50, le=200),
     offset: int = Query(0),
     favourited_only: bool = Query(False, alias="favouritedOnly"),
+    shared_with_me: bool = Query(
+        False,
+        alias="sharedWithMe",
+        description=(
+            "Only views explicitly shared with the caller via resource_grants "
+            "(directly or through a group). Distinct from a visibility filter: "
+            "a team-wide view nobody shared is not 'shared with me'."
+        ),
+    ),
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
@@ -501,6 +521,7 @@ async def list_views(
         offset=offset,
         user_id=_user_id(user),
         favourited_only=favourited_only,
+        shared_with_me=shared_with_me,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
@@ -834,6 +855,99 @@ async def update_view_visibility(
             actor=_user_id(user),
         )
     return view
+
+
+class VisibilityPreviewResponse(BaseModel):
+    """Who would gain access if this view moved to ``tier``."""
+    model_config = ConfigDict(populate_by_name=True)
+    tier: str
+    #: How many principals reach the view at this tier but not at its
+    #: current one. ``None`` for tiers whose audience is unbounded.
+    added_count: Optional[int] = Field(None, alias="addedCount")
+    #: A few of them, for the "…and 42 others" line.
+    sample: List[str] = Field(default_factory=list)
+    #: Plain-English audience, for when a count is meaningless.
+    reach: str = ""
+    widening: bool = False
+
+
+@router.get(
+    "/{view_id}/visibility-preview",
+    response_model=VisibilityPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_visibility(
+    view_id: str = Path(...),
+    tier: str = Query(..., description="The tier being considered."),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> VisibilityPreviewResponse:
+    """Answer "who will be able to see this?" *before* the tier is applied.
+
+    Promotion is a one-click action whose blast radius is otherwise
+    invisible, which is how views end up over-shared: the person choosing
+    "Enterprise" has no way to know whether that means nine colleagues or
+    nine hundred. This is the read predicate inverted — given a view and a
+    target tier, who reaches it there who does not reach it now.
+
+    Counting stops at the workspace tier. ``enterprise`` and ``public``
+    are answered with prose rather than a number: both are unbounded
+    audiences, and a precise headcount of everyone in the organisation is
+    both expensive and, for a caller who may not administer those
+    workspaces, a directory disclosure in its own right.
+    """
+    if not is_valid_visibility(tier):
+        raise HTTPException(
+            status_code=422,
+            detail=f"tier must be one of: {', '.join(VISIBILITY_VALUES)}",
+        )
+
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    current = view_orm.visibility or DEFAULT_VISIBILITY
+    order = VISIBILITY_VALUES
+    widening = order.index(tier) > order.index(current) if is_valid_visibility(current) else True
+
+    if tier in (ViewVisibility.PRIVATE.value, ViewVisibility.WORKSPACE.value):
+        bindings = await binding_repo.list_for_scope(
+            session, scope_type="workspace", scope_id=view_orm.workspace_id,
+        )
+        subjects = {(b.subject_type, b.subject_id) for b in bindings}
+        user_ids = [sid for kind, sid in subjects if kind == "user"]
+        names = await view_repo.resolve_user_ids(session, set(user_ids))
+        labels = sorted(
+            names.get(uid, (uid, None))[0] or uid for uid in user_ids
+        )
+        group_count = sum(1 for kind, _ in subjects if kind == "group")
+        if tier == ViewVisibility.PRIVATE.value:
+            # Only the creator and admins of the workspace.
+            return VisibilityPreviewResponse(
+                tier=tier, added_count=0, sample=[],
+                reach="you, anyone you share it with, and this workspace's admins",
+                widening=widening,
+            )
+        return VisibilityPreviewResponse(
+            tier=tier,
+            added_count=len(labels) + group_count,
+            sample=labels[:5],
+            reach=f"everyone with access to {view_orm.workspace_id}",
+            widening=widening,
+        )
+
+    reach = (
+        "everyone in the organisation — including people who are not in "
+        "this workspace"
+        if tier == ViewVisibility.ENTERPRISE.value
+        else "every signed-in account on the platform, including people "
+             "with no workspace access at all"
+    )
+    return VisibilityPreviewResponse(
+        tier=tier, added_count=None, sample=[], reach=reach, widening=widening,
+    )
 
 
 @router.post("/{view_id}/favourite", status_code=201)

@@ -232,6 +232,12 @@ class ViewServiceImpl {
                 visibleRelationshipTypes: sourceView.content.visibleRelationshipTypes,
                 workspaceId,
                 dataSourceId,
+                // Explicitly private, not inherited. A copy starts narrow and
+                // is widened deliberately; silently carrying the source's tier
+                // would re-share the copy with everyone the original reached.
+                // This was already the behaviour, by omission — now it's a
+                // decision rather than an accident.
+                visibility: 'private',
             })
         } catch (error) {
             return { success: false, error: (error as Error).message }

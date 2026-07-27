@@ -9,15 +9,13 @@
  * keep a busy history scannable. Backed by ``useViewActivity``.
  */
 import { useMemo, useState } from 'react'
-import {
-    Plus, Pencil, Eye, Lock, Users, Globe, Share2, UserMinus, Heart, HeartOff,
-    Trash2, RotateCcw, Clock, History, Database,
-} from 'lucide-react'
+import { Plus, Pencil, Eye, Share2, UserMinus, Heart, HeartOff, Trash2, RotateCcw, Clock, History, Database } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useViewActivity } from '@/hooks/useViewActivity'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import type { ViewActivityEntry, ViewActivityAction } from '@/services/viewApiService'
+import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
 
 type Channel = 'data' | 'settings' | 'sharing'
 
@@ -41,7 +39,8 @@ const CHANNELS: { key: Channel | 'all'; label: string }[] = [
     { key: 'sharing', label: 'Sharing' },
 ]
 
-const VIS_ICON: Record<string, React.ElementType> = { private: Lock, workspace: Users, enterprise: Globe }
+const VIS_ICON: Record<string, React.ElementType> =
+  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, m.icon]))
 
 function initials(name: string | null): string {
     if (!name) return '·'

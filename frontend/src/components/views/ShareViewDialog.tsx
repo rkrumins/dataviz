@@ -20,7 +20,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { updateViewVisibility } from '@/services/viewApiService'
+import { previewVisibility, updateViewVisibility } from '@/services/viewApiService'
+import type { VisibilityPreview } from '@/services/viewApiService'
 import {
     viewGrantsService,
     type ViewGrantResponse,
@@ -118,6 +119,23 @@ export function ShareViewDialog({
         setCopied(true)
         setTimeout(() => setCopied(false), 2000)
     }, [shareUrl])
+
+    // "Who will be able to see this?" for the tier under the cursor —
+    // fetched on hover/focus rather than on click, so the answer is on
+    // screen BEFORE the decision, not after it.
+    const [preview, setPreview] = useState<VisibilityPreview | null>(null)
+    const [previewFor, setPreviewFor] = useState<ViewVisibility | null>(null)
+
+    const loadPreview = useCallback((tier: ViewVisibility) => {
+        if (tier === visibility) { setPreviewFor(null); setPreview(null); return }
+        setPreviewFor(tier)
+        setPreview(null)
+        void previewVisibility(viewId, tier)
+            .then(p => setPreview(p))
+            // A failed preview must never block the change itself; the
+            // dialog just falls back to the static description.
+            .catch(() => setPreview(null))
+    }, [viewId, visibility])
 
     const handleVisibilityChange = useCallback(async (newVisibility: typeof visibility) => {
         const prev = visibility
@@ -249,6 +267,9 @@ export function ShareViewDialog({
                                         <button
                                             key={id}
                                             onClick={() => void handleVisibilityChange(id)}
+                                            onMouseEnter={() => loadPreview(id)}
+                                            onFocus={() => loadPreview(id)}
+                                            onMouseLeave={() => { setPreviewFor(null); setPreview(null) }}
                                             disabled={savingVisibility}
                                             className={cn(
                                                 'w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-colors duration-150 text-left',
@@ -394,7 +415,21 @@ export function ShareViewDialog({
                     {/* Footer */}
                     <div className="px-6 py-3 border-t border-glass-border bg-glass-base/20 shrink-0">
                         <p className="text-[11px] text-ink-muted text-center leading-relaxed">
-                            {`Can access: ${VISIBILITY_META[visibility].reach}.`}
+                            {previewFor && preview
+                                ? (
+                                    <span className={preview.widening ? 'text-amber-600 dark:text-amber-400' : undefined}>
+                                        {preview.widening ? 'Would widen to: ' : 'Would narrow to: '}
+                                        {preview.reach}
+                                        {preview.addedCount !== null && preview.addedCount > 0 && (
+                                            <>
+                                                {' — '}
+                                                {preview.addedCount} {preview.addedCount === 1 ? 'person' : 'people'}
+                                                {preview.sample.length > 0 && ` (${preview.sample.slice(0, 3).join(', ')}${preview.addedCount > 3 ? ', …' : ''})`}
+                                            </>
+                                        )}
+                                    </span>
+                                )
+                                : `Can access: ${VISIBILITY_META[visibility].reach}.`}
                             {grants && grants.length > 0 && (
                                 <> Plus <span className="font-semibold text-ink-secondary">{grants.length} explicit share{grants.length !== 1 ? 's' : ''}</span>.</>
                             )}

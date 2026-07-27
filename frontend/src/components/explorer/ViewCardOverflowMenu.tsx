@@ -3,10 +3,12 @@
  * lifecycle actions: Delete, Change Visibility, Share.
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, History, Settings2 } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import { useToast } from '@/components/ui/toast'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
 import type { ViewVisibility } from '@/types/viewVisibility'
 
 interface ViewCardOverflowMenuProps {
@@ -20,6 +22,13 @@ interface ViewCardOverflowMenuProps {
   onDelete: () => void
   onShare: () => void
   onVisibilityChange?: (visibility: ViewVisibility) => void
+  /**
+   * Mirrors view_access.can_change_visibility (creator OR workspace admin).
+   * Defaults to true so existing callers are unchanged; ExplorerPage
+   * computes it. Without this the tier submenu rendered for everyone and
+   * only failed on save.
+   */
+  canChangeVisibility?: boolean
 }
 
 export function ViewCardOverflowMenu({
@@ -32,7 +41,9 @@ export function ViewCardOverflowMenu({
   onDelete,
   onShare,
   onVisibilityChange,
+  canChangeVisibility = true,
 }: ViewCardOverflowMenuProps) {
+  const toast = useToast()
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
@@ -56,17 +67,25 @@ export function ViewCardOverflowMenu({
       await updateViewVisibility(viewId, newVisibility)
       onVisibilityChange?.(newVisibility)
     } catch (err) {
+      // Was console.error only — the menu closed and the card kept showing
+      // the old tier, so a failed change looked like a successful one.
       console.error('Failed to update visibility:', err)
+      toast.showToast(
+        'error',
+        err instanceof Error
+          ? `Could not change visibility: ${err.message}`
+          : 'Could not change visibility',
+      )
     }
     setIsOpen(false)
     setVisibilitySubmenu(false)
-  }, [viewId, onVisibilityChange])
+  }, [viewId, onVisibilityChange, toast])
 
-  const VISIBILITY_OPTIONS = [
-    { id: 'private' as const, label: 'Private', icon: Lock },
-    { id: 'workspace' as const, label: 'Workspace', icon: Users },
-    { id: 'enterprise' as const, label: 'Enterprise', icon: Globe },
-  ]
+  const VISIBILITY_OPTIONS = VISIBILITY_ORDER.map(id => ({
+    id,
+    label: VISIBILITY_META[id].label,
+    icon: VISIBILITY_META[id].icon as React.ElementType,
+  }))
 
   return (
     <div ref={menuRef} className="relative">
@@ -133,14 +152,16 @@ export function ViewCardOverflowMenu({
                 <Share2 className="w-3.5 h-3.5" />
                 Share
               </button>
-              <button
-                onClick={() => setVisibilitySubmenu(true)}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
-                style={{ width: 'calc(100% - 4px)' }}
-              >
-                <Eye className="w-3.5 h-3.5" />
-                Change Visibility
-              </button>
+              {canChangeVisibility && (
+                <button
+                  onClick={() => setVisibilitySubmenu(true)}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Change Visibility
+                </button>
+              )}
               <button
                 onClick={() => { setActivityOpen(true); setIsOpen(false) }}
                 className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"

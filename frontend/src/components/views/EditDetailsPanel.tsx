@@ -12,10 +12,11 @@
  * had silently drifted between surfaces.
  */
 import { useState } from 'react'
-import { Save, Settings2, Check, Lock, Users, Globe, X, ChevronRight } from 'lucide-react'
+import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
 import { updateView, type View as ViewT } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
 
 /**
  * EditDetailsPanel — lightweight in-drawer form for a view's metadata
@@ -74,11 +75,12 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
     }
   }
 
-  const VIS = [
-    { value: 'private', icon: Lock, label: 'Private', desc: 'Only you can see it' },
-    { value: 'workspace', icon: Users, label: 'Workspace', desc: 'Everyone in this workspace' },
-    { value: 'enterprise', icon: Globe, label: 'Enterprise', desc: 'Everyone in the organisation' },
-  ] as const
+  const VIS = VISIBILITY_ORDER.map(value => ({
+    value,
+    icon: VISIBILITY_META[value].icon,
+    label: VISIBILITY_META[value].label,
+    desc: VISIBILITY_META[value].description,
+  }))
 
   const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-1.5'
   const inputCls = 'w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage/40 transition-shadow'

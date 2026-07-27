@@ -931,6 +931,7 @@ def _apply_view_filters(
     tags: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
+    shared_with_me: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
@@ -952,6 +953,15 @@ def _apply_view_filters(
     view-returning function stops taking a scope.
     """
     query = query.where(readable_views_predicate(scope))
+
+    # "Shared with me" means someone explicitly shared it — a row in
+    # ``resource_grants`` naming this caller or one of their groups. The
+    # Explorer used to approximate it as "visibility in (workspace,
+    # enterprise)", which is a tier filter: it showed every team view
+    # nobody had shared with anyone, and hid a private view genuinely
+    # shared with the caller.
+    if shared_with_me:
+        query = query.where(ViewORM.id.in_(list(scope.grant_view_ids) or [""]))
 
     # Soft-delete filtering
     if deleted_only:
@@ -1208,6 +1218,7 @@ async def list_views_filtered(
     limit: int = 50,
     offset: int = 0,
     user_id: Optional[str] = None,
+    shared_with_me: bool = False,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
@@ -1244,6 +1255,7 @@ async def list_views_filtered(
         tags=tags,
         user_id=user_id,
         favourited_only=favourited_only,
+        shared_with_me=shared_with_me,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
@@ -1410,6 +1422,7 @@ async def get_view_stats(
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
     user_id: Optional[str] = None,
+    shared_with_me: bool = False,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
@@ -1444,6 +1457,7 @@ async def get_view_stats(
         tags=tags,
         user_id=user_id,
         favourited_only=favourited_only,
+        shared_with_me=shared_with_me,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         # Respect an incoming ``attention_only`` on the base queries so

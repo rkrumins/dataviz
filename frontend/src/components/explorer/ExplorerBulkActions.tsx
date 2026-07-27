@@ -2,8 +2,9 @@
  * ExplorerBulkActions — Floating action bar shown when views are selected.
  */
 import { useState, useRef, useEffect } from 'react'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, Eye, X, Globe, Users, Lock, ChevronDown } from 'lucide-react'
+import { Trash2, Eye, X, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ViewVisibility } from '@/types/viewVisibility'
 
@@ -17,16 +18,14 @@ interface ExplorerBulkActionsProps {
   onClearSelection: () => void
 }
 
-const VISIBILITY_OPTIONS: Array<{
-  value: ViewVisibility
-  label: string
-  icon: React.ElementType
-  description: string
-}> = [
-  { value: 'enterprise', label: 'Enterprise', icon: Globe, description: 'Visible to everyone' },
-  { value: 'workspace', label: 'Workspace', icon: Users, description: 'Visible to workspace members' },
-  { value: 'private', label: 'Private', icon: Lock, description: 'Only visible to you' },
-]
+const VISIBILITY_OPTIONS: Array<{ value: ViewVisibility; label: string; icon: React.ElementType; description: string }> =
+    VISIBILITY_ORDER.map(value => ({
+        value,
+        label: VISIBILITY_META[value].label,
+        icon: VISIBILITY_META[value].icon,
+        description: VISIBILITY_META[value].description,
+    }))
+
 
 export function ExplorerBulkActions({
   selectedCount,

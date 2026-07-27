@@ -14,31 +14,14 @@
  */
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import {
-  Layers,
-  LayoutGrid,
-  Star,
-  Clock,
-  Share2,
-  AlertTriangle,
-  Users,
-  Globe,
-  Lock,
-  X,
-  ChevronDown,
-  Check,
-  Database,
-  Trash2,
-  Tag,
-  Shapes,
-  UserCircle,
-} from 'lucide-react'
+import { Layers, LayoutGrid, Star, Clock, Share2, AlertTriangle, Users, Globe, X, ChevronDown, Check, Database, Trash2, Tag, Shapes, UserCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { viewTypeLabel, viewTypeColor, viewTypeIconComponent } from '@/lib/viewUtils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewFacets } from '@/hooks/useViewFacets'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 import { FilterDropdown, type FilterOption } from './FilterDropdown'
+import { VISIBILITY_META, VISIBILITY_ORDER } from '@/types/viewVisibility'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -75,12 +58,16 @@ const CATEGORIES = [
   { key: 'deleted', label: 'Deleted', icon: Trash2 },
 ] as const
 
+// Widest → narrowest here (the reverse of the setter lists): a filter
+// reads as "show me at least this much reach".
 const VISIBILITY_OPTIONS = [
-  { key: null, label: 'Any visibility', icon: Layers },
-  { key: 'enterprise', label: 'Enterprise', icon: Globe },
-  { key: 'workspace', label: 'Workspace', icon: Users },
-  { key: 'private', label: 'Private', icon: Lock },
-] as const
+  { key: null as string | null, label: 'Any visibility', icon: Layers },
+  ...[...VISIBILITY_ORDER].reverse().map(key => ({
+    key: key as string | null,
+    label: VISIBILITY_META[key].label,
+    icon: VISIBILITY_META[key].icon,
+  })),
+]
 
 // Per-view-type icon + colour + label come from the SHARED resolver in
 // lib/viewUtils — no local copy (see viewTypeMeta/viewTypeLabel).

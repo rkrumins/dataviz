@@ -104,6 +104,12 @@ export interface ViewListParams {
     workspaceId?: string
     /** Multi-workspace filter; wins over single ``workspaceId`` when both are set. */
     workspaceIds?: string[]
+    /**
+     * Views explicitly shared with the caller via resource_grants. NOT a
+     * visibility filter — a team-wide view nobody shared is not "shared
+     * with me".
+     */
+    sharedWithMe?: boolean
     contextModelId?: string
     dataSourceId?: string
     viewType?: string
@@ -248,6 +254,7 @@ export async function listViews(
     } else if (params?.workspaceId) {
         sp.set('workspaceId', params.workspaceId)
     }
+    if (params?.sharedWithMe) sp.set('sharedWithMe', 'true')
     if (params?.contextModelId) sp.set('contextModelId', params.contextModelId)
     if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
     if (params?.viewTypes && params.viewTypes.length > 0) {
@@ -315,6 +322,7 @@ export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalo
     } else if (params?.workspaceId) {
         sp.set('workspaceId', params.workspaceId)
     }
+    if (params?.sharedWithMe) sp.set('sharedWithMe', 'true')
     if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
     if (params?.viewTypes && params.viewTypes.length > 0) {
         params.viewTypes.forEach(v => sp.append('viewTypes', v))
@@ -610,4 +618,31 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         createdAt: view.createdAt,
         updatedAt: view.updatedAt,
     }
+}
+
+
+/**
+ * "Who will be able to see this?" for a tier the user is considering.
+ *
+ * Promotion is otherwise a one-click action with an invisible blast
+ * radius — the person picking "Enterprise" has no way to know whether it
+ * means nine colleagues or nine hundred.
+ */
+export interface VisibilityPreview {
+    tier: ViewVisibility
+    /** Principals who'd gain access. Null when the audience is unbounded. */
+    addedCount: number | null
+    sample: string[]
+    reach: string
+    widening: boolean
+}
+
+export async function previewVisibility(
+    viewId: string, tier: ViewVisibility, signal?: AbortSignal,
+): Promise<VisibilityPreview> {
+    return apiFetch<VisibilityPreview>(
+        `/api/v1/views/${encodeURIComponent(viewId)}/visibility-preview`
+        + `?tier=${encodeURIComponent(tier)}`,
+        { signal },
+    )
 }

@@ -6,27 +6,12 @@
 
 
 import { motion } from 'framer-motion'
-import {
-    Layout,
-    Layers,
-    Network,
-    ListTree,
-    LayoutTemplate,
-    Box,
-    GitBranch,
-    Check,
-    Sparkles,
-    Lock,
-    Users,
-    Globe,
-    Tag,
-    Server,
-    Database
-} from 'lucide-react'
+import { Layout, Layers, Network, ListTree, LayoutTemplate, Box, GitBranch, Check, Sparkles, Lock, Tag, Server, Database } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { slugifyGraphName } from '../blankModel'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
+import { VISIBILITY_META as SHARED_VISIBILITY_META, VISIBILITY_ORDER, type ViewVisibility } from '@/types/viewVisibility'
 
 // ============================================
 // Types
@@ -42,11 +27,15 @@ interface PreviewStepProps {
 // Component
 // ============================================
 
-const VISIBILITY_META = {
-    private: { label: 'Private', icon: Lock, color: 'slate' },
-    workspace: { label: 'Workspace', icon: Users, color: 'blue' },
-    enterprise: { label: 'Enterprise', icon: Globe, color: 'green' },
-} as const
+// Label + icon come from the shared tier definitions; only the accent
+// colour is local to this step's palette.
+const VISIBILITY_BADGE = Object.fromEntries(
+    VISIBILITY_ORDER.map(tier => [tier, {
+        label: SHARED_VISIBILITY_META[tier].label,
+        icon: SHARED_VISIBILITY_META[tier].icon,
+        color: SHARED_VISIBILITY_META[tier].accent,
+    }]),
+) as Record<ViewVisibility, { label: string; icon: typeof Lock; color: string }>
 
 export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
@@ -265,14 +254,14 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
                                 {(() => {
-                                    const V = VISIBILITY_META[formData.visibility]
+                                    const V = VISIBILITY_BADGE[formData.visibility]
                                     return <V.icon className="w-5 h-5" />
                                 })()}
                             </div>
                             <div className="flex-1">
                                 <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Sharing</p>
                                 <p className="font-semibold text-slate-800 dark:text-slate-200">
-                                    {VISIBILITY_META[formData.visibility].label}
+                                    {VISIBILITY_BADGE[formData.visibility].label}
                                 </p>
                             </div>
                             <Check className="w-5 h-5 text-green-500" />

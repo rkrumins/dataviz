@@ -170,7 +170,11 @@ export function resolveCategoryParams(
       return { createdAfter: sevenDaysAgo.toISOString() }
     }
     case 'shared-with-me':
-      return { visibilityIn: ['workspace', 'enterprise'] }
+      // Was `visibilityIn: ['workspace', 'enterprise']` — a TIER filter
+      // wearing a sharing label. It listed every team-wide view nobody had
+      // shared with anyone, and omitted a private view genuinely shared
+      // with you. The server now answers from resource_grants.
+      return { sharedWithMe: true }
     case 'needs-attention':
       return { attentionOnly: true }
     case 'deleted':

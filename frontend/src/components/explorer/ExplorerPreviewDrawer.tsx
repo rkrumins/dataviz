@@ -21,9 +21,6 @@ import {
   Share2,
   Trash2,
   Tag,
-  Lock,
-  Users,
-  Globe,
   Calendar,
   User,
   ExternalLink,
@@ -44,6 +41,7 @@ import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWor
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
+import { VISIBILITY_META as VIS_META } from '@/types/viewVisibility'
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -68,11 +66,8 @@ interface ExplorerPreviewDrawerProps {
 
 // ─── Constants ──────────────────────────────────────────────────
 
-const VISIBILITY_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
-  private: { label: 'Private', icon: Lock },
-  workspace: { label: 'Workspace', icon: Users },
-  enterprise: { label: 'Enterprise', icon: Globe },
-}
+const VISIBILITY_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> =
+  Object.fromEntries(Object.entries(VIS_META).map(([k, m]) => [k, { label: m.label, icon: m.icon }]))
 
 // View type theme comes from the SHARED resolver — see viewTypeMeta() /
 // viewTypeLabel() in lib/viewUtils. No local map (that duplication is what let

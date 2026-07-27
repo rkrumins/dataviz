@@ -26,6 +26,7 @@ from backend.app.auth.dependencies import (
 from backend.app.db.models import (
     OutboxEventORM,
     ResourceGrantORM,
+    UserORM,
     ViewORM,
     WorkspaceORM,
 )
@@ -324,3 +325,141 @@ async def test_soft_delete_keeps_the_grants(
         .where(ResourceGrantORM.resource_id == "view_private")
     )).scalar_one()
     assert remaining == 1
+
+
+# ── "shared with me" means shared, not "team-tier" ───────────────────
+
+@pytest.mark.asyncio
+async def test_shared_with_me_reads_grants_not_tiers(
+    test_client: AsyncClient, db_session,
+):
+    """The Explorer's "Shared" pill sent ``visibilityIn=workspace,enterprise``
+    — a tier filter wearing a sharing label. It listed every team-wide view
+    nobody had shared with anyone, and omitted a private view genuinely
+    shared with the caller."""
+    await _seed_mixed(db_session)
+    db_session.add(ResourceGrantORM(
+        id="grt_share", resource_type="view", resource_id="view_private",
+        subject_type="user", subject_id="usr_member", role_name="viewer",
+    ))
+    await db_session.commit()
+
+    member = PermissionClaims(sid="s", ws_perms={WS: ("workspace:view:read",)})
+    with _as("usr_member", member):
+        resp = await test_client.get(
+            "/api/v1/views/", params={"sharedWithMe": "true"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The one actually shared with them — not the three the tier filter
+    # would have returned.
+    assert {v["id"] for v in body["items"]} == {"view_private"}
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_is_empty_when_nothing_is_shared(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_mixed(db_session)
+    member = PermissionClaims(sid="s", ws_perms={WS: ("workspace:view:read",)})
+    with _as("usr_member", member):
+        resp = await test_client.get(
+            "/api/v1/views/", params={"sharedWithMe": "true"},
+        )
+    body = resp.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+
+
+# ── "who will be able to see this?" ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_visibility_preview_counts_the_workspace_audience(
+    test_client: AsyncClient, db_session,
+):
+    """Promotion is a one-click action whose blast radius is otherwise
+    invisible — the person choosing a tier has no way to know whether it
+    means nine colleagues or nine hundred."""
+    from backend.app.db.repositories import binding_repo
+
+    await _seed_mixed(db_session)
+    for uid in ("usr_a", "usr_b"):
+        db_session.add(UserORM(
+            id=uid, email=f"{uid}@example.com", password_hash="x",
+            first_name=uid, last_name="Person", status="active",
+        ))
+    await db_session.commit()
+    for uid in ("usr_a", "usr_b"):
+        await binding_repo.create_binding(
+            db_session, subject_type="user", subject_id=uid,
+            role_name="workspace_member", scope_type="workspace", scope_id=WS,
+        )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/views/view_private/visibility-preview",
+        params={"tier": "workspace"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["addedCount"] == 2
+    assert body["widening"] is True
+    assert len(body["sample"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_describes_unbounded_tiers(
+    test_client: AsyncClient, db_session,
+):
+    """``enterprise``/``public`` get prose, not a headcount: the audience is
+    unbounded, and enumerating it for a caller who may not administer those
+    workspaces is a directory disclosure in itself."""
+    await _seed_mixed(db_session)
+    resp = await test_client.get(
+        "/api/v1/views/view_private/visibility-preview",
+        params={"tier": "public"},
+    )
+    body = resp.json()
+    assert body["addedCount"] is None
+    assert "every signed-in account" in body["reach"]
+    assert body["widening"] is True
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_marks_narrowing(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_mixed(db_session)
+    resp = await test_client.get(
+        "/api/v1/views/view_public/visibility-preview",
+        params={"tier": "private"},
+    )
+    assert resp.json()["widening"] is False
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_rejects_an_unknown_tier(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_mixed(db_session)
+    resp = await test_client.get(
+        "/api/v1/views/view_private/visibility-preview",
+        params={"tier": "everyone"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_needs_read_access_to_the_view(
+    test_client: AsyncClient, db_session,
+):
+    """It answers questions about a view; you have to be able to see it."""
+    await _seed_mixed(db_session)
+    stranger = PermissionClaims(sid="s", ws_perms={})
+    with _as("usr_stranger", stranger):
+        resp = await test_client.get(
+            "/api/v1/views/view_private/visibility-preview",
+            params={"tier": "workspace"},
+        )
+    assert resp.status_code == 404
