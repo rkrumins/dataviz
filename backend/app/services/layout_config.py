@@ -219,6 +219,61 @@ def sanitize_node_ordering(raw_layout: dict) -> dict:
     return out
 
 
+def strip_node_ordering(raw_layout: dict) -> dict:
+    """Remove every node-ordering field from a bare ``referenceLayout``.
+
+    The write-side half of the ``nodeSortingEnabled`` kill switch. Hiding
+    the sort menu is not enforcement: without this, an admin could turn
+    node sorting off and anyone posting to the view-layout endpoint
+    directly would still set sort modes and custom orders.
+
+    STRIPS rather than refuses, for the same reason
+    ``sanitize_node_ordering`` drops instead of 422-ing: the canvas
+    rewrites the whole ``referenceLayout`` on every gesture, so a payload
+    still carrying a ``nodeSortMode`` from before the switch was thrown
+    is the normal case, not an attack. Refusing it would 403 someone for
+    dragging a node — an unrelated edit — and make the flag look broken.
+
+    Only incoming writes are affected. Orders already stored are never
+    touched, so curated views keep rendering exactly as published, which
+    is what the flag's admin copy promises. Never mutates its input;
+    returns the same object when there was nothing to strip.
+    """
+    if not isinstance(raw_layout, dict):
+        return raw_layout
+
+    layers = raw_layout.get("layers")
+    assignments = raw_layout.get("assignments")
+
+    has_default = "defaultNodeSortMode" in raw_layout
+    has_layer_mode = isinstance(layers, list) and any(
+        isinstance(l, dict) and "nodeSortMode" in l for l in layers
+    )
+    has_order_key = isinstance(assignments, dict) and any(
+        isinstance(e, dict) and "orderKey" in e for e in assignments.values()
+    )
+    if not (has_default or has_layer_mode or has_order_key):
+        return raw_layout
+
+    out = dict(raw_layout)
+    out.pop("defaultNodeSortMode", None)
+    if has_layer_mode:
+        out["layers"] = [
+            {k: v for k, v in l.items() if k != "nodeSortMode"}
+            if isinstance(l, dict) else l
+            for l in layers
+        ]
+    if has_order_key:
+        out["assignments"] = {
+            urn: (
+                {k: v for k, v in e.items() if k != "orderKey"}
+                if isinstance(e, dict) else e
+            )
+            for urn, e in assignments.items()
+        }
+    return out
+
+
 def derive_entity_scope(config: Optional[dict]) -> str:
     """'all' | 'curated'. Explicit `content.entityScope` wins; otherwise
     derived from whether any assignments exist."""

@@ -177,6 +177,33 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ui_surfaces=("Create-account link on the login page",),
         still_allowed=("Invited users can always register", "Everyone can sign in"),
     ),
+    # The OTHER door, and deliberately independent of signupEnabled: the common
+    # posture is self-registration off + invite links on. Conflating the two is
+    # what made invite links unusable on a default deployment.
+    #
+    # `capability`, not `security`, and the distinction is load-bearing here
+    # because posture decides what happens when the flag CANNOT be read.
+    # signupEnabled fails closed because an unreadable value must not admit
+    # anonymous strangers. An invite is the opposite of a stranger: a signed,
+    # expiring, use-capped, revocable credential an admin deliberately issued and
+    # can revoke individually. Failing closed on a database hiccup would black
+    # out the only entrance an invite-only deployment has, to protect against
+    # someone who already holds a valid credential.
+    "inviteLinksEnabled": FeatureWiring(
+        key="inviteLinksEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /admin/users/invite — refuses to mint a new link",
+            "GET /auth/verify-invite — reports the link as unusable",
+            "POST /auth/signup — refuses an invited signup, killing links already in circulation",
+        ),
+        ui_surfaces=("Invite by Link button on Admin → Users",),
+        still_allowed=(
+            "Outstanding links stay listed so they can be reviewed and revoked",
+            "Turning it back on revives every link that has not expired",
+            "Existing users sign in as normal",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",
@@ -217,6 +244,28 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         # It provisions a versioned graph, so version control has to be on for it to mean anything.
         depends_on=("versioningEnabled",),
+    ),
+    # The server half STRIPS rather than refuses, and that is the honest
+    # enforcement for this flag: the canvas rewrites the whole
+    # referenceLayout on every gesture, so a payload still carrying a sort
+    # mode from before the switch was thrown is the normal case. Refusing
+    # it would 403 someone for dragging a node.
+    "nodeSortingEnabled": FeatureWiring(
+        key="nodeSortingEnabled",
+        posture="capability",
+        server_gates=(
+            "view_repo._gate_node_ordering — strips nodeSortMode / orderKey / "
+            "defaultNodeSortMode from every view-layout write",
+        ),
+        ui_surfaces=(
+            "Per-layer sort menu on the Context View canvas",
+            "Drag-to-reorder and the nudge-reorder context menu in a draft",
+        ),
+        still_allowed=(
+            "Orders already saved on a view render exactly as curated — this "
+            "removes the controls, it does not disturb anything published",
+            "Every other canvas edit: adding, moving and removing nodes",
+        ),
     ),
     # ── Semantic layers ────────────────────────────────────────────────────────
     "semanticLayerEditMode": FeatureWiring(
@@ -298,10 +347,21 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="toursEnabled",
         posture="capability",
         # Preview: ships OFF, and the both-halves reference rule is relaxed for
-        # experimental flags. The tour is entirely client-side — no server gate.
+        # experimental flags. The tour is entirely client-side — no server
+        # gate, and none is owed: a tour renders guidance the user could read
+        # anyway, so there is no request for a server to refuse.
+        #
+        # The UI surfaces were previously left empty, which made `wired` False
+        # and had the admin page report a flag it renders as "not implemented"
+        # — the registry under-reporting itself, which is the same class of
+        # error as it over-reporting. They are listed because they exist.
         stage="experimental",
         server_gates=(),
-        ui_surfaces=(),
+        ui_surfaces=(
+            "Tour overlay and launcher in the app shell",
+            "'Take a tour' entries in the Help panel and Getting Started hub",
+            "Tour buttons embedded in the docs",
+        ),
         still_allowed=(
             "The Help panel and every guide stay available whether tours are on or off",
         ),

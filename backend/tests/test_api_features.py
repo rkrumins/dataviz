@@ -255,6 +255,14 @@ async def test_the_registry_reports_what_the_code_actually_does(
 
     This is the bug the whole change exists to fix, asserted end-to-end over HTTP: an admin
     reading this page is told the truth about which switches do something.
+
+    EXPERIMENTAL flags are exempt from the gate half, and the exemption is not invented here —
+    it is the policy `feature_wiring.Stage` already states ("the drift guard's both-halves rule
+    is relaxed; the halves don't exist yet") and that
+    `test_feature_wiring.test_every_flag_is_enforced_server_side` already applies by skipping
+    non-active flags. This test simply predated `stage` and never learned about it, so it
+    failed the moment a preview flag was added. Active flags — the ones an admin can actually
+    rely on — are still checked in full.
     """
     resp = await test_client.get("/api/v1/admin/features")
     assert resp.status_code == 200
@@ -263,10 +271,16 @@ async def test_the_registry_reports_what_the_code_actually_does(
     assert schema, "no feature definitions served"
 
     for d in schema:
+        # Required of EVERY flag, at any stage: the page must be able to say what turning it
+        # off does, or the switch is unexplainable regardless of how finished it is.
+        assert d["impactWhenOff"], f"{d['key']} cannot say what turning it off does"
+
+        if d["stage"] != "active":
+            continue
+
         assert d["implemented"] is True, f"{d['key']} is offered to admins but is not wired"
         assert d["enforcedServerSide"] is True, f"{d['key']} is not enforced by the server"
         assert d["serverGates"], f"{d['key']} names no gate"
-        assert d["impactWhenOff"], f"{d['key']} cannot say what turning it off does"
 
 
 # ── Optimistic concurrency (version conflict) ─────────────────────────

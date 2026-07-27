@@ -146,7 +146,21 @@ class LoginResponse(BaseModel):
 
 
 class SignUpResponse(BaseModel):
+    """Phase 15: an invited signup can come back already signed in.
+
+    The invitee was pre-approved and pre-activated by the invite itself,
+    so sending them to a login form to retype the credentials they just
+    chose is friction that buys nothing.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
     message: str
+    #: True when session cookies were issued on this response.
+    auto_signed_in: bool = Field(default=False, alias="autoSignedIn")
+    user: Optional[UserPublicResponse] = None
+    #: Where to land them — the invited workspace when the invite was
+    #: workspace-scoped, otherwise the app root.
+    redirect_to: Optional[str] = Field(default=None, alias="redirectTo")
 
 
 class ResetTokenResponse(BaseModel):
@@ -203,6 +217,28 @@ class CreateInviteRequest(BaseModel):
     # Beyond that, the admin should generate a fresh invite — anything
     # multi-month becomes a real audit/lifecycle concern.
     expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=2160)
+    # Phase 15: seat cap. None = unlimited until expiry, which is what
+    # every invite used to be. A cap is the cheapest possible answer to
+    # "this link leaked": the damage is bounded before anyone notices.
+    max_uses: Optional[int] = Field(None, alias="maxUses", ge=1, le=1000)
+    # Phase 15: restrict a SHAREABLE link to one mail domain. The middle
+    # ground between "anyone holding the URL" and "one named person" —
+    # it makes a link safe to drop in a team channel. Ignored when
+    # ``email`` pins a single address, which is strictly narrower.
+    email_domain: Optional[str] = Field(None, alias="emailDomain", max_length=253)
+
+    @field_validator("email_domain")
+    @classmethod
+    def validate_email_domain(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        # Accept "@company.com" as well — it is what people type.
+        v = v.strip().lower().lstrip("@")
+        if not v:
+            return None
+        if "." not in v or v.startswith(".") or v.endswith(".") or "@" in v:
+            raise ValueError("emailDomain must be a bare domain, e.g. 'company.com'")
+        return v
 
     @field_validator("email")
     @classmethod
@@ -233,6 +269,140 @@ class InviteTokenResponse(BaseModel):
     # success card.
     group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
     expires_at: str = Field(alias="expiresAt")
+    # Phase 15: the ledger row backing this token, so the admin UI can
+    # link straight from the success card to the link it just created.
+    invite_id: Optional[str] = Field(default=None, alias="inviteId")
+    max_uses: Optional[int] = Field(default=None, alias="maxUses")
+    email_domain: Optional[str] = Field(default=None, alias="emailDomain")
+
+
+class BulkInviteRequest(CreateInviteRequest):
+    """One email-pinned link per address, from the same settings.
+
+    Inherits every rule of a single invite — role, workspace, groups,
+    expiry, seat cap — because a bulk invite IS a single invite repeated,
+    and re-declaring the fields is how the two drift apart.
+
+    ``email`` on the parent is ignored here; ``emails`` supplies it. A
+    pinned link per person, rather than one shared link, is the point:
+    each is separately revocable and separately attributable.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    emails: list[str] = Field(min_length=1, max_length=200)
+
+
+class BulkInviteResult(BaseModel):
+    """What happened for one address."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str
+    #: created | already_a_user | invalid_email | duplicate | failed
+    outcome: str
+    invite_token: Optional[str] = Field(default=None, alias="inviteToken")
+    invite_id: Optional[str] = Field(default=None, alias="inviteId")
+    #: Why it did not produce a link, when it did not.
+    detail: Optional[str] = None
+
+
+class BulkInviteResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    created: int
+    skipped: int
+    results: list[BulkInviteResult]
+    expires_at: str = Field(alias="expiresAt")
+
+
+class InviteActivityItem(BaseModel):
+    """Somebody joined through one of my links."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: str
+    user_id: str = Field(alias="userId")
+    redeemed_at: str = Field(alias="redeemedAt")
+    invite_id: str = Field(alias="inviteId")
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+
+
+class RedeemInviteRequest(BaseModel):
+    """Apply an invite to the already-authenticated caller — the SSO
+    route into an invitation."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    invite_token: str = Field(alias="inviteToken", min_length=1)
+
+
+class RedeemInviteResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: False when the invite was valid but there was nothing to apply —
+    #: the account already had access. Not an error: they are signed in,
+    #: which is what they were trying to do.
+    applied: bool
+    message: str
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    redirect_to: str = Field(alias="redirectTo")
+
+
+class ExtendInviteRequest(BaseModel):
+    """Give an existing link more time, and optionally more seats.
+
+    ``additional_uses`` is relative to what has ALREADY been used, so
+    "add 5" means five more people can join — not five more than the
+    original cap, which on a spent link would be none.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=2160)
+    additional_uses: Optional[int] = Field(
+        None, alias="additionalUses", ge=1, le=1000,
+    )
+
+
+class InviteSummaryResponse(BaseModel):
+    """One row in the admin's list of outstanding links.
+
+    Carries NO token, deliberately. "Copy the link again" is a tempting
+    convenience, but it would turn a read-only list into a place where
+    credentials can be harvested — the link is copyable at the moment it
+    is created, and re-sharing should mean minting a fresh, separately
+    revocable one.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    email: Optional[str] = None
+    email_domain: Optional[str] = Field(default=None, alias="emailDomain")
+    group_ids: list[str] = Field(default_factory=list, alias="groupIds")
+    group_names: list[str] = Field(default_factory=list, alias="groupNames")
+    max_uses: Optional[int] = Field(default=None, alias="maxUses")
+    use_count: int = Field(alias="useCount")
+    redemption_count: int = Field(alias="redemptionCount")
+    #: active | revoked | expired | exhausted — derived, never stored.
+    status: str
+    created_by: str = Field(alias="createdBy")
+    created_at: str = Field(alias="createdAt")
+    expires_at: str = Field(alias="expiresAt")
+    revoked_at: Optional[str] = Field(default=None, alias="revokedAt")
+    revoked_by: Optional[str] = Field(default=None, alias="revokedBy")
+
+
+class InviteRedemptionResponse(BaseModel):
+    """Who came in through a link, and when."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    user_id: str = Field(alias="userId")
+    email: str
+    redeemed_at: str = Field(alias="redeemedAt")
 
 
 class InviteVerifyResponse(BaseModel):
@@ -251,3 +421,20 @@ class InviteVerifyResponse(BaseModel):
     # render "You'll join the Engineering and Data Platform groups."
     group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
     group_names: Optional[list[str]] = Field(default=None, alias="groupNames")
+    #: Why the link is unusable, when ``valid`` is False. "Invalid or expired"
+    #: covers four genuinely different situations — the admin revoked it, the
+    #: seats ran out, it aged out, or invite links are switched off entirely —
+    #: and only one of them means "ask for a new link". Without this the page
+    #: has to guess, and it guessed wrong.
+    #:
+    #: One of: ``expired`` | ``revoked`` | ``exhausted`` | ``domain_mismatch``
+    #: | ``links_disabled`` | ``invalid``.
+    reason: Optional[str] = None
+    #: Seats left on a capped link; None when uncapped. Surfaced so a
+    #: capped link can say "2 spots left" rather than silently failing
+    #: for whoever clicks one too late — the person turned away is the
+    #: one who most needed to know the limit existed.
+    seats_remaining: Optional[int] = Field(default=None, alias="seatsRemaining")
+    #: When the link stops working, so the page can show the deadline
+    #: rather than only discovering it after a failed submit.
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")

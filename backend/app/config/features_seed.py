@@ -69,6 +69,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
         "An administrator can enable it under Admin → Features.",
     "signupEnabled":
         "Self-registration is turned off. Ask an administrator for an invitation.",
+    "inviteLinksEnabled":
+        "Invite links are turned off for this deployment. "
+        "An administrator can enable them under Admin → Features, or create your account directly.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -211,6 +214,30 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "normal way in, and they keep working either way."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "inviteLinksEnabled",
+        "name": "Invite links",
+        "description": "Let admins generate shareable signup links that carry a role and group assignments.",
+        "impact_when_off": (
+            "Admins can no longer create invite links, and every link already in circulation "
+            "stops working immediately — including ones sent hours ago. Outstanding links stay "
+            "visible so they can be reviewed and revoked, and turning this back on revives any "
+            "that have not expired. Existing users sign in as normal."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "This is the other door, and it is independent of self-registration: leave "
+            "self-registration off and this on to run an invite-only instance. Turning this "
+            "off is a kill switch — use it when a link has leaked and you want every "
+            "outstanding one dead at once."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     # ── Lineage ────────────────────────────────────────────────────────────────

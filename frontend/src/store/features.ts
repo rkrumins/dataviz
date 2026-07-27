@@ -49,6 +49,13 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerVersionHistory: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
     signupEnabled: false,                 // fail CLOSED — this one is a door
+    // Fail OPEN, unlike signupEnabled, and the asymmetry is the point: seeding
+    // this `false` would re-create the bug it exists to control. A visitor
+    // holding an invite would be turned away by a value we had not fetched yet,
+    // which is exactly how invite links broke in the first place. The server
+    // refuses the redemption if the flag is really off; the client's guess must
+    // never be what stops someone.
+    inviteLinksEnabled: true,
     toursEnabled: false,                  // experimental preview — ships OFF
 }
 
