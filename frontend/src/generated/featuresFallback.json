@@ -110,6 +110,38 @@
       "dependsOn": []
     },
     {
+      "key": "inviteLinksEnabled",
+      "name": "Invite links",
+      "description": "Let admins generate shareable signup links that carry a role and group assignments.",
+      "category": "auth",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "This is the other door, and it is independent of self-registration: leave self-registration off and this on to run an invite-only instance. Turning this off is a kill switch \u2014 use it when a link has leaked and you want every outstanding one dead at once.",
+      "impactWhenOff": "Admins can no longer create invite links, and every link already in circulation stops working immediately \u2014 including ones sent hours ago. Outstanding links stay visible so they can be reviewed and revoked, and turning this back on revives any that have not expired. Existing users sign in as normal.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/users/invite \u2014 refuses to mint a new link",
+        "GET /auth/verify-invite \u2014 reports the link as unusable",
+        "POST /auth/signup \u2014 refuses an invited signup, killing links already in circulation"
+      ],
+      "uiSurfaces": [
+        "Invite by Link button on Admin \u2192 Users"
+      ],
+      "stillAllowed": [
+        "Outstanding links stay listed so they can be reviewed and revoked",
+        "Turning it back on revives every link that has not expired",
+        "Existing users sign in as normal"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "versioningEnabled",
       "name": "Version control",
       "description": "Drafts, reviews, publishing, history and rollback for data sources \u2014 the whole change-management workflow.",
@@ -232,6 +264,28 @@
       "dependsOn": [
         "versioningEnabled"
       ]
+    },
+    {
+      "key": "nodeSortingEnabled",
+      "name": "Node sorting controls",
+      "description": "Let people choose how nodes are ordered inside a Context View layer \u2014 alphabetical, by type, by size, or a hand-arranged custom order (drag to reorder in a draft).",
+      "category": "display",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A kill switch for staged rollouts or locked-down estates where view curation is owned by a central team. Off = consumers see curated views verbatim and cannot re-sort.",
+      "impactWhenOff": "The per-layer sort menu and drag-to-reorder disappear from the canvas. Orders already saved on a view still RENDER exactly as curated \u2014 this only removes the controls for changing them, so nothing anyone published is disturbed.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": false,
+      "enforcedServerSide": false,
+      "posture": "capability",
+      "serverGates": [],
+      "uiSurfaces": [],
+      "stillAllowed": [],
+      "dependsOn": []
     },
     {
       "key": "semanticLayerEditMode",
@@ -622,10 +676,12 @@
       "layered-lineage"
     ],
     "signupEnabled": false,
+    "inviteLinksEnabled": true,
     "versioningEnabled": true,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "blankModelsEnabled": true,
+    "nodeSortingEnabled": true,
     "semanticLayerEditMode": true,
     "semanticLayerNonAdminEditing": true,
     "semanticLayerImportEnabled": true,

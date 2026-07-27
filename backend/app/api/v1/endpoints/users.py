@@ -15,14 +15,25 @@ Admin:
     POST  /api/v1/admin/users/{user_id}/generate-reset-token
 """
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import get_current_user, require_admin
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    require_admin,
+)
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.auth.password import hash_password
-from backend.app.api.v1.endpoints.auth import _check_password_strength
+from backend.app.api.v1.endpoints.auth import (
+    _check_password_strength,
+    INVITE_LINKS_FAIL_OPEN,
+)
+from backend.app.api.v1.feature_gate import feature_disabled
+from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.models.auth import (
@@ -31,6 +42,8 @@ from backend.common.models.auth import (
     ApproveRejectRequest,
     ChangeRoleRequest,
     CreateInviteRequest,
+    InviteRedemptionResponse,
+    InviteSummaryResponse,
     InviteTokenResponse,
     ResetTokenResponse,
     UpdateUserRequest,
@@ -413,6 +426,93 @@ def _role_is_privileged(perms: list[str]) -> bool:
     return any(p == "workspace:admin" or p.startswith("system:") for p in perms)
 
 
+async def _enforce_invite_ceiling(
+    claims: PermissionClaims,
+    body: CreateInviteRequest,
+    *,
+    resolved_workspace_id: Optional[str],
+    role_perms: list[str],
+    role_is_privileged: bool,
+) -> None:
+    """Cap what a NON-platform-admin may hand out with an invite.
+
+    Inviting used to be ``require_admin`` — ``system:admin`` only. That
+    is too narrow in practice: a workspace admin is the person who
+    actually knows who should join their workspace, and routing every
+    such request through a platform owner makes onboarding somebody
+    else's chore.
+
+    The rule that keeps that safe is a single sentence: **you cannot
+    grant what you do not hold.** Everything below is that sentence,
+    checked against the same resolved claims the rest of RBAC uses, so
+    an invite can never become a privilege-escalation primitive.
+    """
+    # Platform owners keep full reach.
+    if has_permission(claims, "system:admin"):
+        return
+
+    # 1. Privileged roles stay with platform admins. A role carrying
+    #    workspace:admin or system:* is how an account becomes able to
+    #    grant further access; minting one from a lesser account would
+    #    make the ceiling self-defeating.
+    if role_is_privileged:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This role grants administrative permissions and can only be "
+                "invited by a platform administrator."
+            ),
+        )
+
+    # 2. Groups are GLOBAL (see GroupORM) — membership carries across
+    #    every workspace a group is bound into. A workspace admin has no
+    #    authority outside their own workspace, and the schema has no
+    #    notion of who owns a group, so there is nothing to check
+    #    against. Refuse rather than invent an ownership model here.
+    if body.group_ids:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Groups are organisation-wide, so only a platform administrator "
+                "can attach them to an invite."
+            ),
+        )
+
+    # 3. An invite must land somewhere the caller actually administers.
+    if not resolved_workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only a platform administrator can create an organisation-wide "
+                "invite. Choose a workspace you administer."
+            ),
+        )
+    if not has_permission(claims, "workspace:admin", workspace_id=resolved_workspace_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"You are not an administrator of workspace "
+                f"'{resolved_workspace_id}'."
+            ),
+        )
+
+    # 4. The ceiling proper: every permission the invited role would
+    #    confer must be one the caller already holds in that workspace.
+    #    A workspace:admin passes trivially for ordinary workspace roles
+    #    — `resolve()` implies every workspace leaf for them — while
+    #    anything reaching outside the workspace is refused. One loop,
+    #    no new notion of "seniority".
+    for perm in role_perms:
+        if not has_permission(claims, perm, workspace_id=resolved_workspace_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"You cannot invite someone into role '{body.role}': it "
+                    f"grants '{perm}', which you do not have."
+                ),
+            )
+
+
 @admin_router.post(
     "/invite",
     response_model=InviteTokenResponse,
@@ -420,12 +520,21 @@ def _role_is_privileged(perms: list[str]) -> bool:
 )
 async def create_invite(
     body: CreateInviteRequest,
-    admin=Depends(require_admin),
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Generate a signed invite token that lets a new user sign up and
     be auto-activated with the specified role. The frontend constructs
     the full URL from its own origin.
+
+    Phase 15 — who may call this. No longer ``require_admin``
+    (``system:admin`` only): a workspace admin may invite into a
+    workspace they administer, under the ceiling enforced by
+    ``_enforce_invite_ceiling`` — you cannot grant what you do not
+    hold. ``requires("workspace:admin", workspace=...)`` cannot express
+    it, because that dependency reads the workspace from the URL path
+    and an invite's workspace comes from the body.
 
     Phase 11 — tiered invites:
       * ``role`` omitted → plain activated account.
@@ -439,7 +548,13 @@ async def create_invite(
         another user.
     """
     from backend.app.auth.jwt import create_invite_token
-    from backend.app.db.repositories import group_repo, role_repo, workspace_repo
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, role_repo, workspace_repo,
+    )
+
+    if not await feature_flags.is_enabled_self_session(
+            "inviteLinksEnabled", default=INVITE_LINKS_FAIL_OPEN):
+        raise feature_disabled("inviteLinksEnabled")
 
     resolved_workspace_id: Optional[str] = None
     resolved_group_ids: list[str] = []
@@ -470,6 +585,7 @@ async def create_invite(
     # a role is attached AND it carries workspace:admin or system:*.
     role = None
     role_is_privileged = False
+    role_perms: list[str] = []
     if body.role is not None:
         role = await role_repo.get_role(session, body.role)
         if role is None:
@@ -477,8 +593,8 @@ async def create_invite(
                 status_code=400, detail=f"Unknown role '{body.role}'",
             )
         bundles = await role_repo.role_names_with_permissions(session, [body.role])
-        perms = bundles.get(body.role, [])
-        role_is_privileged = _role_is_privileged(perms)
+        role_perms = bundles.get(body.role, [])
+        role_is_privileged = _role_is_privileged(role_perms)
 
     # Email rules, most restrictive first:
     # 1. Privileged role → email always required (override doesn't
@@ -581,6 +697,23 @@ async def create_invite(
                     ),
                 )
 
+    # Authorisation ceiling. Deliberately AFTER the workspace has been
+    # resolved: a custom workspace role fixes its own scope, so the
+    # workspace we must check the caller against is not necessarily the
+    # one they asked for.
+    await _enforce_invite_ceiling(
+        claims, body,
+        resolved_workspace_id=resolved_workspace_id,
+        role_perms=role_perms,
+        role_is_privileged=role_is_privileged,
+    )
+
+    # Allocate the id before minting so the token and its ledger row can be
+    # created from a SINGLE encode. Minting twice — once for the expiry,
+    # again for the jti — would leave the row's expires_at a few
+    # microseconds behind the token's exp, and the two would disagree about
+    # the instant a link dies.
+    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
     token, expires_at = create_invite_token(
         role=body.role,
         created_by=admin.id,
@@ -588,6 +721,24 @@ async def create_invite(
         workspace_id=resolved_workspace_id,
         email=body.email,
         group_ids=resolved_group_ids or None,
+        jti=invite_id,
+    )
+    # An email pin is strictly narrower than a domain restriction, so a
+    # link carrying both is really just pinned. Drop the redundant field
+    # rather than storing a constraint that can never bind.
+    resolved_domain = None if body.email else body.email_domain
+    invite = await invite_repo.create(
+        session,
+        invite_id=invite_id,
+        role=body.role,
+        workspace_id=resolved_workspace_id,
+        email=body.email,
+        email_domain=resolved_domain,
+        group_ids=resolved_group_ids,
+        shareable_groups_override=is_shareable_groups_override,
+        max_uses=body.max_uses,
+        expires_at=expires_at,
+        created_by=admin.id,
     )
 
     # Phase 14: distinct audit event when the shareable-groups override
@@ -603,10 +754,13 @@ async def create_invite(
         session,
         event_type=audit_event_type,
         payload={
+            "invite_id": invite.id,
             "role": body.role,
             "workspace_id": resolved_workspace_id,
             "email": body.email,
+            "email_domain": resolved_domain,
             "group_ids": resolved_group_ids,
+            "max_uses": body.max_uses,
             "shareable_groups_override": is_shareable_groups_override,
             "created_by": admin.id,
             "expires_at": expires_at,
@@ -614,10 +768,11 @@ async def create_invite(
     )
 
     logger.info(
-        "Invite token created by admin %s (role=%s ws=%s groups=%d email_bound=%s override=%s)",
-        admin.id, body.role, resolved_workspace_id,
-        len(resolved_group_ids), bool(body.email),
-        is_shareable_groups_override,
+        "Invite %s created by admin %s (role=%s ws=%s groups=%d email_bound=%s "
+        "domain=%s max_uses=%s override=%s)",
+        invite.id, admin.id, body.role, resolved_workspace_id,
+        len(resolved_group_ids), bool(body.email), resolved_domain,
+        body.max_uses, is_shareable_groups_override,
     )
     return InviteTokenResponse(
         inviteToken=token,
@@ -626,4 +781,193 @@ async def create_invite(
         email=body.email,
         groupIds=resolved_group_ids or None,
         expiresAt=expires_at,
+        inviteId=invite.id,
+        maxUses=body.max_uses,
+        emailDomain=resolved_domain,
     )
+
+
+# ── Invite management ────────────────────────────────────────────────
+#
+# An invite used to be a fire-and-forget JWT: once handed out there was no
+# way to see it, count it, or stop it. These three endpoints are the other
+# half of that — the list an admin can actually act on.
+
+
+@admin_router.get("/invites", response_model=list[InviteSummaryResponse])
+async def list_invites(
+    status_filter: str = Query(
+        "active", alias="status",
+        pattern="^(active|revoked|expired|exhausted|all)$",
+    ),
+    limit: int = Query(200, ge=1, le=500),
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Outstanding invite links, newest first.
+
+    Never returns a token — see ``InviteSummaryResponse``.
+
+    A platform admin sees every link; anyone else sees only the ones
+    they created. ``created_by`` is the natural ownership boundary, and
+    it means widening who can invite did not also widen who can see
+    every outstanding invitation in the organisation.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    mine_only = None if has_permission(claims, "system:admin") else admin.id
+    rows = await invite_repo.list_for_admin(
+        session, created_by=mine_only, status=status_filter, limit=limit,
+    )
+    counts = await invite_repo.redemption_counts(session, [r.id for r in rows])
+
+    # Resolve workspace + group names once per distinct id rather than per
+    # row: a page of invites into the same workspace is the common case.
+    ws_names: dict[str, Optional[str]] = {}
+    grp_names: dict[str, str] = {}
+
+    summaries: list[InviteSummaryResponse] = []
+    for row in rows:
+        if row.workspace_id and row.workspace_id not in ws_names:
+            ws = await workspace_repo.get_workspace_orm(session, row.workspace_id)
+            ws_names[row.workspace_id] = ws.name if ws else None
+
+        gids = invite_repo.group_ids_of(row)
+        for gid in gids:
+            if gid not in grp_names:
+                grp = await group_repo.get_group_by_id(session, gid)
+                grp_names[gid] = grp.name if grp else gid
+
+        summaries.append(InviteSummaryResponse(
+            id=row.id,
+            role=row.role,
+            workspaceId=row.workspace_id,
+            workspaceName=ws_names.get(row.workspace_id) if row.workspace_id else None,
+            email=row.email,
+            emailDomain=row.email_domain,
+            groupIds=gids,
+            groupNames=[grp_names[g] for g in gids],
+            maxUses=row.max_uses,
+            useCount=row.use_count,
+            redemptionCount=counts.get(row.id, 0),
+            status=invite_repo.status_of(row),
+            createdBy=row.created_by,
+            createdAt=row.created_at,
+            expiresAt=row.expires_at,
+            revokedAt=row.revoked_at,
+            revokedBy=row.revoked_by,
+        ))
+    return summaries
+
+
+@admin_router.post("/invites/{invite_id}/revoke", response_model=InviteSummaryResponse)
+async def revoke_invite(
+    invite_id: str,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Kill a link now, regardless of its expiry or remaining seats.
+
+    Idempotent: revoking an already-revoked link keeps the original
+    timestamp, because the first revocation is the one that happened.
+
+    Deliberately NOT gated on ``inviteLinksEnabled`` — an admin who has
+    switched invite links off still needs to clean up what is
+    outstanding, and refusing the cleanup would be exactly backwards.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    existing = await invite_repo.get(session, invite_id)
+    # 404 rather than 403 for someone else's link: a caller who may not
+    # act on it should not learn it exists.
+    if existing is None or (
+        existing.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    invite = await invite_repo.revoke(session, invite_id, revoked_by=admin.id)
+    if invite is None:
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_revoked",
+        payload={
+            "invite_id": invite.id,
+            "role": invite.role,
+            "workspace_id": invite.workspace_id,
+            "use_count": invite.use_count,
+            "revoked_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s revoked by admin %s after %d use(s)",
+        invite.id, admin.id, invite.use_count,
+    )
+    counts = await invite_repo.redemption_counts(session, [invite.id])
+    gids = invite_repo.group_ids_of(invite)
+    gnames = [
+        (grp.name if grp else gid)
+        for gid, grp in [
+            (gid, await group_repo.get_group_by_id(session, gid)) for gid in gids
+        ]
+    ]
+    ws = (
+        await workspace_repo.get_workspace_orm(session, invite.workspace_id)
+        if invite.workspace_id else None
+    )
+    return InviteSummaryResponse(
+        id=invite.id,
+        role=invite.role,
+        workspaceId=invite.workspace_id,
+        workspaceName=ws.name if ws else None,
+        email=invite.email,
+        emailDomain=invite.email_domain,
+        groupIds=gids,
+        groupNames=gnames,
+        maxUses=invite.max_uses,
+        useCount=invite.use_count,
+        redemptionCount=counts.get(invite.id, 0),
+        status=invite_repo.status_of(invite),
+        createdBy=invite.created_by,
+        createdAt=invite.created_at,
+        expiresAt=invite.expires_at,
+        revokedAt=invite.revoked_at,
+        revokedBy=invite.revoked_by,
+    )
+
+
+@admin_router.get(
+    "/invites/{invite_id}/redemptions",
+    response_model=list[InviteRedemptionResponse],
+)
+async def list_invite_redemptions(
+    invite_id: str,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who signed up through this link, most recent first."""
+    from backend.app.db.repositories import invite_repo
+
+    existing = await invite_repo.get(session, invite_id)
+    if existing is None or (
+        existing.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    rows = await invite_repo.list_redemptions(session, invite_id)
+    return [
+        InviteRedemptionResponse(
+            id=r.id, userId=r.user_id, email=r.email, redeemedAt=r.redeemed_at,
+        )
+        for r in rows
+    ]

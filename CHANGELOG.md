@@ -9,6 +9,67 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Invite links that actually work, and can be taken back
+
+### Fixed
+
+**Shareable signup links were unusable.** Anyone who clicked one landed on the login page
+instead of the signup form, and the invite was discarded on the way. The `/signup` route was
+gated on the `signupEnabled` flag, which knows nothing about invitations — so in the default
+invite-only posture (`signupEnabled` off, which is what the flag's own admin copy recommends)
+*every* link was dead, for everyone, deterministically. The gate also fired before the flag had
+loaded, so it bounced first-time visitors even where self-registration was on. The decision now
+lives in the signup page, which can see both the invite and whether the flag has actually
+arrived: an invite is never turned away, and nothing is decided on a seeded guess.
+
+**Invited accounts claimed to be self-registrations.** `signup_source` was documented to carry
+`'invite'` and never did, which made the column useless for the one question it exists to
+answer.
+
+**A team sharing one link hit the rate limiter.** Signup was capped at 5/minute per IP, so the
+sixth person behind an office NAT was refused — indistinguishable from a broken link.
+
+### Added
+
+**Invite links are now revocable, countable, and auditable.** They used to be fire-and-forget
+tokens with no server-side record: a link pasted into the wrong channel worked for every reader
+for up to 90 days, and nobody could tell it had happened. Every link now has a row behind it, so
+you can:
+
+- **Revoke** one instantly from **Admin → Users → Manage links**, whatever its expiry.
+- **Cap** it to a number of people — the link closes itself once the seats are gone. Enforced
+  atomically, so two people clicking a one-seat link at the same moment cannot both get in.
+- **See who used it**, and when.
+- **Restrict it to an email domain** (`company.com`) — the middle ground between a link anyone
+  can use and one pinned to a single address, which is what makes a link safe to post in a team
+  channel.
+
+**Invited users are signed straight in.** They were already approved and activated by the
+invite; sending them to a login form to retype the password they had just chosen bought nothing.
+
+**Workspace admins can invite into their own workspaces.** Previously only platform admins
+could invite anyone at all. The rule that keeps it safe is that you cannot grant what you do not
+hold: non-privileged roles only, no organisation-wide groups, and only into workspaces you
+administer. Each person sees and revokes only the links they created.
+
+**`inviteLinksEnabled`** — a switch for the invite-link capability, separate from
+`signupEnabled` so the two doors can be opened independently. Turning it off is a kill switch:
+links already in circulation stop working immediately, not just new ones. The confirmation
+dialog tells you how many live links that will kill before you flip it.
+
+**Links say why they failed.** "Invalid or expired" covered four situations with four different
+remedies. A recipient is now told whether the link was revoked, ran out of seats, expired, or
+whether invite links are switched off entirely.
+
+### Security
+
+Auto sign-in makes the signup endpoint's enumeration-safe response distinguishable for someone
+holding a valid invite (the created path sets cookies, the already-exists path does not). This
+is an accepted trade, not an oversight: it requires a live invite, every probe is bounded by
+that invite's seat cap, and the ledger records who held it. Documented at the call site.
+
+---
+
 ## [0.2.0] — 2026-07-19 — Versioned Graph: rollback, admin flag, and enable-VC at scale
 
 Version control for a data graph becomes usable on a *real* graph: you can turn it on for a

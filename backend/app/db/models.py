@@ -2038,6 +2038,104 @@ class AccessRequestORM(Base):
 # ------------------------------------------------------------------ #
 # revoked_refresh_jti  (refresh-token rotation tracking)               #
 # ------------------------------------------------------------------ #
+# invites  (shareable + email-bound signup links)                      #
+# ------------------------------------------------------------------ #
+
+class InviteORM(Base):
+    """A signup invitation, shareable or pinned to one address.
+
+    The JWT handed to the recipient is a BEARER PROOF; this row is the
+    source of truth. Everything the invite grants — role, workspace,
+    groups — is read back from here at redemption and never from the
+    token payload, so a link that has been revoked or has run out of
+    seats cannot be redeemed with a token that is still perfectly valid
+    cryptographically. Before this table existed there was nothing to
+    consult: a leaked link worked for every reader until it expired, up
+    to 90 days later, and left no trace that it had been used.
+
+    ``id`` doubles as the token's ``jti``. No token hash is stored, and
+    that is deliberate: unlike a password-reset token — a bare random
+    string, hashed in ``user_repo`` so that reading the database cannot
+    yield a usable token — an invite's usability is gated by the HMAC
+    signature. A database reader cannot forge one, so hashing the id
+    would protect nothing and cost a lookup column.
+    """
+    __tablename__ = "invites"
+
+    id = Column(Text, primary_key=True, default=lambda: f"inv_{uuid.uuid4().hex[:12]}")
+    #: NULL = a plain activated account with no role binding.
+    role = Column(Text, nullable=True)
+    #: Resolved scope for workspace-tier and custom-workspace roles.
+    workspace_id = Column(Text, nullable=True)
+    #: Pinned address — the link refuses any other. NULL = shareable.
+    email = Column(Text, nullable=True)
+    #: Restricts a SHAREABLE link to one mail domain ("company.com").
+    #: The middle ground between "anyone with the URL" and "one person".
+    email_domain = Column(Text, nullable=True)
+    group_ids = Column(Text, nullable=False, default="[]")   # JSON list
+    shareable_groups_override = Column(Boolean, nullable=False, default=False)
+    #: NULL = unlimited until expiry. Otherwise a seat cap.
+    max_uses = Column(Integer, nullable=True)
+    use_count = Column(Integer, nullable=False, default=0)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+    expires_at = Column(Text, nullable=False)                # ISO
+    revoked_at = Column(Text, nullable=True)
+    revoked_by = Column(Text, nullable=True)
+
+    # No `status` column: revoked / expired / exhausted / active are all
+    # derivable from the columns above, and a stored copy is one more
+    # thing that can disagree with them.
+
+    __table_args__ = (
+        Index("idx_invites_created_by", "created_by", "created_at"),
+        Index("idx_invites_expires_at", "expires_at"),
+        CheckConstraint("max_uses IS NULL OR max_uses > 0", name="ck_invites_max_uses"),
+        CheckConstraint("use_count >= 0", name="ck_invites_use_count"),
+        CheckConstraint(
+            "revoked_by IS NULL OR revoked_at IS NOT NULL",
+            name="ck_invites_revocation_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Invite id={self.id!r} role={self.role!r} uses={self.use_count}/{self.max_uses}>"
+
+
+# ------------------------------------------------------------------ #
+# invite_redemptions  (who actually used a link)                       #
+# ------------------------------------------------------------------ #
+
+class InviteRedemptionORM(Base):
+    """One row per successful redemption.
+
+    No foreign key on ``user_id``: this is audit history and has to
+    survive the user being deleted — the same reasoning as
+    ``role_bindings.subject_id`` and ``access_requests.requester_id``.
+    ``email`` is denormalised for exactly that case, so a deleted
+    account still leaves a legible record of who came in through which
+    link.
+    """
+    __tablename__ = "invite_redemptions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"invr_{uuid.uuid4().hex[:12]}")
+    invite_id = Column(
+        Text, ForeignKey("invites.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(Text, nullable=False)
+    email = Column(Text, nullable=False)
+    redeemed_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("invite_id", "user_id", name="uq_invite_redemption"),
+        Index("idx_invite_redemptions_invite", "invite_id", "redeemed_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<InviteRedemption invite={self.invite_id!r} user={self.user_id!r}>"
+
+
+# ------------------------------------------------------------------ #
 # Each row records a refresh-token jti that has been consumed (rotated)
 # or revoked (logout / reuse-detection). The auth service consults this
 # table to:

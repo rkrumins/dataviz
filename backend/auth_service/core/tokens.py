@@ -176,6 +176,7 @@ def create_invite_token(
     workspace_id: str | None = None,
     email: str | None = None,
     group_ids: list[str] | None = None,
+    jti: str | None = None,
 ) -> tuple[str, str]:
     """Create a signed invite JWT. Returns (token, expires_at_iso).
 
@@ -189,6 +190,13 @@ def create_invite_token(
     Phase 13: also optional ``group_ids`` — a list of internal Group
     ids the new user should be added to on signup. Omitted from the
     payload when ``None`` / empty.
+
+    Phase 15: optional ``jti`` — the id of the ``invites`` row backing
+    this token. When present, that row is what actually decides whether
+    the invite may still be redeemed and what it grants; the payload
+    below becomes a cached copy. Omitted when ``None`` so a caller that
+    does not use the ledger produces exactly the token it always did,
+    which is what keeps tokens minted before the ledger existed valid.
     """
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=expires_in_hours)
@@ -207,6 +215,8 @@ def create_invite_token(
         payload["email"] = email
     if group_ids:
         payload["group_ids"] = list(group_ids)
+    if jti is not None:
+        payload["jti"] = jti
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at.isoformat()
 

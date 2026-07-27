@@ -124,7 +124,16 @@ async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: 
 // ── Service ───────────────────────────────────────────────────────────
 
 export const authService = {
-    signup(req: SignUpRequest): Promise<{ message: string }> {
+    signup(req: SignUpRequest): Promise<{
+        message: string
+        /** Phase 15: an invited signup comes back already signed in —
+         *  session cookies are on this response. The invitee was
+         *  pre-approved by the invite, so a second credential
+         *  round-trip buys nothing. */
+        autoSignedIn?: boolean
+        user?: AuthUser | null
+        redirectTo?: string | null
+    }> {
         return request<{ message: string }>(`${AUTH_API}/signup`, {
             method: 'POST',
             body: JSON.stringify(req),
@@ -191,6 +200,13 @@ export const authService = {
          *  so the banner can show friendly names. */
         groupIds?: string[] | null
         groupNames?: string[] | null
+        /** Phase 15: why an unusable link is unusable. "Invalid or
+         *  expired" covered four situations with four different
+         *  remedies, and only one of them is "ask for a new link". */
+        reason?:
+            | 'expired' | 'revoked' | 'exhausted'
+            | 'domain_mismatch' | 'links_disabled' | 'invalid'
+            | null
     }> {
         return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,

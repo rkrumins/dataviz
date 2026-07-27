@@ -4,6 +4,7 @@ import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
+import { useFeature, useFeaturesStore } from '@/store/features'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -31,6 +32,23 @@ async function loadZxcvbn() {
 const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
 const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
 
+/** What to tell someone whose link doesn't work. Each of these has a
+ *  different remedy, and only the first is "ask for a new one" — the
+ *  rest tell them who to go back to, or that nothing is wrong with them. */
+const INVITE_REASON_COPY: Record<string, string> = {
+    expired: 'This invite link has expired. Ask whoever sent it for a new one.',
+    revoked: 'This invite link was revoked. Ask whoever sent it for a new one.',
+    exhausted:
+        'This invite link has already been used by as many people as it allows. '
+        + 'Ask whoever sent it for a new one.',
+    links_disabled:
+        'Invite links are turned off for this deployment. Ask an administrator to '
+        + 'set up your account.',
+    domain_mismatch:
+        'This invite link only accepts email addresses from a specific domain.',
+    invalid: 'This invite link is invalid or has expired.',
+}
+
 export function SignUpPage() {
     const brand = useBrand()
     const [firstName, setFirstName] = useState('')
@@ -52,9 +70,33 @@ export function SignUpPage() {
     const [inviteEmail, setInviteEmail] = useState<string | null>(null)
     // Phase 13: groups the user will be added to on signup.
     const [inviteGroupNames, setInviteGroupNames] = useState<string[] | null>(null)
+    // Phase 15: why a link is unusable. Revoked, out of seats, expired and
+    // "invite links are switched off" are four situations with four
+    // different remedies; "invalid or expired" told the recipient nothing
+    // they could act on.
+    const [inviteReason, setInviteReason] = useState<string | null>(null)
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
+
+    // Self-registration gate. This lives here rather than in a route-level
+    // RequireFeature for two reasons, both of which broke invite links:
+    //
+    //   1. An invite OUTRANKS the flag. `signupEnabled` off means "strangers
+    //      may not create accounts" — it has never meant "invitations stop
+    //      working", and the server agrees (auth.py validates the invite
+    //      BEFORE consulting the flag). A guard that cannot see ?invite=
+    //      cannot honour that.
+    //   2. The flag seeds FALSE and loads asynchronously. Deciding before
+    //      `loaded` meant redirecting on a guess — and the redirect discarded
+    //      the invite token, so the link was unrecoverable.
+    //
+    // Hence: never redirect while an invite is present, and never redirect
+    // before we actually know the flag's value.
+    const signupEnabled = useFeature('signupEnabled')
+    const flagsLoaded = useFeaturesStore((s) => s.loaded)
+    const awaitingFlags = !inviteToken && !flagsLoaded
+    const selfSignupBlocked = !inviteToken && flagsLoaded && !signupEnabled
 
     useDocumentTitle('Sign up')
 
@@ -63,6 +105,10 @@ export function SignUpPage() {
         if (isAuthenticated) navigate('/', { replace: true })
     }, [isAuthenticated, navigate])
 
+    useEffect(() => {
+        if (selfSignupBlocked) navigate('/login', { replace: true })
+    }, [selfSignupBlocked, navigate])
+
     useEffect(() => { clearError() }, [clearError])
 
     // Verify invite token on mount
@@ -70,6 +116,7 @@ export function SignUpPage() {
         if (!inviteToken) return
         authService.verifyInvite(inviteToken).then((res) => {
             setInviteValid(res.valid)
+            setInviteReason(res.reason ?? null)
             setInviteRole(res.role)
             setInviteWorkspaceName(res.workspaceName ?? null)
             setInviteGroupNames(res.groupNames ?? null)
@@ -105,7 +152,10 @@ export function SignUpPage() {
     }, [password])
 
     const passwordsMatch = confirmPassword.length === 0 || password === confirmPassword
-    const canSubmit = firstName && lastName && email && password && confirmPassword && passwordsMatch && passwordScore >= 3 && !isLoading
+    // A dead invite with self-registration off has no path to an account: the
+    // server would 403. Don't let the form pretend otherwise.
+    const inviteDeadEnd = !!inviteToken && inviteValid === false && !signupEnabled
+    const canSubmit = firstName && lastName && email && password && confirmPassword && passwordsMatch && passwordScore >= 3 && !isLoading && !inviteDeadEnd
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -114,8 +164,26 @@ export function SignUpPage() {
         if (inviteToken && inviteValid) req.inviteToken = inviteToken
         const result = await signup(req)
         if (result.ok) {
+            // Invited signups come back with a live session — land them in
+            // the app (their workspace, when the invite was scoped) rather
+            // than showing a "now go and sign in" card they don't need.
+            if (result.signedIn) {
+                navigate(result.redirectTo ?? '/', { replace: true })
+                return
+            }
             setSuccessMessage(result.message)
         }
+    }
+
+    // Hold the paint rather than guessing. This is the whole fix for the
+    // uninvited case: the previous guard rendered a redirect from the seeded
+    // `false`, so a visitor was gone before the real value ever arrived.
+    if (awaitingFlags || selfSignupBlocked) {
+        return (
+            <div className="absolute inset-0 flex items-center justify-center bg-canvas">
+                <div className="w-6 h-6 border-2 border-accent-lineage border-t-transparent rounded-full animate-spin" />
+            </div>
+        )
     }
 
     return (
@@ -204,7 +272,15 @@ export function SignUpPage() {
                         <div className="flex items-center gap-2.5 p-3 mb-4 rounded-xl bg-red-500/10 border border-red-500/20">
                             <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
                             <p className="text-xs text-red-600 dark:text-red-400">
-                                This invite link is invalid or has expired. You can still sign up — your account will require admin approval.
+                                {/* Only offer the fallback we can actually honour. With
+                                    self-registration off the server refuses an uninvited
+                                    signup, so "you can still sign up" was a promise the
+                                    form could not keep. */}
+                                {INVITE_REASON_COPY[inviteReason ?? 'invalid']
+                                    ?? INVITE_REASON_COPY.invalid}
+                                {signupEnabled && (
+                                    <> You can still sign up — your account will require admin approval.</>
+                                )}
                             </p>
                         </div>
                     )}

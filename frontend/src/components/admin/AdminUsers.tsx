@@ -16,9 +16,16 @@ import {
     ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
     KeyRound, UserCog,
     RotateCcw, Lock, Copy, Check, Link2,
-    Building2, Globe, Sparkles, AtSign, Users2, ScrollText, Pencil,
+    Building2, Globe, Sparkles, AtSign, Users2, ScrollText, Pencil, ListChecks,
 } from 'lucide-react'
-import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
+import {
+    adminUserService,
+    type AdminUserResponse,
+    type CreateInviteOptions,
+    type InviteResponse,
+} from '@/services/adminUserService'
+import { useFeature } from '@/store/features'
+import { AdminInvites } from './AdminInvites'
 import { permissionsService, type RoleDefinitionResponse, type UserAccessResponse } from '@/services/permissionsService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
@@ -219,6 +226,8 @@ export function AdminUsers() {
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
+    const inviteLinksEnabled = useFeature('inviteLinksEnabled')
+    const [invitesOpen, setInvitesOpen] = useState(false)
 
     // Per-user access drawer — opens on row click. Shows direct +
     // inherited bindings, group memberships, workspace + global
@@ -429,13 +438,7 @@ export function AdminUsers() {
 
     const handleCreateInvite = async (
         role: string | null,
-        opts: {
-            workspaceId?: string | null
-            email?: string | null
-            groupIds?: string[] | null
-            allowShareableWithGroups?: boolean
-            expiresInHours?: number
-        },
+        opts: CreateInviteOptions,
     ) => {
         setInviteLoading(true)
         setError(null)
@@ -539,12 +542,28 @@ export function AdminUsers() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
+                    {/* Hidden when an admin has switched invite links off. The
+                        server refuses the POST either way; this just stops us
+                        offering a button that cannot work. */}
+                    {inviteLinksEnabled && (
+                        <button
+                            onClick={() => setModal({ kind: 'invite' })}
+                            className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
+                        >
+                            <Link2 className="w-4 h-4" />
+                            Invite by Link
+                        </button>
+                    )}
+                    {/* Always available, even when link creation is off: an
+                        admin who has just switched invite links off is
+                        precisely the one who needs to revoke what is still
+                        outstanding. */}
                     <button
-                        onClick={() => setModal({ kind: 'invite' })}
-                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
+                        onClick={() => setInvitesOpen(true)}
+                        className="px-4 py-2 border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 rounded-xl font-medium text-sm text-ink transition-colors flex items-center gap-2"
                     >
-                        <Link2 className="w-4 h-4" />
-                        Invite by Link
+                        <ListChecks className="w-4 h-4" />
+                        Manage links
                     </button>
                     <button
                         onClick={fetchUsers}
@@ -1276,6 +1295,45 @@ export function AdminUsers() {
                         </motion.aside>
                 )}
             </AnimatePresence>
+
+            {/* Outstanding invite links. A drawer rather than a new admin
+                route: a route would need a nav-catalogue entry and its drift
+                test for no benefit — this belongs next to the button that
+                creates the links. */}
+            <Backdrop open={invitesOpen} onClick={() => setInvitesOpen(false)} zClassName="z-40" className="bg-black/40" />
+            <AnimatePresence>
+                {invitesOpen && (
+                    <motion.aside
+                        key="invites-drawer"
+                        initial={{ x: '100%' }}
+                        animate={{ x: 0 }}
+                        exit={{ x: '100%' }}
+                        transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
+                        style={{ willChange: 'transform' }}
+                        className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-2xl bg-canvas-elevated border-l border-glass-border shadow-xl flex flex-col"
+                    >
+                        <div className="flex items-center gap-2 px-5 py-4 border-b border-glass-border shrink-0">
+                            <div className="min-w-0 flex-1">
+                                <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">Invite links</p>
+                                <h2 className="text-base font-bold text-ink">Outstanding links</h2>
+                                <p className="text-[11px] text-ink-muted">
+                                    Revoke a link to stop it working immediately.
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setInvitesOpen(false)}
+                                className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
+                                title="Close"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="flex-1 min-h-0 overflow-y-auto p-5">
+                            <AdminInvites />
+                        </div>
+                    </motion.aside>
+                )}
+            </AnimatePresence>
         </PageContainer>
     )
 }
@@ -1442,16 +1500,7 @@ function InviteForm({
     canGrantSuperAdmin: boolean
     loading: boolean
     onCancel: () => void
-    onSubmit: (
-        role: string | null,
-        opts: {
-            workspaceId?: string | null
-            email?: string | null
-            groupIds?: string[] | null
-            allowShareableWithGroups?: boolean
-            expiresInHours?: number
-        },
-    ) => void
+    onSubmit: (role: string | null, opts: CreateInviteOptions) => void
 }) {
     const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
@@ -1462,6 +1511,10 @@ function InviteForm({
     const [email, setEmail] = useState<string>('')
     // Phase 12: 24h | 7d | 30d | 90d.
     const [expiresIn, setExpiresIn] = useState<'24h' | '7d' | '30d' | '90d'>('30d')
+    // Phase 15: seat cap and domain restriction. null = unlimited, which
+    // is what every invite used to be.
+    const [maxUses, setMaxUses] = useState<number | null>(null)
+    const [emailDomain, setEmailDomain] = useState('')
     // Phase 14: opt-in override for shareable group invites. Default
     // OFF (groups → email required); flips to ON only after the admin
     // explicitly acknowledges the warning. Re-disables automatically
@@ -1537,6 +1590,10 @@ function InviteForm({
             groupIds: hasGroups ? Array.from(selectedGroups) : null,
             allowShareableWithGroups: overrideActive,
             expiresInHours,
+            maxUses,
+            // A pin is strictly narrower, so sending both would store a
+            // constraint that can never bind. The backend drops it too.
+            emailDomain: email.trim() ? null : (emailDomain.trim() || null),
         })
     }
 
@@ -1990,6 +2047,60 @@ function InviteForm({
                             can still sign up — they'll need a new invite or admin approval.
                         </p>
                     </div>
+
+                    {/* ── Section 6 — How many people (full width) ───── */}
+                    <div className="border-t border-glass-border mt-5 pt-5 mb-5">
+                        <SectionLabel>How many people can use it</SectionLabel>
+                        <div className="flex flex-wrap gap-2">
+                            {([1, 5, 25, null] as const).map(opt => {
+                                const isSelected = maxUses === opt
+                                return (
+                                    <button
+                                        key={opt ?? 'unlimited'}
+                                        type="button"
+                                        onClick={() => setMaxUses(opt)}
+                                        className={cn(
+                                            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                            isSelected
+                                                ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                                : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                        )}
+                                    >
+                                        {opt === null ? 'Unlimited' : opt === 1 ? 'Just 1' : `Up to ${opt}`}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                        <p className="text-[11px] text-ink-muted mt-2">
+                            {maxUses === null
+                                ? 'Anyone with the link can sign up until it expires. Set a cap if you might not control where it ends up.'
+                                : `The link closes itself after ${maxUses} ${maxUses === 1 ? 'person signs' : 'people sign'} up. You can revoke it sooner from Manage links.`}
+                        </p>
+                    </div>
+
+                    {/* ── Section 7 — Domain restriction (shareable only) ── */}
+                    {!email.trim() && (
+                        <div className="border-t border-glass-border mt-5 pt-5 mb-5">
+                            <SectionLabel>Restrict to an email domain (optional)</SectionLabel>
+                            <div className="relative group max-w-xs">
+                                <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
+                                    <AtSign className="w-4 h-4" />
+                                </div>
+                                <input
+                                    type="text"
+                                    value={emailDomain}
+                                    onChange={e => setEmailDomain(e.target.value)}
+                                    placeholder="company.com"
+                                    className="w-full bg-canvas-elevated border border-glass-border focus:border-accent-lineage/40 rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors"
+                                />
+                            </div>
+                            <p className="text-[11px] text-ink-muted mt-2">
+                                {emailDomain.trim()
+                                    ? `Only @${emailDomain.trim().replace(/^@/, '')} addresses can use this link — safe to post in a team channel.`
+                                    : 'The middle ground between anyone-with-the-link and pinning one address.'}
+                            </p>
+                        </div>
+                    )}
 
                     {/* ── Live summary preview (full width) ──────────── */}
                     <InviteSummary

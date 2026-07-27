@@ -245,6 +245,7 @@ the steady state), `deprecated` (on its way out; gates being removed). All flags
 | `editModeEnabled` | boolean | capability | — | Graph mutation routes — node/edge create, update, delete |
 | `allowedViewModes` | string[] | capability | — | `POST/PUT /views` — refuses a view whose type is not in the list |
 | `signupEnabled` | boolean | **security** (default OFF) | — | `POST /auth/register` — refuses strangers without an invite |
+| `inviteLinksEnabled` | boolean | capability (default ON) | — | `POST /admin/users/invite` refuses to mint; `GET /auth/verify-invite` and `POST /auth/signup` refuse links already in circulation |
 | `announcementsEnabled` | boolean | capability | — | `GET /announcements` — serves an empty list when off |
 | `graphExportEnabled` | boolean | capability | — | Graph export routes |
 | `blankModelsEnabled` | boolean | capability | `versioningEnabled` | `POST /blank-graphs` — provision a lineage model with no data source |

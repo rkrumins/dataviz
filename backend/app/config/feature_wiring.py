@@ -177,6 +177,33 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ui_surfaces=("Create-account link on the login page",),
         still_allowed=("Invited users can always register", "Everyone can sign in"),
     ),
+    # The OTHER door, and deliberately independent of signupEnabled: the common
+    # posture is self-registration off + invite links on. Conflating the two is
+    # what made invite links unusable on a default deployment.
+    #
+    # `capability`, not `security`, and the distinction is load-bearing here
+    # because posture decides what happens when the flag CANNOT be read.
+    # signupEnabled fails closed because an unreadable value must not admit
+    # anonymous strangers. An invite is the opposite of a stranger: a signed,
+    # expiring, use-capped, revocable credential an admin deliberately issued and
+    # can revoke individually. Failing closed on a database hiccup would black
+    # out the only entrance an invite-only deployment has, to protect against
+    # someone who already holds a valid credential.
+    "inviteLinksEnabled": FeatureWiring(
+        key="inviteLinksEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /admin/users/invite — refuses to mint a new link",
+            "GET /auth/verify-invite — reports the link as unusable",
+            "POST /auth/signup — refuses an invited signup, killing links already in circulation",
+        ),
+        ui_surfaces=("Invite by Link button on Admin → Users",),
+        still_allowed=(
+            "Outstanding links stay listed so they can be reviewed and revoked",
+            "Turning it back on revives every link that has not expired",
+            "Existing users sign in as normal",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

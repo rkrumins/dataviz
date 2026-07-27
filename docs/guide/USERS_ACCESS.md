@@ -47,6 +47,55 @@ who needs attention.
 
 ---
 
+## Invite links
+
+The route above needs an admin to notice a pending account and approve it. An
+**invite link** skips that: it carries the role, workspace and groups the person
+should get, so redeeming it creates an account that is already active, already
+assigned, and already signed in.
+
+Create one from **Admin → Users → Invite by Link**. You choose:
+
+| Setting | What it does |
+|---|---|
+| **Role + workspace** | What the account is granted on arrival. |
+| **Groups** | Group memberships attached on signup. |
+| **Send to** | Leave blank for a link anyone can use, pin an email so only that address can redeem it, or restrict to a **domain** (`company.com`) — the middle ground that makes a link safe to post in a team channel. |
+| **Expires in** | 24 hours to 90 days. |
+| **How many people** | A seat cap. The link closes itself once that many people have signed up. |
+
+Privileged roles — anything granting workspace admin or system permissions —
+always require a pinned email, so a forwarded link cannot escalate someone you
+did not intend.
+
+**Managing what you have handed out.** **Admin → Users → Manage links** lists
+every outstanding link with its usage (`3 / 10`), who created it, when it
+expires, and exactly who has redeemed it. **Revoke** kills a link immediately,
+whatever its expiry or remaining seats — the first thing to reach for if one
+ends up somewhere it shouldn't. Tokens are never shown again after creation; to
+re-share, mint a new link so it can be revoked separately.
+
+**Who can invite.** Platform administrators can invite anyone, anywhere.
+Workspace admins can invite into workspaces they administer, limited to
+non-privileged roles — you can never grant access you do not hold yourself —
+and they see and revoke only the links they created.
+
+**Two independent switches.** In **Admin → Features**:
+
+| `signupEnabled` | `inviteLinksEnabled` | Result |
+|---|---|---|
+| off | on | **Invite-only** — the default, and the usual choice |
+| on | on | Open registration plus invites |
+| off | off | Closed — admins create accounts directly |
+| on | off | Open registration, no shareable links |
+
+Turning **invite links** off is a kill switch: every link already in circulation
+stops working immediately, not just new ones. Outstanding links stay listed so
+you can review and revoke them, and any that have not expired start working
+again if you turn it back on.
+
+---
+
 ## Roles
 
 A **role** is a named bundle of permissions, at one of two tiers: **global**
