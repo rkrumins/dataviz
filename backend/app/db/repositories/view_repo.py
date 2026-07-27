@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Set
 
-from sqlalchemy import select, delete, func, or_, update
+from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -24,6 +24,11 @@ from ..models import (
     WorkspaceDataSourceORM,
     UserORM,
 )
+from backend.app.services.view_access import (
+    ViewReadScope,
+    readable_views_predicate,
+)
+from backend.common.view_visibility import DEFAULT_VISIBILITY
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -185,7 +190,7 @@ def _to_response(
         viewType=row.view_type or "graph",
         layoutType=layout_type,
         config=config_dict,
-        visibility=row.visibility or "private",
+        visibility=row.visibility or DEFAULT_VISIBILITY,
         createdBy=row.created_by,
         createdByName=created_by_name,
         createdByEmail=created_by_email,
@@ -423,7 +428,11 @@ async def create_view(
         data_source_id=req.data_source_id,
         view_type=req.view_type or "graph",
         config=json.dumps(req.config) if req.config else "{}",
-        visibility=req.visibility or "private",
+        # ``req.visibility`` is a ``ViewVisibility`` enum member; persist the
+        # bare string so the column never holds a repr like
+        # "ViewVisibility.PRIVATE" on a Python that doesn't inherit
+        # ``str.__str__`` for mixin enums.
+        visibility=getattr(req.visibility, "value", req.visibility) or DEFAULT_VISIBILITY,
         created_by=user_id,
         tags=json.dumps(req.tags) if req.tags else None,
         is_pinned=req.is_pinned,
@@ -505,7 +514,7 @@ async def update_view(
     if req.config is not None:
         row.config = json.dumps(req.config)
     if req.visibility is not None:
-        row.visibility = req.visibility
+        row.visibility = getattr(req.visibility, "value", req.visibility)
     if req.tags is not None:
         row.tags = json.dumps(req.tags)
     if req.is_pinned is not None:
@@ -906,6 +915,7 @@ async def permanently_delete_view(
 def _apply_view_filters(
     query,
     *,
+    scope: "ViewReadScope",
     visibility: Optional[str] = None,
     visibility_in: Optional[List[str]] = None,
     workspace_id: Optional[str] = None,
@@ -930,7 +940,19 @@ def _apply_view_filters(
     Shared by the listing, counting, and discovery code paths so the same
     set of predicates produces the same result set whether the caller is
     fetching rows or the total count.
+
+    ``scope`` is **required** and is applied first, unconditionally. It is
+    the caller's read reach, not a user-supplied filter: everything below
+    it narrows an already-authorized set. Authorization used to live in a
+    Python loop at the list endpoint instead, which made ``total`` and
+    ``hasMore`` over-report, broke pagination, and left every other
+    consumer of this module unfiltered by default. Keeping it here means a
+    new query is secure unless someone works to make it otherwise —
+    ``tests/test_view_repo_read_scope.py`` fails the build if a
+    view-returning function stops taking a scope.
     """
+    query = query.where(readable_views_predicate(scope))
+
     # Soft-delete filtering
     if deleted_only:
         query = query.where(ViewORM.deleted_at.isnot(None))
@@ -1074,13 +1096,20 @@ async def record_view_visit(
 
 
 async def list_recent_views(
-    session: AsyncSession, user_id: Optional[str], *, limit: int = 5,
+    session: AsyncSession, user_id: Optional[str], *, scope: ViewReadScope,
+    limit: int = 5,
 ) -> List[RecentViewEntry]:
     """This user's most recently visited views, newest first.
 
     Joined against the LIVE view rows, so names/scope are never a stale snapshot
     and a deleted view drops out on its own (no more clicking a recent entry into
     a 404).
+
+    Access is re-checked on every read rather than trusted from the visit
+    record. Being self-scoped by ``view_visits`` is not sufficient: a view
+    that was shared with the user and then unshared, or whose tier was
+    narrowed after they opened it, would otherwise stay reachable from
+    their recents strip indefinitely.
     """
     if not user_id or user_id == "anonymous":
         return []
@@ -1090,6 +1119,7 @@ async def list_recent_views(
         .where(
             ViewVisitORM.user_id == user_id,
             ViewORM.deleted_at.is_(None),
+            readable_views_predicate(scope),
         )
         .order_by(ViewVisitORM.visited_at.desc())
         .limit(limit)
@@ -1160,6 +1190,7 @@ def _view_order_by(sort: Optional[str]):
 async def list_views_filtered(
     session: AsyncSession,
     *,
+    scope: ViewReadScope,
     sort: Optional[str] = None,
     visibility: Optional[str] = None,
     visibility_in: Optional[List[str]] = None,
@@ -1188,9 +1219,16 @@ async def list_views_filtered(
     can render "20 of 1,432" style stats without guessing from page size.
     ``has_more`` and ``next_offset`` are computed once on the server so
     callers never have to reason about "was this the last page?".
+
+    ``total`` counts the same authorized population the rows come from.
+    It previously counted the unfiltered set while the rows were filtered
+    afterwards in Python, so ``total - len(items)`` told the caller exactly
+    how many views they were not allowed to see — a count oracle that, with
+    ``search``, narrowed to specific private view metadata.
     """
     # --- shared filter application (select + count share this) -----------
     filter_kwargs = dict(
+        scope=scope,
         visibility=visibility,
         visibility_in=visibility_in,
         workspace_id=workspace_id,
@@ -1250,17 +1288,27 @@ async def list_views_filtered(
 
 async def get_view_facets(
     session: AsyncSession,
+    *,
+    scope: ViewReadScope,
 ) -> ViewFacetsResponse:
     """Aggregate distinct tags, view types, and creators across non-deleted views.
 
     Used by the Explorer to populate the Tag / View Type / Creator filter
-    dropdowns. Facets are intentionally GLOBAL (unscoped by other active
-    filters) so users can always pick from the full set of values in the
-    database rather than the intersection of their current filters —
-    matches the behaviour users expect from Explorer-style UIs where the
-    picker is a discovery tool, not a query refinement.
+    dropdowns. Facets stay GLOBAL with respect to the caller's *other*
+    active filters — users pick from the full set of values rather than
+    the intersection of their current query, which is what makes the
+    picker a discovery tool rather than a query refinement.
+
+    They are NOT global with respect to access. Every aggregation below is
+    scoped to what the caller may read: the creator facet returns display
+    names and email addresses, and the tag facet spans view metadata, so
+    an unscoped version is a directory dump. It was exactly that until
+    this scope parameter existed.
     """
-    base_where = ViewORM.deleted_at.is_(None)
+    base_where = and_(
+        ViewORM.deleted_at.is_(None),
+        readable_views_predicate(scope),
+    )
 
     # 1. Tags — parsed in Python since the column is a JSON string.
     tags_query = (
@@ -1347,6 +1395,7 @@ async def get_view_facets(
 async def get_view_stats(
     session: AsyncSession,
     *,
+    scope: ViewReadScope,
     visibility: Optional[str] = None,
     visibility_in: Optional[List[str]] = None,
     workspace_id: Optional[str] = None,
@@ -1372,8 +1421,14 @@ async def get_view_stats(
     reuses ``_apply_view_filters`` so the stats always describe the
     exact same population the list endpoint would return. Four cheap
     aggregate queries — no row materialisation.
+
+    Because the filter params are unrestricted and the output is counts,
+    an unscoped version of this is a probing oracle: repeated queries over
+    ``search`` narrow to specific private view names, descriptions and
+    tags. ``scope`` bounds every aggregate to the caller's readable set.
     """
     filter_kwargs = dict(
+        scope=scope,
         visibility=visibility,
         visibility_in=visibility_in,
         workspace_id=workspace_id,
@@ -1453,17 +1508,19 @@ async def get_view_stats(
 async def list_popular_views(
     session: AsyncSession,
     *,
+    scope: ViewReadScope,
     limit: int = 20,
     user_id: Optional[str] = None,
 ) -> List[ViewResponse]:
-    """List the most-favourited views visible to the caller.
+    """List the most-favourited views the caller can actually read.
 
-    Visibility scoping:
-    - ``enterprise`` and ``workspace`` visibility are visible to everyone
-      (matches how ``list_views_filtered`` treats access today).
-    - ``private`` views only surface for their creator, so user A never
-      sees user B's private view bubble up into their Trending strip
-      just because A has happened to favourite it.
+    This used to run its own hand-rolled predicate — ``visibility IN
+    ('enterprise', 'workspace') OR created_by = me`` — with no workspace
+    check at all, so every ``workspace``-tier view in the database was
+    returned to every caller, including callers with no binding in that
+    workspace. The endpoint then deliberately routed around the RBAC
+    post-filter on the grounds that "popular IS the visible set". It now
+    uses the same predicate as every other listing.
 
     Zero-favourite views are excluded so Trending reflects actual
     popularity rather than padding with unloved views.
@@ -1477,21 +1534,12 @@ async def list_popular_views(
         .subquery()
     )
 
-    # Privacy-safe visibility predicate: everyone sees non-private views;
-    # private views only surface to their creator.
-    visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
-    if user_id:
-        visibility_predicate = or_(
-            visibility_predicate,
-            ViewORM.created_by == user_id,
-        )
-
     query = (
         select(ViewORM, fav_count_sq.c.fav_count)
         .join(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
         .where(ViewORM.deleted_at.is_(None))
         .where(fav_count_sq.c.fav_count > 0)
-        .where(visibility_predicate)
+        .where(readable_views_predicate(scope))
         .order_by(
             fav_count_sq.c.fav_count.desc(),
             ViewORM.updated_at.desc(),
@@ -1542,13 +1590,22 @@ async def list_popular_views(
 async def list_views_for_context_model(
     session: AsyncSession,
     context_model_id: str,
+    *,
+    scope: ViewReadScope,
     user_id: Optional[str] = None,
 ) -> List[ViewResponse]:
-    """Find all views referencing a given context model."""
+    """Find all views referencing a given context model, scoped to the caller.
+
+    This had no visibility filter of any kind — it returned every view in
+    the database referencing the model, private ones included. It has no
+    HTTP caller today, which is the only reason it was not a live leak;
+    requiring ``scope`` means it cannot become one when someone routes it.
+    """
     query = (
         select(ViewORM)
         .where(ViewORM.context_model_id == context_model_id)
         .where(ViewORM.deleted_at.is_(None))
+        .where(readable_views_predicate(scope))
         .order_by(ViewORM.updated_at.desc())
     )
     result = await session.execute(query)

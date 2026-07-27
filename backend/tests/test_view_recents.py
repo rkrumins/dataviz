@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.repositories import view_repo
+from tests.common.view_scopes import admin_scope
 from backend.app.db.models import WorkspaceORM, ViewORM, ViewVisitORM
 from backend.common.models.management import ViewCreateRequest
 
@@ -40,7 +41,7 @@ async def test_visit_upserts_and_lists_newest_first(db_session: AsyncSession):
     )).scalars().all()
     assert len(rows) == 2  # upserted, not appended
 
-    recent = await view_repo.list_recent_views(db_session, "u1", limit=5)
+    recent = await view_repo.list_recent_views(db_session, "u1", scope=admin_scope(), limit=5)
     assert [r.viewName for r in recent][0] == "A"  # revisit floats to the top
 
 
@@ -51,8 +52,8 @@ async def test_recents_are_per_user(db_session: AsyncSession):
     a = await _view(db_session, ws.id, "A")
     await view_repo.record_view_visit(db_session, a.id, "u1")
 
-    assert await view_repo.list_recent_views(db_session, "u2", limit=5) == []
-    assert len(await view_repo.list_recent_views(db_session, "u1", limit=5)) == 1
+    assert await view_repo.list_recent_views(db_session, "u2", scope=admin_scope(), limit=5) == []
+    assert len(await view_repo.list_recent_views(db_session, "u1", scope=admin_scope(), limit=5)) == 1
 
 
 async def test_recents_use_live_name_and_drop_deleted(db_session: AsyncSession):
@@ -66,15 +67,15 @@ async def test_recents_use_live_name_and_drop_deleted(db_session: AsyncSession):
     row.name = "New Name"
     await db_session.flush()
 
-    recent = await view_repo.list_recent_views(db_session, "u1", limit=5)
+    recent = await view_repo.list_recent_views(db_session, "u1", scope=admin_scope(), limit=5)
     assert recent[0].viewName == "New Name"
 
     await view_repo.delete_view(db_session, a.id)
-    assert await view_repo.list_recent_views(db_session, "u1", limit=5) == []
+    assert await view_repo.list_recent_views(db_session, "u1", scope=admin_scope(), limit=5) == []
 
 
 async def test_anonymous_is_a_noop(db_session: AsyncSession):
     ws = await _ws(db_session)
     a = await _view(db_session, ws.id, "A")
     await view_repo.record_view_visit(db_session, a.id, "anonymous")
-    assert await view_repo.list_recent_views(db_session, "anonymous", limit=5) == []
+    assert await view_repo.list_recent_views(db_session, "anonymous", scope=admin_scope(), limit=5) == []

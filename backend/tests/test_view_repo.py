@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 
 from backend.app.db.engine import Base
 from backend.app.db.repositories import view_repo
+from tests.common.view_scopes import admin_scope
 from backend.app.db.models import WorkspaceORM, UserORM
 from backend.common.models.management import (
     ViewCreateRequest,
@@ -107,7 +108,7 @@ async def test_delete_view_soft_deletes(db_session: AsyncSession):
     assert fetched.deleted_at is not None
 
     # Not included in default filtered listing
-    listed = await view_repo.list_views_filtered(db_session)
+    listed = await view_repo.list_views_filtered(db_session, scope=admin_scope())
     assert listed.total == 0
     assert listed.items == []
 
@@ -121,7 +122,7 @@ async def test_restore_view(db_session: AsyncSession):
     assert result is True
 
     # Now shows up in listing
-    listed = await view_repo.list_views_filtered(db_session)
+    listed = await view_repo.list_views_filtered(db_session, scope=admin_scope())
     assert listed.total == 1
     assert len(listed.items) == 1
 
@@ -145,13 +146,13 @@ async def test_list_views_filtered_by_visibility(db_session: AsyncSession):
     )
 
     private_views = await view_repo.list_views_filtered(
-        db_session, visibility="private"
+        db_session, scope=admin_scope(), visibility="private"
     )
     assert private_views.total == 1
     assert private_views.items[0].name == "Private"
 
     enterprise_views = await view_repo.list_views_filtered(
-        db_session, visibility="enterprise"
+        db_session, scope=admin_scope(), visibility="enterprise"
     )
     assert enterprise_views.total == 1
     assert enterprise_views.items[0].name == "Enterprise"
@@ -266,7 +267,7 @@ async def test_list_views_filtered_query_count_is_bounded(db_session: AsyncSessi
 
     with _count_queries(db_session) as counter:
         listed = await view_repo.list_views_filtered(
-            db_session, limit=20, user_id=creator_id,
+            db_session, scope=admin_scope(), limit=20, user_id=creator_id,
         )
 
     assert listed.total == 20
@@ -301,7 +302,7 @@ async def test_list_views_filtered_legacy_kill_switch(db_session: AsyncSession, 
 
     with _count_queries(db_session) as counter:
         listed = await view_repo.list_views_filtered(
-            db_session, limit=10, user_id=creator_id,
+            db_session, scope=admin_scope(), limit=10, user_id=creator_id,
         )
 
     assert listed.total == 10
@@ -326,17 +327,17 @@ async def test_batched_enrichment_matches_legacy_output(db_session: AsyncSession
     await _seed_views(db_session, ws, n=5, creator_id=creator_id)
     # Add a couple of favourites so the favourite_count / is_favourited
     # paths actually carry signal in the comparison.
-    listed = await view_repo.list_views_filtered(db_session, limit=5, user_id=creator_id)
+    listed = await view_repo.list_views_filtered(db_session, scope=admin_scope(), limit=5, user_id=creator_id)
     view_ids = [v.id for v in listed.items]
     await view_repo.favourite_view(db_session, view_ids[0], creator_id)
     await view_repo.favourite_view(db_session, view_ids[1], "usr_other")
     await db_session.commit()
 
     monkeypatch.setenv("VIEWS_BATCH_ENRICH", "true")
-    batched = await view_repo.list_views_filtered(db_session, limit=5, user_id=creator_id)
+    batched = await view_repo.list_views_filtered(db_session, scope=admin_scope(), limit=5, user_id=creator_id)
 
     monkeypatch.setenv("VIEWS_BATCH_ENRICH", "false")
-    legacy = await view_repo.list_views_filtered(db_session, limit=5, user_id=creator_id)
+    legacy = await view_repo.list_views_filtered(db_session, scope=admin_scope(), limit=5, user_id=creator_id)
 
     assert batched.total == legacy.total
     assert len(batched.items) == len(legacy.items)
@@ -368,7 +369,7 @@ async def test_list_popular_views_query_count_is_bounded(db_session: AsyncSessio
     ws = await _create_workspace(db_session)
     creator_id = "usr_creator_003"
     await _seed_views(db_session, ws, n=8, creator_id=creator_id)
-    listed = await view_repo.list_views_filtered(db_session, limit=8, user_id=creator_id)
+    listed = await view_repo.list_views_filtered(db_session, scope=admin_scope(), limit=8, user_id=creator_id)
     # Give every view at least one favourite so they all qualify for
     # the "popular" set (popularity = fav_count > 0).
     for v in listed.items:
@@ -377,7 +378,7 @@ async def test_list_popular_views_query_count_is_bounded(db_session: AsyncSessio
 
     with _count_queries(db_session) as counter:
         popular = await view_repo.list_popular_views(
-            db_session, limit=10, user_id=creator_id,
+            db_session, scope=admin_scope(), limit=10, user_id=creator_id,
         )
 
     assert len(popular) == 8
@@ -481,7 +482,7 @@ async def test_batch_list_resolves_creator_and_modifier(db_session: AsyncSession
     )
     await db_session.commit()
 
-    listed = await view_repo.list_views_filtered(db_session, limit=10)
+    listed = await view_repo.list_views_filtered(db_session, scope=admin_scope(), limit=10)
     item = next(v for v in listed.items if v.id == created.id)
 
     assert item.created_by_name == "Aut Hor"

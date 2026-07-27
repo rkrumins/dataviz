@@ -4,18 +4,26 @@ View endpoints (top-level, cross-workspace).
 Views are visual renderings of context models (or ad-hoc graphs).
 Mounted at /api/v1/views
 
-RBAC Phase 2C: each route enforces the three-layer view evaluator
-(``backend.app.services.view_access``). Reads pass when ANY of:
-workspace binding, visibility tier, or explicit ``resource_grants``.
-Mutations (create / edit / delete / change-visibility / restore /
-hard-delete) check the corresponding action predicate.
+Access is decided by ``backend.app.services.view_access``: the view's
+visibility tier says who it reaches, and explicit ``resource_grants``
+extend that to named subjects. Mutations (create / edit / delete /
+change-visibility / restore / hard-delete) check the corresponding
+action predicate.
 
-The list endpoint filters its items post-fetch when enforcement is on.
-That means ``total``/``hasMore`` can overestimate for non-admins
-(callers see fewer rows than the count claims). A Phase 3 SQL refactor
-will push the filter into the query for accurate paging; for now the
-trade-off is acceptable because the kill-switch
-``RBAC_ENFORCE_VIEWS=false`` reverts to the legacy behaviour.
+Every listing route resolves a ``ViewReadScope`` and hands it to the
+repo, which turns it into a SQL predicate. Reads are therefore filtered
+**in the query**, so ``total``/``hasMore`` describe the same authorized
+population the rows come from. The previous design filtered items in
+Python after the query, which made the counts over-report by exactly the
+number of views the caller could not see, broke pagination, and left
+every repo consumer that wasn't this endpoint unfiltered by default.
+
+The ``RBAC_ENFORCE_VIEWS`` kill-switch no longer covers reads. It was a
+single env var that disabled read, edit, delete, hard-delete, restore and
+visibility-change together, and its purpose was to fall back to the
+pre-enforcement behaviour. There is no such behaviour left to fall back
+to now that authorization is the query itself — an unscoped read is not a
+legacy mode, it is a full table dump. It still guards the mutation checks.
 """
 import logging
 import os
@@ -38,6 +46,7 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_repo
 from backend.app.db.repositories import view_activity_repo
+from backend.app.db.repositories import grant_repo, user_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
@@ -45,6 +54,11 @@ from backend.app.services import view_access
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
+from backend.common.view_visibility import (
+    DEFAULT_VISIBILITY,
+    VISIBILITY_VALUES,
+    is_valid_visibility,
+)
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -89,11 +103,10 @@ class _ViewProxy:
     """Adapter that exposes the access-predicate fields off a
     ``ViewResponse``-shaped object.
 
-    The list endpoint receives DTOs from the repo, not ORM rows. The
-    predicates only need ``id``, ``workspace_id``, ``visibility``, and
-    ``created_by`` — all present on the response shape. We wrap the
-    DTO in this lightweight proxy so the predicate functions stay
-    typed against ``ViewORM`` without forcing a re-fetch.
+    List responses are DTOs from the repo, not ORM rows. The reason
+    evaluator only needs ``id``, ``workspace_id``, ``visibility``, and
+    ``created_by`` — all present on the response shape — so we wrap the
+    DTO rather than re-fetching every row just to explain it.
     """
 
     __slots__ = ("id", "workspace_id", "visibility", "created_by")
@@ -111,9 +124,90 @@ class _ViewProxy:
         return cls(
             id=getattr(item, "id"),
             workspace_id=getattr(item, "workspace_id", None),
-            visibility=getattr(item, "visibility", "private"),
+            visibility=getattr(item, "visibility", DEFAULT_VISIBILITY),
             created_by=getattr(item, "created_by", None),
         )
+
+
+async def _record_visibility_change(
+    session: AsyncSession,
+    *,
+    view_id: str,
+    view_name: Optional[str],
+    workspace_id: str,
+    before: Optional[str],
+    after: str,
+    actor: str,
+) -> None:
+    """Record a tier change on both trails.
+
+    ``view_activity_log`` is the per-view product timeline users read.
+    The outbox event is the *security* trail — it lands in
+    ``auth_audit_log`` alongside role changes and binding revocations,
+    which is where an ``org_auditor`` looks. Until this existed, promoting
+    a view to ``enterprise`` or ``public`` — the one action that can expose
+    a workspace's data platform-wide — was the only access-widening
+    mutation on the platform with no security-trail entry.
+
+    Widening is a ``warning``; narrowing is ``info``. See
+    ``endpoints/audit.py: _EVENT_META``.
+    """
+    if before == after:
+        return
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=workspace_id,
+        action="visibility_changed", actor=actor,
+        summary=f"Visibility {before} → {after}",
+        changes={"visibility": {"from": before, "to": after}},
+    )
+    order = VISIBILITY_VALUES
+    try:
+        widened = order.index(after) > order.index(before or DEFAULT_VISIBILITY)
+    except ValueError:
+        # An unrecognised tier on either side — treat as widening so the
+        # event is never quietly downgraded to info.
+        widened = True
+    event = (
+        "rbac.view.visibility_widened" if widened
+        else "rbac.view.visibility_narrowed"
+    )
+    try:
+        await user_repo.create_outbox_event(
+            session,
+            event_type=event,
+            payload={
+                "view_id": view_id,
+                "view_name": view_name,
+                "workspace_id": workspace_id,
+                "from": before,
+                "to": after,
+                "actor_id": actor,
+            },
+        )
+    except Exception:  # pragma: no cover - audit must never block the write
+        logger.warning(
+            "Failed to emit %s for view %s", event, view_id, exc_info=True,
+        )
+
+
+async def _stamp_granted_by(
+    session: AsyncSession,
+    ctx: view_access.ViewerContext,
+    *item_lists: Optional[List[ViewResponse]],
+) -> None:
+    """Annotate each response with *why* the caller can see it.
+
+    The rows are already authorized — the SQL predicate did that — so this
+    only explains the outcome. Reasons are computed for the whole batch at
+    once so the ``resource_grants`` lookup runs once, not once per view.
+    """
+    items = [i for lst in item_lists if lst for i in lst]
+    if not items:
+        return
+    proxies = [_ViewProxy.from_response(i) for i in items]
+    reasons = await view_access.annotate_read_reasons(session, ctx, proxies)
+    for item in items:
+        item.granted_by = reasons.get(item.id)
 
 
 # Suppress the "imported but unused" hint while os is referenced via
@@ -200,9 +294,10 @@ async def _compute_ontology_digest(
 async def list_popular_views(
     limit: int = Query(20, le=100),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """List the most-favourited enterprise-visible views.
+    """List the most-favourited views the caller can read.
 
     Single-flight wrapped: when N concurrent callers hit this with the
     same (principal, limit) pair the leader runs the query and the
@@ -210,40 +305,50 @@ async def list_popular_views(
     homepage-style render that frequently sees burst traffic from
     every Explorer tab opening at once; this kills the thundering
     herd against the views + favourites tables.
+
+    The single-flight key includes the principal, so two callers with
+    different reach never share a cached result.
     """
+    ctx = await _viewer_context(session, user, claims)
+    scope = await view_access.build_read_scope(session, ctx)
     principal = normalised_principal(_user_id(user))
     key = ("popular", principal, limit)
-    return await read_views_sf.run(
+    items = await read_views_sf.run(
         key,
         lambda: view_repo.list_popular_views(
-            session, limit=limit, user_id=_user_id(user),
+            session, scope=scope, limit=limit, user_id=_user_id(user),
         ),
     )
+    await _stamp_granted_by(session, ctx, items)
+    return items
 
 
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
-    """Return distinct tags, view types, and creators across non-deleted views.
+    """Return distinct tags, view types, and creators across readable views.
 
     Used to populate the Explorer's Tag / View Type / Creator filter
     dropdowns from the authoritative DB-wide set of values rather than
     deriving them from the currently-loaded page (which would miss
     tags/creators beyond the first page at scale).
 
-    Authentication is required: the creator facet carries display names
-    and email addresses, and the tag facet spans private views, so this
-    must never be reachable anonymously.
+    Scoped to the caller: the creator facet carries display names and
+    email addresses and the tag facet spans view metadata, so an unscoped
+    version is a directory dump. It was unauthenticated and unscoped until
+    this was fixed.
 
-    Single-flight wrapped: facets is a global aggregation read with a
-    fixed key. Under any concurrency, exactly one worker runs the
-    aggregate and the rest piggy-back on its result.
+    Single-flight wrapped, keyed by principal — the result is per-caller
+    now, so a shared key would serve one user's facets to another.
     """
+    ctx = await _viewer_context(session, user, claims)
+    scope = await view_access.build_read_scope(session, ctx)
     return await read_views_sf.run(
-        ("facets",),
-        lambda: view_repo.get_view_facets(session),
+        ("facets", normalised_principal(_user_id(user))),
+        lambda: view_repo.get_view_facets(session, scope=scope),
     )
 
 
@@ -267,6 +372,7 @@ async def get_view_stats(
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
     user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewCatalogStats:
     """Aggregate counts for the Explorer stats bar, scoped to the same
@@ -279,8 +385,11 @@ async def get_view_stats(
     private view names, descriptions and tags (``search`` spans all of
     them) by probing ``?visibility=private&createdBy=<victim>``.
     """
+    ctx = await _viewer_context(session, user, claims)
+    scope = await view_access.build_read_scope(session, ctx)
     return await view_repo.get_view_stats(
         session,
+        scope=scope,
         visibility=visibility,
         visibility_in=visibility_in,
         workspace_id=workspace_id,
@@ -369,8 +478,11 @@ async def list_views(
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
     """
+    ctx = await _viewer_context(session, user, claims)
+    scope = await view_access.build_read_scope(session, ctx)
     response = await view_repo.list_views_filtered(
         session,
+        scope=scope,
         visibility=visibility,
         visibility_in=visibility_in,
         workspace_id=workspace_id,
@@ -396,29 +508,13 @@ async def list_views(
 
     # Optional ?include=popular: fold the trending strip into the same
     # response so the Explorer only makes one round-trip instead of two.
-    # ``list_popular_views`` enforces its own visibility scoping (private
-    # views only surface to their creator), so it does not need to pass
-    # through the RBAC post-filter below — popular IS the visible set.
+    # It goes through the same read scope as everything else.
     if "popular" in include:
         response.popular = await view_repo.list_popular_views(
-            session, limit=popular_limit, user_id=_user_id(user),
+            session, scope=scope, limit=popular_limit, user_id=_user_id(user),
         )
 
-    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
-        return response
-
-    # Three-layer post-filter. ``response.items`` is a list of
-    # ViewResponse-shaped objects from the repo, NOT ORM rows — but
-    # they carry the fields our predicates need (id, workspace_id,
-    # visibility, created_by). We adapt them here rather than re-
-    # querying the DB.
-    ctx = await _viewer_context(session, user, claims)
-    keep = []
-    for item in response.items:
-        proxy = _ViewProxy.from_response(item)
-        if await view_access.can_read_view(session, ctx, proxy):
-            keep.append(item)
-    response.items = keep
+    await _stamp_granted_by(session, ctx, response.items, response.popular)
     return response
 
 
@@ -478,13 +574,12 @@ async def get_view(
     ``branchId`` (a draft ref) projects the branch-effective config — base ⊕ the
     branch's layout overlay — so a draft sees its own layer/scope edits; published
     and other branches see the base. Absent (or no overlay) → base, unchanged."""
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
-        ctx = await _viewer_context(session, user, claims)
-        if not await view_access.can_read_view(session, ctx, view_orm):
-            # 404 (not 403) so view existence stays private from
-            # users with no access path.
-            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        # 404 (not 403) so view existence stays private from
+        # users with no access path.
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
 
     view = await view_repo.get_view_enriched(
         session, view_id, user_id=_user_id(user), branch_id=branch_id,
@@ -520,6 +615,21 @@ async def update_view(
                 status_code=403,
                 detail="Missing permission: workspace:view:edit",
             )
+        # Changing the tier through the general update route requires the
+        # SAME authority as the dedicated visibility route. Without this,
+        # ``workspace:view:edit`` (a standard member) could widen any view
+        # they can edit by sending ``visibility`` in the body — a bypass of
+        # the creator-or-workspace-admin rule the other endpoint enforces.
+        new_visibility = getattr(req.visibility, "value", req.visibility)
+        if (
+            new_visibility is not None
+            and new_visibility != existing.visibility
+            and not view_access.can_change_visibility(ctx, view_orm)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the creator or a workspace admin can change visibility",
+            )
 
     # Only when the type CHANGES. Withdrawing a layout stops NEW work in it; a view already
     # built in that layout must stay editable, or "existing views keep working" — which is what
@@ -541,6 +651,14 @@ async def update_view(
             session, view_id=view.id, workspace_id=view.workspace_id,
             action="updated", actor=_user_id(user),
             summary=_update_summary(changes), changes=changes,
+        )
+    if view.visibility != existing.visibility:
+        await _record_visibility_change(
+            session,
+            view_id=view.id, view_name=view.name,
+            workspace_id=view.workspace_id,
+            before=existing.visibility, after=view.visibility,
+            actor=_user_id(user),
         )
     return view
 
@@ -624,6 +742,15 @@ async def delete_view(
     existing = await view_repo.get_view(session, view_id)
     if permanent:
         deleted = await view_repo.permanently_delete_view(session, view_id)
+        if deleted:
+            # ``resource_grants.resource_id`` has no FK to ``views.id`` (the
+            # table is polymorphic), so nothing cascades on its own. Left
+            # behind, the rows outlive the view they describe and would
+            # silently re-confer access if the id were ever reused or the
+            # view restored from a backup.
+            await grant_repo.delete_resource_grants(
+                session, resource_type="view", resource_id=view_id,
+            )
     else:
         deleted = await view_repo.delete_view(session, view_id)
     if not deleted:
@@ -673,12 +800,15 @@ async def update_view_visibility(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Change the visibility of a view (private | workspace | enterprise).
+    """Change the visibility of a view (private | workspace | enterprise | public).
 
     Creator or workspace admin only — see the action matrix.
     """
-    if visibility not in ("private", "workspace", "enterprise"):
-        raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
+    if not is_valid_visibility(visibility):
+        raise HTTPException(
+            status_code=422,
+            detail=f"visibility must be one of: {', '.join(VISIBILITY_VALUES)}",
+        )
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
@@ -695,12 +825,13 @@ async def update_view_visibility(
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
-    if existing and existing.visibility != visibility:
-        await view_activity_repo.record_view_activity(
-            session, view_id=view_id, workspace_id=view.workspace_id,
-            action="visibility_changed", actor=_user_id(user),
-            summary=f"Visibility {existing.visibility} → {visibility}",
-            changes={"visibility": {"from": existing.visibility, "to": visibility}},
+    if existing:
+        await _record_visibility_change(
+            session,
+            view_id=view_id, view_name=view.name,
+            workspace_id=view.workspace_id,
+            before=existing.visibility, after=visibility,
+            actor=_user_id(user),
         )
     return view
 
@@ -773,11 +904,10 @@ async def get_view_activity(
     """Per-view activity timeline, newest first. Gated by view-read access —
     whoever can see the view can see how it changed. Legacy views with no
     recorded activity get a synthesized 'created' anchor from their stamps."""
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
-        ctx = await _viewer_context(session, user, claims)
-        if not await view_access.can_read_view(session, ctx, view_orm):
-            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return await view_activity_repo.get_view_activity(
         session, view_id, action=action, limit=limit, offset=offset,
     )
@@ -797,10 +927,9 @@ async def get_workspace_view_activity(
 ):
     """Recent activity across all of a workspace's views (each entry carries the
     view name). Powers the governance-tab feed. Gated by workspace view-read."""
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        from backend.app.services.permission_service import has_permission
-        if not has_permission(claims, "workspace:view:read", workspace_id=workspace_id):
-            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:read")
+    from backend.app.services.permission_service import has_permission
+    if not has_permission(claims, "workspace:view:read", workspace_id=workspace_id):
+        raise HTTPException(status_code=403, detail="Missing permission: workspace:view:read")
     return await view_activity_repo.get_workspace_activity(
         session, workspace_id, limit=limit, offset=offset,
     )
@@ -824,9 +953,6 @@ async def list_my_activity_feed(
     view the user has no access to.
     """
     pairs = await view_activity_repo.get_recent_activity(session, limit=limit * 4)
-
-    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
-        return [entry for entry, _ in pairs][:limit]
 
     ctx = await _viewer_context(session, user, claims)
     visible: List[view_activity_repo.ViewActivityEntry] = []
@@ -920,8 +1046,6 @@ async def list_my_drafts(
     by_id = {v.id: v for v in rows}
 
     ctx = await _viewer_context(session, user, claims)
-    enforce = rbac_flag("RBAC_ENFORCE_VIEWS")
-
     out: List[MyDraftEntry] = []
     for d in drafts:
         if len(out) >= limit:
@@ -929,7 +1053,7 @@ async def list_my_drafts(
         view = by_id.get(d.originating_view_id)
         if view is None:
             continue  # view deleted since the draft was opened
-        if enforce and not await view_access.can_read_view(session, ctx, view):
+        if not await view_access.can_read_view(session, ctx, view):
             continue
         out.append(
             MyDraftEntry(
@@ -951,14 +1075,21 @@ async def list_my_drafts(
 async def list_my_recent_views(
     limit: int = Query(5, le=20),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """The signed-in user's recently visited views — "Continue where you left off".
 
     Server-side and per-user, so it follows them across devices/browsers and is
     joined against the LIVE views (never a stale name, deleted views drop out).
+    Access is re-checked on read, so a view that was unshared or narrowed
+    after the visit drops out too.
     """
-    return await view_repo.list_recent_views(session, _user_id(user), limit=limit)
+    ctx = await _viewer_context(session, user, claims)
+    scope = await view_access.build_read_scope(session, ctx)
+    return await view_repo.list_recent_views(
+        session, _user_id(user), scope=scope, limit=limit,
+    )
 
 
 @router.post("/{view_id}/visit", status_code=204)
@@ -969,9 +1100,8 @@ async def record_visit(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Record that the current user opened this view (drives the recents strip)."""
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
-        ctx = await _viewer_context(session, user, claims)
-        if not await view_access.can_read_view(session, ctx, view_orm):
-            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     await view_repo.record_view_visit(session, view_id, _user_id(user))

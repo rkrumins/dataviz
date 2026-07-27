@@ -163,6 +163,13 @@ def _summary_view_grant(verb: str):
     return _build
 
 
+def _summary_view_visibility(verb: str):
+    def _build(p: dict) -> str:
+        name = p.get("view_name") or p.get("view_id") or "?"
+        return f"View '{name}' {verb}: {p.get('from') or '?'} → {p.get('to') or '?'}"
+    return _build
+
+
 def _summary_group_lifecycle(verb: str):
     def _build(p: dict) -> str:
         return f"Group '{p.get('group_name') or p.get('group_id') or '?'}' {verb}"
@@ -250,6 +257,14 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── warning: revokes / deletes / denials / failed login
     "rbac.workspace.member_revoked": ("warning", _summary_ws_member_revoked),
     "rbac.view.grant_removed": ("warning", _summary_view_grant("revoked")),
+    # Promoting a view is an access-widening mutation like any other, and
+    # the org_auditor role exists to review exactly these. It used to be
+    # recorded only in the per-view product timeline, which never reaches
+    # auth_audit_log — so the one action that can expose a workspace's
+    # data platform-wide was the one action with no security trail.
+    "rbac.view.visibility_widened": (
+        "warning", _summary_view_visibility("widened"),
+    ),
     "rbac.role.deleted": ("warning", _summary_role_lifecycle("deleted")),
     "rbac.group.deleted": ("warning", _summary_group_lifecycle("deleted")),
     "rbac.group.member_removed": ("warning", _summary_group_membership("removed from")),
@@ -263,6 +278,9 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
     "rbac.workspace.member_expiry_updated": ("info", _summary_ws_expiry),
     "rbac.view.grant_added": ("info", _summary_view_grant("added")),
+    "rbac.view.visibility_narrowed": (
+        "info", _summary_view_visibility("narrowed"),
+    ),
     "rbac.role.created": ("info", _summary_role_lifecycle("created")),
     "rbac.role.updated": ("info", _summary_role_lifecycle("permissions updated")),
     "rbac.permission.updated": ("info", lambda p: f"Permission '{p.get('id') or '?'}' description updated"),

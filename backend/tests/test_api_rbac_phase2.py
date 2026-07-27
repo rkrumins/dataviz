@@ -450,11 +450,24 @@ async def test_update_and_delete_lifecycle_guards(
     assert delete.status_code == 204
 
 
-# ── view three-layer evaluator (unit-level) ─────────────────────────
+# ── view access evaluator (unit-level) ──────────────────────────────
 
 @pytest.mark.asyncio
-async def test_view_access_evaluator_layer1_workspace_member(db_session):
-    """Layer 1: workspace binding is sufficient for read."""
+async def test_workspace_member_cannot_read_a_private_view(db_session):
+    """A workspace binding does NOT override the ``private`` tier.
+
+    This test previously asserted the opposite — that workspace membership
+    alone was sufficient to read any view in that workspace, including a
+    private one belonging to someone else. That was the design: read passed
+    if ANY of three independent layers passed, and "holds
+    ``workspace:view:read`` here" was one of them, evaluated without
+    reference to the tier. The effect was that ``private`` and ``workspace``
+    were the same tier for anyone inside the workspace, which is the
+    "private views are visible to others" report.
+
+    Workspace membership is now the *implementation of the ``workspace``
+    tier* rather than a parallel path around it.
+    """
     from backend.app.services import view_access
     from backend.app.services.permission_service import PermissionClaims
 
@@ -478,9 +491,15 @@ async def test_view_access_evaluator_layer1_workspace_member(db_session):
         select(ViewORM).where(ViewORM.id == view_id)
     )).scalar_one()
 
-    # Private + not creator + not workspace admin → Layer 2 fails.
-    # But Layer 1 grants read because the user is a workspace member.
-    assert await view_access.can_read_view(db_session, ctx, view)
+    assert not await view_access.can_read_view(db_session, ctx, view)
+
+    # The same binding DOES reach the same view at the workspace tier —
+    # membership still works, it just no longer outranks the tier.
+    view.visibility = "workspace"
+    await db_session.commit()
+    decision = await view_access.read_decision(db_session, ctx, view)
+    assert decision.allowed
+    assert decision.reason == "tier:workspace"
 
 
 @pytest.mark.asyncio

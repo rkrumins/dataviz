@@ -4,10 +4,53 @@ API endpoint tests for /api/v1/views/*.
 Tests the view CRUD, visibility, favourite, soft-delete and restore endpoints
 using the test_client fixture which overrides auth and DB session.
 """
+import contextlib
+
 from httpx import AsyncClient
+
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_optional_user,
+    get_permission_claims,
+)
+from backend.app.services.permission_service import PermissionClaims
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
+
+@contextlib.contextmanager
+def _as(user_id: str, claims: PermissionClaims):
+    """Run requests as a specific principal.
+
+    The conftest fixture pins every request to a **system admin**, who by
+    design reaches every view. Any test about what a non-privileged caller
+    can see has to step out of that or it asserts nothing.
+    """
+    from backend.app.main import app
+
+    user = type("U", (), {"id": user_id, "email": f"{user_id}@example.com"})()
+
+    async def _user():
+        return user
+
+    def _claims():
+        return claims
+
+    prev = {
+        dep: app.dependency_overrides.get(dep)
+        for dep in (get_current_user, get_optional_user, get_permission_claims)
+    }
+    app.dependency_overrides[get_current_user] = _user
+    app.dependency_overrides[get_optional_user] = _user
+    app.dependency_overrides[get_permission_claims] = _claims
+    try:
+        yield
+    finally:
+        for dep, original in prev.items():
+            if original is None:
+                app.dependency_overrides.pop(dep, None)
+            else:
+                app.dependency_overrides[dep] = original
 
 async def _create_workspace(client: AsyncClient) -> str:
     """Create a workspace and return its ID (views require a workspace_id)."""
@@ -220,18 +263,51 @@ async def test_update_visibility_enterprise(test_client: AsyncClient):
 
 
 async def test_update_visibility_invalid(test_client: AsyncClient):
-    """Invalid visibility value returns 422. ``public`` is explicitly
-    rejected because it was the old whitelist value before the rename to
-    ``enterprise`` (migration 0006); guarding against accidental
-    regression of the rename."""
+    """An unrecognised visibility value returns 422.
+
+    This used to assert that ``public`` specifically was rejected, because
+    ``public`` was once an alias for what is now ``enterprise`` and the
+    test guarded that rename. ``public`` is now a real tier in its own
+    right — wider than ``enterprise``, reaching every signed-in account
+    rather than only those with a workspace binding — so the guard moves
+    to a value that is genuinely not in the enum.
+    """
     ws_id = await _create_workspace(test_client)
     created = await _create_view(test_client, ws_id, "Bad Vis")
     view_id = created["id"]
 
     resp = await test_client.put(
         f"/api/v1/views/{view_id}/visibility",
+        json={"visibility": "everyone"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_update_visibility_public(test_client: AsyncClient):
+    """``public`` is accepted and round-trips."""
+    ws_id = await _create_workspace(test_client)
+    created = await _create_view(test_client, ws_id, "Public Vis")
+    view_id = created["id"]
+
+    resp = await test_client.put(
+        f"/api/v1/views/{view_id}/visibility",
         json={"visibility": "public"},
     )
+    assert resp.status_code == 200
+    assert resp.json()["visibility"] == "public"
+
+
+async def test_create_view_rejects_unknown_visibility(test_client: AsyncClient):
+    """Create validates the tier too — it used to accept any string and
+    only fail later at the DB CHECK, as a 500 rather than a 422."""
+    ws_id = await _create_workspace(test_client)
+    resp = await test_client.post("/api/v1/views/", json={
+        "name": "Bogus Tier",
+        "workspaceId": ws_id,
+        "viewType": "graph",
+        "config": {},
+        "visibility": "everyone",
+    })
     assert resp.status_code == 422
 
 
@@ -607,9 +683,55 @@ async def test_list_popular_views_excludes_others_private(
     )
     await db_session.commit()
 
-    resp = await test_client.get("/api/v1/views/popular")
+    # As a workspace member — NOT a system admin, who legitimately sees
+    # everything, and not the creator.
+    member = PermissionClaims(
+        sid="sess_member", ws_perms={ws_id: ("workspace:view:read",)},
+    )
+    with _as("usr_member", member):
+        resp = await test_client.get("/api/v1/views/popular")
     assert resp.status_code == 200
     assert vid not in {v["id"] for v in resp.json()}
+
+
+async def test_list_popular_views_excludes_workspace_tier_for_non_members(
+    test_client: AsyncClient, db_session,
+):
+    """A ``workspace``-tier view does not surface to someone outside it.
+
+    ``list_popular_views`` used to run its own predicate —
+    ``visibility IN ('enterprise','workspace') OR created_by = me`` — with
+    no workspace check at all, and the endpoint deliberately routed around
+    the access filter because "popular IS the visible set". Every
+    workspace-tier view in the database was therefore returned to every
+    caller, member or not.
+    """
+    from sqlalchemy import update as _sa_update
+    from backend.app.db.models import ViewORM as _V
+
+    ws_id = await _create_workspace(test_client)
+    created = await _create_view(
+        test_client, ws_id, "TeamOnly", visibility="workspace",
+    )
+    vid = created["id"]
+    resp = await test_client.post(f"/api/v1/views/{vid}/favourite")
+    assert resp.status_code == 201
+    await db_session.execute(
+        _sa_update(_V).where(_V.id == vid).values(created_by="usr_other")
+    )
+    await db_session.commit()
+
+    outsider = PermissionClaims(sid="sess_out", ws_perms={"ws_elsewhere": ("workspace:view:read",)})
+    with _as("usr_outsider", outsider):
+        resp = await test_client.get("/api/v1/views/popular")
+    assert resp.status_code == 200
+    assert vid not in {v["id"] for v in resp.json()}
+
+    # …but a member of that workspace does see it.
+    member = PermissionClaims(sid="sess_in", ws_perms={ws_id: ("workspace:view:read",)})
+    with _as("usr_member", member):
+        resp = await test_client.get("/api/v1/views/popular")
+    assert vid in {v["id"] for v in resp.json()}
 
 
 async def test_list_popular_views_excludes_zero_fav(test_client: AsyncClient):

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.repositories import view_repo
+from tests.common.view_scopes import admin_scope
 from backend.app.db.models import WorkspaceORM, ViewORM
 from backend.common.models.management import ViewCreateRequest
 
@@ -44,7 +45,7 @@ async def test_sort_data_newest_nulls_last(db_session: AsyncSession):
     await _set_times(db_session, b.id, data_updated_at="2026-07-01T00:00:00+00:00")
     await _set_times(db_session, c.id, data_updated_at=None)
 
-    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="data-newest", limit=50)
+    resp = await view_repo.list_views_filtered(db_session, scope=admin_scope(), workspace_id=ws.id, sort="data-newest", limit=50)
     order = [v.name for v in resp.items]
     assert order.index("B") < order.index("A")   # Jul before Mar
     assert order[-1] == "C"                       # never-published last
@@ -59,7 +60,7 @@ async def test_sort_data_oldest_nulls_last(db_session: AsyncSession):
     await _set_times(db_session, b.id, data_updated_at="2026-07-01T00:00:00+00:00")
     await _set_times(db_session, c.id, data_updated_at=None)
 
-    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="data-oldest", limit=50)
+    resp = await view_repo.list_views_filtered(db_session, scope=admin_scope(), workspace_id=ws.id, sort="data-oldest", limit=50)
     order = [v.name for v in resp.items]
     assert order.index("A") < order.index("B")   # Mar before Jul
     assert order[-1] == "C"                       # never-published last
@@ -72,6 +73,6 @@ async def test_sort_recently_modified_uses_freshest_of_data_or_settings(db_sessi
     await _set_times(db_session, a.id, data_updated_at=None, updated_at="2026-07-10T00:00:00+00:00")
     await _set_times(db_session, b.id, data_updated_at="2026-07-20T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00")
 
-    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="recently-modified", limit=50)
+    resp = await view_repo.list_views_filtered(db_session, scope=admin_scope(), workspace_id=ws.id, sort="recently-modified", limit=50)
     order = [v.name for v in resp.items]
     assert order[0] == "B"   # B's data (Jul 20) is fresher than A's settings (Jul 10)

@@ -17,6 +17,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
+from backend.common.view_visibility import (
+    DEFAULT_VISIBILITY,
+    visibility_check_constraint,
+)
+
 from .engine import Base
 
 
@@ -704,7 +709,11 @@ class ContextModelORM(Base):
     # Columns added during context-model → view unification
     view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
     config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
-    visibility = Column(Text, nullable=False, default="private")       # private | workspace | enterprise
+    # NOTE: this table carried a ``visibility`` column with the same CHECK
+    # as ``views``, but nothing ever read or wrote it — every endpoint here
+    # is templates-only, and templates are global rows meant to be broadly
+    # readable. A column that looks like enforced policy but isn't is a
+    # standing footgun, so 20260727_1200_view_public_tier drops it.
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
@@ -720,10 +729,6 @@ class ContextModelORM(Base):
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
-        CheckConstraint(
-            "visibility IN ('private', 'workspace', 'enterprise')",
-            name="ck_context_models_visibility",
-        ),
     )
 
 
@@ -761,7 +766,7 @@ class ViewORM(Base):
     ontology_digest = Column(Text, nullable=True, default=None)
     # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
     # for view-ontology compatibility checks once real breakage workflows appear.
-    visibility = Column(Text, nullable=False, default="private")
+    visibility = Column(Text, nullable=False, default=DEFAULT_VISIBILITY)
     created_by = Column(Text, nullable=True)
     # Principal id of whoever last edited the view (same convention as
     # created_by). NULL on legacy rows and until the first edit after the
@@ -791,7 +796,7 @@ class ViewORM(Base):
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
         CheckConstraint(
-            "visibility IN ('private', 'workspace', 'enterprise')",
+            visibility_check_constraint(),
             name="ck_views_visibility",
         ),
     )

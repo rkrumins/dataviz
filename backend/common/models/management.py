@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
+from backend.common.view_visibility import DEFAULT_VISIBILITY, ViewVisibility
+
 
 class ProviderType(str, Enum):
     FALKORDB = "falkordb"
@@ -1045,7 +1047,11 @@ class ViewCreateRequest(BaseModel):
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     view_type: str = Field("graph", alias="viewType")
     config: Dict[str, Any] = Field(default_factory=dict)
-    visibility: str = "private"
+    # Typed, not a bare str: only ``PUT /views/{id}/visibility`` used to
+    # validate, so an unknown tier reached the DB CHECK as a 500 instead of
+    # a 422 — and a value the evaluator doesn't recognise falls closed,
+    # silently hiding the view from everyone including its creator.
+    visibility: ViewVisibility = ViewVisibility.PRIVATE
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
 
@@ -1059,7 +1065,7 @@ class ViewUpdateRequest(BaseModel):
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
     view_type: Optional[str] = Field(None, alias="viewType")
     config: Optional[Dict[str, Any]] = None
-    visibility: Optional[str] = None
+    visibility: Optional[ViewVisibility] = None
     tags: Optional[List[str]] = None
     is_pinned: Optional[bool] = Field(None, alias="isPinned")
 
@@ -1112,7 +1118,19 @@ class ViewResponse(BaseModel):
     # scope resolver) can branch on it without parsing the full config.
     layout_type: Optional[str] = Field(None, alias="layoutType")
     config: Dict[str, Any] = Field(default_factory=dict)
-    visibility: str = "private"
+    # Deliberately ``str``, not the enum: this is a read projection over
+    # rows that may predate any given tier, and a legacy value must render
+    # as itself rather than 500 on serialization. The evaluator falls
+    # closed on anything it doesn't recognise.
+    visibility: str = DEFAULT_VISIBILITY
+    # Why this caller can see this view — 'creator', 'grant', 'tier:public',
+    # 'workspace-admin', … See ``services/view_access.py: ReadReason``.
+    # Per-caller, so it is stamped on the response rather than stored.
+    # Nothing in the product could previously answer "why can I see this?",
+    # which is why a visibility leak took a code audit to diagnose instead
+    # of a glance at the UI. NULL on write responses, where the question
+    # doesn't arise.
+    granted_by: Optional[str] = Field(None, alias="grantedBy")
     created_by: Optional[str] = Field(None, alias="createdBy")
     # Human-readable display for the creator, resolved server-side so
     # every UI surface can show "Alex Smith" rather than "usr_abc123".
