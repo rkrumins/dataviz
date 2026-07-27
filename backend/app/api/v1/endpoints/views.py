@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed
 from backend.app.auth.dependencies import (
+    get_current_user,
     get_optional_user,
     get_permission_claims,
     rbac_flag,
@@ -222,6 +223,7 @@ async def list_popular_views(
 
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
+    _user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
     """Return distinct tags, view types, and creators across non-deleted views.
@@ -230,6 +232,10 @@ async def get_view_facets(
     dropdowns from the authoritative DB-wide set of values rather than
     deriving them from the currently-loaded page (which would miss
     tags/creators beyond the first page at scale).
+
+    Authentication is required: the creator facet carries display names
+    and email addresses, and the tag facet spans private views, so this
+    must never be reachable anonymously.
 
     Single-flight wrapped: facets is a global aggregation read with a
     fixed key. Under any concurrency, exactly one worker runs the
@@ -260,13 +266,18 @@ async def get_view_stats(
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
-    user=Depends(get_optional_user),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewCatalogStats:
     """Aggregate counts for the Explorer stats bar, scoped to the same
     filters the list endpoint accepts. All four numbers describe the
     currently-filtered population so the stats bar stays in sync as
     users narrow their query.
+
+    Authentication is required. The filter params are unrestricted, so an
+    anonymous caller could otherwise use the counts as an oracle over
+    private view names, descriptions and tags (``search`` spans all of
+    them) by probing ``?visibility=private&createdBy=<victim>``.
     """
     return await view_repo.get_view_stats(
         session,
@@ -698,9 +709,21 @@ async def update_view_visibility(
 async def favourite_view(
     view_id: str = Path(...),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Favourite a view for the current user."""
+    """Favourite a view for the current user.
+
+    Gated on read access, like ``/{view_id}/visit``. Without the gate the
+    404-vs-201 split is an existence oracle for arbitrary view ids, and a
+    caller who cannot read the view can still write ``favourited`` rows
+    into its owner's activity timeline and inflate its ranking in the
+    trending strip.
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     view = await view_repo.get_view(session, view_id)
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
@@ -717,9 +740,15 @@ async def favourite_view(
 async def unfavourite_view(
     view_id: str = Path(...),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove favourite for the current user."""
+    """Remove favourite for the current user. Gated on read access — see
+    ``favourite_view`` for why."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     removed = await view_repo.unfavourite_view(session, view_id, _user_id(user))
     if not removed:
         raise HTTPException(status_code=404, detail="Favourite not found")
