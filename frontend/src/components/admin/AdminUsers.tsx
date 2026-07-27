@@ -2111,6 +2111,8 @@ function InviteForm({
                         emailRequired={needsEmail}
                         shareable={overrideActive}
                         expiresIn={expiresIn}
+                        maxUses={maxUses}
+                        emailDomain={email.trim() ? null : (emailDomain.trim().replace(/^@/, '') || null)}
                     />
                     {/* ── close scroll body ──────────────────────────── */}
                     </div>
@@ -2550,6 +2552,7 @@ function GroupsPicker({
 // form's live state so it adapts as the user changes anything.
 function InviteSummary({
     roleLabel, workspaceName, groupNames, email, emailRequired, shareable, expiresIn,
+    maxUses, emailDomain,
 }: {
     roleLabel: string | null
     workspaceName: string | null
@@ -2561,6 +2564,11 @@ function InviteSummary({
      *  "Shareable link (no email pin)." */
     shareable: boolean
     expiresIn: string
+    /** Phase 15: the two limits. A summary that silently omitted them
+     *  would be the least trustworthy part of the form — it is the one
+     *  place claiming to describe the whole invite. */
+    maxUses: number | null
+    emailDomain: string | null
 }) {
     // Build a tiny sentence: "Activate a new account, [grant Role in
     // Workspace], [add to groups X, Y]. [Email-bound to a@x.com] or
@@ -2579,15 +2587,24 @@ function InviteSummary({
 
     const recipient = email
         ? `Email-bound to ${email}.`
-        : shareable
-            ? 'Shareable group invite — anyone with the link can sign up.'
-            : (emailRequired
-                ? 'Email required.'
-                : 'Shareable link (no email pin).')
+        : emailDomain
+            // A domain restriction is the single most important thing to
+            // surface about a shareable link — it is the difference between
+            // "anyone with the URL" and "anyone at our company".
+            ? `Anyone with an @${emailDomain} address can sign up.`
+            : shareable
+                ? 'Shareable group invite — anyone with the link can sign up.'
+                : (emailRequired
+                    ? 'Email required.'
+                    : 'Shareable link (no email pin).')
+
+    const seats = maxUses === null
+        ? 'Usable any number of times'
+        : `Usable ${maxUses === 1 ? 'once' : `${maxUses} times`}`
 
     return (
         <motion.div
-            key={parts.join('|') + '|' + recipient + '|' + expiresIn}
+            key={parts.join('|') + '|' + recipient + '|' + expiresIn + '|' + seats}
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.15 }}
@@ -2601,7 +2618,8 @@ function InviteSummary({
                 <span className={cn(emailRequired && !email && 'text-amber-600 dark:text-amber-400 font-medium')}>
                     {recipient}
                 </span>
-                {' '}Link expires in <span className="font-semibold">{expiresIn}</span>.
+                {' '}<span className="font-semibold">{seats}</span>, expiring in{' '}
+                <span className="font-semibold">{expiresIn}</span>.
             </p>
         </motion.div>
     )
@@ -2685,6 +2703,18 @@ function InviteResultCard({
                         />
                     )}
                     <MetaTile icon={Clock} label="Expires in" value={expiresWhen} />
+                    <MetaTile
+                        icon={Users2}
+                        label="Usable by"
+                        value={
+                            result.maxUses === null || result.maxUses === undefined
+                                ? 'Unlimited people'
+                                : result.maxUses === 1
+                                    ? '1 person'
+                                    : `Up to ${result.maxUses} people`
+                        }
+                        tone={result.maxUses ? 'slate' : 'amber'}
+                    />
                     {result.email ? (
                         <MetaTile
                             icon={Lock}
@@ -2692,11 +2722,22 @@ function InviteResultCard({
                             value={result.email}
                             tone="amber"
                         />
+                    ) : result.emailDomain ? (
+                        // Previously this said "Shareable link" regardless, so a
+                        // domain-restricted invite was confirmed back as though it
+                        // had no restriction at all — the one screen an admin
+                        // checks before sending, disagreeing with what they set.
+                        <MetaTile
+                            icon={AtSign}
+                            label="Restricted to"
+                            value={`@${result.emailDomain}`}
+                            tone="amber"
+                        />
                     ) : (
                         <MetaTile
                             icon={Mail}
                             label="Recipient"
-                            value="Shareable link"
+                            value="Anyone with the link"
                             tone="slate"
                         />
                     )}

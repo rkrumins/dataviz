@@ -22,6 +22,9 @@ import {
 } from '@/services/adminUserService'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
+import { useToast } from '@/components/ui/toast'
+import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 
 const STATUS_FILTERS = [
     { value: 'active', label: 'Active' },
@@ -49,22 +52,41 @@ function messageOf(err: unknown, fallback: string): string {
     return err instanceof Error && err.message ? err.message : fallback
 }
 
-/** "in 3 days" / "2 hours ago" — enough to judge a link at a glance. */
-function relativeTime(iso: string): string {
-    const then = new Date(iso).getTime()
-    if (Number.isNaN(then)) return iso
-    const diffMs = then - Date.now()
-    const abs = Math.abs(diffMs)
-    const units: [number, Intl.RelativeTimeFormatUnit][] = [
-        [1000 * 60 * 60 * 24, 'day'],
-        [1000 * 60 * 60, 'hour'],
-        [1000 * 60, 'minute'],
-    ]
-    const fmt = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
-    for (const [ms, unit] of units) {
-        if (abs >= ms) return fmt.format(Math.round(diffMs / ms), unit)
+const HOUR_MS = 1000 * 60 * 60
+
+/** "in 3 days" / "in 5h" — how long a link has left.
+ *
+ *  Deliberately not `TimeStamp`: that component colours by AGE (how long
+ *  ago something happened) and an expiry is in the future, so every live
+ *  link would read as freshly-green. The urgency here runs the other way
+ *  — a link with two hours left is the one worth noticing. Parsing goes
+ *  through `toUtcDate` so a timestamp without an offset is not skewed by
+ *  the viewer's timezone. */
+function expiresIn(iso: string): { label: string; tone: string } {
+    const d = toUtcDate(iso)
+    if (!d) return { label: '—', tone: 'text-ink-muted' }
+
+    const ms = d.getTime() - Date.now()
+    if (ms <= 0) return { label: 'expired', tone: 'text-ink-muted' }
+
+    const hours = ms / HOUR_MS
+    const label =
+        hours < 1 ? `in ${Math.max(1, Math.round(ms / 60000))}m`
+        : hours < 48 ? `in ${Math.round(hours)}h`
+        : `in ${Math.round(hours / 24)}d`
+
+    return {
+        label,
+        tone: hours < 24 ? 'text-amber-500' : hours < 72 ? 'text-ink-secondary' : 'text-ink-muted',
     }
-    return fmt.format(Math.round(diffMs / 1000), 'second')
+}
+
+/** Seats remaining, or null when the link is uncapped. Drives the amber
+ *  "nearly gone" cue — a link about to close itself is the one an admin
+ *  needs to notice before someone is turned away. */
+function seatsLeft(invite: InviteSummary): number | null {
+    if (invite.maxUses === null) return null
+    return Math.max(0, invite.maxUses - invite.useCount)
 }
 
 /** Who the link is for — the single most important column. */
@@ -82,6 +104,11 @@ export function AdminInvites() {
     const [revoking, setRevoking] = useState<string | null>(null)
     const [expanded, setExpanded] = useState<string | null>(null)
     const [redemptions, setRedemptions] = useState<Record<string, InviteRedemption[]>>({})
+    // Revoking is instant and irreversible — the link dies for everyone
+    // holding it, including people mid-signup. Every other destructive
+    // action on this page confirms first; this one was the exception.
+    const [confirming, setConfirming] = useState<InviteSummary | null>(null)
+    const { showToast } = useToast()
 
     // A counter rather than calling a fetch function directly: it keeps
     // every setState inside the effect on the far side of an await, and
@@ -116,13 +143,25 @@ export function AdminInvites() {
         setError(null)
         try {
             const updated = await adminUserService.revokeInvite(invite.id)
+            setConfirming(null)
+            // Say what actually happened, not just "done". An admin
+            // revoking a link wants to know it stopped working, and
+            // whether anyone had already got in through it.
+            showToast(
+                'success',
+                invite.useCount > 0
+                    ? `Link revoked. It had already been used ${invite.useCount} time${invite.useCount === 1 ? '' : 's'}.`
+                    : 'Link revoked. It stopped working immediately.',
+            )
             // Reload rather than patching in place: revoking usually
             // moves the row out of the current filter, and leaving a
             // "Revoked" row sitting in the Active list is a lie.
             if (status === 'active') reload()
             else setInvites(prev => prev.map(i => (i.id === updated.id ? updated : i)))
         } catch (err: unknown) {
-            setError(messageOf(err, 'Could not revoke this link'))
+            const msg = messageOf(err, 'Could not revoke this link')
+            setError(msg)
+            showToast('error', msg)
         } finally {
             setRevoking(null)
         }
@@ -183,9 +222,25 @@ export function AdminInvites() {
             )}
 
             {loading ? (
-                <div className="flex items-center justify-center py-12 text-ink-muted">
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                </div>
+                // Skeleton rows rather than a spinner: the list keeps its
+                // shape, so the panel doesn't collapse and jump when data
+                // lands. Matches the drawer's AccessSkeleton next door.
+                <ul className="space-y-2" aria-busy="true" aria-label="Loading invite links">
+                    {[0, 1, 2].map(i => (
+                        <li
+                            key={i}
+                            className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex items-center gap-3"
+                        >
+                            <div className="h-5 w-16 rounded-md bg-black/5 dark:bg-white/5 animate-pulse" />
+                            <div className="flex-1 space-y-1.5">
+                                <div className="h-3.5 w-40 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
+                                <div className="h-3 w-56 rounded bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
+                            </div>
+                            <div className="h-3.5 w-10 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
+                            <div className="h-3.5 w-20 rounded bg-black/5 dark:bg-white/5 animate-pulse" />
+                        </li>
+                    ))}
+                </ul>
             ) : invites.length === 0 ? (
                 <div className="text-center py-12">
                     <Link2 className="w-8 h-8 mx-auto mb-3 text-ink-muted/40" />
@@ -236,11 +291,16 @@ export function AdminInvites() {
                                     </div>
 
                                     <div
-                                        className="text-xs text-ink-muted flex items-center gap-1 shrink-0"
+                                        className={cn(
+                                            'text-xs flex items-center gap-1 shrink-0 tabular-nums',
+                                            seatsLeft(invite) !== null && seatsLeft(invite)! <= 1
+                                                ? 'text-amber-500 font-medium'
+                                                : 'text-ink-muted',
+                                        )}
                                         title={
                                             invite.maxUses === null
                                                 ? `${invite.useCount} used, no limit`
-                                                : `${invite.useCount} of ${invite.maxUses} used`
+                                                : `${invite.useCount} of ${invite.maxUses} used · ${seatsLeft(invite)} left`
                                         }
                                     >
                                         <Users className="w-3.5 h-3.5" />
@@ -251,10 +311,25 @@ export function AdminInvites() {
                                         )}
                                     </div>
 
-                                    <p className="text-xs text-ink-muted shrink-0 w-28 text-right">
+                                    {/* The exact instant lives in the tooltip — "in 3d"
+                                        is for scanning, and nobody can act on it when
+                                        they actually need to know when. */}
+                                    <p
+                                        className={cn(
+                                            'text-xs shrink-0 w-24 text-right',
+                                            invite.status === 'revoked'
+                                                ? 'text-ink-muted'
+                                                : expiresIn(invite.expiresAt).tone,
+                                        )}
+                                        title={
+                                            invite.status === 'revoked' && invite.revokedAt
+                                                ? `Revoked ${formatUtc(invite.revokedAt)}`
+                                                : `Expires ${formatUtc(invite.expiresAt)}`
+                                        }
+                                    >
                                         {invite.status === 'revoked' && invite.revokedAt
-                                            ? `Revoked ${relativeTime(invite.revokedAt)}`
-                                            : `Expires ${relativeTime(invite.expiresAt)}`}
+                                            ? `Revoked ${timeAgo(invite.revokedAt)}`
+                                            : `Expires ${expiresIn(invite.expiresAt).label}`}
                                     </p>
 
                                     <button
@@ -277,7 +352,7 @@ export function AdminInvites() {
 
                                     {invite.status !== 'revoked' && (
                                         <button
-                                            onClick={() => void handleRevoke(invite)}
+                                            onClick={() => setConfirming(invite)}
                                             disabled={revoking === invite.id}
                                             title="Revoke this link"
                                             className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/10 transition-colors flex items-center gap-1.5 disabled:opacity-50"
@@ -314,8 +389,11 @@ export function AdminInvites() {
                                                             className="flex items-center justify-between text-xs"
                                                         >
                                                             <span className="text-ink">{r.email}</span>
-                                                            <span className="text-ink-muted">
-                                                                {relativeTime(r.redeemedAt)}
+                                                            <span
+                                                                className="text-ink-muted"
+                                                                title={formatUtc(r.redeemedAt)}
+                                                            >
+                                                                {timeAgo(r.redeemedAt)}
                                                             </span>
                                                         </div>
                                                     ))
@@ -329,6 +407,31 @@ export function AdminInvites() {
                     })}
                 </ul>
             )}
+
+            {/* Revoking is instant and cannot be undone: everyone holding the
+                link loses it, including anyone part-way through signing up.
+                The message names the blast radius rather than asking a generic
+                "are you sure?", which nobody reads. */}
+            <ConfirmDialog
+                open={confirming !== null}
+                title="Revoke this invite link?"
+                message={
+                    confirming
+                        ? [
+                            `Anyone holding this link stops being able to sign up, immediately.`,
+                            confirming.useCount > 0
+                                ? `${confirming.useCount} ${confirming.useCount === 1 ? 'person has' : 'people have'} already used it — their accounts are not affected.`
+                                : 'Nobody has used it yet.',
+                            'This cannot be undone. Create a new link if you need one.',
+                        ].join(' ')
+                        : ''
+                }
+                confirmLabel="Revoke link"
+                confirmIcon={Ban}
+                loading={revoking !== null}
+                onConfirm={() => { if (confirming) void handleRevoke(confirming) }}
+                onCancel={() => setConfirming(null)}
+            />
         </div>
     )
 }

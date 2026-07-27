@@ -50,7 +50,7 @@ describe('AdminInvites', () => {
         render(<AdminInvites />)
 
         expect(await screen.findByText('Anyone with the link')).toBeInTheDocument()
-        expect(screen.getByTitle('3 of 10 used')).toBeInTheDocument()
+        expect(screen.getByTitle('3 of 10 used · 7 left')).toBeInTheDocument()
         expect(screen.getByText('Finance', { exact: false })).toBeInTheDocument()
     })
 
@@ -72,13 +72,52 @@ describe('AdminInvites', () => {
         expect(await screen.findByText('@company.com')).toBeInTheDocument()
     })
 
-    it('revokes a link and refreshes the list', async () => {
+    it('does not revoke until the confirmation is accepted', async () => {
+        // Revoking is instant and irreversible — it kills the link for
+        // everyone holding it, including anyone mid-signup. Clicking the
+        // button must not be enough on its own.
+        render(<AdminInvites />)
+
+        fireEvent.click(await screen.findByTitle('Revoke this link'))
+
+        expect(await screen.findByText(/revoke this invite link\?/i)).toBeInTheDocument()
+        expect(adminUserService.revokeInvite).not.toHaveBeenCalled()
+    })
+
+    it('names the blast radius in the confirmation', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 4, redemptionCount: 4 }),
+        ])
+        render(<AdminInvites />)
+
+        fireEvent.click(await screen.findByTitle('Revoke this link'))
+
+        expect(
+            await screen.findByText(/4 people have already used it/i),
+        ).toBeInTheDocument()
+        expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument()
+    })
+
+    it('abandoning the confirmation leaves the link alone', async () => {
+        render(<AdminInvites />)
+        fireEvent.click(await screen.findByTitle('Revoke this link'))
+
+        fireEvent.click(await screen.findByRole('button', { name: /cancel/i }))
+
+        await waitFor(() =>
+            expect(screen.queryByText(/revoke this invite link\?/i)).not.toBeInTheDocument(),
+        )
+        expect(adminUserService.revokeInvite).not.toHaveBeenCalled()
+    })
+
+    it('revokes a link and refreshes the list once confirmed', async () => {
         vi.mocked(adminUserService.revokeInvite).mockResolvedValue(
             invite({ status: 'revoked', revokedAt: new Date().toISOString() }),
         )
         render(<AdminInvites />)
 
         fireEvent.click(await screen.findByTitle('Revoke this link'))
+        fireEvent.click(await screen.findByRole('button', { name: /revoke link/i }))
 
         await waitFor(() =>
             expect(adminUserService.revokeInvite).toHaveBeenCalledWith('inv_abc123'),
@@ -140,6 +179,18 @@ describe('AdminInvites', () => {
         await waitFor(() =>
             expect(adminUserService.listInvites).toHaveBeenLastCalledWith('revoked'),
         )
+    })
+
+    it('flags a link that is nearly out of seats', async () => {
+        // A link about to close itself is the one an admin needs to notice
+        // before somebody is turned away at the door.
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ useCount: 4, maxUses: 5 }),
+        ])
+        render(<AdminInvites />)
+
+        const seats = await screen.findByTitle('4 of 5 used · 1 left')
+        expect(seats.className).toMatch(/amber/)
     })
 
     it('surfaces a load failure instead of showing an empty list', async () => {
