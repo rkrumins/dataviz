@@ -89,13 +89,22 @@ of dropping a brand-new person onto a cold dashboard.
 up through your links, and when. Sending an invitation and never hearing whether it worked left
 you with no idea whether to follow up or let it expire.
 
-**Creating a link is a guided flow, not a wall.** "Invite by Link" asked seven questions
-at once — role, workspace, groups, recipient, expiry, seat cap, domain — with no starting
-point and the summary describing the whole invite parked below the fold, under the fields it
-was meant to check. It now asks three questions in the order they depend on each other: who
-the link is for, what they get, then a review. The first question is the one the inviter
-already knows the answer to before opening the dialog, and it is the only one that constrains
-the rest — so it now carries the defaults.
+**Creating a link is a wizard, not a wall.** "Invite by Link" asked seven questions at once
+— role, workspace, groups, recipient, expiry, seat cap, domain — with no starting point, and
+parked the sentence describing the whole invite below the fold, under the fields it was meant
+to check. It is now a four-step wizard built to the same pattern as the view and asset
+onboarding wizards: its own overlay, a header stating which step you are on, a progress rail
+whose completed steps carry a one-line summary of what you chose and can be clicked to go
+back, directional transitions, keyboard navigation with a focus trap, and a guard against
+closing with work in progress. The steps are *who it's for → what they get → safety →
+review*, in that order because the first question is the only one that constrains the others
+— and the one the inviter can already answer before opening the dialog, so it carries the
+defaults for everything downstream.
+
+**A link's reach is visible before it is minted.** The safety step shows how far the invite
+actually reaches — audience, seat cap, lifetime and role, as a single meter with the reasons
+written beside it — so "anyone · unlimited · 90 days · org admin" feels different from "one
+person · 1 seat · 7 days" at the point of creation rather than in an audit later.
 
 **An open link arrives bounded.** Picking "anyone with the link" used to be the *default*
 state, at unlimited uses for 30 days — the widest invite the product can mint, reached by
