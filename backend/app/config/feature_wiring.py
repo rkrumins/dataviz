@@ -245,6 +245,28 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         # It provisions a versioned graph, so version control has to be on for it to mean anything.
         depends_on=("versioningEnabled",),
     ),
+    # The server half STRIPS rather than refuses, and that is the honest
+    # enforcement for this flag: the canvas rewrites the whole
+    # referenceLayout on every gesture, so a payload still carrying a sort
+    # mode from before the switch was thrown is the normal case. Refusing
+    # it would 403 someone for dragging a node.
+    "nodeSortingEnabled": FeatureWiring(
+        key="nodeSortingEnabled",
+        posture="capability",
+        server_gates=(
+            "view_repo._gate_node_ordering — strips nodeSortMode / orderKey / "
+            "defaultNodeSortMode from every view-layout write",
+        ),
+        ui_surfaces=(
+            "Per-layer sort menu on the Context View canvas",
+            "Drag-to-reorder and the nudge-reorder context menu in a draft",
+        ),
+        still_allowed=(
+            "Orders already saved on a view render exactly as curated — this "
+            "removes the controls, it does not disturb anything published",
+            "Every other canvas edit: adding, moving and removing nodes",
+        ),
+    ),
     # ── Semantic layers ────────────────────────────────────────────────────────
     "semanticLayerEditMode": FeatureWiring(
         key="semanticLayerEditMode",
@@ -325,10 +347,21 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="toursEnabled",
         posture="capability",
         # Preview: ships OFF, and the both-halves reference rule is relaxed for
-        # experimental flags. The tour is entirely client-side — no server gate.
+        # experimental flags. The tour is entirely client-side — no server
+        # gate, and none is owed: a tour renders guidance the user could read
+        # anyway, so there is no request for a server to refuse.
+        #
+        # The UI surfaces were previously left empty, which made `wired` False
+        # and had the admin page report a flag it renders as "not implemented"
+        # — the registry under-reporting itself, which is the same class of
+        # error as it over-reporting. They are listed because they exist.
         stage="experimental",
         server_gates=(),
-        ui_surfaces=(),
+        ui_surfaces=(
+            "Tour overlay and launcher in the app shell",
+            "'Take a tour' entries in the Help panel and Getting Started hub",
+            "Tour buttons embedded in the docs",
+        ),
         still_allowed=(
             "The Help panel and every guide stay available whether tours are on or off",
         ),

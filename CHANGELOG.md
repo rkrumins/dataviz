@@ -68,6 +68,25 @@ holding a valid invite (the created path sets cookies, the already-exists path d
 is an accepted trade, not an oversight: it requires a live invite, every probe is bounded by
 that invite's seat cap, and the ledger records who held it. Documented at the call site.
 
+**Node sorting is now enforced by the server.** `nodeSortingEnabled` had no backend half at
+all: an admin could switch node sorting off, the canvas would hide the sort menu, and anyone
+posting to the view-layout endpoint directly would still set sort modes and custom orders — the
+exact "toggle that only hides a button" the feature registry's drift guard exists to prevent.
+View-layout writes now strip `nodeSortMode`, `orderKey` and `defaultNodeSortMode` when the flag
+is off. It strips rather than refuses, because the canvas rewrites the whole layout on every
+gesture and a 403 would block someone for dragging a node; orders already stored are untouched
+and still render, exactly as the flag's admin copy promises.
+
+### Fixed
+
+**The feature registry was under-reporting itself.** `nodeSortingEnabled` had no wiring entry
+at all and `toursEnabled` declared no UI surfaces despite being read in six components, so the
+admin Features page reported both as "not implemented" and two drift-guard tests failed on
+`main`. Both now declare what actually exists. The end-to-end registry test has also been taught
+the `stage` exemption that `feature_wiring.py` documents and its sibling test already applied —
+experimental flags are not required to have a server gate yet, which is the whole reason the
+stage exists. Active flags are still checked in full.
+
 ---
 
 ## [0.2.0] — 2026-07-19 — Versioned Graph: rollback, admin flag, and enable-VC at scale

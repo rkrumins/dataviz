@@ -255,6 +255,13 @@ the steady state), `deprecated` (on its way out; gates being removed). All flags
 | `semanticLayerAutoSuggest` | boolean | capability | — | `POST /admin/ontologies/suggest` — score layers against a graph |
 | `semanticLayerVersionHistory` | boolean | capability | — | Ontology version-history routes |
 | `semanticLayerNonAdminEditing` | boolean | **security** | `semanticLayerEditMode` | Allows non-admins to edit the semantic layer (fails closed) |
+| `nodeSortingEnabled` | boolean | capability | — | `view_repo._gate_node_ordering` — strips `nodeSortMode` / `orderKey` / `defaultNodeSortMode` from every view-layout write. Strips rather than refuses: the canvas rewrites the whole layout on each gesture, so a 403 would block unrelated edits. Orders already stored still render. |
+| `toursEnabled` | boolean | capability, **experimental** (ships OFF) | — | None — a tour renders guidance the user could read anyway, so there is no request for the server to refuse. Client-side only, by design. |
+
+> **Experimental flags** (`stage: "experimental"`) are exempt from the server-gate requirement:
+> the feature is still being built, so the halves are not required to exist yet. They must ship
+> OFF. Active flags are always required to have a real server gate — a switch that only hides a
+> button is decoration, because anyone who knows the URL still has the feature.
 
 > A `depends_on` flag is only effective when its parent is also on (e.g. `blankModelsEnabled` requires
 > `versioningEnabled`; `semanticLayerImportEnabled` and `semanticLayerNonAdminEditing` require

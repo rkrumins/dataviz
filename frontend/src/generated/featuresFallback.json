@@ -279,12 +279,20 @@
       "sortOrder": 0,
       "deprecated": false,
       "stage": "active",
-      "implemented": false,
-      "enforcedServerSide": false,
+      "implemented": true,
+      "enforcedServerSide": true,
       "posture": "capability",
-      "serverGates": [],
-      "uiSurfaces": [],
-      "stillAllowed": [],
+      "serverGates": [
+        "view_repo._gate_node_ordering \u2014 strips nodeSortMode / orderKey / defaultNodeSortMode from every view-layout write"
+      ],
+      "uiSurfaces": [
+        "Per-layer sort menu on the Context View canvas",
+        "Drag-to-reorder and the nudge-reorder context menu in a draft"
+      ],
+      "stillAllowed": [
+        "Orders already saved on a view render exactly as curated \u2014 this removes the controls, it does not disturb anything published",
+        "Every other canvas edit: adding, moving and removing nodes"
+      ],
       "dependsOn": []
     },
     {
@@ -514,11 +522,15 @@
       "sortOrder": 0,
       "deprecated": false,
       "stage": "experimental",
-      "implemented": false,
+      "implemented": true,
       "enforcedServerSide": false,
       "posture": "capability",
       "serverGates": [],
-      "uiSurfaces": [],
+      "uiSurfaces": [
+        "Tour overlay and launcher in the app shell",
+        "'Take a tour' entries in the Help panel and Getting Started hub",
+        "Tour buttons embedded in the docs"
+      ],
       "stillAllowed": [
         "The Help panel and every guide stay available whether tours are on or off"
       ],
