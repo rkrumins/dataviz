@@ -1360,7 +1360,15 @@ export function AdminUsers() {
                             </button>
                         </div>
                         <div className="flex-1 min-h-0 overflow-y-auto p-5">
-                            <AdminInvites />
+                            {/* Creating a link used to mean closing this panel
+                                and hunting for a different button — the one
+                                place you manage links could not make one.
+                                Close the drawer rather than stacking the modal
+                                on top of it: both live at z-50 and the result
+                                card needs the user's full attention. */}
+                            <AdminInvites
+                                onCreate={() => { setInvitesOpen(false); setModal({ kind: 'invite' }) }}
+                            />
                         </div>
                     </motion.aside>
                 )}

@@ -89,6 +89,14 @@ of dropping a brand-new person onto a cold dashboard.
 up through your links, and when. Sending an invitation and never hearing whether it worked left
 you with no idea whether to follow up or let it expire.
 
+**The links panel leads rather than lists.** It opens on what needs doing — how many links are
+live, how many people have joined, and how many are about to expire or run out of seats — and
+sorts by urgency so the link you came to deal with is at the top. You can create a link from
+the panel that manages them, which previously meant closing it to find a different button.
+Search and sort appear only once there are enough links to need them, and a single contextual
+tip surfaces things worth knowing (an uncapped link with no restriction on who can use it, for
+instance) and disappears when they stop being true.
+
 ### Security
 
 Auto sign-in makes the signup endpoint's enumeration-safe response distinguishable for someone
@@ -114,6 +122,16 @@ admin Features page reported both as "not implemented" and two drift-guard tests
 the `stage` exemption that `feature_wiring.py` documents and its sibling test already applied —
 experimental flags are not required to have a server gate yet, which is the whole reason the
 stage exists. Active flags are still checked in full.
+
+**Invite rows had no edges.** They used the house `border-glass-border` recipe, which in light
+mode is a *white* hairline — it works everywhere else because those cards sit on the page
+background and take their edge from the fill, but this list lives in a drawer that is the same
+colour as the cards, so the rows dissolved into one stream. They now draw a real hairline.
+Separately, `bg-accent-lineage/10` and friends emit no CSS at all — Tailwind cannot apply an
+opacity modifier to a variable holding a full hex — so every tint in the panel was silently
+invisible, including the seat meter's track. This panel now uses the palette colour the token
+resolves to, which renders. The same class is used ~850 times elsewhere in the app and is
+untouched here; worth a separate look.
 
 ---
 

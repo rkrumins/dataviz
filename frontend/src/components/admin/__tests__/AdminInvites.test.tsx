@@ -60,7 +60,7 @@ describe('AdminInvites — reading a row', () => {
         ])
         render(<AdminInvites />)
 
-        expect(await screen.findByText('No role')).toBeInTheDocument()
+        expect(await screen.findByText('Account only')).toBeInTheDocument()
         expect(screen.getByText('Anyone with the link')).toBeInTheDocument()
     })
 
@@ -165,10 +165,50 @@ describe('AdminInvites — summary and filters', () => {
 
     it('guides toward creating one when there are none at all', async () => {
         vi.mocked(adminUserService.listInvites).mockResolvedValue([])
-        render(<AdminInvites />)
+        const onCreate = vi.fn()
+        render(<AdminInvites onCreate={onCreate} />)
 
         expect(await screen.findByText(/no links are active right now/i)).toBeInTheDocument()
-        expect(screen.getByText(/invite by link/i)).toBeInTheDocument()
+
+        // The empty state carries the action, not just the news. The
+        // top-of-panel button is suppressed here so there is exactly one
+        // thing to click.
+        expect(screen.queryByRole('button', { name: /new invite link/i })).not.toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: /create your first link/i }))
+        expect(onCreate).toHaveBeenCalledTimes(1)
+    })
+
+    it('can create a link from the panel that manages them', async () => {
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([invite()])
+        const onCreate = vi.fn()
+        render(<AdminInvites onCreate={onCreate} />)
+        await screen.findByText(/in Finance/)
+
+        fireEvent.click(screen.getByRole('button', { name: /new invite link/i }))
+        expect(onCreate).toHaveBeenCalledTimes(1)
+    })
+
+    it('finds a link by who it is for, and says so when nothing matches', async () => {
+        // Search only appears once the list is big enough to need it.
+        vi.mocked(adminUserService.listInvites).mockResolvedValue([
+            invite({ id: 'inv_1', email: 'alice@company.com' }),
+            invite({ id: 'inv_2', email: 'bob@company.com' }),
+            invite({ id: 'inv_3', email: 'carol@company.com' }),
+            invite({ id: 'inv_4', email: 'dave@company.com' }),
+            invite({ id: 'inv_5', email: 'erin@company.com' }),
+            invite({ id: 'inv_6', email: 'frank@company.com' }),
+        ])
+        render(<AdminInvites />)
+        await screen.findByText('alice@company.com')
+
+        const box = screen.getByPlaceholderText(/search by person/i)
+        fireEvent.change(box, { target: { value: 'carol' } })
+
+        expect(screen.getByText('carol@company.com')).toBeInTheDocument()
+        expect(screen.queryByText('alice@company.com')).not.toBeInTheDocument()
+
+        fireEvent.change(box, { target: { value: 'nobody' } })
+        expect(screen.getByText(/nothing matches that search/i)).toBeInTheDocument()
     })
 })
 
