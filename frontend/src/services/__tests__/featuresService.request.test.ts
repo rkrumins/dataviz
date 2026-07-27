@@ -85,4 +85,17 @@ describe('featuresService.update — error body handling', () => {
     expect(res.version).toBe(2)
     expect(res.values).toEqual({ editModeEnabled: true })
   })
+
+  // The nginx-405 bug: an env-derived base URL routed this PATCH outside `/api/`, so it hit the
+  // SPA static fallback and 405'd. Lock the URL to the same-origin `/api/` path like every sibling.
+  it('sends the toggle PATCH to the same-origin /api/v1/admin/features path', async () => {
+    fetchWithTimeoutMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ values: {}, version: 1 }), { status: 200 }),
+    )
+    await featuresService.update({ version: 0 })
+    const [url, init] = fetchWithTimeoutMock.mock.calls[0]
+    expect(url).toBe('/api/v1/admin/features')
+    expect(String(url).startsWith('/api/')).toBe(true)
+    expect((init as RequestInit | undefined)?.method).toBe('PATCH')
+  })
 })
