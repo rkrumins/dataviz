@@ -234,47 +234,6 @@ async def test_the_cookie_must_be_for_this_provider(db_session):
 # ── The whole round trip ─────────────────────────────────────────────
 
 
-@pytest.fixture()
-async def registry(db_session):
-    """Wire the process registry to the per-test session, so slug routes
-    reach their handler instead of 503ing at ``_resolve_provider``."""
-    from backend.auth_service.providers import PROVIDER_BUILDERS
-    from backend.auth_service.providers.registry import (
-        ProviderConfigSnapshot, ProviderRegistry, configure_registry,
-    )
-
-    class _Loader:
-        @staticmethod
-        def _snap(row):
-            return ProviderConfigSnapshot(
-                id=row.id, slug=row.slug, display_name=row.display_name,
-                kind=row.kind, enabled=bool(row.enabled),
-                priority=int(row.priority or 100),
-                settings=idp_provider_repo.decrypt_settings(row.settings),
-                claim_mapping=idp_provider_repo.parse_claim_mapping(row),
-                linking_policy=row.linking_policy,
-                button_label=row.button_label, button_icon=row.button_icon,
-            )
-
-        async def get_by_id(self, provider_id):
-            row = await idp_provider_repo.get_provider(db_session, provider_id)
-            return self._snap(row) if row is not None else None
-
-        async def get_by_slug(self, slug):
-            row = await idp_provider_repo.get_provider_by_slug(db_session, slug)
-            return self._snap(row) if row is not None else None
-
-        async def list_enabled(self):
-            rows = await idp_provider_repo.list_providers(
-                db_session, only_enabled=True,
-            )
-            return [self._snap(r) for r in rows]
-
-    reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,
-                           ttl_seconds=0)
-    configure_registry(reg)
-    yield reg
-    await reg.invalidate()
 
 
 @pytest.fixture()

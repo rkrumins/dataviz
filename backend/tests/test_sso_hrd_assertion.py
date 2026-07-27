@@ -32,11 +32,14 @@ async def _enable_email_first(db_session, on=True):
 
 
 @pytest.fixture()
-async def hrd_client(test_client, db_session):
+async def hrd_client(test_client, db_session, registry):
     """``test_client`` wires an identity service for local login only. HRD
     needs the two hooks ``main.py`` injects at startup: the email-domain
     resolver, and an auth config read from the DB rather than the static
-    all-defaults snapshot (which has the toggle off, as it should)."""
+    all-defaults snapshot (which has the toggle off, as it should).
+
+    ``registry`` (conftest) binds the provider registry to this session so
+    the public catalog sees the rows these tests create."""
     from contextlib import asynccontextmanager
 
     from backend.app.main import app
@@ -293,3 +296,53 @@ async def test_no_assertion_yet_is_a_404_with_an_explanation(
     )
     assert resp.status_code == 404
     assert "next successful sign-in" in resp.text
+
+
+# ── Login context ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_login_context_reports_the_posture(hrd_client, db_session):
+    """The login page cannot render the right shape without this. It used
+    to guess, and guessed wrong on an SSO-only deployment — offering a
+    password form the server always refuses."""
+    await _provider(db_session, slug="ctx-idp", domains=["corp.example"])
+    await _enable_email_first(db_session)
+
+    resp = await hrd_client.get("/api/v1/auth/login-context")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["allowLocalLogin"] is True
+    assert body["emailFirstLogin"] is True
+    assert [p["slug"] for p in body["providers"]] == ["ctx-idp"]
+
+
+@pytest.mark.asyncio
+async def test_login_context_never_leaks_settings(hrd_client, db_session):
+    await _provider(db_session, slug="ctx-secret", domains=["corp.example"])
+
+    resp = await hrd_client.get("/api/v1/auth/login-context")
+    assert "client_secret" not in resp.text
+    assert "settings" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_login_context_fails_open_on_a_broken_posture_read(test_client):
+    """Failing closed here would render a page with no usable control on
+    it — an outage that locks everyone out of the product. A form the
+    server might refuse is strictly better than nothing."""
+    from backend.app.main import app
+
+    class _BrokenConfigService:
+        async def auth_config(self):
+            raise RuntimeError("posture table unavailable")
+
+    previous = app.state.identity_service
+    app.state.identity_service = _BrokenConfigService()
+    try:
+        resp = await test_client.get("/api/v1/auth/login-context")
+        assert resp.status_code == 200
+        assert resp.json()["allowLocalLogin"] is True
+        assert resp.json()["emailFirstLogin"] is False
+    finally:
+        app.state.identity_service = previous

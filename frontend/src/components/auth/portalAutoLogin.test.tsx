@@ -12,8 +12,9 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
 
-const { listProviders, loginWithBrowserProfile, navigate } = vi.hoisted(() => ({
+const { listProviders, loginContext, loginWithBrowserProfile, navigate } = vi.hoisted(() => ({
     listProviders: vi.fn(),
+    loginContext: vi.fn(),
     loginWithBrowserProfile: vi.fn(),
     navigate: vi.fn(),
 }))
@@ -27,7 +28,7 @@ vi.mock('@/services/authService', async () => {
     const actual = await vi.importActual<typeof import('@/services/authService')>(
         '@/services/authService',
     )
-    return { ...actual, authService: { ...actual.authService, listProviders } }
+    return { ...actual, authService: { ...actual.authService, listProviders, loginContext } }
 })
 
 vi.mock('@/store/auth', () => ({
@@ -70,6 +71,14 @@ describe('portal auto sign-in', () => {
         window.localStorage.clear()
         window.sessionStorage.clear()
         listProviders.mockResolvedValue([PORTAL])
+        // The page reads catalog + posture in one call now. Deriving the
+        // context from ``listProviders`` keeps each test's existing
+        // provider setup — and every assertion — exactly as it was.
+        loginContext.mockImplementation(async () => ({
+            allowLocalLogin: true,
+            emailFirstLogin: false,
+            providers: await listProviders(),
+        }))
         loginWithBrowserProfile.mockResolvedValue(true)
     })
 

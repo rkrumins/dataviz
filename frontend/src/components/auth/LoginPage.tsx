@@ -7,6 +7,7 @@ import {
     authService,
     needsBrowserPayload,
     readBrowserProfile,
+    type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
 import { cn } from '@/lib/utils'
@@ -27,10 +28,15 @@ function SsoButtons({
     providers,
     failed,
     onPortalError,
+    showDivider = true,
 }: {
     providers: SsoProviderSummary[] | null
     failed: boolean
     onPortalError: (message: string) => void
+    /** "Or sign in with" only makes sense when there is something above
+     *  to be an alternative *to*. On an SSO-only deployment with a single
+     *  provider these buttons are the whole page. */
+    showDivider?: boolean
 }) {
     const navigate = useNavigate()
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
@@ -95,10 +101,15 @@ function SsoButtons({
     }
 
     return (
-        <div className="mt-6 pt-6 border-t border-white/10 space-y-3">
-            <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
-                Or sign in with
-            </p>
+        <div className={cn(
+            "space-y-3",
+            showDivider && "mt-6 pt-6 border-t border-white/10",
+        )}>
+            {showDivider && (
+                <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
+                    Or sign in with
+                </p>
+            )}
             {(providers ?? []).map((p) => (
                 needsBrowserPayload(p) ? (
                     <button
@@ -305,21 +316,28 @@ export function LoginPage() {
         loginWithBrowserProfile,
     } = useAuthStore()
 
-    // Email-first routing. Additive: the password form and the button row
-    // are untouched, and an address that matches nothing simply produces no
-    // banner — nobody is stranded by a wrong domain mapping.
+    // The page's shape is a function of the platform posture, not a fixed
+    // layout. See ``pageShape`` below.
+    const [context, setContext] = useState<LoginContext | null>(null)
+    const [contextFailed, setContextFailed] = useState(false)
     const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
-    const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
-    const [providersFailed, setProvidersFailed] = useState(false)
     const [portalError, setPortalError] = useState<string | null>(null)
+    // Escape hatch out of the email-first flow. Never shown when local
+    // login is off — there would be nothing to escape to.
+    const [forcePassword, setForcePassword] = useState(false)
+    // "Other ways to sign in" disclosure, for the postures that tuck the
+    // full button row away.
+    const [showAllProviders, setShowAllProviders] = useState(false)
 
     useEffect(() => {
         let cancelled = false
-        authService.listProviders()
-            .then((rows) => { if (!cancelled) setProviders(rows) })
-            .catch(() => { if (!cancelled) setProvidersFailed(true) })
+        authService.loginContext()
+            .then((ctx) => { if (!cancelled) setContext(ctx) })
+            .catch(() => { if (!cancelled) setContextFailed(true) })
         return () => { cancelled = true }
     }, [])
+
+    const providers = context?.providers ?? null
 
     // Silent portal sign-in: on an internal deployment the corporate
     // portal has already written the profile, so the login form is a
@@ -374,8 +392,13 @@ export function LoginPage() {
 
     // Debounced so it fires once the address looks finished, not on every
     // keystroke. A miss is silent by design — see /auth/resolve.
+    //
+    // Gated on the posture: without this it fired on every deployment,
+    // including the ~99% with email-first off, where the endpoint can only
+    // ever answer null.
+    const emailFirst = context?.emailFirstLogin ?? false
     useEffect(() => {
-        if (!email.includes('@')) { setRouted(null); return }
+        if (!emailFirst || !email.includes('@')) { setRouted(null); return }
         let cancelled = false
         const timer = setTimeout(() => {
             authService.resolveEmailDomain(email)
@@ -383,9 +406,30 @@ export function LoginPage() {
                 .catch(() => { if (!cancelled) setRouted(null) })
         }, 400)
         return () => { cancelled = true; clearTimeout(timer) }
-    }, [email])
+    }, [email, emailFirst])
 
     useDocumentTitle('Sign in')
+
+    // ── What shape is this page? ─────────────────────────────────────
+    //
+    // Previously fixed: password form, divider, every provider as a
+    // button — regardless of configuration. That meant an SSO-only
+    // deployment led with a control the server always refuses, and
+    // email-first routing appeared *below* the password form it was meant
+    // to replace, so it removed neither the button row nor the topology
+    // disclosure it existed to remove.
+    //
+    // Fails open on a context read that never arrived: local login on,
+    // email-first off. A page with a form the server might refuse still
+    // beats a page with nothing on it.
+    const allowLocal = context?.allowLocalLogin ?? true
+    const showPasswordForm = allowLocal && (!emailFirst || forcePassword)
+    // Email-first leads with the routed provider and tucks the button row
+    // behind a disclosure — otherwise it removes neither the coin flip nor
+    // the topology disclosure it exists to remove.
+    const leadWithEmail = emailFirst
+    const showEmailField = showPasswordForm || leadWithEmail
+    const showProviderRow = !leadWithEmail || showAllProviders
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -471,6 +515,7 @@ export function LoginPage() {
                     )}
 
                     {/* Form */}
+                    {showEmailField && (
                     <form onSubmit={handleSubmit} className="space-y-5">
                         <div className="space-y-2">
                             <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="email">
@@ -492,6 +537,7 @@ export function LoginPage() {
                             </div>
                         </div>
 
+                        {showPasswordForm && (
                         <div className="space-y-2">
                             <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="password">
                                 Password
@@ -511,6 +557,7 @@ export function LoginPage() {
                                 />
                             </div>
                         </div>
+                        )}
 
                         {/* Error Message */}
                         <AnimatePresence mode="wait">
@@ -528,6 +575,7 @@ export function LoginPage() {
                         </AnimatePresence>
 
                         {/* Submit Button */}
+                        {showPasswordForm && (
                         <button
                             type="submit"
                             disabled={isLoading}
@@ -545,14 +593,23 @@ export function LoginPage() {
                                 </>
                             )}
                         </button>
+                        )}
+
+                        {/* Email-first, waiting on an address that routes
+                            somewhere. Says so rather than leaving a lone
+                            field with no visible next step. */}
+                        {leadWithEmail && !routed && !showPasswordForm && (
+                            <p className="text-xs text-center text-ink-muted">
+                                Enter your work email to continue.
+                            </p>
+                        )}
                     </form>
+                    )}
 
                     {/* ── SSO ──────────────────────────────────────────── */}
                     {/* Each link is a top-level GET so the IdP redirect
                         flow works. The backend returns 404 for any
-                        provider that isn't configured, and we render
-                        the buttons unconditionally because the user has
-                        the most context about which their org uses. */}
+                        provider that isn't configured. */}
                     {routed && (
                         <a
                             href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
@@ -563,11 +620,41 @@ export function LoginPage() {
                         </a>
                     )}
 
-                    <SsoButtons
-                        providers={providers}
-                        failed={providersFailed}
-                        onPortalError={setPortalError}
-                    />
+                    {/* Escape hatches out of the email-first flow. Offered
+                        only when there is something to escape to: no
+                        password link when local login is off, because the
+                        server would refuse it. */}
+                    {leadWithEmail && (
+                        <div className="mt-4 flex flex-col items-center gap-2">
+                            {allowLocal && !forcePassword && (
+                                <button
+                                    type="button"
+                                    onClick={() => setForcePassword(true)}
+                                    className="text-xs text-accent-lineage hover:underline"
+                                >
+                                    Use a password instead
+                                </button>
+                            )}
+                            {!showAllProviders && (providers?.length ?? 0) > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowAllProviders(true)}
+                                    className="text-xs text-ink-muted hover:text-ink"
+                                >
+                                    Other ways to sign in
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {showProviderRow && (
+                        <SsoButtons
+                            providers={providers}
+                            failed={contextFailed}
+                            onPortalError={setPortalError}
+                            showDivider={showEmailField}
+                        />
+                    )}
 
                     {portalError && (
                         <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
@@ -578,11 +665,14 @@ export function LoginPage() {
 
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">
-                        <p className="text-xs text-ink-muted">
-                            <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
-                                Forgot your password?
-                            </Link>
-                        </p>
+                        {/* No password to forget when local login is off. */}
+                        {allowLocal && (
+                            <p className="text-xs text-ink-muted">
+                                <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
+                                    Forgot your password?
+                                </Link>
+                            </p>
+                        )}
                         {/* The server now REFUSES this signup (auth.py), so offering it would
                             hand someone a form that cannot submit. When self-registration is
                             off, an invite link is the only way in — and that still works. */}

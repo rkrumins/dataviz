@@ -37,46 +37,6 @@ from backend.auth_service.providers.registry import (
 from backend.auth_service.service import LocalIdentityService
 
 
-@pytest.fixture()
-async def registry(db_session):
-    """Wire the process registry to the per-test session.
-
-    Without it ``_resolve_provider`` raises RuntimeError and every slug route
-    503s before reaching its handler — which would let a handler-level bug
-    (like the metadata NameError) pass a test unnoticed.
-    """
-    class _Loader:
-        @staticmethod
-        def _snap(row):
-            return ProviderConfigSnapshot(
-                id=row.id, slug=row.slug, display_name=row.display_name,
-                kind=row.kind, enabled=bool(row.enabled),
-                priority=int(row.priority or 100),
-                settings=idp_provider_repo.decrypt_settings(row.settings),
-                claim_mapping=idp_provider_repo.parse_claim_mapping(row),
-                linking_policy=row.linking_policy,
-                button_label=row.button_label, button_icon=row.button_icon,
-            )
-
-        async def get_by_id(self, provider_id):
-            row = await idp_provider_repo.get_provider(db_session, provider_id)
-            return self._snap(row) if row is not None else None
-
-        async def get_by_slug(self, slug):
-            row = await idp_provider_repo.get_provider_by_slug(db_session, slug)
-            return self._snap(row) if row is not None else None
-
-        async def list_enabled(self):
-            rows = await idp_provider_repo.list_providers(
-                db_session, only_enabled=True,
-            )
-            return [self._snap(r) for r in rows]
-
-    reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,
-                           ttl_seconds=0)
-    configure_registry(reg)
-    yield reg
-    await reg.invalidate()
 
 
 # ── CSRF: the IdP-callback surface must be reachable without a token ──

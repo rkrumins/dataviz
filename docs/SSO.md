@@ -320,6 +320,24 @@ and routes it to the matching provider, instead of showing every configured
 IdP as a button — which is a coin flip once an org has three of them, and
 publishes the org's IdP topology to anyone who loads `/login`.
 
+The page's shape follows the posture; it is not a fixed layout with
+email-first bolted underneath. `GET /auth/login-context` returns the
+catalog and the two posture booleans in one call, and the page renders one
+of:
+
+| Posture | Page |
+|---|---|
+| local + SSO, email-first off | password form, divider, full button row (the default — unchanged) |
+| local + SSO, email-first on | email field → routed provider as the primary action; password behind "use a password instead"; button row behind "other ways to sign in" |
+| SSO-only, email-first off | the button row alone — no password form, no divider, no "forgot password" |
+| SSO-only, email-first on | email field → routed provider; no password escape, because there is nothing to escape to |
+| local only | password form; no divider, no empty SSO section |
+
+`login-context` **fails open**: a posture read that raises yields local
+login on and email-first off. That is the shape that always has a usable
+control on it — failing closed here would render a page nobody can sign in
+from.
+
 * Domains live on `idp_providers.email_domains` — plaintext JSON, no
   secrets, normalised on write (`@Corp.Example` and `corp.example` are one
   thing).

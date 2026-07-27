@@ -1487,6 +1487,7 @@ a cross-site **GET**, which `Lax` permits.
 | POST | `/api/v1/auth/{slug}/mock` | mock identity | dev-only env gate | `{ok}` + cookie |
 | POST | `/api/v1/auth/{slug}/browser-profile` | `{payload}` from web storage | signature/freshness server-side; 404 unless the row's source is browser storage | `{user}` + session cookies |
 | POST | `/api/v1/auth/resolve` | `{email}` | none — pre-session, CSRF-exempt, rate limited 20/min | `{provider}` or `{provider: null}`; every miss identical |
+| GET | `/api/v1/auth/login-context` | — | none — pre-session | `{allowLocalLogin, emailFirstLogin, providers[]}`. What the login page renders from; fails open to the permissive posture |
 
 #### Self-service identities
 

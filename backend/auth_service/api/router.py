@@ -514,28 +514,19 @@ async def me(request: Request):
 # ── GET /auth/providers (public catalog) ─────────────────────────────
 
 
-@router.get("/providers", response_model=list[ProviderSummary])
-async def list_providers(request: Request):
-    """Return the public catalog of enabled IdPs.
+async def _enabled_provider_summaries(request: Request, cfg) -> list[ProviderSummary]:
+    """The public catalog, shared by ``/providers`` and ``/login-context``.
 
-    Used by the login page to render one button per provider. No
-    secrets, no settings — only the bits the user-facing UI needs.
-
-    Phase 4: when the platform master kill-switch
-    (``app_auth_config.sso_enabled``) is off, returns ``[]`` — the
-    user-facing login page treats this as "SSO is unavailable" and
-    falls back to the password form.
+    No secrets, no settings — only the bits the user-facing UI needs.
+    Returns ``[]`` when the master kill-switch is off or no registry is
+    configured (env-only deployment / tests), so the login page falls back
+    to the password form rather than erroring.
     """
-    svc = _identity_service(request)
-    # See _require_sso_enabled: probe for the method, don't wrap the await.
-    cfg = await svc.auth_config() if hasattr(svc, "auth_config") else None
     if cfg is not None and not cfg.sso_enabled:
         return []
     try:
         registry = get_registry()
     except RuntimeError:
-        # No registry configured (env-only deployment / tests). Return
-        # an empty list so the FE renders only the password form.
         return []
     snaps = await registry.list_enabled()
     return [
@@ -547,6 +538,65 @@ async def list_providers(request: Request):
         )
         for s in snaps
     ]
+
+
+@router.get("/providers", response_model=list[ProviderSummary])
+async def list_providers(request: Request):
+    """Return the public catalog of enabled IdPs.
+
+    Superseded by ``/login-context`` for the login page, which needs the
+    posture alongside the catalog. Kept because it is a published endpoint
+    with no reason to break.
+    """
+    svc = _identity_service(request)
+    # See _require_sso_enabled: probe for the method, don't wrap the await.
+    cfg = await svc.auth_config() if hasattr(svc, "auth_config") else None
+    return await _enabled_provider_summaries(request, cfg)
+
+
+class LoginContext(BaseModel):
+    """Everything the login page needs to decide what to render."""
+    model_config = ConfigDict(populate_by_name=True)
+    allow_local_login: bool = Field(alias="allowLocalLogin")
+    email_first_login: bool = Field(alias="emailFirstLogin")
+    providers: list[ProviderSummary] = Field(default_factory=list)
+
+
+@router.get("/login-context", response_model=LoginContext,
+            response_model_by_alias=True)
+async def login_context(request: Request):
+    """Catalog + posture in one call, so the login page can render the
+    right shape on first paint.
+
+    Without this the page has to assume a shape and hope: it rendered a
+    password form even where ``allow_local_login`` was off, so the primary
+    control on the page was one the server always refuses. It also fired an
+    email-domain resolve on every deployment, including the ~99% with
+    email-first off, because it had no way to know.
+
+    The two booleans are disclosed to anonymous callers. That is
+    deliberate: the page cannot be correct without them, and neither tells
+    an attacker anything that attempting a login would not. The provider
+    list is the same one ``/providers`` has always served publicly.
+
+    Fails soft — a posture read that raises yields the permissive default
+    (local login on, email-first off), which is the shape that always has a
+    usable control on it. A locked-out login page is worse than a login
+    page that offers a form the server may refuse.
+    """
+    svc = _identity_service(request)
+    cfg = None
+    if hasattr(svc, "auth_config"):
+        try:
+            cfg = await svc.auth_config()
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            logger.warning("Login context: posture read failed: %s", exc)
+
+    return LoginContext(
+        allow_local_login=bool(getattr(cfg, "allow_local_login", True)),
+        email_first_login=bool(getattr(cfg, "email_first_login", False)),
+        providers=await _enabled_provider_summaries(request, cfg),
+    )
 
 
 class _ResolveBody(BaseModel):

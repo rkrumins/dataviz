@@ -68,6 +68,18 @@ export interface SsoProviderSummary {
     }
 }
 
+/** What the login page needs to pick its shape.
+ *
+ *  ``allowLocalLogin`` off means the password form must not render at all
+ *  — the server refuses it, so offering it is offering a dead control.
+ *  ``emailFirstLogin`` on means route by email domain instead of showing
+ *  every provider as a button. */
+export interface LoginContext {
+    allowLocalLogin: boolean
+    emailFirstLogin: boolean
+    providers: SsoProviderSummary[]
+}
+
 /** Sources whose payload only JavaScript can reach — cookie and header
  *  sources are read server-side and complete as a plain redirect. */
 export const BROWSER_STORAGE_SOURCES = ['local_storage', 'session_storage']
@@ -251,10 +263,19 @@ export const authService = {
         )
     },
 
-    /** Public catalog of enabled SSO providers. Drives the login page
-     *  buttons. Returns ``[]`` when the registry is unconfigured. */
+    /** Public catalog of enabled SSO providers. Returns ``[]`` when the
+     *  registry is unconfigured.
+     *
+     *  The login page uses {@link loginContext} instead — it needs the
+     *  posture in the same round trip to know what to render. */
     listProviders(): Promise<SsoProviderSummary[]> {
         return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
+    },
+
+    /** Catalog + platform posture, for deciding the login page's shape
+     *  before first paint. */
+    loginContext(): Promise<LoginContext> {
+        return request<LoginContext>(`${AUTH_API}/login-context`)
     },
 
     /**
