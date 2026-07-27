@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink } from 'lucide-react'
+import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import {
@@ -61,13 +61,35 @@ function SsoButtons({
             .toString()
             .toLowerCase() === 'true'
 
-    if (providers === null && !failed) {
+    if (failed) {
+        // Not silence: on an SSO-only deployment the buttons are the only
+        // way in, so "nothing rendered" is an unrecoverable dead end with
+        // no explanation. Muted rather than alarming — it isn't the user's
+        // fault, and the password form may still work.
+        return (
+            <div className="mt-6 pt-6 border-t border-white/10 text-center">
+                <p className="text-xs text-ink-muted">
+                    Couldn't load single sign-on options.{' '}
+                    <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="text-accent-lineage hover:underline"
+                    >
+                        Retry
+                    </button>
+                    {' '}or sign in with your password.
+                </p>
+            </div>
+        )
+    }
+
+    if (providers === null) {
         // While the catalog is loading, render nothing — the password
         // form is the dependable fallback.
         return null
     }
 
-    const hasProviders = providers !== null && providers.length > 0
+    const hasProviders = providers.length > 0
     if (!hasProviders && !customEnabled) {
         return null
     }
@@ -161,8 +183,14 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
                         <p className="mt-2 text-sm text-ink-secondary">
                             We won't auto-link your SSO identity to it because your
                             IdP hasn't verified the email address. Sign in with your
-                            password below, then go to <span className="font-mono">Account → Identities</span>
-                            {' '}to link your SSO provider securely.
+                            password below, then open{' '}
+                            <Link
+                                to="/me/identities"
+                                className="text-accent-lineage font-semibold hover:underline"
+                            >
+                                Identities
+                            </Link>
+                            {' '}from the user menu to link your SSO provider securely.
                         </p>
                         <button
                             onClick={onClose}
@@ -175,6 +203,71 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
             </motion.div>
         </div>
         </>
+    )
+}
+
+/** Shown when the SSO callback bounced back with ``?sso_error=1``.
+ *
+ *  The precise reason is deliberately withheld here — it is admin-only by
+ *  construction and lives in the audit log. What the user gets instead is
+ *  the reference, which is the only thing that lets an admin find the
+ *  reason. Without this the whole correlation chain dead-ends: the ref was
+ *  minted, audited and put in the URL, and then shown to nobody. */
+function SsoFailureBanner({ reference, onDismiss }: {
+    reference: string | null
+    onDismiss: () => void
+}) {
+    const [copied, setCopied] = useState(false)
+
+    async function copy() {
+        if (!reference) return
+        try {
+            await navigator.clipboard.writeText(reference)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 2000)
+        } catch {
+            // Clipboard unavailable (insecure context / denied). The ref is
+            // selectable text either way, so this is cosmetic.
+        }
+    }
+
+    return (
+        <div
+            role="alert"
+            className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm"
+        >
+            <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+                <div className="flex-1 min-w-0">
+                    <p className="text-red-300">
+                        Sign-in through your identity provider didn't complete.
+                    </p>
+                    {reference && (
+                        <div className="mt-2 flex items-center gap-2 flex-wrap">
+                            <span className="text-xs text-ink-muted">
+                                Quote this reference to your administrator:
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => { void copy() }}
+                                title="Copy reference"
+                                className="px-2 py-0.5 rounded font-mono text-xs bg-black/20 border border-white/10 hover:bg-black/30 transition-colors"
+                            >
+                                {copied ? 'copied' : reference}
+                            </button>
+                        </div>
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={onDismiss}
+                    aria-label="Dismiss"
+                    className="text-ink-muted hover:text-ink shrink-0"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+        </div>
     )
 }
 
@@ -257,6 +350,12 @@ export function LoginPage() {
     const collisionEmail = params.get('email')
     const [showCollision, setShowCollision] = useState(
         errorCode === 'unsafe_auto_link' && Boolean(collisionEmail),
+    )
+    // ``sso_error=1`` is set on every SSO failure; ``ref`` correlates it to
+    // the audit event. The collision case has its own modal, so this banner
+    // covers everything else — which is the majority.
+    const [showSsoFailure, setShowSsoFailure] = useState(
+        params.get('sso_error') === '1' && errorCode !== 'unsafe_auto_link',
     )
     useEffect(() => {
         if (errorCode === 'unsafe_auto_link' && collisionEmail) {
@@ -363,6 +462,13 @@ export function LoginPage() {
                             {brand.loginTagline}
                         </p>
                     </div>
+
+                    {showSsoFailure && (
+                        <SsoFailureBanner
+                            reference={params.get('ref')}
+                            onDismiss={() => setShowSsoFailure(false)}
+                        />
+                    )}
 
                     {/* Form */}
                     <form onSubmit={handleSubmit} className="space-y-5">

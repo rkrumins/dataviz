@@ -92,6 +92,35 @@ def _validate_shape(
         raise ProviderValidationError("priority must be between 0 and 10000")
 
 
+def validate_button_icon(icon: Optional[str]) -> None:
+    """Refuse an icon the login page could never render.
+
+    The app serves ``img-src 'self' data: blob:`` (see
+    ``middleware/security_headers.py``), so a ``https://cdn.example/logo.png``
+    is silently blocked by the browser and the operator sees a broken image
+    with nothing explaining why. Better to refuse it here, where we can say
+    so, than to store a value that cannot work.
+
+    A remote URL would also make every anonymous hit on the login page fetch
+    a third-party asset, handing that third party the IP of everyone who
+    loads it — not something to enable by accident on an internal
+    deployment.
+    """
+    if not icon:
+        return
+    value = icon.strip()
+    if value.startswith("data:image/"):
+        return
+    if value.startswith("/") and not value.startswith("//"):
+        return
+    raise ProviderValidationError(
+        "button_icon must be a data: image URI or a same-origin path "
+        "starting with '/'. Remote URLs are blocked by the app's "
+        "Content-Security-Policy (img-src 'self' data: blob:) and would "
+        "render as a broken image."
+    )
+
+
 def encrypt_settings(settings: dict) -> str:
     """Serialise + Fernet-encrypt the settings dict.
 
@@ -191,6 +220,7 @@ async def create_provider(
     # Also guarded on create: cloning an existing provider by GET-then-POST is
     # the other obvious way to store the mask as a real secret.
     _reject_redaction_marker(settings or {})
+    validate_button_icon(button_icon)
     row = IdpProviderORM(
         slug=slug.strip().lower(),
         display_name=display_name.strip(),
@@ -259,6 +289,7 @@ async def update_provider(
     if button_label is not None:
         row.button_label = (button_label or None) and button_label.strip()
     if button_icon is not None:
+        validate_button_icon(button_icon)
         row.button_icon = (button_icon or None) and button_icon.strip()
     if email_domains is not None:
         row.email_domains = _encode_domains(email_domains)

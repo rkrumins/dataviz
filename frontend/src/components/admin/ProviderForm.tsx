@@ -347,6 +347,13 @@ export function ProviderForm({
     const [emailDomains, setEmailDomains] = useState(
         (existing?.emailDomains ?? []).join(', '),
     )
+    const [buttonLabel, setButtonLabel] = useState(existing?.buttonLabel ?? '')
+    const [buttonIcon, setButtonIcon] = useState(existing?.buttonIcon ?? '')
+    const [priority, setPriority] = useState(existing?.priority ?? 100)
+    // A new provider starts disabled: creating one used to publish it to
+    // every user's login page immediately, before discovery had been
+    // reviewed or a dry-run had proved it works.
+    const [enabled, setEnabled] = useState(existing?.enabled ?? false)
     const [profileSettings, setProfileSettings] = useState<CustomProfileSettings>(
         existing?.kind === 'custom_profile'
             ? { ...DEFAULT_CUSTOM_PROFILE_SETTINGS, ...existing.settings }
@@ -416,11 +423,17 @@ export function ProviderForm({
                 await ssoAdminService.updateProvider(existing.id, {
                     displayName, settings, claimMapping, linkingPolicy,
                     emailDomains: parseDomains(emailDomains),
+                    buttonLabel: buttonLabel || null,
+                    buttonIcon: buttonIcon || null,
+                    priority, enabled,
                 })
             } else {
                 await ssoAdminService.createProvider({
                     slug, displayName, kind, settings, claimMapping, linkingPolicy,
                     emailDomains: parseDomains(emailDomains),
+                    buttonLabel: buttonLabel || undefined,
+                    buttonIcon: buttonIcon || undefined,
+                    priority, enabled,
                 })
             }
             onSaved()
@@ -512,6 +525,63 @@ export function ProviderForm({
                     </label>
                 </>
             )}
+
+            {/* Login-page presentation. These four have been on the API
+                since the first version and had no inputs, so the only way
+                to set them was a hand-rolled PATCH. */}
+            <div className="grid grid-cols-2 gap-3">
+                <label className="text-xs">
+                    Button label <span className="text-ink-muted">(optional)</span>
+                    <input
+                        className={inputCls}
+                        value={buttonLabel}
+                        onChange={(e) => setButtonLabel(e.target.value)}
+                        placeholder={displayName || 'Sign in with…'}
+                    />
+                </label>
+                <label className="text-xs">
+                    Priority
+                    <input
+                        className={inputCls}
+                        type="number"
+                        min={0}
+                        max={10000}
+                        value={priority}
+                        onChange={(e) => setPriority(Number(e.target.value))}
+                    />
+                    <span className="mt-0.5 block text-[10px] text-ink-muted">
+                        Login-page order, lowest first.
+                    </span>
+                </label>
+                <label className="text-xs col-span-2">
+                    Button icon <span className="text-ink-muted">(optional)</span>
+                    <input
+                        className={monoCls}
+                        value={buttonIcon}
+                        onChange={(e) => setButtonIcon(e.target.value)}
+                        placeholder="data:image/svg+xml;base64,… or /static/idp/entra.svg"
+                    />
+                    <span className="mt-0.5 block text-[10px] text-ink-muted">
+                        A <code>data:</code> URI or a path on this server. Remote
+                        URLs are blocked by the app's content-security policy and
+                        would render as a broken image.
+                    </span>
+                </label>
+                <label className="flex items-center gap-2 text-xs col-span-2">
+                    <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(e) => setEnabled(e.target.checked)}
+                    />
+                    <span>
+                        Enabled
+                        <span className="ml-1 text-ink-muted">
+                            — when on, this provider appears on the login page for
+                            everyone. Leave off until you've rehearsed a sign-in.
+                        </span>
+                    </span>
+                </label>
+            </div>
 
             <label className="block text-xs">
                 Email domains <span className="text-ink-muted">(optional)</span>

@@ -486,3 +486,58 @@ async def test_legacy_service_without_auth_config_still_works(
         assert resp.status_code == 404
     finally:
         app.state.identity_service = previous
+
+
+# ── buttonIcon must be renderable, not just storable ─────────────────
+
+
+@pytest.mark.parametrize("icon", [
+    "https://cdn.example.com/logo.png",
+    "http://intranet/logo.png",
+    "//cdn.example.com/logo.png",     # protocol-relative is still remote
+])
+@pytest.mark.asyncio
+async def test_a_remote_button_icon_is_refused(db_session, icon):
+    """The app serves ``img-src 'self' data: blob:``, so a remote icon is
+    blocked by the browser and renders as a broken image with nothing
+    explaining why. Refusing it here is the only place we can say so.
+
+    It is also a privacy leak: the login page is anonymous, so a remote
+    icon hands a third party the IP of everyone who loads it.
+    """
+    with pytest.raises(idp_provider_repo.ProviderValidationError) as exc:
+        await idp_provider_repo.create_provider(
+            db_session, slug="icon-remote", display_name="X", kind="oidc",
+            settings={"issuer": "https://idp"}, button_icon=icon,
+        )
+    assert "Content-Security-Policy" in str(exc.value)
+
+
+@pytest.mark.parametrize("icon", [
+    "data:image/svg+xml;base64,PHN2Zy8+",
+    "data:image/png;base64,iVBORw0KGgo=",
+    "/static/idp/entra.svg",
+    None,
+])
+@pytest.mark.asyncio
+async def test_a_renderable_button_icon_is_accepted(db_session, icon):
+    row = await idp_provider_repo.create_provider(
+        db_session, slug=f"icon-ok-{abs(hash(icon)) % 1000}",
+        display_name="X", kind="oidc",
+        settings={"issuer": "https://idp"}, button_icon=icon,
+    )
+    assert row.button_icon == (icon or None)
+
+
+@pytest.mark.asyncio
+async def test_the_update_path_is_guarded_too(db_session):
+    """Create and update are separate entry points; a guard on one is not
+    a guard."""
+    row = await idp_provider_repo.create_provider(
+        db_session, slug="icon-update", display_name="X", kind="oidc",
+        settings={"issuer": "https://idp"},
+    )
+    with pytest.raises(idp_provider_repo.ProviderValidationError):
+        await idp_provider_repo.update_provider(
+            db_session, row.id, button_icon="https://cdn.example.com/x.png",
+        )
