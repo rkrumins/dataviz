@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import jwt as pyjwt
@@ -70,6 +71,29 @@ def _build_reauth_url(provider_slug: Optional[str], *, next_path: str) -> str:
     )
     safe_next = next_path or "/"
     return f"{base}?next={quote(safe_next, safe='/')}&force=1"
+
+
+@dataclass(frozen=True)
+class SsoDecision:
+    """What an incoming SSO identity means, before anything is done about it.
+
+    Produced by ``_classify_sso_login`` from reads alone, and consumed two
+    ways: ``complete_sso_login`` executes the writes for the action, and
+    ``preview_sso_login`` renders it for an operator rehearsing a sign-in.
+    One producer is the point — a rehearsal that disagreed with the login
+    it rehearses would be worse than no rehearsal.
+    """
+    #: sign_in_existing | link_intent | provision_new | link_existing | rejected
+    action: str
+    #: The account this would touch, when there is one.
+    user: Any = None
+    #: The ``user_identities`` row to touch, on the returning-subject path.
+    identity_row: Any = None
+    #: Set when ``action == "rejected"``: the ``SSOAuthError`` code.
+    error: Optional[str] = None
+    deny_reasons: tuple[str, ...] = ()
+    has_existing_identity: bool = False
+    email_verified: bool = False
 
 
 class LocalIdentityService:
@@ -470,39 +494,52 @@ class LocalIdentityService:
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
-            # 1. Known subject (provider_id, external_id) — reuse the
-            #    account it belongs to, must be active.
-            existing_identity = await self._user_identity_repo.get_by_subject(
-                session, provider_id=provider_id, external_id=external_id,
+            # Which branch fires is decided in one place, shared with the
+            # dry-run so a rehearsal cannot disagree with the real thing.
+            # What follows is only the consequences.
+            decision = await self._classify_sso_login(
+                session, identity, provider_id=provider_id,
+                linking_policy=linking_policy,
+                link_intent_user_id=link_intent_user_id,
             )
-            orm = None
+            orm = decision.user
+            link_metadata = {"groups": idp_groups, "attributes": attributes}
 
-            if existing_identity is not None:
-                orm = await self._user_repo.get_user_by_id(
-                    session, existing_identity.user_id,
-                )
-                if orm is None or orm.deleted_at is not None or orm.status != "active":
-                    raise SSOAuthError("sso_account_inactive")
+            if decision.action == "rejected":
+                # The refusals that operators need to see get an audit
+                # event in its own transaction, since this one rolls back.
+                if decision.error == "jit_disabled":
+                    await self._emit_audit(
+                        "user.sso_jit_blocked",
+                        {"email": email, "provider_id": provider_id,
+                         "external_id": external_id,
+                         "reason": "jit_provisioning_disabled"},
+                    )
+                elif decision.error == "unsafe_auto_link":
+                    await self._emit_audit(
+                        "user.sso_link_denied",
+                        {"email": email, "provider_id": provider_id,
+                         "external_id": external_id,
+                         "reason": "unsafe_auto_link",
+                         "deny_reasons": list(decision.deny_reasons),
+                         "linking_policy": linking_policy,
+                         "email_verified": email_verified,
+                         "existing_status": orm.status if orm else None,
+                         "existing_has_identity": decision.has_existing_identity},
+                    )
+                raise SSOAuthError(decision.error or "sso_rejected")
+
+            if decision.action == "sign_in_existing":
                 await self._user_identity_repo.touch_last_login(
-                    session, existing_identity.id,
-                    metadata={"groups": idp_groups, "attributes": attributes},
+                    session, decision.identity_row.id, metadata=link_metadata,
                 )
 
-            # 2. Link-intent path — bind the subject to the current
-            #    authenticated user. Skips the policy gate because the
-            #    user just authenticated via password / another IdP
-            #    moments ago to start the link.
-            elif link_intent_user_id is not None:
-                orm = await self._user_repo.get_user_by_id(
-                    session, link_intent_user_id,
-                )
-                if orm is None or orm.deleted_at is not None or orm.status != "active":
-                    raise SSOAuthError("link_target_inactive")
+            elif decision.action == "link_intent":
                 await self._user_identity_repo.create_identity(
                     session,
                     user_id=orm.id, provider_id=provider_id,
                     external_id=external_id, email_at_link=email,
-                    metadata={"groups": idp_groups, "attributes": attributes},
+                    metadata=link_metadata,
                 )
                 if self._outbox_emit is not None:
                     await self._outbox_emit(
@@ -511,103 +548,52 @@ class LocalIdentityService:
                          "external_id": external_id, "via": "self_service"},
                     )
 
-            else:
-                # 3. New subject — does the email collide with an
-                #    existing account?
-                by_email = await self._user_repo.get_user_by_email(session, email)
-                if by_email is None:
-                    # Phase 4: JIT provisioning is gated on the
-                    # platform posture. When ``allow_jit_provisioning``
-                    # is false, brand-new IdP subjects with no matching
-                    # local user get rejected here. Audit the deny so
-                    # operators can spot misconfigured users / IdPs.
-                    if not cfg.allow_jit_provisioning:
-                        await self._emit_audit(
-                            "user.sso_jit_blocked",
-                            {"email": email, "provider_id": provider_id,
-                             "external_id": external_id,
-                             "reason": "jit_provisioning_disabled"},
-                        )
-                        raise SSOAuthError("jit_disabled")
-                    if linking_policy == "disabled":
-                        # Policy explicitly says "no linking" — but the
-                        # email is free, so JIT-provision a fresh user.
-                        # This is the same as the "strict, no
-                        # collision" branch; deny only applies to the
-                        # collision case below.
-                        pass
-                    orm = await self._user_repo.create_sso_user(
-                        session,
-                        email=email,
-                        first_name=identity.first_name,
-                        last_name=identity.last_name,
-                        password_hash=disabled_password_hash(),
-                        signup_source="sso_jit",
-                        signup_provider_id=provider_id,
-                    )
-                    await self._user_identity_repo.create_identity(
-                        session,
-                        user_id=orm.id, provider_id=provider_id,
-                        external_id=external_id, email_at_link=email,
-                        metadata={"groups": idp_groups, "attributes": attributes},
-                    )
-                    if self._outbox_emit is not None:
-                        await self._outbox_emit(
-                            session, "user.sso_provisioned",
-                            {"user_id": orm.id, "email": orm.email,
-                             "provider_id": provider_id,
-                             "external_id": external_id,
-                             "linking_policy": linking_policy,
-                             "signup_source": "sso_jit"},
-                        )
-                else:
-                    # Collision branch — apply the linking policy.
-                    has_existing_identity = (
-                        await self._user_identity_repo.has_any_identity(
-                            session, by_email.id,
-                        )
-                    )
-                    deny_reasons = self._link_deny_reasons(
-                        by_email, linking_policy=linking_policy,
-                        email_verified=email_verified,
-                        has_existing_identity=has_existing_identity,
+            elif decision.action == "provision_new":
+                orm = await self._user_repo.create_sso_user(
+                    session,
+                    email=email,
+                    first_name=identity.first_name,
+                    last_name=identity.last_name,
+                    password_hash=disabled_password_hash(),
+                    signup_source="sso_jit",
+                    signup_provider_id=provider_id,
+                )
+                await self._user_identity_repo.create_identity(
+                    session,
+                    user_id=orm.id, provider_id=provider_id,
+                    external_id=external_id, email_at_link=email,
+                    metadata=link_metadata,
+                )
+                if self._outbox_emit is not None:
+                    await self._outbox_emit(
+                        session, "user.sso_provisioned",
+                        {"user_id": orm.id, "email": orm.email,
+                         "provider_id": provider_id,
+                         "external_id": external_id,
+                         "linking_policy": linking_policy,
+                         "signup_source": "sso_jit"},
                     )
 
-                    if deny_reasons:
-                        await self._emit_audit(
-                            "user.sso_link_denied",
-                            {"email": email, "provider_id": provider_id,
-                             "external_id": external_id,
-                             "reason": "unsafe_auto_link",
-                             "deny_reasons": deny_reasons,
-                             "linking_policy": linking_policy,
-                             "email_verified": email_verified,
-                             "existing_status": by_email.status,
-                             "existing_has_identity": has_existing_identity},
-                        )
-                        raise SSOAuthError("unsafe_auto_link")
-
-                    # Auto-link safe. Add the identity row to the
-                    # existing user (no longer destructively rewriting
-                    # password_hash — local + SSO can coexist when
-                    # the policy allows).
-                    orm = by_email
-                    await self._user_identity_repo.create_identity(
-                        session,
-                        user_id=orm.id, provider_id=provider_id,
-                        external_id=external_id, email_at_link=email,
-                        metadata={"groups": idp_groups, "attributes": attributes},
+            elif decision.action == "link_existing":
+                # Add the identity row to the existing user — not a
+                # destructive rewrite of password_hash; local + SSO
+                # coexist when the policy allows.
+                await self._user_identity_repo.create_identity(
+                    session,
+                    user_id=orm.id, provider_id=provider_id,
+                    external_id=external_id, email_at_link=email,
+                    metadata=link_metadata,
+                )
+                if self._outbox_emit is not None:
+                    await self._outbox_emit(
+                        session, "user.sso_linked",
+                        {"user_id": orm.id, "email": orm.email,
+                         "provider_id": provider_id,
+                         "external_id": external_id,
+                         "linking_policy": linking_policy,
+                         "has_password": _has_password(orm),
+                         "had_existing_identity": decision.has_existing_identity},
                     )
-                    if self._outbox_emit is not None:
-                        await self._outbox_emit(
-                            session, "user.sso_linked",
-                            {"user_id": orm.id, "email": orm.email,
-                             "provider_id": provider_id,
-                             "external_id": external_id,
-                             "linking_policy": linking_policy,
-                             "has_password": _has_password(orm),
-                             "had_existing_identity": has_existing_identity},
-                        )
 
             # Persist the IdP-asserted groups + attributes on the user
             # row so the admin UI / /me can surface the latest snapshot.
@@ -719,30 +705,110 @@ class LocalIdentityService:
         )
         return user, tokens
 
+    async def _classify_sso_login(
+        self,
+        session,
+        identity,
+        *,
+        provider_id: str,
+        linking_policy: str,
+        link_intent_user_id: Optional[str] = None,
+    ) -> "SsoDecision":
+        """Decide what this identity means, without changing anything.
+
+        Reads only. Every branch of the real login and every branch of the
+        dry-run comes from here, so the rehearsal cannot disagree with the
+        sign-in it rehearses — previously the two mirrored each other's
+        structure and only shared the deny gate, guarded by a test that
+        grepped the source for a function name. A grep is what you write
+        when the structure cannot make the guarantee itself.
+
+        The caller owns the consequences: writes for
+        :meth:`complete_sso_login`, a rendered explanation for
+        :meth:`preview_sso_login`. Audit events for the refusals belong to
+        the caller too — a rehearsal must not emit them.
+        """
+        email_verified = _claims_email_verified(identity.raw_claims)
+
+        # 1. Known subject (provider_id, external_id) — reuse the account
+        #    it belongs to, must be active.
+        existing_identity = await self._user_identity_repo.get_by_subject(
+            session, provider_id=provider_id,
+            external_id=identity.external_id,
+        )
+        if existing_identity is not None:
+            orm = await self._user_repo.get_user_by_id(
+                session, existing_identity.user_id,
+            )
+            if orm is None or orm.deleted_at is not None \
+                    or orm.status != "active":
+                return SsoDecision("rejected", error="sso_account_inactive")
+            return SsoDecision(
+                "sign_in_existing", user=orm, identity_row=existing_identity,
+            )
+
+        # 2. Link-intent path — bind the subject to the current
+        #    authenticated user. Skips the policy gate because the user
+        #    just authenticated moments ago to start the link.
+        if link_intent_user_id is not None:
+            orm = await self._user_repo.get_user_by_id(
+                session, link_intent_user_id,
+            )
+            if orm is None or orm.deleted_at is not None \
+                    or orm.status != "active":
+                return SsoDecision("rejected", error="link_target_inactive")
+            return SsoDecision("link_intent", user=orm)
+
+        # 3. New subject — does the email collide with an existing account?
+        by_email = await self._user_repo.get_user_by_email(
+            session, identity.email,
+        )
+        if by_email is None:
+            cfg = await self._auth_config_provider.get()
+            if not cfg.allow_jit_provisioning:
+                return SsoDecision("rejected", error="jit_disabled")
+            return SsoDecision("provision_new")
+
+        has_existing_identity = await self._user_identity_repo.has_any_identity(
+            session, by_email.id,
+        )
+        deny_reasons = self._link_deny_reasons(
+            by_email, linking_policy=linking_policy,
+            email_verified=email_verified,
+            has_existing_identity=has_existing_identity,
+        )
+        if deny_reasons:
+            return SsoDecision(
+                "rejected", user=by_email, error="unsafe_auto_link",
+                deny_reasons=tuple(deny_reasons),
+                has_existing_identity=has_existing_identity,
+                email_verified=email_verified,
+            )
+        return SsoDecision(
+            "link_existing", user=by_email,
+            has_existing_identity=has_existing_identity,
+        )
+
     async def preview_sso_login(
         self,
         identity,
         *,
         provider_id: str,
         linking_policy: str = "strict",
+        link_intent_user_id: Optional[str] = None,
     ) -> dict:
         """What ``complete_sso_login`` WOULD do with this identity.
 
-        Read-only by construction: it calls the same lookups the real path
-        calls but none of the writers, and it never commits. The
-        collision-branch gate is shared code (:meth:`_link_deny_reasons`)
-        so the two cannot disagree about *why* a link is refused; the
-        branch structure around it is mirrored, which is the residual
-        drift risk. The alternative — running the real path inside a
-        rolled-back transaction — would exercise the writers, and the
-        audit helper there commits a session of its own, which would make
-        "writes nothing" untrue in exactly the case an operator is
-        trusting it.
+        Read-only by construction: it runs :meth:`_classify_sso_login` —
+        the *same* function the real login runs — and renders the decision
+        instead of executing it. That is what makes the rehearsal
+        trustworthy: there is one implementation of "which branch fires",
+        not two that have to be kept in agreement.
 
-        Deliberately excludes the link-intent branch: a dry-run is about
-        "what happens when this person signs in", and link-intent only
-        fires for an already-authenticated user who asked to attach an
-        identity.
+        The alternative — running the real path inside a rolled-back
+        transaction — would exercise the writers, and the audit helper
+        there commits a session of its own, which would make "writes
+        nothing" untrue in exactly the case an operator is trusting it.
         """
         outcome: dict = {
             "email": identity.email,
@@ -766,48 +832,19 @@ class LocalIdentityService:
             return outcome
 
         async with self._session_factory() as session:
-            existing_identity = await self._user_identity_repo.get_by_subject(
-                session, provider_id=provider_id,
-                external_id=identity.external_id,
+            decision = await self._classify_sso_login(
+                session, identity, provider_id=provider_id,
+                linking_policy=linking_policy,
+                link_intent_user_id=link_intent_user_id,
             )
-            if existing_identity is not None:
-                orm = await self._user_repo.get_user_by_id(
-                    session, existing_identity.user_id,
-                )
-                if orm is None or orm.deleted_at is not None \
-                        or orm.status != "active":
-                    outcome["action"] = "rejected"
-                    outcome["reason"] = "sso_account_inactive"
-                else:
-                    outcome["action"] = "sign_in_existing"
-                    outcome["user_id"] = orm.id
-                    outcome["user_email"] = orm.email
-            else:
-                by_email = await self._user_repo.get_user_by_email(
-                    session, identity.email,
-                )
-                if by_email is None:
-                    if not cfg.allow_jit_provisioning:
-                        outcome["action"] = "rejected"
-                        outcome["reason"] = "jit_disabled"
-                    else:
-                        outcome["action"] = "provision_new"
-                else:
-                    has_identity = await self._user_identity_repo \
-                        .has_any_identity(session, by_email.id)
-                    denies = self._link_deny_reasons(
-                        by_email, linking_policy=linking_policy,
-                        email_verified=outcome["email_verified"],
-                        has_existing_identity=has_identity,
-                    )
-                    outcome["user_id"] = by_email.id
-                    outcome["user_email"] = by_email.email
-                    if denies:
-                        outcome["action"] = "rejected"
-                        outcome["reason"] = "unsafe_auto_link"
-                        outcome["deny_reasons"] = denies
-                    else:
-                        outcome["action"] = "link_existing"
+            outcome["action"] = decision.action
+            if decision.user is not None:
+                outcome["user_id"] = decision.user.id
+                outcome["user_email"] = decision.user.email
+            if decision.error:
+                outcome["reason"] = decision.error
+            if decision.deny_reasons:
+                outcome["deny_reasons"] = list(decision.deny_reasons)
 
             if self._sso_role_previewer is not None:
                 try:

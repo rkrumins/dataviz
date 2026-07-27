@@ -24,6 +24,7 @@ from backend.auth_service.core.tokens import (
     create_link_intent_token,
     decode_dryrun_token,
 )
+from backend.auth_service.interface import SSOAuthError
 from backend.auth_service.providers.base import ProviderIdentity
 from backend.auth_service.service import LocalIdentityService
 
@@ -146,16 +147,56 @@ async def test_it_names_the_reason_a_link_would_be_refused(db_session):
 
 
 @pytest.mark.asyncio
-async def test_the_deny_gate_is_shared_with_the_real_path(db_session):
-    """Not a behaviour test — a drift guard. A dry-run that disagrees with
-    the login it rehearses is worse than no dry-run, so the two read the
-    same function rather than two copies of the rules."""
-    import inspect
+@pytest.mark.parametrize("policy", [
+    "strict", "allow_verified", "manual_only", "disabled",
+])
+async def test_the_rehearsal_and_the_real_login_agree(db_session, policy):
+    """The property the whole feature rests on: whatever the dry-run says
+    would happen is what happens.
 
-    from backend.auth_service import service as service_module
+    This used to be a test that grepped ``complete_sso_login`` for a
+    function name — which is what you write when the structure cannot make
+    the guarantee itself. Both paths now run the same
+    ``_classify_sso_login``, so the agreement is checkable directly, for
+    every linking policy including the ones that refuse.
+    """
+    provider = await _provider(db_session, slug=f"agree-{policy.replace(chr(95), chr(45))}",
+                               linking_policy=policy)
+    # A collision the policy actually decides: an ACTIVE local account, a
+    # verified email, no identities yet. Get any of those wrong and every
+    # policy refuses for the same non-policy reason, and the test passes
+    # without ever exercising what it claims to.
+    await user_repo.create_user(
+        db_session, email="rehearsal@corp.example",
+        password_hash="argon2-placeholder", first_name="A", last_name="B",
+        status="active",
+    )
+    await db_session.commit()
+    svc = _svc(db_session)
 
-    source = inspect.getsource(service_module.LocalIdentityService.complete_sso_login)
-    assert "_link_deny_reasons" in source
+    predicted = await svc.preview_sso_login(
+        _identity(), provider_id=provider.id, linking_policy=policy,
+    )
+
+    try:
+        user, _tokens = await svc.complete_sso_login(
+            _identity(), provider_id=provider.id,
+            provider_slug=provider.slug, linking_policy=policy,
+        )
+    except SSOAuthError as exc:
+        assert predicted["action"] == "rejected", (
+            f"{policy}: rehearsal said {predicted['action']}, login refused"
+        )
+        assert predicted["reason"] == str(exc), (
+            f"{policy}: rehearsal blamed {predicted['reason']}, "
+            f"login blamed {exc}"
+        )
+    else:
+        assert predicted["action"] != "rejected", (
+            f"{policy}: rehearsal said refused, login succeeded"
+        )
+        assert predicted["user_id"] == user.id or \
+            predicted["action"] == "provision_new"
 
 
 @pytest.mark.asyncio

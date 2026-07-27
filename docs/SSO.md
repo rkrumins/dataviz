@@ -739,9 +739,16 @@ still signed in as yourself. The marker cookie is minted only by
 `system:admin`; that is what keeps this from being a way for an anonymous
 caller to probe identities. It expires in 10 minutes.
 
-The collision-branch deny gate is shared code with the real login path, so
-a dry-run cannot disagree with the sign-in it rehearses about *why* a link
-is refused.
+A rehearsal cannot disagree with the sign-in it rehearses: both run the
+same `_classify_sso_login`, which decides the branch from reads alone. The
+real login then executes the writes for that decision; the dry-run renders
+it. There is one implementation of "which branch fires", not two kept in
+agreement by hand.
+
+Available on **every** provider kind, including `custom_profile` — the
+kind with the weakest assurance, so the one where rehearsing matters most.
+The browser-storage variant answers with JSON rather than the result page,
+since it is reached by `fetch()`.
 
 ### 2.12 Debug a failed sign-in from the reference the user was shown
 
