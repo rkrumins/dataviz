@@ -120,37 +120,21 @@ nobody but you can see it.
 
 ### Give people roles automatically
 
-**Admin → SSO → Access mapping.** Map an IdP group to a role or to an internal
-group. Reconciliation runs on every sign-in and every session refresh, so
-removing someone from a group in your IdP removes the access here within a few
-minutes.
+**Admin → SSO → Access mapping.** Each rule reads as a sentence — *anyone in
+`engineering` from Corporate Entra gets Editor in Analytics* — and rules are
+re-evaluated on every sign-in and every session refresh, so your directory stays
+the source of truth.
 
-Some roles cannot be granted this way. Platform-admin roles require a **verified**
-connection, and `super_admin` can never be auto-granted at all — that one stays a
-deliberate, manual act.
-
-### Assurance: how much a connection's word is worth
-
-| Level | Means |
-|---|---|
-| **Verified** | A signature over a third-party assertion was checked against a key we hold |
-| **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not |
-| **Unverified** | We cannot tell a genuine claim from a forged one |
-
-Shown on every connection. It is derived from how the connection is configured,
-not stored, so it always reflects reality.
+There is more to this than fits here: what a rule can grant, why removing
+somebody from a group does not always remove their access, and what platform-
+admin roles need. See [Running Single Sign-On](/guide/sso-operations).
 
 ### When someone cannot sign in
 
 They will see a short reference like `a1b2c3d4`. Ask them for it, then
-**Admin → SSO → Diagnostics** and search for it. The precise reason is recorded
-there — deliberately not shown to the person, because it would leak your
-configuration to anyone who can reach the sign-in page.
-
-The same tab finds the person: free text across names and emails, or an exact
-match on a claim attribute such as `staff_id` when you only have their employee
-number. The activity log needs `system:audit:read` on top of admin; without it
-the tab shows the lookup alone.
+**Admin → SSO → Diagnostics** and search for it. Each result explains its reason
+in place; the full list of reasons and what to do about each is in
+[Running Single Sign-On](/guide/sso-operations#when-a-sign-in-fails).
 
 ### Certificate expiry
 
@@ -207,6 +191,22 @@ Closing with unsaved edits asks first.
 
 - **Turn off one connection** — the power button on its card. The configuration
   is kept; sign-ins through it stop.
-- **Turn off all SSO** — Settings → *SSO enabled*. The master switch.
-- **SSO only, no passwords** — Settings → *Allow local login*. Refused if it
-  would lock out an admin who has no SSO identity.
+- **Turn off all SSO** — Settings → *Single sign-on*. The master switch.
+- **SSO only, no passwords** — Settings → *Passwords*. Refused if it would lock
+  out an admin who has no SSO identity.
+
+The Settings tab opens with one sentence describing what somebody arriving at the
+sign-in page gets right now, because four independent switches do not add up to
+that on their own. Watch it as you change them — in particular, turning single
+sign-on off while passwords are already off locks everyone out, and that is the
+one combination no individual switch can warn you about.
+
+---
+
+## What next
+
+Your connection is live and people are signing in. The questions from here are
+about running it: who gets what, what happens when somebody leaves, and why one
+person cannot sign in when everybody else can.
+
+**→ [Running Single Sign-On](/guide/sso-operations)**
