@@ -24,6 +24,52 @@ import { useFeature } from '@/store/features'
 // exception: only JS can read the key, so those POST it instead.
 // The catalog comes from /api/v1/auth/providers — only enabled
 // providers are returned, no client-side fan-out.
+/**
+ * One SSO button, visible on both themes.
+ *
+ * These carried `border-white/20 … hover:bg-white/5`, which is a border
+ * on a light card that is the same colour as the card. On the light
+ * theme the control was not faint — it was gone, and the only evidence
+ * an SSO option existed at all was a lone icon floating under "Or sign
+ * in with".
+ *
+ * The page states both themes explicitly rather than leaning on a
+ * semantic token (see the inputs above: `bg-white/50 dark:bg-black/20`),
+ * so these match that. A fill as well as a border, because this sits
+ * directly under the password field and reads as a peer control.
+ */
+const SSO_BUTTON = [
+    'flex items-center justify-center gap-2 w-full text-center py-2.5',
+    'rounded-xl border text-sm font-medium transition-colors duration-150',
+    'text-ink bg-white/50 dark:bg-white/[0.04]',
+    'border-black/10 dark:border-white/15',
+    'hover:bg-white/80 dark:hover:bg-white/[0.09]',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+].join(' ')
+
+/** The dev-login and `custom`-kind buttons, which say "not production"
+ *  in amber. `text-yellow-300` on a white card is unreadable. */
+const SSO_BUTTON_DEV = [
+    'flex items-center justify-center gap-2 w-full text-center py-2.5',
+    'rounded-xl border text-sm font-medium transition-colors duration-150',
+    'border-yellow-500/40 text-yellow-700 dark:text-yellow-300',
+    'bg-yellow-500/[0.06] hover:bg-yellow-500/10',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500/50',
+].join(' ')
+
+/**
+ * What the button says. Never nothing.
+ *
+ * `buttonLabel` is optional and `displayName` was arriving undefined —
+ * the API serialised it snake_case while this file read it camelCase —
+ * so the fallback chain ran out and every button rendered as an empty
+ * outline. The slug is always present and always meaningful, so it is a
+ * poor label but never a missing one.
+ */
+function ssoLabel(p: SsoProviderSummary): string {
+    return p.buttonLabel?.trim() || p.displayName?.trim() || p.slug
+}
+
 function SsoButtons({
     providers,
     failed,
@@ -73,7 +119,7 @@ function SsoButtons({
         // no explanation. Muted rather than alarming — it isn't the user's
         // fault, and the password form may still work.
         return (
-            <div className="mt-6 pt-6 border-t border-white/10 text-center">
+            <div className="mt-6 pt-6 border-t border-black/10 dark:border-white/10 text-center">
                 <p className="text-xs text-ink-muted">
                     Couldn't load single sign-on options.{' '}
                     <button
@@ -103,7 +149,7 @@ function SsoButtons({
     return (
         <div className={cn(
             "space-y-3",
-            showDivider && "mt-6 pt-6 border-t border-white/10",
+            showDivider && "mt-6 pt-6 border-t border-black/10 dark:border-white/10",
         )}>
             {showDivider && (
                 <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
@@ -118,9 +164,7 @@ function SsoButtons({
                         disabled={busySlug === p.slug}
                         onClick={() => { void signInWithPortal(p) }}
                         className={cn(
-                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                            "rounded-xl border text-sm font-medium transition-colors",
-                            "border-white/20 text-ink hover:bg-white/5",
+                            SSO_BUTTON,
                             busySlug === p.slug && "opacity-70 cursor-not-allowed",
                         )}
                     >
@@ -128,7 +172,7 @@ function SsoButtons({
                             <img src={p.buttonIcon} alt="" aria-hidden
                                  className="w-4 h-4 shrink-0 object-contain" />
                         )}
-                        {p.buttonLabel || p.displayName}
+                        {ssoLabel(p)}
                         {busySlug === p.slug
                             ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
                             : <ChevronRight className="w-3.5 h-3.5 opacity-50" />}
@@ -137,19 +181,13 @@ function SsoButtons({
                     <a
                         key={p.id}
                         href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
-                        className={cn(
-                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                            "rounded-xl border text-sm font-medium transition-colors",
-                            p.kind === 'custom'
-                                ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
-                                : "border-white/20 text-ink hover:bg-white/5",
-                        )}
+                        className={p.kind === 'custom' ? SSO_BUTTON_DEV : SSO_BUTTON}
                     >
                         {p.buttonIcon && (
                             <img src={p.buttonIcon} alt="" aria-hidden
                                  className="w-4 h-4 shrink-0 object-contain" />
                         )}
-                        {p.buttonLabel || p.displayName}
+                        {ssoLabel(p)}
                         <ExternalLink className="w-3.5 h-3.5 opacity-50" />
                     </a>
                 )
@@ -160,7 +198,7 @@ function SsoButtons({
             {customEnabled && !providers?.some((p) => p.kind === 'custom') && (
                 <a
                     href={`/dev-login?next=${next}`}
-                    className="block w-full text-center py-2.5 rounded-xl border border-yellow-500/40 text-sm font-medium text-yellow-300 hover:bg-yellow-500/5 transition-colors"
+                    className={SSO_BUTTON_DEV}
                 >
                     Dev Login (mock IdP) — non-production
                 </a>
