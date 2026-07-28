@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 from typing import Callable, Optional
 
@@ -71,6 +72,7 @@ from ..core.tokens import (
     decode_dryrun_token,
     decode_link_intent_token,
     decode_oidc_state_token,
+    decode_refresh_token,
     decode_saml_state_token,
 )
 from ..interface import (
@@ -107,7 +109,47 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+
+
+def _refresh_family_key(request: Request) -> str:
+    """Bucket /auth/refresh by rotation family rather than by IP.
+
+    ``get_remote_address`` is the wrong granularity for this endpoint and
+    was actively harmful. Behind a proxy it returns the ingress address,
+    so every user in the deployment shared one bucket; anyone in a NAT'd
+    office shared one anyway. Refreshes also cluster — everyone who
+    signed in at 09:00 rotates together — so a synchronised herd hit a
+    shared fixed window, got a 429, and the SPA read that as "session
+    gone" and signed them out. Random logouts under load, none in
+    testing.
+
+    A ``fam`` claim is exactly one browser session, which is the thing
+    this limit is actually meant to protect, and it is immune to both
+    NAT and missing forwarding headers. Requests with no usable cookie
+    fall back to the address — they cannot name a session, and that path
+    is what a flood of cookie-less refreshes would take.
+    """
+    token = read_refresh_cookie(request)
+    if token:
+        try:
+            return f"fam:{decode_refresh_token(token, verify_exp=False).family_id}"
+        except pyjwt.InvalidTokenError:
+            pass
+    return get_remote_address(request)
+
+
+# Storage is shared when a Redis URL is configured. slowapi defaults to
+# per-process memory, and the API runs 4 gunicorn workers per container
+# across N replicas, so "30/minute" silently meant somewhere between 30
+# and 30xNx4 depending on which worker the load balancer picked. Failures
+# are swallowed: a Redis outage must not become a site-wide lockout.
+_RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("REDIS_URL")
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=_RATELIMIT_STORAGE_URI,
+    swallow_errors=True,
+)
 
 
 # ── Request / response models ─────────────────────────────────────────
@@ -664,7 +706,7 @@ async def logout(request: Request, response: Response):
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-@limiter.limit("30/minute")
+@limiter.limit("30/minute", key_func=_refresh_family_key)
 async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)

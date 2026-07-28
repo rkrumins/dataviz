@@ -42,3 +42,10 @@ data:
   DB_STARTUP_RETRY_TIMEOUT_SECS: "60"
   JWT_ALGORITHM: "HS256"
   JWT_EXPIRY_MINUTES: "15"
+  # Trust X-Forwarded-For from the ingress. The ingress pod's address is
+  # not stable enough to enumerate, and the container port is only
+  # reachable inside the cluster, so "*" is the workable value here.
+  # Without it gunicorn keeps its 127.0.0.1 default, discards the header,
+  # and every caller is recorded as the ingress — which put the whole
+  # cluster in one rate-limit bucket.
+  FORWARDED_ALLOW_IPS: "*"

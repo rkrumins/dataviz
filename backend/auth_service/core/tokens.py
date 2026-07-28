@@ -171,10 +171,18 @@ def create_refresh_token(
     return token, claims
 
 
-def decode_refresh_token(token: str) -> RefreshClaims:
+def decode_refresh_token(
+    token: str, *, verify_exp: bool = True,
+) -> RefreshClaims:
     """Decode a refresh JWT into RefreshClaims.
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
+
+    ``verify_exp=False`` is for the rate limiter, which buckets requests
+    by ``fam``: an expired token still needs a stable bucket, or every
+    expired refresh would fall back to the shared IP bucket — the exact
+    pile-up the family key exists to avoid. The signature is still
+    verified, so the bucket label cannot be forged.
     """
     payload = jwt.decode(
         token,
@@ -182,6 +190,7 @@ def decode_refresh_token(token: str) -> RefreshClaims:
         algorithms=[JWT_ALGORITHM],
         issuer=JWT_ISSUER,
         audience=_REFRESH_AUDIENCE,
+        options={"verify_exp": verify_exp},
     )
     sub = payload.get("sub")
     jti = payload.get("jti")
