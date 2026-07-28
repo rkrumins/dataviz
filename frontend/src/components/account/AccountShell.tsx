@@ -57,14 +57,16 @@ export function useAccountIdentity(): AccountIdentityState {
 const NAV = [
     { to: '/me/account', label: 'Profile & password', icon: UserCog, end: true },
     { to: '/me/identities', label: 'Connected identities', icon: Link2, end: true },
-    { to: '/my/access', label: 'What I can access', icon: ShieldCheck, end: true },
+    { to: '/my/access', label: 'My access', icon: ShieldCheck, end: true },
 ]
 
 export function AccountShell({
-    title, blurb, children,
+    title, blurb, actions, children,
 }: {
     title: string
     blurb: string
+    /** Page-level action for the hero row, e.g. a Refresh button. */
+    actions?: React.ReactNode
     children: React.ReactNode
 }) {
     const user = useAuthStore((s) => s.user)
@@ -116,14 +118,17 @@ export function AccountShell({
                 <PageContainer className="py-6 pb-28">
                     <div className="mx-auto w-full max-w-[1100px]">
 
-                        <div className="flex items-center gap-3 min-w-0 mb-6">
-                            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-md shadow-indigo-500/20 shrink-0">
-                                <UserCog className="w-6 h-6 text-white" />
+                        <div className="flex items-center justify-between gap-4 mb-6">
+                            <div className="flex items-center gap-3 min-w-0">
+                                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-md shadow-indigo-500/20 shrink-0">
+                                    <UserCog className="w-6 h-6 text-white" />
+                                </div>
+                                <div className="min-w-0">
+                                    <h1 className="text-2xl font-bold text-ink">{title}</h1>
+                                    <p className="text-sm text-ink-muted">{blurb}</p>
+                                </div>
                             </div>
-                            <div className="min-w-0">
-                                <h1 className="text-2xl font-bold text-ink">{title}</h1>
-                                <p className="text-sm text-ink-muted">{blurb}</p>
-                            </div>
+                            {actions && <div className="shrink-0">{actions}</div>}
                         </div>
 
                         <div className="grid grid-cols-1 lg:grid-cols-[248px_minmax(0,1fr)] gap-6 items-start">
