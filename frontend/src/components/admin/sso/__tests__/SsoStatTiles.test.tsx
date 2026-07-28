@@ -15,7 +15,8 @@
  * log is worse than admitting we do not know.
  */
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import { SsoStatTiles, type SsoStats } from '../SsoStatTiles'
 
 function stats(over: Partial<SsoStats> = {}): SsoStats {
@@ -54,5 +55,37 @@ describe('stat tiles', () => {
         render(<SsoStatTiles stats={stats({ failures24h: 0, drafts: 0 })} />)
         expect(within(tile(/failed sign-ins/i)).getByText('0')).toBeInTheDocument()
         expect(within(tile(/drafts to rehearse/i)).getByText('0')).toBeInTheDocument()
+    })
+})
+
+describe('stat tiles as navigation', () => {
+    it('reports which tile was pressed', async () => {
+        const onSelect = vi.fn()
+        render(<SsoStatTiles stats={stats()} onSelect={onSelect} />)
+        await userEvent.click(screen.getByRole('button', { name: /drafts to rehearse/i }))
+        expect(onSelect).toHaveBeenCalledWith('drafts')
+    })
+
+    it('says where a tile goes, not just what it counts', () => {
+        render(<SsoStatTiles stats={stats()} onSelect={vi.fn()} />)
+        // The count alone is not an accessible name for a control — a
+        // screen reader user pressing it should know where they land.
+        expect(screen.getByRole('button', { name: /open access mapping/i }))
+            .toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /open diagnostics/i }))
+            .toBeInTheDocument()
+    })
+
+    it('does not offer a filter that would show nothing', () => {
+        // Zero drafts: pressing it would narrow the list to an empty set.
+        render(<SsoStatTiles stats={stats({ drafts: 0 })} onSelect={vi.fn()} />)
+        expect(screen.queryByRole('button', { name: /drafts to rehearse/i })).toBeNull()
+        expect(screen.getByRole('button', { name: /live connections/i }))
+            .toBeInTheDocument()
+    })
+
+    it('stays inert without a handler', () => {
+        render(<SsoStatTiles stats={stats()} />)
+        expect(screen.queryAllByRole('button')).toHaveLength(0)
     })
 })

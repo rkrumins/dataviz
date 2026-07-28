@@ -33,6 +33,7 @@ import { cn } from '@/lib/utils'
 import { ErrorBanner } from './ErrorBanner'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
 import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
+import { SsoSettingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
 
 interface SwitchDef {
     field: keyof AuthConfig
@@ -174,9 +175,11 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
 
     if (cfg === null && error === null) {
         return (
-            <div className="py-16 flex items-center justify-center gap-2 text-sm text-ink-muted">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Reading the current posture…
+            <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
+                <div className="min-w-0">
+                    <SsoLoading label="Reading the current sign-in posture" />
+                    <SsoSettingsSkeleton />
+                </div>
             </div>
         )
     }

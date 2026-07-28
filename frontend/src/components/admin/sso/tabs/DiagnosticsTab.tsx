@@ -25,13 +25,13 @@
  * themselves.
  */
 import { useState } from 'react'
-import { AtSign, Hash, Loader2, Search, Tag, UserSearch } from 'lucide-react'
+import { AtSign, Hash, Loader2, Search, SearchX, Tag, UserSearch } from 'lucide-react'
 
 import { ssoAdminService, type UserSummary } from '@/services/ssoAdminService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import { SsoActivityTab } from '../../SsoActivityTab'
-import { SsoCard } from '../ui/SsoCard'
+import { SsoCard, SsoEmpty } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
 import { UserResultCard } from './diagnostics/UserResultCard'
 
@@ -164,20 +164,39 @@ function LookupSection() {
 
             {error && <ErrorBanner message={error} />}
 
+            {/* The results area always occupies its place. Leaving it blank
+                until a search runs made the tab open as a control at the top
+                of an empty page, which reads as something failing to load. */}
+            {results === null && !error && (
+                <SsoCard>
+                    <SsoEmpty icon={UserSearch}>
+                        Search above to see someone’s accounts, how they can sign
+                        in, and what their IdP has told us about them.
+                    </SsoEmpty>
+                </SsoCard>
+            )}
+
             {results !== null && results.length === 0 && !error && (
-                <p className="text-xs text-ink-muted">
-                    Nobody matched. If they have never signed in successfully,
-                    there is no account yet — the activity log below will still
-                    show the attempt.
-                </p>
+                <SsoCard>
+                    <SsoEmpty icon={SearchX}>
+                        Nobody matched. If they have never signed in successfully
+                        there is no account yet — the activity log below still
+                        shows the attempt.
+                    </SsoEmpty>
+                </SsoCard>
             )}
 
             {results !== null && results.length > 0 && (
-                <ul className="space-y-3">
-                    {results.map((u, i) => (
-                        <UserResultCard key={u.id} user={u} index={i} />
-                    ))}
-                </ul>
+                <>
+                    <p className="text-[11px] text-ink-muted">
+                        {results.length} {results.length === 1 ? 'person' : 'people'} found
+                    </p>
+                    <ul className="space-y-3">
+                        {results.map((u, i) => (
+                            <UserResultCard key={u.id} user={u} index={i} />
+                        ))}
+                    </ul>
+                </>
             )}
         </section>
     )

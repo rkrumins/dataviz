@@ -13,12 +13,13 @@
  */
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, Trash2, Users } from 'lucide-react'
+import { ArrowRight, ShieldAlert, Trash2, Users } from 'lucide-react'
 
 import type { IdpGroupMapping, IdpProvider } from '@/services/ssoAdminService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { GroupResponse } from '@/services/groupsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { isPlatformAdminRole } from './privilegedRule'
 import { cn } from '@/lib/utils'
 
 export interface MappingGroup {
@@ -78,7 +79,12 @@ export function MappingGroupCard({
                         </span>
                         <ArrowRight className="w-3.5 h-3.5 text-ink-muted shrink-0" />
                         <span className="min-w-0 flex-1">
-                            <Target row={row} workspaces={workspaces} groups={groups} />
+                            <RuleTarget
+                                row={row}
+                                workspaces={workspaces}
+                                groups={groups}
+                                providers={providers}
+                            />
                         </span>
                         <DeleteRule
                             busy={busy}
@@ -92,21 +98,47 @@ export function MappingGroupCard({
     )
 }
 
-function providerLabel(row: IdpGroupMapping, providers: IdpProvider[]): string {
+/** Exported so the composer's preview renders through the *same* code the
+ *  saved rule does. "Exactly what gets saved" is a claim worth making
+ *  literally true rather than approximating with a second renderer that is
+ *  free to drift. */
+export function providerLabel(row: IdpGroupMapping, providers: IdpProvider[]): string {
     if (!row.providerId) return 'any connection'
     const p = providers.find(x => x.id === row.providerId)
     return p ? (p.displayName || p.slug) : row.providerId
 }
 
-function Target({
-    row, workspaces, groups,
+/**
+ * Whether this rule still grants anything.
+ *
+ * Assurance is re-resolved on every reconcile, not once when the rule was
+ * written — `permission_service.reconcile_sso_targets` resolves it per run
+ * precisely so that a connection downgraded afterwards stops granting
+ * platform admin from the very next login. Turning on `trust_unsigned`
+ * therefore leaves this rule sitting here looking correct and doing
+ * nothing, and the only other symptom is somebody quietly losing access.
+ */
+function inertReason(
+    row: IdpGroupMapping, providers: IdpProvider[],
+): string | null {
+    if (row.targetType !== 'role_binding') return null
+    if (!isPlatformAdminRole(row.roleName ?? '')) return null
+    const p = providers.find(x => x.id === row.providerId)
+    if (!p || p.assurance === 'verified') return null
+    return `${p.displayName || p.slug} is ${p.assurance}`
+}
+
+export function RuleTarget({
+    row, workspaces, groups, providers,
 }: {
     row: IdpGroupMapping
     workspaces: WorkspaceResponse[]
     groups: GroupResponse[]
+    providers: IdpProvider[]
 }) {
     if (row.targetType === 'role_binding') {
         const visual = roleVisualFor(row.roleName ?? '')
+        const inert = inertReason(row, providers)
         // Resolve the id to the name it was chosen by. Falling back to the
         // raw id keeps a deleted workspace legible rather than blank.
         const where = row.scopeType === 'workspace'
@@ -123,6 +155,15 @@ function Target({
                 <span className="text-[11px] text-ink-muted">
                     {where ? `in ${where}` : 'across the organization'}
                 </span>
+                {inert && (
+                    <span
+                        title="Assurance is re-checked on every sign-in, so this rule stopped granting when the connection was downgraded"
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                    >
+                        <ShieldAlert className="w-2.5 h-2.5" />
+                        not granting — {inert}
+                    </span>
+                )}
             </span>
         )
     }

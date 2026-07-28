@@ -24,7 +24,7 @@
  * original form offered both and let the pairing 400 at the server.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Loader2, Plus } from 'lucide-react'
+import { ArrowRight, Check, Loader2, Plus, ShieldAlert, Users } from 'lucide-react'
 
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 import {
@@ -33,6 +33,9 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { privilegedRuleBlock } from './privilegedRule'
+import { RuleTarget, providerLabel } from './MappingGroupCard'
+import type { IdpGroupMapping } from '@/services/ssoAdminService'
 import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 
@@ -43,13 +46,36 @@ const control =
     'text-ink text-sm outline-none transition-colors duration-150 ' +
     'focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10'
 
-function Slot({ label, children }: { label: string; children: React.ReactNode }) {
+/**
+ * One slot of the rule.
+ *
+ * `filled` is not decoration: four identical-looking controls give no sense
+ * of how much of the rule is done, and the operator is composing a sentence
+ * whose parts arrive in order. A settled slot goes quiet and gets a tick;
+ * the one still waiting keeps the eye.
+ */
+function Slot({
+    label, filled, children,
+}: {
+    label: string
+    filled: boolean
+    children: React.ReactNode
+}) {
     return (
         <label className="block min-w-0">
-            <span className="block text-[10px] font-semibold uppercase tracking-wider text-ink-muted mb-1.5">
+            <span className={cn(
+                'flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider mb-1.5 transition-colors duration-150',
+                filled ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted',
+            )}>
                 {label}
+                {filled && <Check className="w-2.5 h-2.5" />}
             </span>
-            {children}
+            <div className={cn(
+                'rounded-xl transition-shadow duration-150',
+                filled && 'ring-1 ring-emerald-500/25',
+            )}>
+                {children}
+            </div>
         </label>
     )
 }
@@ -94,9 +120,57 @@ export function MappingComposer({
             || role.permissions.some(p => p.startsWith('workspace:'))),
     )
 
-    const ready = kind === 'role_binding'
+    /** The server refuses these two shapes outright; catching them here
+     *  turns a 400-after-composing into a sentence beside the control. */
+    const privileged = useMemo(
+        () => (kind === 'role_binding'
+            ? privilegedRuleBlock(roleName, providerId, providers)
+            : null),
+        [kind, roleName, providerId, providers],
+    )
+
+    const ready = !privileged && (kind === 'role_binding'
         ? Boolean(idpGroup.trim() && roleName && (!needsWorkspace || workspaceId))
-        : Boolean(idpGroup.trim() && targetGroupId)
+        : Boolean(idpGroup.trim() && targetGroupId))
+
+    /** How much of the rule is answered. The connection is deliberately not
+     *  counted — "any connection" is a real answer, not a blank. */
+    const needed = kind === 'role_binding' ? (needsWorkspace ? 3 : 2) : 2
+    const answered = [
+        Boolean(idpGroup.trim()),
+        kind === 'role_binding' ? Boolean(roleName) : Boolean(targetGroupId),
+        ...(kind === 'role_binding' && needsWorkspace ? [Boolean(workspaceId)] : []),
+    ].filter(Boolean).length
+
+    /**
+     * The rule as the row it will become, or null while it is incomplete.
+     *
+     * Shaped as an `IdpGroupMapping` so the saved renderer can take it
+     * unchanged. `id` is a sentinel — nothing reads it, but leaving it off
+     * would mean lying about the type.
+     */
+    const draftRow: IdpGroupMapping | null = useMemo(() => {
+        if (!ready) return null
+        return {
+            id: '__draft__',
+            providerId: providerId || null,
+            idpGroup: idpGroup.trim(),
+            targetType: kind,
+            roleName: kind === 'role_binding' ? roleName : null,
+            scopeType: kind === 'role_binding'
+                ? (needsWorkspace ? 'workspace' : 'global') : null,
+            scopeId: kind === 'role_binding' && needsWorkspace ? workspaceId : null,
+            targetGroupId: kind === 'group_membership' ? targetGroupId : null,
+        } as IdpGroupMapping
+    }, [ready, providerId, idpGroup, kind, roleName, needsWorkspace,
+        workspaceId, targetGroupId])
+
+    /** The rule in plain language — the preview while it is incomplete, and
+     *  the restatement under the row once it is not. */
+    const draftSentence = sentence({
+        idpGroup, kind, role, workspaces, workspaceId,
+        groups, targetGroupId, providers, providerId,
+    })
 
     async function submit(e: React.FormEvent) {
         e.preventDefault()
@@ -133,7 +207,7 @@ export function MappingComposer({
     return (
         <form onSubmit={submit}>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <Slot label="Anyone in">
+                <Slot label="Anyone in" filled={Boolean(idpGroup.trim())}>
                     <input
                         value={idpGroup}
                         onChange={e => setIdpGroup(e.target.value)}
@@ -144,7 +218,7 @@ export function MappingComposer({
                     />
                 </Slot>
 
-                <Slot label="From">
+                <Slot label="From" filled={Boolean(providerId)}>
                     <select
                         value={providerId}
                         onChange={e => setProviderId(e.target.value)}
@@ -160,7 +234,7 @@ export function MappingComposer({
                     </select>
                 </Slot>
 
-                <Slot label="Gets">
+                <Slot label="Gets" filled>
                     <select
                         value={kind}
                         onChange={e => setKind(e.target.value as TargetKind)}
@@ -175,7 +249,7 @@ export function MappingComposer({
                 {/* The varying slot. Which control appears here is what makes
                     the two target types legible without naming either. */}
                 {kind === 'role_binding' ? (
-                    <Slot label="Which role">
+                    <Slot label="Which role" filled={Boolean(roleName)}>
                         <select
                             value={roleName}
                             onChange={e => { setRoleName(e.target.value); setWorkspaceId('') }}
@@ -212,7 +286,7 @@ export function MappingComposer({
                         </select>
                     </Slot>
                 ) : (
-                    <Slot label="Which group">
+                    <Slot label="Which group" filled={Boolean(targetGroupId)}>
                         <select
                             value={targetGroupId}
                             onChange={e => setTargetGroupId(e.target.value)}
@@ -231,7 +305,7 @@ export function MappingComposer({
                 )}
 
                 {needsWorkspace && (
-                    <Slot label="In which workspace">
+                    <Slot label="In which workspace" filled={Boolean(workspaceId)}>
                         <select
                             value={workspaceId}
                             onChange={e => setWorkspaceId(e.target.value)}
@@ -248,32 +322,102 @@ export function MappingComposer({
                 )}
             </div>
 
-            {/* The sentence, now doing the job it is actually good at:
-                confirming what is about to be written, with ids resolved. */}
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <p className="flex items-start gap-1.5 text-xs text-ink-secondary min-w-0">
-                    <ArrowRight className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+            {privileged && (
+                <p className="mt-3 flex items-start gap-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                    <ShieldAlert className="w-3.5 h-3.5 mt-px shrink-0" />
                     <span>
-                        {preview({
-                            idpGroup, kind, role, workspaces, workspaceId,
-                            groups, targetGroupId, providers, providerId,
-                        })}
+                        {privileged.message}
+                        {privileged.suggestion && (
+                            <span className="block mt-0.5 text-ink-muted">
+                                {privileged.suggestion}
+                            </span>
+                        )}
                     </span>
                 </p>
-                <button
-                    type="submit"
-                    disabled={!ready || busy}
-                    className={cn(
-                        'shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
-                        ready && !busy
-                            ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
-                            : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+            )}
+
+            {/*
+              * The preview, rendered through the saved rule's own component.
+              *
+              * A grey sentence claiming to be "exactly what gets saved" asks
+              * to be taken on trust. Rendering the draft through `RuleTarget`
+              * — the same code the card below uses — makes the claim literal:
+              * what you see here is the row you are about to create, in the
+              * place it will appear, and the two cannot drift because there
+              * is only one renderer.
+              */}
+            <div className={cn(
+                'mt-4 rounded-xl border transition-colors duration-200',
+                ready
+                    ? 'border-emerald-500/30 bg-emerald-500/[0.04]'
+                    : 'border-dashed border-glass-border bg-black/[0.015] dark:bg-white/[0.02]',
+            )}>
+                <div className="flex items-center justify-between gap-2 px-4 pt-3">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                        {ready ? 'Will be created as' : 'Preview'}
+                    </span>
+                    <span className={cn(
+                        'text-[10px] font-medium',
+                        ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted',
+                    )}>
+                        {ready ? 'Ready' : `${answered} of ${needed} chosen`}
+                    </span>
+                </div>
+
+                <div className="px-4 py-3">
+                    {draftRow ? (
+                        // Deliberately the same three-part row as MappingGroupCard:
+                        // group heading, connection, arrow, target.
+                        <div className="flex items-center gap-3 min-w-0">
+                            <span className="inline-flex items-center gap-1.5 shrink-0">
+                                <Users className="w-3.5 h-3.5 text-ink-muted" />
+                                <span className="font-mono text-xs font-semibold text-ink">
+                                    {idpGroup.trim()}
+                                </span>
+                            </span>
+                            <span className="text-[11px] text-ink-muted shrink-0 truncate max-w-[10rem]">
+                                {providerLabel(draftRow, providers)}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                            <span className="min-w-0 flex-1">
+                                <RuleTarget
+                                    row={draftRow}
+                                    workspaces={workspaces}
+                                    groups={groups}
+                                    providers={providers}
+                                />
+                            </span>
+                        </div>
+                    ) : (
+                        <p className="flex items-center gap-1.5 text-xs text-ink-muted">
+                            <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                            {draftSentence}
+                        </p>
                     )}
-                >
-                    {busy
-                        ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
-                        : <><Plus className="w-4 h-4" />Create rule</>}
-                </button>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 px-4 pb-3">
+                    {/* Only once the row is up: before that the sentence IS
+                        the preview above, and repeating it would be two
+                        voices saying the same thing. */}
+                    <p className="text-[11px] text-ink-muted min-w-0">
+                        {draftRow ? draftSentence : ''}
+                    </p>
+                    <button
+                        type="submit"
+                        disabled={!ready || busy}
+                        className={cn(
+                            'shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
+                            ready && !busy
+                                ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
+                                : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                        )}
+                    >
+                        {busy
+                            ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
+                            : <><Plus className="w-4 h-4" />Create rule</>}
+                    </button>
+                </div>
             </div>
 
             {role?.description && (
@@ -295,9 +439,10 @@ export function MappingComposer({
     )
 }
 
-/** The rule as a sentence, with every id resolved to the name it was
- *  picked by. Falls back to a prompt while it is still incomplete. */
-function preview({
+/** The same rule in plain language, under the row. The row shows the
+ *  shape; this says it out loud, which is what catches a mapping that is
+ *  structurally valid and semantically wrong. */
+function sentence({
     idpGroup, kind, role, workspaces, workspaceId,
     groups, targetGroupId, providers, providerId,
 }: {

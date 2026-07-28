@@ -5,6 +5,7 @@
  * none and the guided wizard behind "Connect a provider".
  */
 import { useCallback, useEffect, useState } from 'react'
+import { FlaskConical, X } from 'lucide-react'
 import {
     ssoAdminService,
     type IdpHealth,
@@ -14,14 +15,19 @@ import { SsoFirstRunHero } from '../SsoFirstRunHero'
 import { IdpProviderCard } from '../IdpProviderCard'
 import { IdpConnectionWizard } from '../IdpConnectionWizard'
 import { ProviderEditorDrawer } from '../ProviderEditorDrawer'
+import { SsoCard, SsoEmpty } from '../ui/SsoCard'
+import { SsoListSkeleton, SsoLoading } from '../ui/SsoSkeleton'
 import { ErrorBanner } from './ErrorBanner'
 
 export function ProvidersTab({
-    openWizardSignal = 0, onChanged,
+    openWizardSignal = 0, filter = null, onClearFilter, onChanged,
 }: {
     /** Bumped by the page's "Connect a provider" action. A counter rather
      *  than a boolean so a second press re-opens after a cancel. */
     openWizardSignal?: number
+    /** Set by the page's "Drafts to rehearse" tile. */
+    filter?: 'drafts' | null
+    onClearFilter?: () => void
     /** Lets the page's stat tiles follow a change made in here. */
     onChanged?: () => void
 } = {}) {
@@ -31,6 +37,7 @@ export function ProvidersTab({
     const [showCreate, setShowCreate] = useState(false)
     const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
+    const [loaded, setLoaded] = useState(false)
 
     const refresh = useCallback(async () => {
         try {
@@ -38,6 +45,8 @@ export function ProvidersTab({
             setError(null)
         } catch (err) {
             setError((err as Error).message)
+        } finally {
+            setLoaded(true)
         }
         // Health is a separate, non-fatal read: it comes from a background
         // sweep, so a replica that runs no schedulers returns nothing and the
@@ -107,20 +116,55 @@ export function ProvidersTab({
         }
     }
 
+    if (!loaded) {
+        // Without this the empty `rows` on first paint rendered the
+        // first-run hero for one frame, so an org with six connections
+        // was briefly told it had none.
+        return (
+            <>
+                <SsoLoading label="Loading connections" />
+                <SsoListSkeleton />
+            </>
+        )
+    }
+
     if (rows.length === 0 && !showCreate && !error) {
         // An empty table with a button above it says nothing about what
         // the job is. Replace the empty surface with the path through it.
         return <SsoFirstRunHero onStart={() => setShowCreate(true)} />
     }
 
+    const visible = filter === 'drafts'
+        ? rows.filter(p => p.lifecycle === 'draft')
+        : rows
+
     return (
         <div className="space-y-4">
             {error && <ErrorBanner message={error} />}
+
+            {filter === 'drafts' && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.05]">
+                    <FlaskConical className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                    <p className="text-xs text-ink flex-1 min-w-0">
+                        Showing drafts only — nobody can see these on the sign-in
+                        page until you publish them.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={onClearFilter}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors duration-150"
+                    >
+                        <X className="w-3 h-3" />
+                        Show all
+                    </button>
+                </div>
+            )}
+
             {/* No heading row of its own: the counts are the page's stat
                 tiles now, and "Connect a provider" is a page action beside
                 Refresh, where every other Admin section puts it. */}
             <div className="space-y-3">
-                {rows.map((p, i) => (
+                {visible.map((p, i) => (
                     <IdpProviderCard
                         key={p.id}
                         provider={p}
@@ -138,6 +182,27 @@ export function ProvidersTab({
                     />
                 ))}
             </div>
+
+            {/* Reachable by publishing the last draft while filtered — the
+                list would otherwise just vanish. */}
+            {visible.length === 0 && (
+                <SsoCard>
+                    <SsoEmpty
+                        icon={FlaskConical}
+                        action={
+                            <button
+                                type="button"
+                                onClick={onClearFilter}
+                                className="px-4 py-2 rounded-xl border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 text-sm font-medium text-ink transition-colors duration-150"
+                            >
+                                Show all connections
+                            </button>
+                        }
+                    >
+                        Nothing is in draft — every connection is published.
+                    </SsoEmpty>
+                </SsoCard>
+            )}
 
             {editing && (
                 <ProviderEditorDrawer

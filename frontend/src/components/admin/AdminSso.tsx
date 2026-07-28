@@ -63,6 +63,7 @@ export function AdminSso() {
     const [reloadToken, setReloadToken] = useState(0)
     const [refreshing, setRefreshing] = useState(false)
     const [wizardSignal, setWizardSignal] = useState(0)
+    const [providerFilter, setProviderFilter] = useState<'drafts' | null>(null)
 
     const loadStats = useCallback(async () => {
         setRefreshing(true)
@@ -94,6 +95,20 @@ export function AdminSso() {
     }), [providers, ruleCount, failures])
 
     const refresh = useCallback(() => setReloadToken(t => t + 1), [])
+
+    /**
+     * Each tile is the door to what it counts.
+     *
+     * The drafts tile is the one that earns the filter: the count is
+     * useless without a way to see *which* ones, and finding amber cards
+     * by eye in a list of twenty is the search the page should be doing.
+     */
+    const jump = useCallback((key: keyof SsoStats) => {
+        if (key === 'rules') return setTab('mappings')
+        if (key === 'failures24h') return setTab('diagnostics')
+        setProviderFilter(key === 'drafts' ? 'drafts' : null)
+        setTab('providers')
+    }, [])
 
     return (
         <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
@@ -135,7 +150,7 @@ export function AdminSso() {
                 </div>
             </header>
 
-            <SsoStatTiles stats={stats} />
+            <SsoStatTiles stats={stats} onSelect={jump} />
 
             <nav className="flex items-center gap-1 border-b border-glass-border mb-6">
                 {TABS.map(({ id, label, icon: Icon }) => {
@@ -143,7 +158,10 @@ export function AdminSso() {
                     return (
                         <button
                             key={id}
-                            onClick={() => setTab(id)}
+                            // Choosing the tab by hand means choosing the
+                            // whole tab, not whatever a stat tile last
+                            // narrowed it to.
+                            onClick={() => { setTab(id); setProviderFilter(null) }}
                             aria-current={active ? 'page' : undefined}
                             className={cn(
                                 'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-colors duration-150 border-b-2',
@@ -160,7 +178,12 @@ export function AdminSso() {
             </nav>
 
             {tab === 'providers' && (
-                <ProvidersTab openWizardSignal={wizardSignal} onChanged={refresh} />
+                <ProvidersTab
+                    openWizardSignal={wizardSignal}
+                    filter={providerFilter}
+                    onClearFilter={() => setProviderFilter(null)}
+                    onChanged={refresh}
+                />
             )}
             {tab === 'mappings' && <MappingsTab onChanged={refresh} />}
             {tab === 'diagnostics' && <DiagnosticsTab />}
