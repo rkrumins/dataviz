@@ -385,6 +385,79 @@ describe('IdP-managed fields', () => {
     })
 })
 
+describe('a full name split into halves', () => {
+    // An IdP that releases only `name` still populates both name fields —
+    // the mapper splits the full name. But none of *their* candidates
+    // fired, so resolvedFrom is null for each, and this pane read that as
+    // "Nothing resolved" beside two values the login would go on to write.
+    const SPLIT = {
+        resolvedFrom: {
+            external_id: 'sub', email: 'email',
+            display_name: 'fullName', first_name: null, last_name: null,
+        },
+        namesDerivedFrom: 'fullName',
+    }
+    const SAMPLE = JSON.stringify({
+        sub: 'u1', email: 'a@x.com', fullName: 'Alice Doe',
+    })
+
+    /** One field's row, so a claim about First name is not answered by
+     *  Groups — several rows legitimately resolve nothing here. */
+    function row(label: string) {
+        return within(screen.getByText(label).closest('li')!)
+    }
+
+    it('shows the value it resolved to, not "nothing resolved"', async () => {
+        previewMapping.mockResolvedValue(resolved(SPLIT))
+        render(<Harness initialSample={SAMPLE} />)
+
+        expect(await screen.findAllByText(/split from/i)).toHaveLength(2)
+        expect(row('First name').getByText('Alice')).toBeInTheDocument()
+        expect(row('Last name').getByText('Doe')).toBeInTheDocument()
+        expect(row('First name').queryByText(/nothing resolved/i)).toBeNull()
+    })
+
+    it('names the claim it was split out of', async () => {
+        previewMapping.mockResolvedValue(resolved(SPLIT))
+        render(<Harness initialSample={SAMPLE} />)
+
+        // Twice for the two name rows, once more as display_name's own
+        // winning candidate chip.
+        expect(await screen.findAllByText('fullName', { selector: 'code' }))
+            .not.toHaveLength(0)
+    })
+
+    it('does not hand the field to the connection', async () => {
+        // The substantive half: ownership costs the person the ability to
+        // correct the field and re-applies our answer every login. We are
+        // not claiming that on the strength of a guess.
+        previewMapping.mockResolvedValue(resolved(SPLIT))
+        render(<Harness initialSample={SAMPLE} />)
+
+        await screen.findAllByText(/split from/i)
+        expect(screen.queryByText('IdP-managed')).toBeNull()
+        expect(screen.getAllByText(/stays editable/i)).toHaveLength(2)
+    })
+
+    it('still hands it over when the IdP names the halves itself', async () => {
+        // The asymmetry is the assertion worth having — it would be easy
+        // to fix the lock by never locking anything.
+        previewMapping.mockResolvedValue(resolved({
+            resolvedFrom: {
+                external_id: 'sub', email: 'email',
+                first_name: 'firstName', last_name: 'lastName',
+            },
+            namesDerivedFrom: null,
+        }))
+        render(<Harness initialSample={JSON.stringify({
+            sub: 'u1', email: 'a@x.com', firstName: 'Alice', lastName: 'Doe',
+        })} />)
+
+        expect(await screen.findAllByText('IdP-managed')).toHaveLength(2)
+        expect(screen.queryByText(/split from/i)).toBeNull()
+    })
+})
+
 describe('click to assign', () => {
     it('assigns a payload key to a field from its menu', async () => {
         const user = userEvent.setup()

@@ -210,6 +210,10 @@ export function ClaimMappingStudio({
         candidates: effective(f.key),
         inherited: usingDefault(f.key),
         winner: resolvedFrom ? resolvedFrom[f.key] ?? null : undefined,
+        // Only the two name fields can be split out of something else.
+        derivedFrom: f.key === 'first_name' || f.key === 'last_name'
+            ? result?.namesDerivedFrom ?? null
+            : null,
         value: result ? displayValue(result.resolved, f.key) : undefined,
     })), [effective, usingDefault, resolvedFrom, result])
 

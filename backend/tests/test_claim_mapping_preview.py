@@ -122,6 +122,41 @@ async def test_extras_carry_provenance_too(test_client):
     assert resp.json()["resolvedFrom"]["extras.staff_id"] == "staffNo"
 
 
+@pytest.mark.asyncio
+async def test_a_split_name_is_reported_as_derived_not_as_nothing(test_client):
+    """The screen would otherwise contradict the login it is configuring.
+
+    An IdP releasing only ``name`` produces both names via the display-name
+    split, but none of *their* candidates fired — so ``resolvedFrom`` is
+    null for each, and the pane read that as "nothing resolved" beside two
+    populated values.
+    """
+    resp = await test_client.post(PREVIEW, json={
+        "kind": "oidc",
+        "claims": {"sub": "u-1", "email": "a@corp.example", "name": "Alice Doe"},
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["resolved"]["first_name"] == "Alice"
+    assert body["resolved"]["last_name"] == "Doe"
+    assert body["resolvedFrom"]["first_name"] is None
+    assert body["namesDerivedFrom"] == "name"
+
+
+@pytest.mark.asyncio
+async def test_names_the_idp_asserted_are_not_reported_as_derived(test_client):
+    resp = await test_client.post(PREVIEW, json={
+        "kind": "oidc",
+        "claims": {
+            "sub": "u-1", "email": "a@corp.example",
+            "given_name": "Alice", "family_name": "Doe",
+        },
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["namesDerivedFrom"] is None
+    assert resp.json()["resolvedFrom"]["first_name"] == "given_name"
+
+
 # ── The saved path keeps its shape, and gains provenance ──────────────
 
 

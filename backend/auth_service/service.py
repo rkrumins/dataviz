@@ -631,12 +631,15 @@ class LocalIdentityService:
             # Only fields this login actually carried are touched. An IdP
             # that releases no ``given_name`` leaves the field alone
             # instead of blanking it, and leaves it editable — see
-            # ``identity_provenance``.
+            # ``identity_provenance``. Nor does a name we split out of a
+            # full name count: it is populated at provisioning either way,
+            # but we do not lock a person out of correcting our own guess.
             #
             # Best-effort, like the metadata write below: a profile that
             # failed to re-sync must not cost somebody their sign-in.
             owned = asserted_fields(
                 first_name=identity.first_name, last_name=identity.last_name,
+                derived=identity.names_derived_from is not None,
             )
             if owned:
                 try:
