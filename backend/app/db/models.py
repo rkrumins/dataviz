@@ -713,7 +713,7 @@ class ContextModelORM(Base):
     # as ``views``, but nothing ever read or wrote it — every endpoint here
     # is templates-only, and templates are global rows meant to be broadly
     # readable. A column that looks like enforced policy but isn't is a
-    # standing footgun, so 20260727_1200_view_public_tier drops it.
+    # standing footgun, so 20260728_1700_view_public_tier drops it.
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)

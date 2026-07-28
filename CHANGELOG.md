@@ -76,8 +76,8 @@ did not carry access to the data they showed. Four reported problems, one root c
 
 ### Upgrading
 
-Two migrations: `20260727_1200_view_public_tier` (widens the Views tier CHECK, drops the dead
-`context_models.visibility`) and `20260727_1300_grant_expiry`.
+Two migrations: `20260728_1700_view_public_tier` (widens the Views tier CHECK, drops the dead
+`context_models.visibility`) and `20260728_1800_grant_expiry`.
 
 **Users will lose access to Views they can see today.** This is the fix, but it is still an
 access removal. Run the read-only report first to see who is affected:

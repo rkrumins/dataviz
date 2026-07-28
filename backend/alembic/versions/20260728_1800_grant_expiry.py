@@ -18,8 +18,8 @@ from typing import Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260727_1300_grant_expiry"
-down_revision: Union[str, None] = "20260727_1200_view_public_tier"
+revision: str = "20260728_1800_grant_expiry"
+down_revision: Union[str, None] = "20260728_1700_view_public_tier"
 branch_labels = None
 depends_on = None
 
