@@ -10,7 +10,7 @@ import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
-    BarChart3, AlertTriangle, Loader2,
+    BarChart3, AlertTriangle, Loader2, Boxes,
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
@@ -27,6 +27,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { PropertyMappingTab } from './PropertyMappingTab'
 import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
@@ -142,7 +143,7 @@ export function DataSourceDetailPanel({
     onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
+    const [activeTab, setActiveTab] = useState<'insights' | 'mapping' | 'aggregation' | 'views' | 'versioning'>('insights')
     const versioningEnabled = useFeature('versioningEnabled')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
@@ -359,6 +360,7 @@ export function DataSourceDetailPanel({
                         {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
+                            <TabBtn active={activeTab === 'mapping'} icon={Boxes} label="Mapping" onClick={() => setActiveTab('mapping')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             {versioningEnabled && (
@@ -414,6 +416,60 @@ export function DataSourceDetailPanel({
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
                                 )
+                            )}
+
+                            {/* ─── Mapping Tab ──────────────────────────── */}
+                            {/* Everything about how this source's PHYSICAL nodes map onto the
+                                platform's model: which field is identity, which is the display
+                                name, and where the properties actually live. */}
+                            {activeTab === 'mapping' && (
+                                <div className="space-y-6">
+                                    <NodeIdentityField
+                                        key={ds.id}
+                                        value={pendingIdentityProperty}
+                                        onChange={setPendingIdentityProperty}
+                                        canEdit={canManageDs}
+                                        providerId={ds.providerId}
+                                        graphName={ds.graphName}
+                                        nameValue={pendingNameProperty}
+                                        onNameChange={setPendingNameProperty}
+                                    />
+
+                                    {/* Identity/name save through the Aggregation transaction
+                                        (they're columns on the DS row); the property mapping
+                                        saves itself (it merges into extra_config server-side).
+                                        Two stores, one screen — so surface the pending identity
+                                        edit here rather than stranding it on another tab. */}
+                                    {isDirty && canManageDs && (
+                                        <div className="flex items-center justify-end gap-2 p-3 rounded-lg bg-amber-500/[0.06] border border-amber-500/20 animate-in slide-in-from-top-1 fade-in duration-150">
+                                            <button
+                                                onClick={handleDiscardConfig}
+                                                disabled={isSaving}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                            >
+                                                <RotateCcw className="w-3 h-3" /> Discard
+                                            </button>
+                                            <button
+                                                onClick={handleSaveConfig}
+                                                disabled={isSaving}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm"
+                                            >
+                                                {isSaving
+                                                    ? <Loader2 className="w-3 h-3 animate-spin" />
+                                                    : <Save className="w-3 h-3" />}
+                                                {isSaving ? 'Saving…' : 'Save Identity'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    <div className="pt-2 border-t border-glass-border">
+                                        <PropertyMappingTab
+                                            wsId={wsId}
+                                            dataSourceId={ds.id}
+                                            canEdit={canManageDs}
+                                        />
+                                    </div>
+                                </div>
                             )}
 
                             {/* ─── Aggregation Tab ──────────────────────── */}
@@ -504,18 +560,10 @@ export function DataSourceDetailPanel({
                                         </div>
                                     )}
 
-                                    {/* Node Identity Property (URN-equivalent) — shared control,
-                                        graph-aware suggestions from the source's own node properties. */}
-                                    <NodeIdentityField
-                                        key={ds.id}
-                                        value={pendingIdentityProperty}
-                                        onChange={setPendingIdentityProperty}
-                                        canEdit={canManageDs}
-                                        providerId={ds.providerId}
-                                        graphName={ds.graphName}
-                                        nameValue={pendingNameProperty}
-                                        onNameChange={setPendingNameProperty}
-                                    />
+                                    {/* Node identity / display-name mapping moved to the Mapping
+                                        tab — it is physical-to-logical mapping, not aggregation
+                                        topology, and belongs with the property mapping so an
+                                        operator sees one coherent story. */}
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
                                     {isDirty && canManageDs && (
