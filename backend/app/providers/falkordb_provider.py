@@ -645,19 +645,23 @@ def _node_from_props(
             user_props.update(
                 flatten_properties(container, mapping.properties_separator)
             )
-        # Flag once per provider boot so operators can run the alignment.
-        # Bounded by ``_logged_legacy_blob`` so we don't spam production.
-        global _logged_legacy_blob
-        if not _logged_legacy_blob:
-            logger.warning(
-                "node urn=%s stores its properties nested under n.%s. They are "
-                "rendered from the container on read, but are NOT visible to "
-                "advanced search until unpacked into native fields — align this "
-                "data source's properties (Data source -> Mapping) or run "
-                "backend/scripts/migrate_native_properties.py.",
-                props.get("urn"), container_key,
-            )
-            _logged_legacy_blob = True
+            # Flag once per provider boot so operators can run the alignment.
+            # Bounded by ``_logged_legacy_blob`` so we don't spam production.
+            # Only warn when the container actually HELD something: an empty
+            # or unreadable one has nothing trapped in it, and sending an
+            # operator to fix a graph with nothing to unpack is a false alarm.
+            global _logged_legacy_blob
+            if not _logged_legacy_blob:
+                logger.warning(
+                    "node urn=%s stores its properties nested under n.%s. They "
+                    "are rendered from the container on read, but are NOT "
+                    "visible to advanced search until unpacked into native "
+                    "fields — align this data source's properties (Data source "
+                    "-> Mapping) or run "
+                    "backend/scripts/migrate_native_properties.py.",
+                    props.get("urn"), container_key,
+                )
+                _logged_legacy_blob = True
 
     # ── Layer 1: native non-reserved keys ────────────────────────────
     if mapping.collect_unmapped_as_properties:

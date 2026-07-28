@@ -281,15 +281,15 @@ export function PropertyMappingTab({ wsId, dataSourceId, canEdit }: PropertyMapp
                                         />
                                     </div>
                                 </div>
-                                {sample.nativeAfter.length > 0 && (
+                                {sample.newlySearchable.length > 0 && (
                                     <p className="mt-2 pt-2 border-t border-glass-border/40 text-[10.5px] text-ink-muted leading-relaxed">
                                         <span className="font-semibold text-ink">
-                                            {sample.nativeAfter.length} searchable
+                                            {sample.newlySearchable.length} become searchable
                                         </span>{' '}
                                         once aligned:{' '}
                                         <code className="font-mono">
-                                            {sample.nativeAfter.slice(0, 6).join(', ')}
-                                            {sample.nativeAfter.length > 6 ? '…' : ''}
+                                            {sample.newlySearchable.slice(0, 6).join(', ')}
+                                            {sample.newlySearchable.length > 6 ? '…' : ''}
                                         </code>
                                     </p>
                                 )}

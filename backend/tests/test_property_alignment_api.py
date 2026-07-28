@@ -147,6 +147,39 @@ class TestAnalyzePropertyStorage:
         assert report["labels"] == {}
         assert report["totals"]["affectedNodes"] == 0
 
+    async def test_label_with_no_nodes(self):
+        report = await analyze_property_storage(
+            _FakeGraph({"dataset": []}), SchemaMapping(),
+        )
+        assert report["labels"]["dataset"]["storage"] == "empty"
+        assert report["totals"]["needsAlignment"] == []
+
+    async def test_empty_container_is_not_pitched_as_work(self):
+        """A node carrying `n.properties = "{}"` has nothing trapped in it.
+        Flagging it would offer the operator a rewrite that yields zero new
+        searchable properties."""
+        graph = _FakeGraph({"dataset": [{"urn": "u1", "properties": "{}"}]})
+        report = await analyze_property_storage(graph, SchemaMapping())
+
+        assert report["labels"]["dataset"]["storage"] != "container"
+        assert report["totals"]["needsAlignment"] == []
+        assert report["totals"]["newPaths"] == 0
+
+    async def test_no_count_query_when_there_is_nothing_to_count(self):
+        graph = _FakeGraph({"dataset": [{"urn": "u1", "owner": "team"}]})
+        await analyze_property_storage(graph, SchemaMapping())
+        assert not any("count(n)" in q for q in graph.queries)
+
+    async def test_container_key_disabled_classifies_everything_native(self):
+        graph = _FakeGraph({"dataset": [
+            {"urn": "u1", "properties": _container(a=1), "owner": "team"},
+        ]})
+        report = await analyze_property_storage(
+            graph, SchemaMapping(properties_field=None),
+        )
+        assert report["labels"]["dataset"]["storage"] == "native"
+        assert report["totals"]["needsAlignment"] == []
+
     async def test_separator_flows_into_inferred_paths(self):
         graph = _FakeGraph({"dataset": [
             {"urn": "u1", "properties": _container(a={"b": 1})},
@@ -180,7 +213,7 @@ class TestPreviewAlignment:
         assert sample["after"] == {"owner/team": "data"}
         assert sample["urn"] == "u1"
 
-    async def test_native_after_lists_what_becomes_indexable(self):
+    async def test_newly_searchable_lists_what_becomes_indexable(self):
         """The half a property bag can't show: which keys become real
         FalkorDB fields, and therefore searchable."""
         graph = _FakeGraph({"dataset": [
@@ -191,9 +224,32 @@ class TestPreviewAlignment:
         result = await preview_alignment(graph, SchemaMapping())
 
         sample = result["samples"][0]
-        assert "fmt" in sample["nativeAfter"]
+        assert "fmt" in sample["newlySearchable"]
         # A list-of-dicts leaf can't be native — it lands in propertiesRaw.
-        assert "nested/deep/deeper/a" not in sample["nativeAfter"]
+        assert "nested/deep/deeper/a" not in sample["newlySearchable"]
+
+    async def test_promises_nothing_when_the_node_is_already_native(self):
+        """`before` and `after` are identical whenever the mapping hasn't
+        changed, because the read path already hydrates the container. The
+        payoff must therefore be measured against the node's REAL fields —
+        otherwise an already-aligned graph is told it has properties to gain."""
+        graph = _FakeGraph({"dataset": [
+            {"urn": "u1", "owner": "team", "rowCount": 5},
+        ]})
+        result = await preview_alignment(graph, SchemaMapping())
+
+        sample = result["samples"][0]
+        assert sample["before"] == sample["after"]
+        assert sample["newlySearchable"] == []
+
+    async def test_counts_only_the_trapped_half_of_a_mixed_node(self):
+        graph = _FakeGraph({"dataset": [
+            {"urn": "u1", "owner": "team", "properties": _container(fmt="parquet")},
+        ]})
+        result = await preview_alignment(graph, SchemaMapping())
+
+        # `owner` is already a field; only `fmt` is trapped in the container.
+        assert result["samples"][0]["newlySearchable"] == ["fmt"]
 
     async def test_preview_writes_nothing(self):
         graph = _FakeGraph({"dataset": [{"urn": "u1", "properties": _container(a=1)}]})

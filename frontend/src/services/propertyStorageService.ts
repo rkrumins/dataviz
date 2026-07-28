@@ -80,8 +80,12 @@ export interface PropertyPreviewSample {
     before: Record<string, unknown>
     /** Property bag under the proposed mapping. */
     after: Record<string, unknown>
-    /** Keys that become real, indexable FalkorDB fields once aligned. */
-    nativeAfter: string[]
+    /**
+     * Keys not already fields on the physical node that would become ones —
+     * the actual payoff of aligning. Empty when the node is already native,
+     * so the UI must not promise a gain that isn't there.
+     */
+    newlySearchable: string[]
 }
 
 export interface PropertyPreview {

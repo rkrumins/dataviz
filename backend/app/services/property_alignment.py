@@ -144,7 +144,11 @@ async def analyze_property_storage(
                 parsed = coerce_container(props[container_key])
                 if parsed is None:
                     unparseable += 1
-                else:
+                elif parsed:
+                    # Only a container that actually HELD something counts as
+                    # needing alignment. An empty one has nothing trapped in
+                    # it, and flagging it would pitch the operator a rewrite
+                    # that yields zero new searchable properties.
                     container_nodes += 1
                     for path in flatten_properties(parsed, separator):
                         if len(inferred_paths) < _INFERRED_PATH_CAP:
@@ -237,11 +241,16 @@ async def preview_alignment(
     will actually see. ``before`` uses the mapping in force today; ``after``
     uses the one being proposed.
 
-    ``nativeAfter`` lists the keys that become real, indexable FalkorDB fields
-    once the alignment job runs; that is the half the preview can't show by
-    rendering a property bag, and it is what makes the properties searchable.
+    ``newlySearchable`` lists the keys that are NOT already fields on the
+    physical node and would become ones — the half a property bag can't show,
+    and the actual payoff of running the alignment. It is computed against the
+    node's real top-level keys rather than against ``before``: since the read
+    path already hydrates the container, ``before`` and ``after`` are identical
+    whenever the mapping itself hasn't changed, so diffing them would report
+    nothing gained for exactly the graphs that have the most to gain.
     """
     from backend.app.providers.falkordb_provider import (
+        _RESERVED_NODE_KEYS,
         _node_from_props,
         _split_user_properties,
     )
@@ -288,6 +297,11 @@ async def preview_alignment(
             if before is None or after is None:
                 continue
 
+            # What is ALREADY a real field on the physical node — everything
+            # else the aligned bag holds is currently trapped in a container.
+            already_native = {
+                k for k in props if k not in _RESERVED_NODE_KEYS
+            }
             native_after, _ = _split_user_properties(after.properties)
             samples.append({
                 "urn": before.urn,
@@ -295,7 +309,7 @@ async def preview_alignment(
                 "displayName": before.display_name,
                 "before": before.properties,
                 "after": after.properties,
-                "nativeAfter": sorted(native_after),
+                "newlySearchable": sorted(set(native_after) - already_native),
             })
 
     return {"samples": samples, "count": len(samples)}

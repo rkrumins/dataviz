@@ -395,6 +395,36 @@ class TestMappedNodeReads:
         }, "dataset", mapping)
         assert node.properties["existing"] == "keep-me"
 
+    def test_empty_container_does_not_warn(self, caplog):
+        """A node whose container is empty has nothing trapped in it. Warning
+        would send an operator to align a graph with nothing to unpack."""
+        import backend.app.providers.falkordb_provider as provider_module
+        provider_module._logged_legacy_blob = False
+        with caplog.at_level("WARNING"):
+            node = _node_from_props({
+                "urn": "urn:x", "properties": "{}", "owner": "team",
+            }, "dataset")
+        assert node.properties == {"owner": "team"}
+        assert not any("nested under" in r.message for r in caplog.records)
+
+    def test_populated_container_still_warns(self, caplog):
+        import backend.app.providers.falkordb_provider as provider_module
+        provider_module._logged_legacy_blob = False
+        with caplog.at_level("WARNING"):
+            _node_from_props({
+                "urn": "urn:x", "properties": json.dumps({"a": 1}),
+            }, "dataset")
+        assert any("nested under" in r.message for r in caplog.records)
+
+    def test_unreadable_container_does_not_warn(self, caplog):
+        """Nothing was hydrated, so there is nothing to tell the operator
+        about unpacking — the value is preserved untouched either way."""
+        import backend.app.providers.falkordb_provider as provider_module
+        provider_module._logged_legacy_blob = False
+        with caplog.at_level("WARNING"):
+            _node_from_props({"urn": "urn:x", "properties": "not json"}, "dataset")
+        assert not any("nested under" in r.message for r in caplog.records)
+
     def test_container_key_never_leaks_as_a_property(self):
         """Even a non-default container name must not show up as a property
         row — it is structure, not data."""

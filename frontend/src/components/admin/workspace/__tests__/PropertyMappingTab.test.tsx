@@ -61,7 +61,7 @@ const PREVIEW: PropertyPreview = {
         displayName: 'Revenue',
         before: { properties: '{"technical":{"format":"parquet"}}' },
         after: { 'technical/format': 'parquet' },
-        nativeAfter: ['technical/format'],
+        newlySearchable: ['technical/format'],
     }],
 }
 
@@ -116,7 +116,23 @@ describe('PropertyMappingTab', () => {
         const beforeColumn = screen.getByText('Now').parentElement!
         expect(within(beforeColumn).getByText('properties')).toBeInTheDocument()
 
-        expect(screen.getByText(/1 searchable/)).toBeInTheDocument()
+        expect(screen.getByText(/1 become searchable/)).toBeInTheDocument()
+    })
+
+    it('promises no gain when the mapping changes nothing', async () => {
+        previewPropertyMapping.mockResolvedValue({
+            count: 1,
+            samples: [{
+                urn: 'urn:x', label: 'dataset', displayName: 'Revenue',
+                before: { owner: 'team' },
+                after: { owner: 'team' },
+                newlySearchable: [],
+            }],
+        })
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        expect(await screen.findByText('Now')).toBeInTheDocument()
+        expect(screen.queryByText(/become searchable/)).toBeNull()
     })
 
     it('says nothing needs doing when every label is already native', async () => {
