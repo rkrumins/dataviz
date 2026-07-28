@@ -61,6 +61,10 @@ export interface IdpProvider {
     emailDomains: string[]
     /** When an assertion was last captured, or null. */
     lastAssertionAt?: string | null
+    /** Readiness. A ``draft`` is configured but unproven and reaches no
+     *  public surface; ``live`` is on the login page. Distinct from
+     *  ``enabled``, which is the operational switch. */
+    lifecycle?: 'draft' | 'live'
     createdAt: string
     updatedAt: string
 }
@@ -260,6 +264,16 @@ export const ssoAdminService = {
         return request<void>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
+        )
+    },
+
+    /** Promote a draft to live — the moment it appears on the login page
+     *  for every user. Deliberately its own call, not a PATCH: making a
+     *  provider public is a different kind of act from renaming it. */
+    publishProvider(id: string): Promise<IdpProvider> {
+        return request<IdpProvider>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/publish`,
+            { method: 'POST' },
         )
     },
 

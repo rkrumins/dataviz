@@ -121,6 +121,7 @@ export function ClaimMappingEditor({
     value,
     onChange,
     onReadFromBrowser,
+    initialSample,
 }: {
     kind: IdpKind
     /** Present only for a saved provider — the live-preview endpoint is
@@ -132,9 +133,14 @@ export function ClaimMappingEditor({
      *  of the admin's own browser so they can map against the real
      *  object instead of a hand-typed sample. */
     onReadFromBrowser?: () => string | null
+    /** A worked example to start from — the vendor preset's, in the setup
+     *  wizard. Without one the preview has nothing to run on until a real
+     *  sign-in has happened, so a first-time operator sees an empty result
+     *  and cannot tell a good mapping from a bad one. */
+    initialSample?: string
 }) {
     const [defaults, setDefaults] = useState<ClaimMapping | null>(null)
-    const [sample, setSample] = useState('')
+    const [sample, setSample] = useState(initialSample ?? '')
     const [sampleError, setSampleError] = useState<string | null>(null)
     const [preview, setPreview] = useState<TestMappingResult | null>(null)
     const [previewError, setPreviewError] = useState<string | null>(null)
