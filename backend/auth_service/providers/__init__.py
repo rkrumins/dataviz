@@ -30,6 +30,7 @@ from .oidc import (
 from .claim_mapper import (
     ClaimMappingError,
     DEFAULT_CUSTOM,
+    DEFAULT_CUSTOM_PROFILE,
     DEFAULT_OIDC,
     DEFAULT_SAML,
     apply_claim_mapping,
@@ -65,6 +66,21 @@ from .custom import (
     CustomIdentityProvider,
     CustomSettings,
     build_custom_provider,
+)
+from .assurance import (
+    ASSURANCE_DESCRIPTIONS,
+    ASSURANCE_ORDER,
+    assurance_for,
+    at_least as assurance_at_least,
+)
+from .custom_profile import (
+    BROWSER_STORAGE_SOURCES,
+    SERVER_READ_SOURCES,
+    CustomProfileConfigError,
+    CustomProfileError,
+    CustomProfileProvider,
+    CustomProfileSettings,
+    build_custom_profile_provider,
 )
 
 
@@ -103,8 +119,9 @@ def known_providers() -> list[str]:
 
 # Per-kind builder map consumed by :class:`ProviderRegistry`.
 PROVIDER_BUILDERS = {
-    "oidc":   build_oidc_provider,
-    "custom": build_custom_provider,
+    "oidc":           build_oidc_provider,
+    "custom":         build_custom_provider,
+    "custom_profile": build_custom_profile_provider,
 }
 if SAML_AVAILABLE and build_saml_provider is not None:
     PROVIDER_BUILDERS["saml2"] = build_saml_provider
@@ -132,6 +149,17 @@ __all__ = [
     "CustomIdentityError",
     "CustomSettings",
     "build_custom_provider",
+    "CustomProfileProvider",
+    "CustomProfileError",
+    "CustomProfileConfigError",
+    "CustomProfileSettings",
+    "build_custom_profile_provider",
+    "BROWSER_STORAGE_SOURCES",
+    "SERVER_READ_SOURCES",
+    "assurance_for",
+    "assurance_at_least",
+    "ASSURANCE_ORDER",
+    "ASSURANCE_DESCRIPTIONS",
     "ProviderRegistry",
     "ProviderConfigSnapshot",
     "ProviderConfigLoader",
@@ -149,4 +177,5 @@ __all__ = [
     "DEFAULT_OIDC",
     "DEFAULT_SAML",
     "DEFAULT_CUSTOM",
+    "DEFAULT_CUSTOM_PROFILE",
 ]

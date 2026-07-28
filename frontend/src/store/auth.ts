@@ -177,6 +177,12 @@ interface AuthState {
     /** Call once on app boot — asks the server whether the cookie is valid. */
     bootstrap: () => Promise<void>
     login: (email: string, password: string) => Promise<boolean>
+    /** Complete a ``custom_profile`` login from a payload read out of
+     *  browser storage. Same post-login hydration as ``login``; only
+     *  the endpoint differs. */
+    loginWithBrowserProfile: (
+        providerSlug: string, payload: string,
+    ) => Promise<boolean>
     signup: (req: SignUpRequest) => Promise<{
         ok: boolean
         message: string
@@ -283,6 +289,28 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             return true
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Login failed'
+            clearUserCache()
+            set({ ..._unauthenticated, error: message, isLoading: false })
+            return false
+        }
+    },
+
+    loginWithBrowserProfile: async (providerSlug, payload) => {
+        set({ error: null, isLoading: true })
+        resetClaimRecovery()
+        try {
+            const { user } = await authService.loginWithBrowserProfile(
+                providerSlug, payload,
+            )
+            set({ ..._authenticated(user), error: null, isLoading: false })
+            writeUserCache(user)
+            await hydratePermissions(set)
+            void useNavCatalogueStore.getState().hydrate()
+            return true
+        } catch (err: unknown) {
+            const message = err instanceof Error
+                ? err.message
+                : 'Portal sign-in failed'
             clearUserCache()
             set({ ..._unauthenticated, error: message, isLoading: false })
             return false

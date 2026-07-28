@@ -55,6 +55,7 @@ class AuthConfigDTO(BaseModel):
     sso_enabled: bool = Field(alias="ssoEnabled")
     allow_local_login: bool = Field(alias="allowLocalLogin")
     allow_jit_provisioning: bool = Field(alias="allowJitProvisioning")
+    email_first_login: bool = Field(default=False, alias="emailFirstLogin")
     version: int
     updated_at: str = Field(alias="updatedAt")
 
@@ -66,6 +67,7 @@ class AuthConfigPatch(BaseModel):
     sso_enabled: Optional[bool] = Field(default=None, alias="ssoEnabled")
     allow_local_login: Optional[bool] = Field(default=None, alias="allowLocalLogin")
     allow_jit_provisioning: Optional[bool] = Field(default=None, alias="allowJitProvisioning")
+    email_first_login: Optional[bool] = Field(default=None, alias="emailFirstLogin")
     expected_version: Optional[int] = Field(default=None, alias="expectedVersion")
 
 
@@ -79,6 +81,7 @@ async def get_config(
         sso_enabled=snap.sso_enabled,
         allow_local_login=snap.allow_local_login,
         allow_jit_provisioning=snap.allow_jit_provisioning,
+        email_first_login=getattr(snap, "email_first_login", False),
         version=snap.version,
         updated_at=snap.updated_at,
     )
@@ -199,6 +202,7 @@ async def update_config(
             sso_enabled=body.sso_enabled,
             allow_local_login=body.allow_local_login,
             allow_jit_provisioning=body.allow_jit_provisioning,
+            email_first_login=body.email_first_login,
             updated_by=admin.id,
         )
     except ConflictingVersion as exc:
@@ -210,7 +214,7 @@ async def update_config(
         await user_repo.create_outbox_event(
             session, event_type="auth.config.updated",
             payload={
-                "actor": admin.id,
+                "actor_id": admin.id,
                 "sso_enabled": bool(row.sso_enabled),
                 "allow_local_login": bool(row.allow_local_login),
                 "allow_jit_provisioning": bool(row.allow_jit_provisioning),
@@ -229,6 +233,7 @@ async def update_config(
 
     return AuthConfigDTO(
         sso_enabled=bool(row.sso_enabled),
+        email_first_login=bool(getattr(row, "email_first_login", False)),
         allow_local_login=bool(row.allow_local_login),
         allow_jit_provisioning=bool(row.allow_jit_provisioning),
         version=int(row.version or 1),

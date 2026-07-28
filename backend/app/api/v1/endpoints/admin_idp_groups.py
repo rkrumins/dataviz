@@ -137,7 +137,7 @@ async def create_role_binding_mapping(
         payload={"mapping_id": row.id, "target_type": "role_binding",
                  "idp_group": row.idp_group, "role_name": row.role_name,
                  "scope_type": row.scope_type, "scope_id": row.scope_id,
-                 "provider_id": row.provider_id, "actor": admin.id},
+                 "provider_id": row.provider_id, "actor_id": admin.id},
     )
     return _to_dto(row)
 
@@ -168,7 +168,7 @@ async def create_group_membership_mapping(
         payload={"mapping_id": row.id, "target_type": "group_membership",
                  "idp_group": row.idp_group,
                  "target_group_id": row.target_group_id,
-                 "provider_id": row.provider_id, "actor": admin.id},
+                 "provider_id": row.provider_id, "actor_id": admin.id},
     )
     return _to_dto(row)
 
@@ -188,6 +188,6 @@ async def delete_mapping(
     await user_repo.create_outbox_event(
         session, event_type="rbac.sso_mapping.deleted",
         payload={"mapping_id": mapping_id, "target_type": row.target_type,
-                 "idp_group": row.idp_group, "actor": admin.id},
+                 "idp_group": row.idp_group, "actor_id": admin.id},
     )
     return None

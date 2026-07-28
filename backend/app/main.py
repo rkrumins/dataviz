@@ -342,10 +342,11 @@ async def lifespan(_app: FastAPI):
                 return self._to_snapshot(row) if row is not None else None
 
         async def list_enabled(self):
+            # "Enabled" from the registry's perspective means publicly
+            # visible — enabled AND published. A draft is rehearsable but
+            # must never reach the login catalog.
             async with get_async_session() as session:
-                rows = await idp_provider_repo.list_providers(
-                    session, only_enabled=True,
-                )
+                rows = await idp_provider_repo.list_public_providers(session)
                 return [self._to_snapshot(r) for r in rows]
 
         @staticmethod
@@ -362,6 +363,16 @@ async def lifespan(_app: FastAPI):
                 linking_policy=row.linking_policy,
                 button_label=row.button_label,
                 button_icon=row.button_icon,
+            )
+
+    async def _resolve_email_domain(domain: str):
+        """Which enabled provider claims *domain*. Injected into the
+        identity service so ``auth_service`` never imports the repo."""
+        async with get_async_session() as session:
+            row = await idp_provider_repo.find_by_email_domain(session, domain)
+            return (
+                _DbProviderConfigLoader._to_snapshot(row)
+                if row is not None else None
             )
 
     _registry = ProviderRegistry(
@@ -506,6 +517,28 @@ async def lifespan(_app: FastAPI):
             provider_id=provider_id,
         )
 
+    async def _preview_sso_targets(
+        session, *, idp_groups: list[str], provider_id=None,
+    ) -> dict:
+        """Which mappings a dry-run's groups would match. Read-only
+        sibling of ``_reconcile_sso_targets`` — the same lookup, without
+        granting anything."""
+        from backend.app.db.repositories import idp_group_mapping_repo
+        mappings = await idp_group_mapping_repo.list_active_for_groups(
+            session, provider_id=provider_id, idp_groups=idp_groups,
+        )
+        return {
+            "matched": [
+                {"idp_group": m.idp_group, "target_type": m.target_type,
+                 "role_name": m.role_name, "group_id": m.target_group_id,
+                 "scope_type": m.scope_type, "scope_id": m.scope_id}
+                for m in mappings
+            ],
+            "unmatched_groups": sorted(
+                set(idp_groups) - {m.idp_group for m in mappings}
+            ),
+        }
+
     # Phase 2.E: inject the session-killer (RevocationService). Called
     # by the auth service when the SSO daily ceiling forces re-auth so
     # every live access token across all tabs bounces to the IdP.
@@ -544,8 +577,11 @@ async def lifespan(_app: FastAPI):
         user_identity_repo=_user_identity_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
+        email_domain_resolver=_resolve_email_domain,
+        assertion_recorder=idp_provider_repo.record_last_assertion,
         claims_resolver=_resolve_claims,
         sso_role_reconciler=_reconcile_sso_targets,
+        sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
         auth_config_provider=_auth_config_provider,
     )
@@ -947,6 +983,25 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
+    # IdP health sweep → app.state.idp_health_cache, read by the cache-only
+    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
+    # relay so replicas don't each probe every IdP. The cache is initialised
+    # unconditionally: a WEB replica serves an empty status rather than
+    # AttributeError-ing on a missing attribute.
+    _app.state.idp_health_cache = {}
+    _app.state._idp_health_shutdown = asyncio.Event()
+    _app.state._idp_health_task = None
+    if runs_scheduler():
+        from .services.idp_health import run_idp_health_loop
+        _app.state._idp_health_task = asyncio.create_task(
+            run_idp_health_loop(
+                get_jobs_session,
+                _app.state._idp_health_shutdown,
+                _app.state.idp_health_cache,
+            ),
+            name="idp-health",
+        )
+
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
     # returns 503 + Retry-After: 5. Setting this AFTER all sync init
@@ -1007,6 +1062,23 @@ async def lifespan(_app: FastAPI):
             _outbox_relay_task.cancel()
             try:
                 await _outbox_relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the IdP health sweep before DB pool teardown, same shape as the
+    # relay above. The loop waits on the shutdown event rather than
+    # sleeping, so this returns immediately instead of after its interval.
+    _idp_health_shutdown = getattr(_app.state, "_idp_health_shutdown", None)
+    _idp_health_task = getattr(_app.state, "_idp_health_task", None)
+    if _idp_health_shutdown is not None:
+        _idp_health_shutdown.set()
+    if _idp_health_task is not None and not _idp_health_task.done():
+        try:
+            await asyncio.wait_for(_idp_health_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _idp_health_task.cancel()
+            try:
+                await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1095,7 +1167,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Rate-limit 429 handler
+# Rate-limit 429 handler.
+#
+# ``app.state.limiter`` is not optional decoration: slowapi's handler does
+# ``request.app.state.limiter._inject_headers(...)`` (slowapi/extension.py),
+# so without it the handler ITSELF raises AttributeError and the client gets a
+# 500 with a stack trace instead of a 429 with Retry-After — on every
+# rate-limited endpoint, which is exactly the moment you least want an
+# unhandled error. Registering the same instance the routes decorate with
+# keeps the raised limit and the response headers consistent.
+from backend.auth_service.api.router import limiter as _auth_limiter
+
+app.state.limiter = _auth_limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Global handler for management DB failures — returns structured 503 instead of

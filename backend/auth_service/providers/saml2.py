@@ -470,52 +470,6 @@ class SamlProvider:
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _attr_first(attrs: dict, keys: tuple[str, ...]) -> Optional[str]:
-    """Return the first value found under any of *keys*. SAML attributes
-    are typically lists; we pick the first element."""
-    for k in keys:
-        v = attrs.get(k)
-        if v is None:
-            continue
-        if isinstance(v, (list, tuple)):
-            for item in v:
-                if isinstance(item, str) and item.strip():
-                    return item.strip()
-        elif isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
-
-
-def _extract_groups(attrs: dict) -> tuple[str, ...]:
-    """Pull group membership out of the SAML attribute statement.
-
-    Accepts the configured ``SAML_GROUPS_ATTRIBUTE`` (default ``groups``)
-    and several common alternates IdPs use out of the box. Empty when
-    no usable attribute is present.
-    """
-    candidates = (
-        SAML_GROUPS_ATTRIBUTE,
-        "groups",
-        "memberOf",
-        "Groups",
-        "http://schemas.xmlsoap.org/claims/Group",
-        "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
-    )
-    for key in candidates:
-        raw = attrs.get(key)
-        if raw is None:
-            continue
-        if isinstance(raw, (list, tuple)):
-            out = [g.strip() for g in raw if isinstance(g, str) and g.strip()]
-        elif isinstance(raw, str):
-            out = [g.strip() for g in raw.split(",") if g.strip()] if "," in raw else [raw.strip()] if raw.strip() else []
-        else:
-            continue
-        if out:
-            return tuple(out)
-    return ()
-
-
 def _extract_authn_instant(auth) -> Optional[int]:
     """Read ``AuthnInstant`` from the parsed assertion.
 
@@ -591,3 +545,98 @@ def build_saml_provider(snap: ProviderConfigSnapshot) -> SamlProvider:
     """Factory for the registry. Materialises a working
     :class:`SamlProvider` from a snapshot."""
     return SamlProvider(settings_from_snapshot(snap))
+
+
+# ── Admin-time IdP metadata import ───────────────────────────────────
+
+
+def parse_idp_metadata(xml: str) -> dict:
+    """Turn an IdP's SAML metadata XML into the settings an operator would
+    otherwise transcribe by hand — entity id, SSO/SLO URLs, signing cert.
+
+    Lazy import, matching the rest of this module: a non-viz image may not
+    have ``libxmlsec1`` installed, and importing python3-saml at module load
+    would break ``auth_service`` everywhere rather than just here.
+
+    Returns ``{"settings": {...}, "warnings": [...]}``. Raises
+    :class:`SamlError` on unparseable input.
+    """
+    try:
+        from onelogin.saml2.idp_metadata_parser import (  # type: ignore
+            OneLogin_Saml2_IdPMetadataParser,
+        )
+    except ImportError as exc:  # pragma: no cover - missing system dep
+        raise SamlError(f"python3-saml is not available: {exc}") from exc
+
+    if not (xml or "").strip():
+        raise SamlError("metadata XML is empty")
+
+    try:
+        parsed = OneLogin_Saml2_IdPMetadataParser.parse(xml)
+    except Exception as exc:  # noqa: BLE001 — any XML fault is one error here
+        raise SamlError(f"could not parse IdP metadata: {exc}") from exc
+
+    idp = (parsed or {}).get("idp") or {}
+    settings: dict = {}
+    warnings: list[str] = []
+
+    if idp.get("entityId"):
+        settings["idp_entity_id"] = idp["entityId"]
+    sso = (idp.get("singleSignOnService") or {}).get("url")
+    if sso:
+        settings["idp_sso_url"] = sso
+    slo = (idp.get("singleLogoutService") or {}).get("url")
+    if slo:
+        settings["idp_slo_url"] = slo
+
+    # python3-saml gives one cert under x509cert, or several under
+    # x509certMulti when the IdP is mid-rotation. We take the signing cert;
+    # this provider verifies signatures, so that is the one that matters.
+    cert = idp.get("x509cert")
+    if not cert:
+        multi = idp.get("x509certMulti") or {}
+        signing = multi.get("signing") or []
+        if signing:
+            cert = signing[0]
+            if len(signing) > 1:
+                warnings.append(
+                    f"The IdP published {len(signing)} signing certificates "
+                    "(a rotation is likely in progress). The first was "
+                    "imported — confirm it is the active one."
+                )
+    if cert:
+        settings["idp_x509_cert"] = _normalise_cert(cert)
+    else:
+        warnings.append(
+            "No signing certificate found in the metadata. Assertions "
+            "cannot be verified without one."
+        )
+
+    for required, label in (
+        ("idp_entity_id", "entity ID"),
+        ("idp_sso_url", "single sign-on URL"),
+    ):
+        if required not in settings:
+            warnings.append(f"The metadata contains no {label}.")
+
+    return {"settings": settings, "warnings": warnings}
+
+
+async def fetch_idp_metadata(url: str, *, timeout: float = 10.0) -> str:
+    """Fetch IdP metadata XML over HTTP.
+
+    python3-saml ships ``parse_remote``, but it uses urllib synchronously and
+    would block the event loop, so we fetch with httpx and hand the body to
+    :func:`parse_idp_metadata`.
+    """
+    import httpx
+
+    if not (url or "").strip():
+        raise SamlError("metadata URL is required")
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url.strip())
+            resp.raise_for_status()
+            return resp.text
+    except httpx.HTTPError as exc:
+        raise SamlError(f"could not fetch metadata: {exc}") from exc

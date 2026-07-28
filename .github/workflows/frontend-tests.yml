@@ -1,0 +1,57 @@
+# Gates the frontend test suite. Before this workflow existed, NOTHING in CI
+# ran vitest, eslint, or tsc — the whole frontend was unguarded.
+#
+# What that cost: commit 5adab3b added a <DocsLink> (a router <Link>) to the
+# shared wizard header and to BlankCanvasEmptyState. Every test that stubbed
+# react-router-dom with a one-key factory, or rendered with no router at all,
+# started throwing at mount — 11 tests across 4 files. Not one assertion in
+# them executed again until someone happened to run the suite locally. This is
+# the same lesson alembic-guards.yml already records for the backend: a test
+# nobody runs is a comment.
+#
+# One job, and it is REQUIRED. The suite is green (216 files); there is no
+# "informational" tier here on purpose, because an advisory gate is how the
+# 11 failures stayed invisible in the first place.
+#
+# Deliberately NOT gated yet — `npx tsc --noEmit` (79 errors across 32 files)
+# and `npm run lint` (--max-warnings 0, 180+ react-hooks/set-state-in-effect
+# violations). Both fail on main today. Adding either as a gate means paying
+# that debt down first; the lint rule in particular cannot be satisfied
+# without changing render behaviour, so it needs its own change with its own
+# review. Add the step here once the count reaches zero — don't add it with a
+# `continue-on-error` escape hatch, which is just a comment again.
+name: frontend-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: frontend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    name: Frontend unit suite (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # `npm ci`, not `npm install`: the lockfile is the contract, and a
+      # silently-resolved different tree would defeat the point of the gate.
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD keeps a transitive postinstall from
+      # pulling ~500MB of browsers this job never launches.
+      - name: Run the unit suite
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npx vitest run

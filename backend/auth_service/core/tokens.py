@@ -31,6 +31,7 @@ _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
 _LINK_INTENT_AUDIENCE = f"{JWT_AUDIENCE}:link_intent"
+_DRYRUN_AUDIENCE = f"{JWT_AUDIENCE}:dryrun"
 
 
 # ── Access tokens ────────────────────────────────────────────────────
@@ -422,4 +423,42 @@ def decode_link_intent_token(token: str) -> dict:
     )
     if payload.get("purpose") != "link_intent":
         raise jwt.InvalidTokenError("Not a link-intent token")
+    return payload
+
+
+# ── Dry-run tokens ("what would happen if I signed in here?") ────────
+#
+# An admin starts a real IdP round-trip from the provider form. The
+# signed ``nx_dryrun`` cookie marks the flow so the callback computes the
+# outcome and renders it instead of minting a session. Minted only by an
+# admin-authed endpoint, which is what keeps this from being a way for
+# an anonymous caller to probe identities.
+
+
+def create_dryrun_token(
+    *, admin_id: str, provider_id: str, expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "dryrun",
+        "admin_id": admin_id,
+        "provider_id": provider_id,
+        "iss": JWT_ISSUER,
+        "aud": _DRYRUN_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_dryrun_token(token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_DRYRUN_AUDIENCE,
+    )
+    if payload.get("purpose") != "dryrun":
+        raise jwt.InvalidTokenError("Not a dry-run token")
     return payload

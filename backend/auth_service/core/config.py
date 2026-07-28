@@ -103,13 +103,6 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 
 
-# ── Group claim extraction (Phase 2.C) ───────────────────────────────
-# Which OIDC claim / SAML attribute holds the user's group memberships.
-# Missing or empty -> empty list (no reconciliation happens).
-OIDC_GROUPS_CLAIM: str = os.getenv("OIDC_GROUPS_CLAIM", "groups")
-SAML_GROUPS_ATTRIBUTE: str = os.getenv("SAML_GROUPS_ATTRIBUTE", "groups")
-
-
 # ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────
 # The Custom provider reads a JWT-signed cookie/header that simulates an
 # IdP returning AD-style attributes (first/last/email/external_id/claims/

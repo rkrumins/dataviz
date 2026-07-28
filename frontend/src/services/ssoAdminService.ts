@@ -9,11 +9,43 @@ import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const ADMIN = '/api/v1/admin'
 
+/** Provider kinds the backend accepts — mirrors ``VALID_KINDS`` in
+ *  ``idp_provider_repo`` and the ``ck_idp_providers_kind`` CHECK. */
+export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+
+/** How much a provider's word is worth — derived server-side from kind +
+ *  settings on every read, never stored. Ordered worst to best. */
+export type AssuranceLevel = 'unverified' | 'asserted' | 'verified'
+
+/** Where a ``custom_profile`` row reads its payload from. Cookie and
+ *  header are read server-side; the two storage sources need the
+ *  browser to read the key and POST it. */
+export type CustomProfileSource =
+    | 'cookie' | 'local_storage' | 'session_storage' | 'header'
+
+/** Typed view of a ``custom_profile`` row's settings blob. Every field
+ *  is optional because the admin form builds it up incrementally and
+ *  the server owns validation. */
+export interface CustomProfileSettings {
+    source?: CustomProfileSource
+    source_key?: string
+    encoding?: 'none' | 'base64url' | 'url'
+    payload_format?: 'jwt' | 'json'
+    trust_unsigned?: boolean
+    signing_alg?: 'HS256' | 'RS256'
+    shared_secret?: string
+    public_key?: string
+    issuer?: string
+    audience?: string
+    max_age_seconds?: number
+    trusted_proxy_acknowledged?: boolean
+}
+
 export interface IdpProvider {
     id: string
     slug: string
     displayName: string
-    kind: 'oidc' | 'saml2' | 'custom'
+    kind: IdpKind
     enabled: boolean
     priority: number
     settings: Record<string, unknown>     // secrets redacted as '********'
@@ -21,6 +53,18 @@ export interface IdpProvider {
     linkingPolicy: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     buttonLabel?: string | null
     buttonIcon?: string | null
+    /** Derived server-side; see AssuranceLevel. */
+    assurance: AssuranceLevel
+    /** One-line operator explanation of what that level means. */
+    assuranceReason: string
+    /** Domains routed here when email-first login is on. */
+    emailDomains: string[]
+    /** When an assertion was last captured, or null. */
+    lastAssertionAt?: string | null
+    /** Readiness. A ``draft`` is configured but unproven and reaches no
+     *  public surface; ``live`` is on the login page. Distinct from
+     *  ``enabled``, which is the operational switch. */
+    lifecycle?: 'draft' | 'live'
     createdAt: string
     updatedAt: string
 }
@@ -28,7 +72,7 @@ export interface IdpProvider {
 export interface CreateProviderInput {
     slug: string
     displayName: string
-    kind: 'oidc' | 'saml2' | 'custom'
+    kind: IdpKind
     settings?: Record<string, unknown>
     claimMapping?: Record<string, unknown>
     linkingPolicy?: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
@@ -36,6 +80,7 @@ export interface CreateProviderInput {
     enabled?: boolean
     buttonLabel?: string
     buttonIcon?: string
+    emailDomains?: string[]
 }
 
 export interface UpdateProviderInput {
@@ -47,6 +92,41 @@ export interface UpdateProviderInput {
     linkingPolicy?: 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     buttonLabel?: string | null
     buttonIcon?: string | null
+    emailDomains?: string[]
+}
+
+export interface IdpHealth {
+    providerId: string
+    slug: string
+    /** ok | warning | unavailable | unknown. ``unknown`` means the sweep has
+     *  not run or the kind has nothing to probe — never "broken". */
+    status: string
+    detail?: string | null
+    certNotAfter?: string | null
+    certDaysRemaining?: number | null
+    checkedAt?: string | null
+}
+
+export interface DiscoverInput {
+    kind: IdpKind
+    /** OIDC: the issuer URL. */
+    issuer?: string
+    /** SAML: a metadata URL to fetch, or… */
+    metadataUrl?: string
+    /** …the metadata XML pasted directly. */
+    metadataXml?: string
+}
+
+export interface DiscoverResult {
+    success: boolean
+    /** Settings to merge into the form. Never contains secrets — the
+     *  operator still supplies client_id / client_secret themselves. */
+    settings: Record<string, unknown>
+    /** Endpoints read from the discovery document, for display. */
+    metadata: Record<string, unknown>
+    /** Non-fatal findings worth showing before the operator saves. */
+    warnings: string[]
+    error?: string | null
 }
 
 export interface TestMappingResult {
@@ -86,6 +166,7 @@ export interface AuthConfig {
     ssoEnabled: boolean
     allowLocalLogin: boolean
     allowJitProvisioning: boolean
+    emailFirstLogin: boolean
     version: number
     updatedAt: string
 }
@@ -94,6 +175,7 @@ export interface AuthConfigPatch {
     ssoEnabled?: boolean
     allowLocalLogin?: boolean
     allowJitProvisioning?: boolean
+    emailFirstLogin?: boolean
     expectedVersion?: number
 }
 
@@ -185,6 +267,55 @@ export const ssoAdminService = {
         )
     },
 
+    /** Promote a draft to live — the moment it appears on the login page
+     *  for every user. Deliberately its own call, not a PATCH: making a
+     *  provider public is a different kind of act from renaming it. */
+    publishProvider(id: string): Promise<IdpProvider> {
+        return request<IdpProvider>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/publish`,
+            { method: 'POST' },
+        )
+    },
+
+    /** Begin a rehearsal sign-in. Sets the marker cookie and returns the
+     *  IdP login URL to open; the callback reports the would-be outcome
+     *  and writes nothing. */
+    startDryRun(id: string): Promise<{ loginUrl: string; expiresInMinutes: number }> {
+        return request<{ loginUrl: string; expiresInMinutes: number }>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/dry-run/start`,
+            { method: 'POST' },
+        )
+    },
+
+    /** The most recent assertion a provider sent, for mapping against
+     *  reality rather than a hand-typed sample. 404s until one is captured. */
+    lastAssertion(id: string): Promise<{ claims: Record<string, unknown>; capturedAt: string }> {
+        return request<{ claims: Record<string, unknown>; capturedAt: string }>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/last-assertion`,
+        )
+    },
+
+    /** Last known IdP health from the background sweep. Reads a cache —
+     *  makes no outbound requests, so it is safe to poll. */
+    providerStatus(): Promise<{ providers: IdpHealth[] }> {
+        return request<{ providers: IdpHealth[] }>(
+            `${ADMIN}/idp-providers/status`,
+        )
+    },
+
+    /**
+     * Read a provider's own published configuration and derive its settings.
+     *
+     * Resolves even when the probe fails — the failure is in
+     * ``result.error``, not an exception, matching the backend contract.
+     * Only a malformed request rejects.
+     */
+    discover(body: DiscoverInput): Promise<DiscoverResult> {
+        return request<DiscoverResult>(`${ADMIN}/idp-providers/discover`, {
+            method: 'POST', body: JSON.stringify(body),
+        })
+    },
+
     /** Dry-run claim mapping against a paste-in claims blob. */
     testMapping(
         id: string,
@@ -197,7 +328,7 @@ export const ssoAdminService = {
         )
     },
 
-    getDefaultMapping(kind: 'oidc' | 'saml2' | 'custom'): Promise<Record<string, unknown>> {
+    getDefaultMapping(kind: IdpKind): Promise<Record<string, unknown>> {
         return request<Record<string, unknown>>(
             `${ADMIN}/idp-providers/defaults/${encodeURIComponent(kind)}`,
         )
