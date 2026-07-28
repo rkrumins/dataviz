@@ -1,9 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink } from 'lucide-react'
+import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
-import { authService, type SsoProviderSummary } from '@/services/authService'
+import {
+    authService,
+    needsBrowserPayload,
+    readBrowserProfile,
+    type LoginContext,
+    type SsoProviderSummary,
+} from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
@@ -11,27 +17,49 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useFeature } from '@/store/features'
 
 
-// SSO is initiated by a top-level GET so the IdP redirect flow works
-// (a fetch would lose the cookie + redirect chain). The catalog comes
-// from /api/v1/auth/providers — only enabled providers are returned,
-// no client-side fan-out.
-function SsoButtons() {
-    const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
-    const [failed, setFailed] = useState(false)
+// Redirect-based SSO (oidc / saml2 / custom, and custom_profile rows
+// sourced from a cookie or header) is initiated by a top-level GET so
+// the IdP redirect flow works — a fetch would lose the cookie + redirect
+// chain. custom_profile rows sourced from browser storage are the
+// exception: only JS can read the key, so those POST it instead.
+// The catalog comes from /api/v1/auth/providers — only enabled
+// providers are returned, no client-side fan-out.
+function SsoButtons({
+    providers,
+    failed,
+    onPortalError,
+    showDivider = true,
+}: {
+    providers: SsoProviderSummary[] | null
+    failed: boolean
+    onPortalError: (message: string) => void
+    /** "Or sign in with" only makes sense when there is something above
+     *  to be an alternative *to*. On an SSO-only deployment with a single
+     *  provider these buttons are the whole page. */
+    showDivider?: boolean
+}) {
+    const navigate = useNavigate()
+    const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
+    const [busySlug, setBusySlug] = useState<string | null>(null)
 
-    useEffect(() => {
-        let cancelled = false
-        authService.listProviders()
-            .then((rows) => {
-                if (!cancelled) setProviders(rows)
-            })
-            .catch(() => {
-                if (!cancelled) setFailed(true)
-            })
-        return () => {
-            cancelled = true
+    // ``custom_profile`` providers backed by browser storage can't use a
+    // top-level GET — only JS can read the key. Read it, post it, then
+    // navigate ourselves once the session cookies are set.
+    async function signInWithPortal(p: SsoProviderSummary) {
+        const payload = readBrowserProfile(p)
+        if (!payload) {
+            onPortalError(
+                `No ${p.displayName} session found in this browser. ` +
+                'Sign in to the portal first, then try again.',
+            )
+            return
         }
-    }, [])
+        onPortalError('')
+        setBusySlug(p.slug)
+        const ok = await loginWithBrowserProfile(p.slug, payload)
+        setBusySlug(null)
+        if (ok) navigate('/', { replace: true })
+    }
 
     const next = encodeURIComponent('/dashboard')
     const customEnabled =
@@ -39,37 +67,92 @@ function SsoButtons() {
             .toString()
             .toLowerCase() === 'true'
 
-    if (providers === null && !failed) {
+    if (failed) {
+        // Not silence: on an SSO-only deployment the buttons are the only
+        // way in, so "nothing rendered" is an unrecoverable dead end with
+        // no explanation. Muted rather than alarming — it isn't the user's
+        // fault, and the password form may still work.
+        return (
+            <div className="mt-6 pt-6 border-t border-white/10 text-center">
+                <p className="text-xs text-ink-muted">
+                    Couldn't load single sign-on options.{' '}
+                    <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="text-accent-lineage hover:underline"
+                    >
+                        Retry
+                    </button>
+                    {' '}or sign in with your password.
+                </p>
+            </div>
+        )
+    }
+
+    if (providers === null) {
         // While the catalog is loading, render nothing — the password
         // form is the dependable fallback.
         return null
     }
 
-    const hasProviders = providers !== null && providers.length > 0
+    const hasProviders = providers.length > 0
     if (!hasProviders && !customEnabled) {
         return null
     }
 
     return (
-        <div className="mt-6 pt-6 border-t border-white/10 space-y-3">
-            <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
-                Or sign in with
-            </p>
+        <div className={cn(
+            "space-y-3",
+            showDivider && "mt-6 pt-6 border-t border-white/10",
+        )}>
+            {showDivider && (
+                <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
+                    Or sign in with
+                </p>
+            )}
             {(providers ?? []).map((p) => (
-                <a
-                    key={p.id}
-                    href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
-                    className={cn(
-                        "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                        "rounded-xl border text-sm font-medium transition-colors",
-                        p.kind === 'custom'
-                            ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
-                            : "border-white/20 text-ink hover:bg-white/5",
-                    )}
-                >
-                    {p.buttonLabel || p.displayName}
-                    <ExternalLink className="w-3.5 h-3.5 opacity-50" />
-                </a>
+                needsBrowserPayload(p) ? (
+                    <button
+                        key={p.id}
+                        type="button"
+                        disabled={busySlug === p.slug}
+                        onClick={() => { void signInWithPortal(p) }}
+                        className={cn(
+                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
+                            "rounded-xl border text-sm font-medium transition-colors",
+                            "border-white/20 text-ink hover:bg-white/5",
+                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                        )}
+                    >
+                        {p.buttonIcon && (
+                            <img src={p.buttonIcon} alt="" aria-hidden
+                                 className="w-4 h-4 shrink-0 object-contain" />
+                        )}
+                        {p.buttonLabel || p.displayName}
+                        {busySlug === p.slug
+                            ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                            : <ChevronRight className="w-3.5 h-3.5 opacity-50" />}
+                    </button>
+                ) : (
+                    <a
+                        key={p.id}
+                        href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
+                        className={cn(
+                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
+                            "rounded-xl border text-sm font-medium transition-colors",
+                            p.kind === 'custom'
+                                ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
+                                : "border-white/20 text-ink hover:bg-white/5",
+                        )}
+                    >
+                        {p.buttonIcon && (
+                            <img src={p.buttonIcon} alt="" aria-hidden
+                                 className="w-4 h-4 shrink-0 object-contain" />
+                        )}
+                        {p.buttonLabel || p.displayName}
+                        <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                    </a>
+                )
             ))}
             {/* Dev-login button is always offered when the env flag is
                 set, even if no ``custom`` provider exists yet — clicking
@@ -111,8 +194,14 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
                         <p className="mt-2 text-sm text-ink-secondary">
                             We won't auto-link your SSO identity to it because your
                             IdP hasn't verified the email address. Sign in with your
-                            password below, then go to <span className="font-mono">Account → Identities</span>
-                            {' '}to link your SSO provider securely.
+                            password below, then open{' '}
+                            <Link
+                                to="/me/identities"
+                                className="text-accent-lineage font-semibold hover:underline"
+                            >
+                                Identities
+                            </Link>
+                            {' '}from the user menu to link your SSO provider securely.
                         </p>
                         <button
                             onClick={onClose}
@@ -128,6 +217,92 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
     )
 }
 
+/** Shown when the SSO callback bounced back with ``?sso_error=1``.
+ *
+ *  The precise reason is deliberately withheld here — it is admin-only by
+ *  construction and lives in the audit log. What the user gets instead is
+ *  the reference, which is the only thing that lets an admin find the
+ *  reason. Without this the whole correlation chain dead-ends: the ref was
+ *  minted, audited and put in the URL, and then shown to nobody. */
+function SsoFailureBanner({ reference, onDismiss }: {
+    reference: string | null
+    onDismiss: () => void
+}) {
+    const [copied, setCopied] = useState(false)
+
+    async function copy() {
+        if (!reference) return
+        try {
+            await navigator.clipboard.writeText(reference)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 2000)
+        } catch {
+            // Clipboard unavailable (insecure context / denied). The ref is
+            // selectable text either way, so this is cosmetic.
+        }
+    }
+
+    return (
+        <div
+            role="alert"
+            className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm"
+        >
+            <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+                <div className="flex-1 min-w-0">
+                    <p className="text-red-300">
+                        Sign-in through your identity provider didn't complete.
+                    </p>
+                    {reference && (
+                        <div className="mt-2 flex items-center gap-2 flex-wrap">
+                            <span className="text-xs text-ink-muted">
+                                Quote this reference to your administrator:
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => { void copy() }}
+                                title="Copy reference"
+                                className="px-2 py-0.5 rounded font-mono text-xs bg-black/20 border border-white/10 hover:bg-black/30 transition-colors"
+                            >
+                                {copied ? 'copied' : reference}
+                            </button>
+                        </div>
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={onDismiss}
+                    aria-label="Dismiss"
+                    className="text-ink-muted hover:text-ink shrink-0"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+        </div>
+    )
+}
+
+/** Session-scoped guard so a rejected auto-attempt can't relaunch on
+ *  every render or on a bounce back to /login. A fresh tab retries. */
+const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
+
+function autoPortalAlreadyTried(): boolean {
+    try {
+        return window.sessionStorage.getItem(AUTO_PORTAL_SENTINEL) === '1'
+    } catch {
+        return false
+    }
+}
+
+function markAutoPortalTried() {
+    try {
+        window.sessionStorage.setItem(AUTO_PORTAL_SENTINEL, '1')
+    } catch {
+        // Storage unavailable — the worst case is one retry per render
+        // cycle guarded by the in-flight ref below.
+    }
+}
+
 export function LoginPage() {
     const signupEnabled = useFeature('signupEnabled')
     const brand = useBrand()
@@ -136,7 +311,55 @@ export function LoginPage() {
     const navigate = useNavigate()
     const [params] = useSearchParams()
 
-    const { login, error, clearError, isLoading, isAuthenticated, status } = useAuthStore()
+    const {
+        login, error, clearError, isLoading, isAuthenticated, status,
+        loginWithBrowserProfile,
+    } = useAuthStore()
+
+    // The page's shape is a function of the platform posture, not a fixed
+    // layout. See ``pageShape`` below.
+    const [context, setContext] = useState<LoginContext | null>(null)
+    const [contextFailed, setContextFailed] = useState(false)
+    const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
+    const [portalError, setPortalError] = useState<string | null>(null)
+    // Escape hatch out of the email-first flow. Never shown when local
+    // login is off — there would be nothing to escape to.
+    const [forcePassword, setForcePassword] = useState(false)
+    // "Other ways to sign in" disclosure, for the postures that tuck the
+    // full button row away.
+    const [showAllProviders, setShowAllProviders] = useState(false)
+
+    useEffect(() => {
+        let cancelled = false
+        authService.loginContext()
+            .then((ctx) => { if (!cancelled) setContext(ctx) })
+            .catch(() => { if (!cancelled) setContextFailed(true) })
+        return () => { cancelled = true }
+    }, [])
+
+    const providers = context?.providers ?? null
+
+    // Silent portal sign-in: on an internal deployment the corporate
+    // portal has already written the profile, so the login form is a
+    // speed bump. Attempt it once per tab when exactly one storage-
+    // backed provider is configured and its key is present. A rejection
+    // falls through to the normal form rather than looping.
+    const autoAttempted = useRef(false)
+    useEffect(() => {
+        if (providers === null || autoAttempted.current) return
+        if (isAuthenticated || autoPortalAlreadyTried()) return
+
+        const candidates = providers.filter(needsBrowserPayload)
+        if (candidates.length !== 1) return
+        const payload = readBrowserProfile(candidates[0])
+        if (!payload) return
+
+        autoAttempted.current = true
+        markAutoPortalTried()
+        void loginWithBrowserProfile(candidates[0].slug, payload).then((ok) => {
+            if (ok) navigate('/', { replace: true })
+        })
+    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])
 
     // Read ``?error_code=...&email=...`` from the SSO failure redirect
     // path. The collision modal is the most user-actionable case; other
@@ -145,6 +368,12 @@ export function LoginPage() {
     const collisionEmail = params.get('email')
     const [showCollision, setShowCollision] = useState(
         errorCode === 'unsafe_auto_link' && Boolean(collisionEmail),
+    )
+    // ``sso_error=1`` is set on every SSO failure; ``ref`` correlates it to
+    // the audit event. The collision case has its own modal, so this banner
+    // covers everything else — which is the majority.
+    const [showSsoFailure, setShowSsoFailure] = useState(
+        params.get('sso_error') === '1' && errorCode !== 'unsafe_auto_link',
     )
     useEffect(() => {
         if (errorCode === 'unsafe_auto_link' && collisionEmail) {
@@ -161,7 +390,46 @@ export function LoginPage() {
         clearError()
     }, [clearError])
 
+    // Debounced so it fires once the address looks finished, not on every
+    // keystroke. A miss is silent by design — see /auth/resolve.
+    //
+    // Gated on the posture: without this it fired on every deployment,
+    // including the ~99% with email-first off, where the endpoint can only
+    // ever answer null.
+    const emailFirst = context?.emailFirstLogin ?? false
+    useEffect(() => {
+        if (!emailFirst || !email.includes('@')) { setRouted(null); return }
+        let cancelled = false
+        const timer = setTimeout(() => {
+            authService.resolveEmailDomain(email)
+                .then((r) => { if (!cancelled) setRouted(r.provider) })
+                .catch(() => { if (!cancelled) setRouted(null) })
+        }, 400)
+        return () => { cancelled = true; clearTimeout(timer) }
+    }, [email, emailFirst])
+
     useDocumentTitle('Sign in')
+
+    // ── What shape is this page? ─────────────────────────────────────
+    //
+    // Previously fixed: password form, divider, every provider as a
+    // button — regardless of configuration. That meant an SSO-only
+    // deployment led with a control the server always refuses, and
+    // email-first routing appeared *below* the password form it was meant
+    // to replace, so it removed neither the button row nor the topology
+    // disclosure it existed to remove.
+    //
+    // Fails open on a context read that never arrived: local login on,
+    // email-first off. A page with a form the server might refuse still
+    // beats a page with nothing on it.
+    const allowLocal = context?.allowLocalLogin ?? true
+    const showPasswordForm = allowLocal && (!emailFirst || forcePassword)
+    // Email-first leads with the routed provider and tucks the button row
+    // behind a disclosure — otherwise it removes neither the coin flip nor
+    // the topology disclosure it exists to remove.
+    const leadWithEmail = emailFirst
+    const showEmailField = showPasswordForm || leadWithEmail
+    const showProviderRow = !leadWithEmail || showAllProviders
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -239,7 +507,15 @@ export function LoginPage() {
                         </p>
                     </div>
 
+                    {showSsoFailure && (
+                        <SsoFailureBanner
+                            reference={params.get('ref')}
+                            onDismiss={() => setShowSsoFailure(false)}
+                        />
+                    )}
+
                     {/* Form */}
+                    {showEmailField && (
                     <form onSubmit={handleSubmit} className="space-y-5">
                         <div className="space-y-2">
                             <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="email">
@@ -261,6 +537,7 @@ export function LoginPage() {
                             </div>
                         </div>
 
+                        {showPasswordForm && (
                         <div className="space-y-2">
                             <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="password">
                                 Password
@@ -280,6 +557,7 @@ export function LoginPage() {
                                 />
                             </div>
                         </div>
+                        )}
 
                         {/* Error Message */}
                         <AnimatePresence mode="wait">
@@ -297,6 +575,7 @@ export function LoginPage() {
                         </AnimatePresence>
 
                         {/* Submit Button */}
+                        {showPasswordForm && (
                         <button
                             type="submit"
                             disabled={isLoading}
@@ -314,23 +593,86 @@ export function LoginPage() {
                                 </>
                             )}
                         </button>
+                        )}
+
+                        {/* Email-first, waiting on an address that routes
+                            somewhere. Says so rather than leaving a lone
+                            field with no visible next step. */}
+                        {leadWithEmail && !routed && !showPasswordForm && (
+                            <p className="text-xs text-center text-ink-muted">
+                                Enter your work email to continue.
+                            </p>
+                        )}
                     </form>
+                    )}
 
                     {/* ── SSO ──────────────────────────────────────────── */}
                     {/* Each link is a top-level GET so the IdP redirect
                         flow works. The backend returns 404 for any
-                        provider that isn't configured, and we render
-                        the buttons unconditionally because the user has
-                        the most context about which their org uses. */}
-                    <SsoButtons />
+                        provider that isn't configured. */}
+                    {routed && (
+                        <a
+                            href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
+                            className="mt-4 flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-accent-lineage text-white text-sm font-semibold hover:brightness-110 transition-all"
+                        >
+                            Continue with {routed.buttonLabel || routed.displayName}
+                            <ChevronRight className="w-4 h-4" />
+                        </a>
+                    )}
+
+                    {/* Escape hatches out of the email-first flow. Offered
+                        only when there is something to escape to: no
+                        password link when local login is off, because the
+                        server would refuse it. */}
+                    {leadWithEmail && (
+                        <div className="mt-4 flex flex-col items-center gap-2">
+                            {allowLocal && !forcePassword && (
+                                <button
+                                    type="button"
+                                    onClick={() => setForcePassword(true)}
+                                    className="text-xs text-accent-lineage hover:underline"
+                                >
+                                    Use a password instead
+                                </button>
+                            )}
+                            {!showAllProviders && (providers?.length ?? 0) > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowAllProviders(true)}
+                                    className="text-xs text-ink-muted hover:text-ink"
+                                >
+                                    Other ways to sign in
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {showProviderRow && (
+                        <SsoButtons
+                            providers={providers}
+                            failed={contextFailed}
+                            onPortalError={setPortalError}
+                            showDivider={showEmailField}
+                        />
+                    )}
+
+                    {portalError && (
+                        <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <p>{portalError}</p>
+                        </div>
+                    )}
 
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">
-                        <p className="text-xs text-ink-muted">
-                            <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
-                                Forgot your password?
-                            </Link>
-                        </p>
+                        {/* No password to forget when local login is off. */}
+                        {allowLocal && (
+                            <p className="text-xs text-ink-muted">
+                                <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
+                                    Forgot your password?
+                                </Link>
+                            </p>
+                        )}
                         {/* The server now REFUSES this signup (auth.py), so offering it would
                             hand someone a form that cannot submit. When self-registration is
                             off, an invite link is the only way in — and that still works. */}

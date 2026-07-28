@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -315,6 +315,22 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                   <Shield className="w-4 h-4" />
                   <span>My access</span>
                 </DropdownMenu.Item>
+
+                {/* Linked sign-in methods. The page existed and was routed
+                    from the start but was linked from nowhere — including
+                    from the collision modal, which told users to come here. */}
+                <DropdownMenu.Item
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  onSelect={() => navigate('/me/identities')}
+                >
+                  <Link2 className="w-4 h-4" />
+                  <span>Identities</span>
+                </DropdownMenu.Item>
+
+                {/* "Change Avatar" used to sit here. The picker is still two
+                    clicks away — hover the avatar just above, or open Account
+                    settings — so a third entry point to one preference was
+                    the row worth losing when this menu gained two. */}
 
                 {/* Reduce motion — accessibility "calm mode". preventDefault
                     keeps the menu open so it reads as a switch. Framer honours

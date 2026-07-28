@@ -61,10 +61,60 @@ export interface SsoProviderSummary {
     id: string
     slug: string
     displayName: string
-    kind: string                 // 'oidc' | 'saml2' | 'custom'
+    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile'
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
+    /** Non-secret, per-kind hints needed to start the flow. Only
+     *  ``custom_profile`` populates it today: ``source`` always, plus
+     *  ``sourceKey`` when the payload lives in browser storage and the
+     *  client is the one that has to read it. */
+    config?: {
+        source?: string
+        sourceKey?: string
+    }
+}
+
+/** What the login page needs to pick its shape.
+ *
+ *  ``allowLocalLogin`` off means the password form must not render at all
+ *  — the server refuses it, so offering it is offering a dead control.
+ *  ``emailFirstLogin`` on means route by email domain instead of showing
+ *  every provider as a button. */
+export interface LoginContext {
+    allowLocalLogin: boolean
+    emailFirstLogin: boolean
+    providers: SsoProviderSummary[]
+}
+
+/** Sources whose payload only JavaScript can reach — cookie and header
+ *  sources are read server-side and complete as a plain redirect. */
+export const BROWSER_STORAGE_SOURCES = ['local_storage', 'session_storage']
+
+/** True when this provider needs the client to read a storage key and
+ *  POST it, rather than just following ``/auth/{slug}/login``. */
+export function needsBrowserPayload(p: SsoProviderSummary): boolean {
+    return (
+        p.kind === 'custom_profile' &&
+        BROWSER_STORAGE_SOURCES.includes(p.config?.source ?? '')
+    )
+}
+
+/** Read a custom-profile payload out of the browser store the provider
+ *  is configured against. Returns null when the key is absent — that
+ *  means "no portal session here", not an error. */
+export function readBrowserProfile(p: SsoProviderSummary): string | null {
+    const key = p.config?.sourceKey
+    if (!key) return null
+    try {
+        const store = p.config?.source === 'session_storage'
+            ? window.sessionStorage
+            : window.localStorage
+        return store.getItem(key)
+    } catch {
+        // Storage can throw in private-mode / blocked-cookie browsers.
+        return null
+    }
 }
 
 /** One linked identity on the current user. */
@@ -227,10 +277,51 @@ export const authService = {
 
     // ── SSO discovery + self-service identities (Phase 3) ───────────
 
-    /** Public catalog of enabled SSO providers. Drives the login page
-     *  buttons. Returns ``[]`` when the registry is unconfigured. */
+    /**
+     * Route an email address to its IdP (Home Realm Discovery).
+     *
+     * Returns ``null`` for every miss — feature off, unknown domain,
+     * disabled provider — so the caller cannot use it to enumerate which
+     * domains an org has configured.
+     */
+    resolveEmailDomain(email: string): Promise<{ provider: SsoProviderSummary | null }> {
+        return request<{ provider: SsoProviderSummary | null }>(
+            `${AUTH_API}/resolve`,
+            { method: 'POST', body: JSON.stringify({ email }) },
+        )
+    },
+
+    /** Public catalog of enabled SSO providers. Returns ``[]`` when the
+     *  registry is unconfigured.
+     *
+     *  The login page uses {@link loginContext} instead — it needs the
+     *  posture in the same round trip to know what to render. */
     listProviders(): Promise<SsoProviderSummary[]> {
         return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
+    },
+
+    /** Catalog + platform posture, for deciding the login page's shape
+     *  before first paint. */
+    loginContext(): Promise<LoginContext> {
+        return request<LoginContext>(`${AUTH_API}/login-context`)
+    },
+
+    /**
+     * Complete a ``custom_profile`` login from a payload the browser
+     * read out of local/sessionStorage.
+     *
+     * A fetch rather than a top-level navigation because only JS can
+     * reach web storage; the session cookies ride back on the response
+     * and the caller navigates itself. The payload is opaque to us —
+     * signature and freshness are checked server-side.
+     */
+    loginWithBrowserProfile(
+        providerSlug: string, payload: string,
+    ): Promise<SessionResponse> {
+        return request<SessionResponse>(
+            `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
+            { method: 'POST', body: JSON.stringify({ payload }) },
+        )
     },
 
     /** Apply an invite to the already-signed-in user. The SSO route

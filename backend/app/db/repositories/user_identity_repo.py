@@ -22,6 +22,7 @@ from typing import Optional
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import UserIdentityORM, UserORM
 
@@ -70,9 +71,26 @@ async def get_by_id(
 async def list_for_user(
     session: AsyncSession, user_id: str,
 ) -> list[UserIdentityORM]:
+    """List a user's linked identities, with ``.provider`` populated.
+
+    The eager load is load-bearing, not an optimisation. ``UserIdentityORM
+    .provider`` is a default ``lazy="select"`` relationship, so touching it on
+    an AsyncSession after the rows are detached from their statement raises
+    ``MissingGreenlet`` rather than emitting a query. The 24h SSO re-auth path
+    (``LocalIdentityService._latest_identity_slug``) reads ``.provider.slug``
+    to build the re-login URL, and that lives in ``auth_service``, which may
+    not import ``backend.app.*`` — so the fix belongs here, at the source of
+    the rows.
+
+    Without it, an SSO session crossing the re-auth ceiling gets a 500 from
+    ``POST /auth/refresh`` instead of the structured
+    ``{"error": "sso_reauth_required"}`` the frontend needs to bounce the user
+    to their IdP, and the browser retries into the same 500 indefinitely.
+    """
     result = await session.execute(
         select(UserIdentityORM)
         .where(UserIdentityORM.user_id == user_id)
+        .options(selectinload(UserIdentityORM.provider))
         .order_by(UserIdentityORM.created_at.asc())
     )
     return list(result.scalars().all())

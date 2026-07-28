@@ -317,6 +317,15 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/USERS_ACCESS.md?raw'),
   },
   {
+    slug: 'sso-setup',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Single Sign-On',
+    description: 'Connect an identity provider, map claims, rehearse, publish',
+    readingTime: '7 min',
+    importFn: () => import('@docs/guide/SSO_SETUP.md?raw'),
+  },
+  {
     slug: 'governance-ops',
     section: 'admin',
     persona: 'admin',

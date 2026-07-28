@@ -7,7 +7,7 @@ and code on both sides of the wire references them by name.
 
 Prior to this module the strings were hardcoded in
 ``user_repo.GLOBAL_ASSIGNABLE_ROLES``, ``auth.py: _INVITE_GLOBAL_TIER``,
-``idp_group_mapping_repo.FORBIDDEN_AUTO_ROLE``, and various inline
+``idp_group_mapping_repo.FORBIDDEN_AUTO_ROLES``, and various inline
 checks. A rename therefore meant a wide silent-bug-prone sweep; now
 every caller imports from here.
 """

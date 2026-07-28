@@ -127,7 +127,7 @@ async def admin_link_identity(
         session, event_type="user.identity.admin_linked",
         payload={"user_id": user_id, "identity_id": ident.id,
                  "provider_id": body.provider_id,
-                 "external_id": body.external_id, "actor": admin.id},
+                 "external_id": body.external_id, "actor_id": admin.id},
     )
     return await _to_dto(session, ident)
 
@@ -155,6 +155,6 @@ async def admin_unlink_identity(
     await user_repo.create_outbox_event(
         session, event_type="user.identity.admin_unlinked",
         payload={"user_id": user_id, "identity_id": identity_id,
-                 "actor": admin.id},
+                 "actor_id": admin.id},
     )
     return None

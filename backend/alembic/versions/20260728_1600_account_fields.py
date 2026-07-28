@@ -37,8 +37,8 @@ from typing import Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260728_1200_account_fields"
-down_revision: Union[str, None] = "20260727_1400_invite_tokenver"
+revision: str = "20260728_1600_account_fields"
+down_revision: Union[str, None] = "20260728_1500_idp_lifecycle"
 branch_labels = None
 depends_on = None
 

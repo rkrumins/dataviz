@@ -108,10 +108,28 @@ DEFAULT_CUSTOM: dict[str, Any] = {
 }
 
 
+# A corporate portal hands us whatever shape its own user object has.
+# The candidate lists below cover the casings we see in practice
+# (camelCase JS objects, snake_case APIs, LDAP-ish names) so most
+# integrations need no override at all.
+DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
+    "external_id":    ["sub", "userId", "user_id", "employeeId", "uid", "email"],
+    "email":          ["email", "emailAddress", "email_address", "mail", "upn"],
+    "email_verified": ["email_verified", "emailVerified"],
+    "first_name":     ["firstName", "first_name", "givenName", "given_name"],
+    "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
+    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
+    "groups":         ["groups", "roles", "memberOf"],
+    "auth_time":      ["auth_time", "authTime", "iat"],
+    "extras":         {},
+}
+
+
 KIND_DEFAULTS = {
-    "oidc":   DEFAULT_OIDC,
-    "saml2":  DEFAULT_SAML,
-    "custom": DEFAULT_CUSTOM,
+    "oidc":           DEFAULT_OIDC,
+    "saml2":          DEFAULT_SAML,
+    "custom":         DEFAULT_CUSTOM,
+    "custom_profile": DEFAULT_CUSTOM_PROFILE,
 }
 
 
