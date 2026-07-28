@@ -267,6 +267,56 @@ def merge_mapping(kind: str, override: dict | None) -> dict:
     return merged
 
 
+def resolved_sources(
+    claims: dict,
+    *,
+    kind: str,
+    override: dict | None = None,
+) -> dict[str, str | None]:
+    """Which candidate key actually supplied each field.
+
+    ``apply_claim_mapping`` returns the resolved *values*; an operator
+    editing a fallback list needs the *provenance* — with
+    ``email: [emailAddress, email, mail]`` and two of them present, only
+    the winner is doing any work and the rest are dead weight they may be
+    maintaining for nothing.
+
+    Lives here rather than in the admin endpoint, and re-walks the same
+    ``_first_non_empty`` over the same ``merge_mapping`` result, because a
+    second implementation of first-non-empty would be free to disagree
+    with the one that runs at login. Dotted paths are exactly where it
+    would: ``_resolve`` understands ``user.email`` and ``groups[0]``, and
+    a naive ``claims.get(path)`` does not.
+
+    Keys mirror ``ProviderIdentity``'s fields, plus one entry per
+    configured extra under ``extras.<name>``. A field nothing resolved is
+    present with ``None`` — absent would be indistinguishable from a field
+    we forgot to report.
+    """
+    mapping = merge_mapping(kind, override)
+
+    def winner(paths: Any) -> str | None:
+        if not isinstance(paths, (list, tuple)):
+            return None
+        for p in paths:
+            if isinstance(p, str) and _first_non_empty(claims, [p]) is not None:
+                return p
+        return None
+
+    out: dict[str, str | None] = {
+        field: winner(mapping.get(field))
+        for field in (
+            "external_id", "email", "email_verified",
+            "first_name", "last_name", "display_name",
+            "groups", "auth_time",
+        )
+    }
+    for name, paths in (mapping.get("extras") or {}).items():
+        if isinstance(name, str) and name:
+            out[f"extras.{name}"] = winner(paths)
+    return out
+
+
 def apply_claim_mapping(
     claims: dict,
     *,

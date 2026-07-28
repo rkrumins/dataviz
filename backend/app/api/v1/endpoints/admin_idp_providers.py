@@ -39,6 +39,7 @@ from backend.auth_service.providers import (
     DEFAULT_CUSTOM,
     DEFAULT_CUSTOM_PROFILE,
     get_registry,
+    resolved_sources,
 )
 from backend.auth_service.providers.oidc import OidcError, discover_issuer
 
@@ -164,6 +165,20 @@ class TestMappingRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     claims: dict
     override: Optional[dict] = None
+
+
+class PreviewMappingRequest(BaseModel):
+    """Body for ``POST /admin/idp-providers/preview-mapping``.
+
+    The provider-less twin of :class:`TestMappingRequest`. ``kind`` picks
+    the default mapping to merge ``override`` onto; ``slug`` only names the
+    connection in an error message, so it is optional while the operator is
+    still deciding what to call it."""
+    model_config = ConfigDict(populate_by_name=True)
+    kind: str
+    claims: dict
+    override: Optional[dict] = None
+    slug: Optional[str] = None
 
 
 def _to_dto(row) -> ProviderDTO:
@@ -462,16 +477,51 @@ async def test_provider_mapping(
         body.override if body.override is not None
         else idp_provider_repo.parse_claim_mapping(row)
     )
+    result = _resolve_preview(
+        body.claims, kind=row.kind, slug=row.slug, override=override,
+    )
+    result["providerId"] = provider_id
+    return result
+
+
+@router.post("/preview-mapping")
+async def preview_claim_mapping(
+    body: PreviewMappingRequest = Body(...),
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Resolve a mapping that has no provider row behind it yet.
+
+    ``/{provider_id}/test`` needs a saved row, which meant the setup
+    wizard's mapping step — the one place an operator is actively *writing*
+    a mapping — could not preview at all: the draft is not created until
+    the rehearse step that follows it. So the guidance said "here is what
+    your IdP would produce" while the button sat disabled.
+
+    Nothing here reads the database. The row was only ever supplying
+    ``kind`` and ``slug``, and both are known before a row exists — ``kind``
+    from the vendor tile, ``slug`` only to name the provider in an error
+    message.
+    """
+    return _resolve_preview(
+        body.claims, kind=body.kind,
+        slug=body.slug or "this connection", override=body.override,
+    )
+
+
+def _resolve_preview(
+    claims: dict, *, kind: str, slug: str, override: Optional[dict],
+) -> dict:
+    """Shared body of the two preview routes: resolve, and say where each
+    field came from. One implementation so the saved and unsaved paths
+    cannot answer the same question differently."""
     try:
         identity = apply_claim_mapping(
-            body.claims, kind=row.kind, provider_slug=row.slug,
-            override=override,
+            claims, kind=kind, provider_slug=slug, override=override,
         )
     except ClaimMappingError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     return {
-        "providerId": provider_id,
-        "providerSlug": row.slug,
+        "providerSlug": slug,
         "resolved": {
             "external_id": identity.external_id,
             "email": identity.email,
@@ -481,6 +531,7 @@ async def test_provider_mapping(
             "auth_time": identity.auth_time,
             "attributes": identity.attributes,
         },
+        "resolvedFrom": resolved_sources(claims, kind=kind, override=override),
     }
 
 

@@ -130,7 +130,8 @@ export interface DiscoverResult {
 }
 
 export interface TestMappingResult {
-    providerId: string
+    /** Absent on the provider-less preview — there is no row to name. */
+    providerId?: string
     providerSlug: string
     resolved: {
         external_id: string
@@ -141,6 +142,16 @@ export interface TestMappingResult {
         auth_time: number | null
         attributes: Record<string, unknown>
     }
+    /**
+     * Which candidate key actually supplied each field, keyed by our field
+     * name plus `extras.<name>`. `null` means nothing in the list matched.
+     *
+     * Computed server-side against the same walker that runs at login —
+     * the fallback list is ordered and dotted paths are real, so a
+     * client-side guess would be free to disagree with the sign-in that
+     * eventually happens.
+     */
+    resolvedFrom?: Record<string, string | null>
 }
 
 export interface IdpGroupMapping {
@@ -325,6 +336,28 @@ export const ssoAdminService = {
         return request<TestMappingResult>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}/test`,
             { method: 'POST', body: JSON.stringify({ claims, override }) },
+        )
+    },
+
+    /**
+     * Resolve a mapping that has no provider row behind it yet.
+     *
+     * `testMapping` needs a saved id, which the setup wizard does not have
+     * at its mapping step — the draft is created one step later. That made
+     * preview dead exactly where a mapping is being written.
+     */
+    previewMapping(
+        kind: IdpKind,
+        claims: Record<string, unknown>,
+        override?: Record<string, unknown>,
+        slug?: string,
+    ): Promise<TestMappingResult> {
+        return request<TestMappingResult>(
+            `${ADMIN}/idp-providers/preview-mapping`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ kind, claims, override, slug }),
+            },
         )
     },
 

@@ -4,7 +4,7 @@
  * One card per IdP connection, plus the first-run hero when there are
  * none and the guided wizard behind "Connect a provider".
  */
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Plus } from 'lucide-react'
 
 import {
@@ -12,11 +12,11 @@ import {
     type IdpHealth,
     type IdpProvider,
 } from '@/services/ssoAdminService'
-import { ProviderForm } from '../../ProviderForm'
 import { DocsLink } from '@/components/help/DocsLink'
 import { SsoFirstRunHero } from '../SsoFirstRunHero'
 import { IdpProviderCard } from '../IdpProviderCard'
 import { IdpConnectionWizard } from '../IdpConnectionWizard'
+import { ProviderEditorDrawer } from '../ProviderEditorDrawer'
 import { ErrorBanner } from './ErrorBanner'
 
 export function ProvidersTab() {
@@ -48,6 +48,10 @@ export function ProvidersTab() {
     }, [])
 
     useEffect(() => { void refresh() }, [refresh])
+
+    // Resolved from the freshest list rather than held as a snapshot, so a
+    // refresh behind the open drawer does not leave it editing a stale row.
+    const editing = rows.find(p => p.id === editingId) ?? null
 
     async function toggleEnabled(p: IdpProvider) {
         setBusy(true)
@@ -91,19 +95,6 @@ export function ProvidersTab() {
         }
     }
 
-    async function remove(p: IdpProvider) {
-        if (!confirm(`Delete provider ${p.slug}? Linked users must unlink first.`)) return
-        setBusy(true)
-        try {
-            await ssoAdminService.deleteProvider(p.id)
-            await refresh()
-        } catch (err) {
-            setError((err as Error).message)
-        } finally {
-            setBusy(false)
-        }
-    }
-
     if (rows.length === 0 && !showCreate && !error) {
         // An empty table with a button above it says nothing about what
         // the job is. Replace the empty surface with the path through it.
@@ -136,29 +127,32 @@ export function ProvidersTab() {
 
             <div className="space-y-3">
                 {rows.map((p, i) => (
-                    <Fragment key={p.id}>
-                        <IdpProviderCard
-                            provider={p}
-                            health={health[p.id]}
-                            busy={busy}
-                            index={i}
-                            onEdit={() => setEditingId(editingId === p.id ? null : p.id)}
-                            onRehearse={() => { void dryRun(p) }}
-                            onPublish={() => { void publish(p) }}
-                            onToggleEnabled={() => { void toggleEnabled(p) }}
-                            onDelete={() => { void remove(p) }}
-                        />
-                        {editingId === p.id && (
-                            <ProviderForm
-                                existing={p}
-                                onSaved={() => { setEditingId(null); void refresh() }}
-                                onError={setError}
-                                onCancel={() => setEditingId(null)}
-                            />
-                        )}
-                    </Fragment>
+                    <IdpProviderCard
+                        key={p.id}
+                        provider={p}
+                        health={health[p.id]}
+                        busy={busy}
+                        index={i}
+                        onEdit={() => setEditingId(p.id)}
+                        onRehearse={() => { void dryRun(p) }}
+                        onPublish={() => { void publish(p) }}
+                        onToggleEnabled={() => { void toggleEnabled(p) }}
+                        // Deleting now lives in the editor's danger zone,
+                        // behind a type-to-confirm, rather than one browser
+                        // confirm() away from the list.
+                        onDelete={() => setEditingId(p.id)}
+                    />
                 ))}
             </div>
+
+            {editing && (
+                <ProviderEditorDrawer
+                    provider={editing}
+                    onClose={() => setEditingId(null)}
+                    onSaved={() => { void refresh() }}
+                    onDeleted={() => { setEditingId(null); void refresh() }}
+                />
+            )}
 
             {showCreate && (
                 <IdpConnectionWizard
