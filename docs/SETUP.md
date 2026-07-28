@@ -296,6 +296,7 @@ synodic/
 ## Further reading
 
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VM / self-host guide
+- [MULTI_ENVIRONMENT_SESSIONS.md](MULTI_ENVIRONMENT_SESSIONS.md) — running dev/uat/prod side by side without them logging each other out
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system overview
 
 ### Related in-app docs
