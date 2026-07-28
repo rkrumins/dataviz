@@ -43,11 +43,18 @@ _DEFAULT_ALGORITHM = "HS256"
 # HS256 needs a high-entropy shared secret. 32 chars is the floor we
 # accept; anything shorter is rejected as weak.
 _MIN_SECRET_LENGTH = 32
-# RBAC Phase 1: short access-token TTL paired with Redis revocation
-# set. Old default was 15 minutes; the design plan calls for ≤5 min so
-# revocation lag stays within enterprise tolerances. Operators can
-# override JWT_EXPIRY_MINUTES to fall back to the longer window if the
-# revocation set is unavailable in their environment.
+# RBAC Phase 1: short access-token TTL paired with the Redis revocation
+# set. The design plan calls for ≤5 min so revocation lag stays within
+# enterprise tolerances; the shipped .env files and the k8s configmap
+# use 15, which is the documented ceiling.
+#
+# Raising this is not free and the cost used to be invisible. Permission
+# claims ride in the token, so this is how long a revoked or demoted
+# session keeps working, and the Redis tombstone has to be held for the
+# whole window — which is why RBAC_REVOCATION_TTL_SECONDS is derived
+# from this value rather than configured beside it, and why startup
+# refuses to boot if an explicit override makes the tombstone shorter.
+# See ``_assert_session_config_coherent`` in backend/app/main.py.
 _DEFAULT_ACCESS_EXPIRY_MINUTES = 5
 _DEFAULT_REFRESH_EXPIRY_DAYS = 7
 

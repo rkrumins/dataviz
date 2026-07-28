@@ -606,9 +606,26 @@ class LocalIdentityService:
         email_verified = _claims_email_verified(identity.raw_claims)
         idp_groups: list[str] = list(getattr(identity, "groups", ()) or ())
         attributes: dict = dict(getattr(identity, "attributes", {}) or {})
+        # The 24h re-auth ceiling measures from the instant the IdP says
+        # the user actually authenticated. When the IdP does not say, we
+        # substitute now — which quietly converts the ceiling into "24h
+        # since this login", a weaker guarantee than the one it claims
+        # to enforce. That is the right fallback (refusing the login
+        # would be worse) but it must not be silent: an IdP that never
+        # asserts auth_time is a misconfiguration an operator can fix,
+        # and until now nothing surfaced it.
         auth_time = getattr(identity, "auth_time", None)
-        if not isinstance(auth_time, int) or auth_time <= 0:
+        auth_time_asserted = isinstance(auth_time, int) and auth_time > 0
+        if not auth_time_asserted:
             auth_time = int(time.time())
+            logger.warning(
+                "IdP provider_id=%s released no usable auth_time; the SSO "
+                "re-auth ceiling will measure from this login instead of "
+                "from the IdP authentication. The authorize request already "
+                "sends max_age, which obliges a compliant OIDC provider to "
+                "return auth_time — check the provider's claim mapping.",
+                provider_id,
+            )
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -828,6 +845,12 @@ class LocalIdentityService:
                     "provider_id": provider_id,
                     "provider_slug": provider_slug,
                     "auth_time": auth_time,
+                    # False means the IdP did not release auth_time and
+                    # this is our own clock — so the re-auth ceiling for
+                    # this session measures from the login, not from the
+                    # IdP authentication. Recorded per-login so the
+                    # question is answerable per provider after the fact.
+                    "auth_time_asserted": auth_time_asserted,
                     "groups": idp_groups,
                     # How well we actually knew this person. Recorded on the
                     # login itself so the question is answerable later without

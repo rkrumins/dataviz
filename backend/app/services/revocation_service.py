@@ -24,6 +24,8 @@ import logging
 import os
 from typing import Iterable, Optional, Protocol
 
+from backend.auth_service.core.config import JWT_EXPIRY_MINUTES
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,9 +33,20 @@ logger = logging.getLogger(__name__)
 
 # Access-token TTL drives how long a revocation entry needs to live —
 # we keep it for TTL + a buffer so a request that arrives at the very
-# end of the token's life still finds the entry. The default mirrors
-# the design plan (5 min access TTL → 6 min revocation TTL).
-_DEFAULT_REVOCATION_TTL_SECONDS = 360
+# end of the token's life still finds the entry.
+#
+# DERIVED, not configured alongside it. These two were independent
+# numbers and they drifted: the 360s default was sized for the 5-minute
+# access TTL in code, while every shipped .env set 60 minutes and the
+# k8s configmap set 15. At 60 minutes the tombstone expired 54 minutes
+# before the token did, so revoking someone's access — suspending a
+# user, dropping a binding — silently stopped working for the tail of
+# every token. Deriving it means the invariant cannot be broken by
+# changing one file.
+_REVOCATION_TTL_BUFFER_SECONDS = 60
+_DEFAULT_REVOCATION_TTL_SECONDS = (
+    JWT_EXPIRY_MINUTES * 60 + _REVOCATION_TTL_BUFFER_SECONDS
+)
 REVOCATION_TTL_SECONDS: int = int(
     os.getenv("RBAC_REVOCATION_TTL_SECONDS", str(_DEFAULT_REVOCATION_TTL_SECONDS))
 )
