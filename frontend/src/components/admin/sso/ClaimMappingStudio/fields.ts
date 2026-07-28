@@ -16,6 +16,19 @@ export interface MappingField {
     label: string
     hint: string
     required?: boolean
+    /**
+     * Mapping this field hands ownership of it to the IdP: the person's own
+     * profile renders it read-only, attributed to this connection, and a
+     * write is refused with `409 idp_managed_field` — administrators
+     * included.
+     *
+     * Mirrors `identity_provenance.MANAGEABLE_FIELDS`
+     * (`backend/common/identity_provenance.py`), which is the authority.
+     * Ownership there is decided by whether the field resolves non-blank
+     * *after* mapping — which is exactly what this screen controls, so the
+     * consequence belongs on this screen.
+     */
+    managed?: boolean
 }
 
 export const FIELDS: MappingField[] = [
@@ -32,14 +45,17 @@ export const FIELDS: MappingField[] = [
         hint: 'Boolean-ish. Strict linking policies refuse to auto-link when this is false.',
     },
     {
-        key: 'first_name', label: 'First name',
+        key: 'first_name', label: 'First name', managed: true,
         hint: 'Falls back to splitting the display name when both name fields are empty.',
     },
     {
-        key: 'last_name', label: 'Last name',
+        key: 'last_name', label: 'Last name', managed: true,
         hint: 'Falls back to splitting the display name when both name fields are empty.',
     },
     {
+        // Deliberately not `managed`, and the asymmetry is the point: this is
+        // the name a person can always set for themselves, which is what makes
+        // locking the two above tolerable.
         key: 'display_name', label: 'Full / display name',
         hint: 'Used only when first and last name are both empty — split on the first space.',
     },

@@ -206,6 +206,7 @@ export function ClaimMappingStudio({
         label: f.label,
         hint: f.hint,
         required: f.required,
+        managed: f.managed,
         candidates: effective(f.key),
         inherited: usingDefault(f.key),
         winner: resolvedFrom ? resolvedFrom[f.key] ?? null : undefined,

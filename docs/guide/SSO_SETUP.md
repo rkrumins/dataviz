@@ -84,6 +84,14 @@ maintaining for nothing, and can be dropped.
 row says so and sign-in would fail. External ID must be the *stable* identifier
 (Entra's `oid`, not the username): if it changes, existing accounts are orphaned.
 
+**First name** and **Last name** are marked *IdP-managed* once they resolve, and
+that marker is a decision, not a label. A field your IdP supplies is re-synced on
+every sign-in and becomes read-only on that person's own profile, attributed to
+this connection — so your directory stays the single source of truth, and nobody
+can drift away from it. Leave the row empty and the field stays theirs to edit.
+**Full / display name** is never taken this way, whatever you map: it is the one
+name a person can always choose for themselves.
+
 > **Note:** *Where the sample came from matters.* Until someone signs in, the
 > preview runs against a worked example of your vendor's payload — good enough to
 > check the shape, but it is not your tenant. The bar above the columns says which

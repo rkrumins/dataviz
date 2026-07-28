@@ -328,6 +328,63 @@ describe('live preview', () => {
     })
 })
 
+describe('IdP-managed fields', () => {
+    // Mapping a name is no longer only "fill this field": main's
+    // identity_provenance hands the field to the IdP and refuses the
+    // person's own edits with 409. The operator taking that decision
+    // could not see it from either screen.
+    it('marks the two fields that become read-only on the profile', async () => {
+        previewMapping.mockResolvedValue(resolved({
+            resolvedFrom: {
+                external_id: 'sub', email: 'email',
+                first_name: 'firstName', last_name: 'lastName',
+            },
+        }))
+        render(<Harness initialSample={JSON.stringify({
+            sub: 'u1', email: 'a@x.com', firstName: 'Alice', lastName: 'Doe',
+        })} />)
+
+        expect(await screen.findAllByText('IdP-managed')).toHaveLength(2)
+        expect(await screen.findAllByText(/no longer\s+theirs to edit/i))
+            .toHaveLength(2)
+    })
+
+    it('leaves display name and email unmarked, which is the whole point', async () => {
+        // display_name is the one a person can always set for themselves —
+        // the reason locking the other two is tolerable. Marking all four
+        // would be wrong and entirely plausible-looking.
+        previewMapping.mockResolvedValue(resolved({
+            resolvedFrom: {
+                external_id: 'sub', email: 'email', display_name: 'fullName',
+                first_name: null, last_name: null,
+            },
+        }))
+        render(<Harness initialSample={JSON.stringify({
+            sub: 'u1', email: 'a@x.com', fullName: 'Alice Doe',
+        })} />)
+
+        // display_name has no resolved value of its own — the mapper folds it
+        // into first/last — so wait on a field that does render one.
+        await screen.findByText('email', { selector: 'code' })
+        expect(screen.queryByText('IdP-managed')).toBeNull()
+    })
+
+    it('does not claim a field whose mapping resolves nothing', async () => {
+        // asserted_fields gates on the value, not on a candidate being
+        // listed. A mapping that resolves nothing takes nothing.
+        previewMapping.mockResolvedValue(resolved({
+            resolvedFrom: {
+                external_id: 'sub', email: 'email',
+                first_name: null, last_name: null,
+            },
+        }))
+        render(<Harness initialSample='{"sub":"u1","email":"a@x.com"}' />)
+
+        await screen.findByText('email', { selector: 'code' })
+        expect(screen.queryByText('IdP-managed')).toBeNull()
+    })
+})
+
 describe('click to assign', () => {
     it('assigns a payload key to a field from its menu', async () => {
         const user = userEvent.setup()

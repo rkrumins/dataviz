@@ -11,7 +11,7 @@
  * A required field that resolved nothing says so in place, rather than as
  * a red sentence somewhere below.
  */
-import { AlertCircle, Check, RotateCcw, X } from 'lucide-react'
+import { AlertCircle, Check, Lock, RotateCcw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FIELDS } from './fields'
 
@@ -20,6 +20,8 @@ export interface FieldRow {
     label: string
     hint: string
     required?: boolean
+    /** Mapping this takes the field away from the person it describes. */
+    managed?: boolean
     /** Ordered candidate keys currently in effect. */
     candidates: string[]
     /** Inheriting the kind default rather than overridden here. */
@@ -86,6 +88,20 @@ export function ProfilePane({
     )
 }
 
+/**
+ * Whether this field would actually be claimed by the IdP.
+ *
+ * Mirrors `identity_provenance.asserted_fields`, which gates ownership on the
+ * value being non-blank *after* mapping rather than on a candidate merely
+ * being listed — a mapping that resolves nothing takes nothing. Before a
+ * sample exists there is no resolved value to judge, so a non-empty candidate
+ * list stands in for the operator's intent.
+ */
+function mapped(row: FieldRow): boolean {
+    if (row.winner === undefined) return row.candidates.length > 0
+    return typeof row.winner === 'string'
+}
+
 function Row({
     row, onRemoveCandidate, onAddCandidate, onRevert,
 }: {
@@ -108,10 +124,24 @@ function Row({
                 : 'border-black/[0.08] dark:border-white/[0.10]',
         )}>
             <div className="flex items-baseline justify-between gap-2">
-                <span className="text-xs font-semibold text-ink">
-                    {row.label}
-                    {row.required && (
-                        <span aria-hidden="true" className="text-red-500 ml-0.5">*</span>
+                <span className="flex items-baseline gap-1.5 min-w-0">
+                    <span className="text-xs font-semibold text-ink">
+                        {row.label}
+                        {row.required && (
+                            <span aria-hidden="true" className="text-red-500 ml-0.5">*</span>
+                        )}
+                    </span>
+                    {/* Muted, not a warning. Keeping directory names correct is
+                        the intended use of this field; styling the consequence
+                        as a problem would push operators off it. */}
+                    {row.managed && mapped(row) && (
+                        <span
+                            title="This connection will own the field on the person's profile"
+                            className="inline-flex items-center gap-0.5 shrink-0 text-[10px] font-medium text-ink-muted"
+                        >
+                            <Lock className="w-2.5 h-2.5" />
+                            IdP-managed
+                        </span>
                     )}
                 </span>
                 {row.inherited ? (
@@ -163,6 +193,14 @@ function Row({
                 onRemove={onRemoveCandidate}
                 onAdd={onAddCandidate}
             />
+
+            {row.managed && mapped(row) && (
+                <p className="mt-1.5 text-[10px] text-ink-muted">
+                    Mapped here, this becomes read-only on the person&apos;s own
+                    profile — kept in step with your directory, and no longer
+                    theirs to edit.
+                </p>
+            )}
 
             {row.hint && (
                 <p className="mt-1.5 text-[10px] text-ink-muted">{row.hint}</p>
