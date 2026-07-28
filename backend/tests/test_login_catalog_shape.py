@@ -14,6 +14,7 @@ spelled the same either way. This file asserts the contract itself.
 import pytest
 
 from backend.app.db.repositories import idp_provider_repo
+from backend.app.db.repositories.idp_provider_repo import ProviderValidationError
 
 
 async def _live_provider(db_session, *, slug, **over):
@@ -60,3 +61,31 @@ async def test_login_context_carries_the_same_shape(
     entry = next(p for p in body["providers"] if p["slug"] == "ctx")
     assert entry["displayName"] == "Context SSO"
     assert "display_name" not in entry
+
+
+@pytest.mark.asyncio
+async def test_an_edit_cannot_blank_a_name_a_create_refused(db_session):
+    """The two write paths disagreed.
+
+    ``create_provider`` refuses a blank display name; ``update_provider``
+    stripped and stored whatever it was handed. So a connection could be
+    left nameless by editing it, and the login page would fall back to
+    calling it by its slug.
+    """
+    row = await _live_provider(db_session, slug="named", display_name="Named")
+
+    with pytest.raises(ProviderValidationError):
+        await idp_provider_repo.update_provider(
+            db_session, row.id, display_name="   ",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_real_rename_still_goes_through(db_session):
+    """The guard must not cost operators the ordinary edit."""
+    row = await _live_provider(db_session, slug="renamed", display_name="Old")
+
+    updated = await idp_provider_repo.update_provider(
+        db_session, row.id, display_name="  New Name  ",
+    )
+    assert updated.display_name == "New Name"

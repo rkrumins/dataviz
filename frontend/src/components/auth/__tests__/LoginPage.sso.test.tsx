@@ -77,13 +77,52 @@ describe('SSO buttons carry a name', () => {
         // The state the screenshot was in. A poor label beats a control
         // with no accessible name at all, which is what shipped.
         renderLogin([provider({ displayName: '', buttonLabel: null })])
-        expect(await screen.findByRole('link', { name: /corp-sso/i }))
+        expect(await screen.findByRole('link', { name: /corp sso/i }))
             .toBeInTheDocument()
+    })
+
+    it('presents the slug as a name rather than as an identifier', async () => {
+        // Only reachable when a connection has no display name at all,
+        // and if we are down to the last resort it should still look
+        // like something a person chose.
+        renderLogin([provider({ displayName: '', slug: 'corporate-portal' })])
+        const link = await screen.findByRole('link', { name: /corporate portal/i })
+
+        expect(link).toHaveTextContent('Continue with Corporate Portal')
+        expect(link).not.toHaveTextContent('corporate-portal')
+    })
+
+    it('says "Continue with" rather than naming the provider alone', async () => {
+        renderLogin([provider({ displayName: 'Corp SSO' })])
+        expect(await screen.findByRole('link', { name: /continue with corp sso/i }))
+            .toBeInTheDocument()
+    })
+
+    it('leaves an operator-written label exactly as written', async () => {
+        // They may well have written "Continue with" themselves, and
+        // "Continue with Continue with Okta" is the obvious way to break
+        // this.
+        renderLogin([provider({ buttonLabel: 'Use your Okta account' })])
+        const link = await screen.findByRole('link', { name: /okta/i })
+
+        expect(link).toHaveTextContent('Use your Okta account')
+        expect(link).not.toHaveTextContent('Continue with')
+    })
+
+    it('carries a mark, so it reads as a sign-in option', async () => {
+        // The leading glyph is what distinguishes a real "Continue with"
+        // control from a secondary text link.
+        renderLogin([provider({ displayName: 'Corp SSO' })])
+        const link = await screen.findByRole('link', { name: /corp sso/i })
+
+        // Decorative, so it must not reach the accessible name.
+        expect(link.querySelector('[aria-hidden="true"]')).toHaveTextContent('C')
+        expect(link).toHaveAccessibleName('Continue with Corp SSO')
     })
 
     it('treats a whitespace-only label as absent', async () => {
         renderLogin([provider({ buttonLabel: '   ' })])
-        expect(await screen.findByRole('link', { name: /corp sso/i }))
+        expect(await screen.findByRole('link', { name: /continue with corp sso/i }))
             .toBeInTheDocument()
     })
 })

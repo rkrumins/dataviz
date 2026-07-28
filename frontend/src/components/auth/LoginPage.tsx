@@ -39,35 +39,84 @@ import { useFeature } from '@/store/features'
  * directly under the password field and reads as a peer control.
  */
 const SSO_BUTTON = [
-    'flex items-center justify-center gap-2 w-full text-center py-2.5',
-    'rounded-xl border text-sm font-medium transition-colors duration-150',
-    'text-ink bg-white/50 dark:bg-white/[0.04]',
+    'group relative flex items-center justify-center w-full h-12',
+    'rounded-xl border text-sm font-semibold transition-all duration-200',
+    'text-ink bg-white/60 dark:bg-white/[0.04]',
     'border-black/10 dark:border-white/15',
-    'hover:bg-white/80 dark:hover:bg-white/[0.09]',
+    'hover:bg-white dark:hover:bg-white/[0.09]',
+    'hover:border-accent-lineage/40 hover:shadow-md hover:shadow-accent-lineage/5',
+    'hover:-translate-y-px active:translate-y-0',
     'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
 ].join(' ')
 
 /** The dev-login and `custom`-kind buttons, which say "not production"
  *  in amber. `text-yellow-300` on a white card is unreadable. */
 const SSO_BUTTON_DEV = [
-    'flex items-center justify-center gap-2 w-full text-center py-2.5',
-    'rounded-xl border text-sm font-medium transition-colors duration-150',
+    'group relative flex items-center justify-center w-full h-12',
+    'rounded-xl border text-sm font-semibold transition-all duration-200',
     'border-yellow-500/40 text-yellow-700 dark:text-yellow-300',
     'bg-yellow-500/[0.06] hover:bg-yellow-500/10',
+    'hover:-translate-y-px active:translate-y-0',
     'focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500/50',
 ].join(' ')
 
 /**
- * What the button says. Never nothing.
+ * What to call the connection.
  *
- * `buttonLabel` is optional and `displayName` was arriving undefined —
- * the API serialised it snake_case while this file read it camelCase —
- * so the fallback chain ran out and every button rendered as an empty
- * outline. The slug is always present and always meaningful, so it is a
- * poor label but never a missing one.
+ * The operator's own ``buttonLabel`` wins outright — they wrote it to be
+ * read. Otherwise the display name, which is what Admin → SSO asks for
+ * and is required to be non-blank at both create and update.
+ *
+ * The slug is the floor and should never be reached. It exists because a
+ * control with no accessible name is unusable, and for a while every
+ * button had one: the API served the catalog snake_case while this file
+ * read camelCase, so ``displayName`` arrived undefined. Presented rather
+ * than raw — ``corporate-portal`` is an identifier, "Corporate Portal"
+ * is a name, and if we are down to the last resort it should still look
+ * like something a person chose.
  */
+function ssoName(p: SsoProviderSummary): string {
+    const chosen = p.displayName?.trim()
+    if (chosen) return chosen
+    return p.slug
+        .split(/[-_.]+/)
+        .filter(Boolean)
+        .map(w => w[0].toUpperCase() + w.slice(1))
+        .join(' ')
+}
+
+/** The full string on the button. "Continue with X" is the phrasing every
+ *  SSO button on the web uses, and it reads as an invitation rather than
+ *  as a bare noun sitting in a box. An operator-set label is used
+ *  verbatim — they may well have written "Continue with" themselves. */
 function ssoLabel(p: SsoProviderSummary): string {
-    return p.buttonLabel?.trim() || p.displayName?.trim() || p.slug
+    return p.buttonLabel?.trim() || `Continue with ${ssoName(p)}`
+}
+
+/**
+ * The provider's mark, or a stand-in for it.
+ *
+ * A leading mark is what makes this read as a real sign-in option rather
+ * than a secondary link — it is the shape people recognise from every
+ * other "Continue with" button. Most connections have no uploaded icon,
+ * so the initial in a tinted tile stands in: still an anchor for the eye,
+ * still identifiable at a glance when two connections are listed.
+ */
+function SsoMark({ p }: { p: SsoProviderSummary }) {
+    if (p.buttonIcon) {
+        return (
+            <img src={p.buttonIcon} alt="" aria-hidden
+                 className="w-5 h-5 shrink-0 object-contain" />
+        )
+    }
+    return (
+        <span
+            aria-hidden="true"
+            className="flex items-center justify-center w-7 h-7 shrink-0 rounded-lg bg-gradient-to-br from-violet-500/20 to-indigo-500/10 text-[11px] font-bold text-accent-lineage"
+        >
+            {ssoName(p).charAt(0).toUpperCase()}
+        </span>
+    )
 }
 
 function SsoButtons({
@@ -168,14 +217,18 @@ function SsoButtons({
                             busySlug === p.slug && "opacity-70 cursor-not-allowed",
                         )}
                     >
-                        {p.buttonIcon && (
-                            <img src={p.buttonIcon} alt="" aria-hidden
-                                 className="w-4 h-4 shrink-0 object-contain" />
-                        )}
-                        {ssoLabel(p)}
-                        {busySlug === p.slug
-                            ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
-                            : <ChevronRight className="w-3.5 h-3.5 opacity-50" />}
+                        {/* Mark and affordance are pinned to the edges so
+                            the label stays optically centred however long
+                            the provider's name is. */}
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        <span className="absolute right-3.5 flex items-center">
+                            {busySlug === p.slug
+                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                        </span>
                     </button>
                 ) : (
                     <a
@@ -183,12 +236,16 @@ function SsoButtons({
                         href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
                         className={p.kind === 'custom' ? SSO_BUTTON_DEV : SSO_BUTTON}
                     >
-                        {p.buttonIcon && (
-                            <img src={p.buttonIcon} alt="" aria-hidden
-                                 className="w-4 h-4 shrink-0 object-contain" />
-                        )}
-                        {ssoLabel(p)}
-                        <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        {/* ExternalLink rather than a chevron: this one
+                            leaves the page for the IdP, and saying so is
+                            worth more than a consistent glyph. */}
+                        <span className="absolute right-3.5 flex items-center">
+                            <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                        </span>
                     </a>
                 )
             ))}
@@ -651,10 +708,13 @@ export function LoginPage() {
                     {routed && (
                         <a
                             href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
-                            className="mt-4 flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-accent-lineage text-white text-sm font-semibold hover:brightness-110 transition-all"
+                            className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
                         >
-                            Continue with {routed.buttonLabel || routed.displayName}
-                            <ChevronRight className="w-4 h-4" />
+                            {/* Through ssoLabel, so a connection with no
+                                display name cannot render "Continue with
+                                undefined" here either. */}
+                            {ssoLabel(routed)}
+                            <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                         </a>
                     )}
 
