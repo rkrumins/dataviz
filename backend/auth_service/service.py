@@ -99,6 +99,33 @@ class SsoDecision:
     email_verified: bool = False
 
 
+class _RefreshRejected(Exception):
+    """Carries a refresh rejection out of the DB session scope.
+
+    Everything a rejection still has to do — revoke the family, kill live
+    access tokens, write the audit row — has to happen on a connection
+    the request scope is no longer holding, and after that scope has
+    rolled back. Raising this instead of the caller-facing error lets
+    ``refresh`` unwind the session first and settle the consequences
+    afterwards. It never escapes ``refresh``.
+    """
+
+    def __init__(
+        self,
+        error: Exception,
+        *,
+        kill_sessions_for: Optional[str] = None,
+        audit: Optional[tuple[str, dict]] = None,
+    ):
+        super().__init__(str(error))
+        #: The error to re-raise at the caller once cleanup is done.
+        self.error = error
+        #: User id whose live access tokens should be tombstoned, if any.
+        self.kill_sessions_for = kill_sessions_for
+        #: ``(event_type, payload)`` to emit in its own transaction.
+        self.audit = audit
+
+
 class LocalIdentityService:
     """In-process ``IdentityService`` (Phase 3 — multi-IdP, multi-identity).
 
@@ -297,6 +324,33 @@ class LocalIdentityService:
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
             raise InvalidRefreshToken(str(exc)) from exc
 
+        # Every rejection below has to revoke the family durably, and the
+        # request session is rolled back on the way out — so the revocation
+        # cannot ride on it. It also must not run *inside* this block:
+        # opening a second connection while the first is still held is a
+        # deadlock against SQLite's single writer and, on Postgres, a way
+        # to exhaust the pool under load waiting for a connection that only
+        # frees when this scope exits. So rejections are carried out of the
+        # scope by ``_RefreshRejected`` and settled once it has closed.
+        try:
+            return await self._refresh_within_session(refresh_token, claims)
+        except _RefreshRejected as rejection:
+            await self._revoke_family_committed(claims.family_id)
+            if rejection.kill_sessions_for is not None and self._session_killer:
+                try:
+                    await self._session_killer(rejection.kill_sessions_for)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "session_killer failed during refresh rejection "
+                        "(user=%s): %s", rejection.kill_sessions_for, exc,
+                    )
+            if rejection.audit is not None:
+                await self._emit_audit(*rejection.audit)
+            raise rejection.error from None
+
+    async def _refresh_within_session(
+        self, refresh_token: str, claims,
+    ) -> tuple[User, SessionTokens]:
         claims_extra: dict = {}
         async with self._session_factory() as session:
             store = self._refresh_store_factory(session)
@@ -311,13 +365,16 @@ class LocalIdentityService:
                     "Refresh rejected (%s) for user=%s family=%s",
                     err, claims.sub, claims.family_id,
                 )
-                raise InvalidRefreshToken(err)
+                if err == "family_revoked":
+                    # Already dead — nothing to revoke, don't pay for a
+                    # second connection just to re-write the sentinel.
+                    raise InvalidRefreshToken(err)
+                raise _RefreshRejected(InvalidRefreshToken(err))
 
             orm = await self._user_repo.get_user_by_id(session, claims.sub)
             if orm is None or orm.deleted_at is not None or orm.status != "active":
                 # User no longer eligible — kill the family and bail.
-                await store.revoke_family(claims.family_id)
-                raise InvalidRefreshToken("user_inactive")
+                raise _RefreshRejected(InvalidRefreshToken("user_inactive"))
 
             # ── Session revocation cutoff ────────────────────────────
             # Revoking sessions tombstones live access-token ``sid``s in
@@ -334,12 +391,11 @@ class LocalIdentityService:
             if _refresh_predates_cutoff(
                 claims.mint_ms, getattr(orm, "sessions_valid_from", None),
             ):
-                await store.revoke_family(claims.family_id)
                 logger.info(
                     "Refresh rejected (sessions_revoked) for user=%s family=%s",
                     claims.sub, claims.family_id,
                 )
-                raise InvalidRefreshToken("sessions_revoked")
+                raise _RefreshRejected(InvalidRefreshToken("sessions_revoked"))
 
             # ── SSO daily re-auth ceiling ────────────────────────────
             # The presence of ``auth_time`` in the refresh JWT means
@@ -356,34 +412,27 @@ class LocalIdentityService:
             if is_sso_session and sso_age > SSO_SESSION_MAX_AGE_SECONDS:
                 # Kill the family + every live access token across all
                 # tabs so the next request from any browser surface
-                # bounces to the IdP. Best-effort outbox audit.
-                await store.revoke_family(claims.family_id)
-                if self._session_killer is not None:
-                    try:
-                        await self._session_killer(orm.id)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "session_killer failed during SSO expiry "
-                            "(user=%s): %s", orm.id, exc,
-                        )
+                # bounces to the IdP. The slug lookup needs the session,
+                # so resolve it here; the revocation, the session-killer
+                # (Redis) and the audit event all happen after this scope
+                # closes — see ``refresh``.
                 provider_slug = await self._latest_identity_slug(session, orm.id)
-                if self._outbox_emit is not None:
-                    await self._outbox_emit(
-                        session, "user.sso_session_expired",
-                        {
-                            "user_id": orm.id,
-                            "provider_slug": provider_slug,
-                            "auth_time": claims.auth_time,
-                            "elapsed_seconds": sso_age,
-                        },
-                    )
                 logger.info(
                     "SSO session expired (user=%s, slug=%s, age=%ds)",
                     orm.id, provider_slug, sso_age,
                 )
-                raise SsoReauthRequired(
-                    _build_reauth_url(provider_slug, next_path="/"),
-                    provider=provider_slug or "sso",
+                raise _RefreshRejected(
+                    SsoReauthRequired(
+                        _build_reauth_url(provider_slug, next_path="/"),
+                        provider=provider_slug or "sso",
+                    ),
+                    kill_sessions_for=orm.id,
+                    audit=("user.sso_session_expired", {
+                        "user_id": orm.id,
+                        "provider_slug": provider_slug,
+                        "auth_time": claims.auth_time,
+                        "elapsed_seconds": sso_age,
+                    }),
                 )
 
             # ── Continuous group->target reconciliation ──────────────
@@ -966,6 +1015,32 @@ class LocalIdentityService:
                 await session.commit()
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
+
+    async def _revoke_family_committed(self, family_id: str) -> None:
+        """Revoke a refresh family in its own committed transaction.
+
+        Same shape as ``_emit_audit`` above, and for the same reason:
+        every caller raises straight after, and the request-scoped
+        session is rolled back on the way out — so a revocation written
+        into that session never reached the database. Reuse detection,
+        the inactive-user check, the sessions_valid_from cutoff and the
+        SSO daily ceiling all revoked into thin air.
+
+        Unlike ``_emit_audit`` a commit failure is NOT swallowed: a lost
+        audit row is regrettable, a lost revocation leaves a stolen
+        token family live. We log it loudly and let the caller raise its
+        own auth error so the client still gets a clean 401.
+        """
+        async with self._session_factory() as session:
+            store = self._refresh_store_factory(session)
+            await store.revoke_family(family_id)
+            try:
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "FAILED to revoke refresh family=%s — the family is "
+                    "still live: %s", family_id, exc,
+                )
 
     async def resolve_email_domain(self, domain: str):
         """Which provider claims *domain*, or None. See the injected

@@ -64,36 +64,47 @@ class SQLAlchemyRefreshStore:
         )
         return result.scalar_one_or_none() is not None
 
-    async def _insert_ignore(self, *, jti: str, family_id: str, expires_at_iso: str) -> None:
+    async def _insert_ignore(
+        self, *, jti: str, family_id: str, expires_at_iso: str,
+    ) -> bool:
         """Insert a revocation row, swallowing duplicates.
+
+        Returns True when this call inserted the row, False when it was
+        already there.
 
         Implemented as INSERT + IntegrityError catch so the same code
         runs on SQLite (dev/tests) and Postgres (prod) without a
         dialect-specific dispatch. A duplicate is benign — the jti is
         already revoked, which is exactly the state we wanted.
+
+        The insert runs inside a SAVEPOINT so a duplicate unwinds only
+        itself. It used to call ``session.rollback()``, which discarded
+        the caller's ENTIRE transaction — on a refresh that meant the
+        SSO role-binding reconciliation writes vanished along with it.
         """
         try:
-            await self._session.execute(
-                insert(RevokedRefreshJtiORM).values(
-                    jti=jti,
-                    family_id=family_id,
-                    revoked_at=_now_iso(),
-                    expires_at=expires_at_iso,
+            async with self._session.begin_nested():
+                await self._session.execute(
+                    insert(RevokedRefreshJtiORM).values(
+                        jti=jti,
+                        family_id=family_id,
+                        revoked_at=_now_iso(),
+                        expires_at=expires_at_iso,
+                    )
                 )
-            )
-            await self._session.flush()
+            return True
         except IntegrityError:
-            await self._session.rollback()
+            return False
 
     async def revoke_jti(
         self, jti: str, family_id: str, expires_at_iso: str,
-    ) -> None:
-        await self._insert_ignore(
+    ) -> bool:
+        return await self._insert_ignore(
             jti=jti, family_id=family_id, expires_at_iso=expires_at_iso,
         )
 
-    async def revoke_family(self, family_id: str) -> None:
-        await self._insert_ignore(
+    async def revoke_family(self, family_id: str) -> bool:
+        return await self._insert_ignore(
             jti=_family_sentinel(family_id),
             family_id=family_id,
             expires_at_iso=_far_future_iso(),

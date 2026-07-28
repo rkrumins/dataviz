@@ -24,8 +24,8 @@ class RefreshStore(Protocol):
     """
 
     async def is_jti_revoked(self, jti: str) -> bool: ...
-    async def revoke_jti(self, jti: str, family_id: str, expires_at_iso: str) -> None: ...
-    async def revoke_family(self, family_id: str) -> None: ...
+    async def revoke_jti(self, jti: str, family_id: str, expires_at_iso: str) -> bool: ...
+    async def revoke_family(self, family_id: str) -> bool: ...
     async def is_family_revoked(self, family_id: str) -> bool: ...
 
 
@@ -46,14 +46,18 @@ async def check_and_record_rotation(
     same family). Returns a string error code on failure:
 
       * ``"family_revoked"`` — the family was killed by a previous reuse.
-      * ``"reuse_detected"`` — this jti was already consumed; the entire
-        family is now revoked as a side effect.
+      * ``"reuse_detected"`` — this jti was already consumed.
+
+    Reporting ``reuse_detected`` does NOT revoke the family. Killing it is
+    the caller's job, and it has to happen in its own committed
+    transaction: every caller raises immediately afterwards, and the
+    request-scoped session is rolled back on the way out, which silently
+    discarded the revocation. See ``LocalIdentityService._revoke_family_committed``.
     """
     if await store.is_family_revoked(presented_family):
         return "family_revoked"
 
     if await store.is_jti_revoked(presented_jti):
-        await store.revoke_family(presented_family)
         return "reuse_detected"
 
     await store.revoke_jti(
