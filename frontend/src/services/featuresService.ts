@@ -1,23 +1,17 @@
 /**
  * Features Service — CRUD for admin feature flags.
- * API base URL is configurable via env (VITE_FEATURES_API_URL or VITE_API_BASE_URL).
+ * Same-origin: every endpoint is a relative `/api/v1/...` path, like the rest of the app.
  * When API is unavailable, uses generated fallback (see scripts/generate-features-fallback).
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessage } from '@/lib/errorMessage'
 
-function getFeaturesApiUrl(): string {
-  if (import.meta.env.VITE_FEATURES_API_URL) {
-    return import.meta.env.VITE_FEATURES_API_URL
-  }
-  const base = import.meta.env.VITE_API_BASE_URL
-  if (base) {
-    const b = String(base).replace(/\/$/, '')
-    return `${b}/api/v1/admin/features`
-  }
-  return '/api/v1/admin/features'
-}
-
-const FEATURES_API = getFeaturesApiUrl()
+// Same-origin, behind the frontend nginx `location /api/` proxy — matches catalogService,
+// authService, and every other service. This was previously env-derived
+// (VITE_FEATURES_API_URL / VITE_API_BASE_URL); a base URL carrying a path segment resolved this
+// PATCH outside `/api/`, so it hit nginx's SPA `try_files` fallback and came back as a 405 while
+// the rest of the app (all relative `/api/v1/...`) kept working.
+const FEATURES_API = '/api/v1/admin/features'
 
 /** Public (unauthenticated) values endpoint — the admin URL minus `/admin`. */
 function getPublicValuesUrl(): string {
@@ -180,6 +174,7 @@ export class FeaturesConcurrencyError extends Error {
 /** Last-resort defaults when API and fallback file are both unavailable. App never hangs or crashes. */
 const FAILSAFE_VALUES: Record<string, unknown> = {
   signupEnabled: false,
+  inviteLinksEnabled: true,   // fail OPEN — see the note in store/features.ts
   editModeEnabled: true,
   traceEnabled: true,
   allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
@@ -261,7 +256,15 @@ function parseApiError(status: number, body: unknown): string {
     if (typeof d === 'object' && d?.detail) return d.detail
     if (typeof d === 'string') return d
   }
-  return 'Could not save. Please try again.'
+  // Fallback: surface the real cause instead of a bland generic line. Reached for
+  // 401/403/5xx and for any empty/non-JSON body — the cases the old res.json()+res.text()
+  // double-read used to crash on with a "response body already used" TypeError.
+  const detail = extractErrorMessage(body, '')
+  if (detail) return detail
+  if (status >= 500) return `Couldn't reach the server (HTTP ${status}). Please try again.`
+  if (status === 401) return 'Session expired. Please sign in again.'
+  if (status === 403) return "You don't have permission to change features."
+  return `Could not save (HTTP ${status}). Please try again.`
 }
 
 // ─── HTTP helper ───────────────────────────────────────────────────────────
@@ -272,11 +275,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
   if (!res.ok) {
+    // Read the body exactly ONCE. Reading it twice (res.json() then res.text()) throws the
+    // browser's native "Response body is already used" TypeError, which used to mask the real
+    // error on every failed toggle. Parse to an object when it's JSON; keep `undefined` for an
+    // empty or non-JSON body (e.g. a text/plain 500 or proxy HTML) so it never lands in a toast.
+    const text = await res.text()
     let body: unknown
     try {
-      body = await res.json()
+      body = text ? JSON.parse(text) : undefined
     } catch {
-      body = await res.text()
+      body = undefined
     }
     const message = parseApiError(res.status, body)
     if (res.status === 409) throw new FeaturesConcurrencyError(message)

@@ -174,7 +174,16 @@ async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: 
 // ── Service ───────────────────────────────────────────────────────────
 
 export const authService = {
-    signup(req: SignUpRequest): Promise<{ message: string }> {
+    signup(req: SignUpRequest): Promise<{
+        message: string
+        /** Phase 15: an invited signup comes back already signed in —
+         *  session cookies are on this response. The invitee was
+         *  pre-approved by the invite, so a second credential
+         *  round-trip buys nothing. */
+        autoSignedIn?: boolean
+        user?: AuthUser | null
+        redirectTo?: string | null
+    }> {
         return request<{ message: string }>(`${AUTH_API}/signup`, {
             method: 'POST',
             body: JSON.stringify(req),
@@ -241,6 +250,18 @@ export const authService = {
          *  so the banner can show friendly names. */
         groupIds?: string[] | null
         groupNames?: string[] | null
+        /** Phase 15: why an unusable link is unusable. "Invalid or
+         *  expired" covered four situations with four different
+         *  remedies, and only one of them is "ask for a new link". */
+        reason?:
+            | 'expired' | 'revoked' | 'exhausted'
+            | 'domain_mismatch' | 'links_disabled' | 'invalid'
+            | null
+        /** Phase 15: seats left on a capped link (null = uncapped) and
+         *  when it stops working, so the page can show the limits up
+         *  front instead of only on a failed submit. */
+        seatsRemaining?: number | null
+        expiresAt?: string | null
     }> {
         return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
@@ -294,6 +315,22 @@ export const authService = {
             `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
             { method: 'POST', body: JSON.stringify({ payload }) },
         )
+    },
+
+    /** Apply an invite to the already-signed-in user. The SSO route
+     *  into an invitation: the provider handshake authenticates them,
+     *  this grants what the link carried. */
+    redeemInvite(inviteToken: string): Promise<{
+        applied: boolean
+        message: string
+        role?: string | null
+        workspaceId?: string | null
+        redirectTo: string
+    }> {
+        return request(`${AUTH_API}/redeem-invite`, {
+            method: 'POST',
+            body: JSON.stringify({ inviteToken }),
+        })
     },
 
     /** Logged-in user's linked SSO identities + whether they have a

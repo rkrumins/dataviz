@@ -44,6 +44,7 @@ const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m =>
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
 const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
+const InviteAcceptPage = lazy(() => import('@/components/auth/InviteAcceptPage').then(m => ({ default: m.InviteAcceptPage })))
 
 // Docs (public, self-contained layout)
 const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
@@ -81,10 +82,21 @@ function Lazy({ children }: { children: React.ReactNode }) {
 export const router = createBrowserRouter([
   // Unauthenticated routes
   { path: '/login', element: <Lazy><LoginPage /></Lazy> },
-  // Self-registration is an admin switch AND a security control. The server refuses the
-  // signup POST when it is off (auth.py); this stops us handing someone a form that
-  // cannot submit. RequireFeature sends them to the login page instead.
-  { path: '/signup', element: <RequireFeature feature="signupEnabled" redirectTo="/login"><Lazy><SignUpPage /></Lazy></RequireFeature> },
+  // Self-registration is an admin switch AND a security control — but an INVITE is the
+  // exception that switch exists to create: turning the open door off is precisely when
+  // invites become the only way in, and the server says so (auth.py refuses an uninvited
+  // signup while letting an invited one through).
+  //
+  // RequireFeature cannot express that. It cannot see ?invite=, and it decides from the
+  // seeded flag value before the flags have loaded — which sent every invited user to
+  // /login and dropped their token on the way. The gate therefore lives INSIDE SignUpPage,
+  // the only component that can see both the invite and the load state.
+  { path: '/signup', element: <Lazy><SignUpPage /></Lazy> },
+  // Where an SSO-redeemed invite lands: the provider handshake proves who
+  // they are, this applies what the link carried. Ungated for the same
+  // reason /signup is — an invite is the exception the signup switch exists
+  // to create, and the server is the enforcement either way.
+  { path: '/invite/accept', element: <Lazy><InviteAcceptPage /></Lazy> },
   // Public docs
   {
     path: '/docs',

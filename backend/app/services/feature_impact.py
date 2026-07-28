@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     AnnouncementORM,
+    InviteORM,
     OntologyORM,
     UserORM,
     ViewORM,
@@ -183,6 +184,40 @@ async def _signup_probe(session: AsyncSession) -> list[ImpactFact]:
     ]
 
 
+async def _invite_links_probe(session: AsyncSession) -> list[ImpactFact]:
+    """Count links that are live RIGHT NOW and would die on the spot.
+
+    This is the number that makes the toggle's kill-switch behaviour
+    legible before an admin flips it. "Invite links: off" reads like a
+    setting; "37 live invite links stop working immediately" reads like
+    a decision.
+    """
+    from backend.app.db.repositories import invite_repo
+
+    now = datetime.now(timezone.utc)
+    r = await session.execute(
+        select(InviteORM).where(InviteORM.revoked_at.is_(None))
+    )
+    live = [
+        i for i in r.scalars().all()
+        if invite_repo.status_of(i, now=now) == "active"
+    ]
+    if not live:
+        return []
+    return [
+        ImpactFact(
+            count=len(live),
+            label="live invite links" if len(live) != 1 else "live invite link",
+            consequence=(
+                "Stop working immediately, including links already sent. They stay "
+                "listed so you can review and revoke them, and any that have not "
+                "expired start working again if you turn this back on."
+            ),
+            tone="warning",
+        )
+    ]
+
+
 async def _announcements_probe(session: AsyncSession) -> list[ImpactFact]:
     r = await session.execute(
         select(func.count()).select_from(AnnouncementORM).where(AnnouncementORM.is_active.is_(True))
@@ -213,6 +248,7 @@ PROBES: dict[str, Callable[[AsyncSession], Awaitable[list[ImpactFact]]]] = {
     "semanticLayerNonAdminEditing": _semantic_layers_probe,
     "semanticLayerVersionHistory": _layer_history_probe,
     "signupEnabled": _signup_probe,
+    "inviteLinksEnabled": _invite_links_probe,
     "announcementsEnabled": _announcements_probe,
 }
 

@@ -9,6 +9,195 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Invite links that actually work, and can be taken back
+
+### Fixed
+
+**Shareable signup links were unusable.** Anyone who clicked one landed on the login page
+instead of the signup form, and the invite was discarded on the way. The `/signup` route was
+gated on the `signupEnabled` flag, which knows nothing about invitations — so in the default
+invite-only posture (`signupEnabled` off, which is what the flag's own admin copy recommends)
+*every* link was dead, for everyone, deterministically. The gate also fired before the flag had
+loaded, so it bounced first-time visitors even where self-registration was on. The decision now
+lives in the signup page, which can see both the invite and whether the flag has actually
+arrived: an invite is never turned away, and nothing is decided on a seeded guess.
+
+**Invited accounts claimed to be self-registrations.** `signup_source` was documented to carry
+`'invite'` and never did, which made the column useless for the one question it exists to
+answer.
+
+**A team sharing one link hit the rate limiter.** Signup was capped at 5/minute per IP, so the
+sixth person behind an office NAT was refused — indistinguishable from a broken link.
+
+### Added
+
+**Invite links are now revocable, countable, and auditable.** They used to be fire-and-forget
+tokens with no server-side record: a link pasted into the wrong channel worked for every reader
+for up to 90 days, and nobody could tell it had happened. Every link now has a row behind it, so
+you can:
+
+- **Revoke** one instantly from **Admin → Users → Manage links**, whatever its expiry.
+- **Cap** it to a number of people — the link closes itself once the seats are gone. Enforced
+  atomically, so two people clicking a one-seat link at the same moment cannot both get in.
+- **See who used it**, and when.
+- **Restrict it to an email domain** (`company.com`) — the middle ground between a link anyone
+  can use and one pinned to a single address, which is what makes a link safe to post in a team
+  channel.
+
+**Invited users are signed straight in.** They were already approved and activated by the
+invite; sending them to a login form to retype the password they had just chosen bought nothing.
+
+**Workspace admins can invite into their own workspaces.** Previously only platform admins
+could invite anyone at all. The rule that keeps it safe is that you cannot grant what you do not
+hold: non-privileged roles only, no organisation-wide groups, and only into workspaces you
+administer. Each person sees and revokes only the links they created.
+
+**`inviteLinksEnabled`** — a switch for the invite-link capability, separate from
+`signupEnabled` so the two doors can be opened independently. Turning it off is a kill switch:
+links already in circulation stop working immediately, not just new ones. The confirmation
+dialog tells you how many live links that will kill before you flip it.
+
+**Links say why they failed.** "Invalid or expired" covered four situations with four different
+remedies. A recipient is now told whether the link was revoked, ran out of seats, expired, or
+whether invite links are switched off entirely.
+
+**Accept an invite with single sign-on.** An invite meant one thing: choose a password. In an
+SSO-only deployment that asked the invitee to invent one that login would then refuse. The
+invite page now offers **Continue with &lt;your IdP&gt;**, and the invitation is applied once the
+handshake has proved who they are. An invite is only applied to an account with no access yet —
+somebody already set up has already been onboarded, and a forwarded link must not add grants to
+an established account.
+
+**Invite several people at once.** One list of addresses, one set of settings, one
+email-pinned link per person — pinned rather than shared, so each is separately revocable and
+each redemption is attributable. Partial success is reported per row: one address already
+having an account does not cost the others their invitations.
+
+**Extend or replace a link without losing its history.** **Extend** buys another 30 days (and
+more seats on a capped link) while the URL you already shared keeps working. **New URL** issues
+a fresh link and stops every URL already sent, keeping the role, groups, seat count and the
+record of who has joined on the same invitation. Previously both meant minting a replacement,
+which split one invitation across two rows and stranded its history on the dead one.
+
+**A capped link says so.** "2 spots left · Expires in 3 days" on the signup page, so the person
+who clicks one too late is not the only one who ever finds out there was a limit.
+
+**Invited users land somewhere useful.** Redemption opens the Getting Started hub once instead
+of dropping a brand-new person onto a cold dashboard.
+
+**The notification bell does something.** Its first real content is invite activity: who signed
+up through your links, and when. Sending an invitation and never hearing whether it worked left
+you with no idea whether to follow up or let it expire.
+
+**Admins can add people directly, one at a time or from a list.** Until now the only way
+in was a link somebody had to click — which does not help when there is nobody to hand a link
+TO yet: someone starting Monday, an account migrated from another tool, a shared operations
+login. **Add people** in Admin → Users creates the accounts outright, with the same role,
+workspace and group choices an invite carries, because the account that comes out is the same
+account either way.
+
+Three ways the new account can first sign in. The default, **a setup link**, leaves no
+password on the account at all — the person chooses their own, so nobody, including the admin
+who created it, ever knows it. You can also **set a password yourself** (quick, but you will
+know it, and nothing sends it for you), or leave it **SSO-only**. A shared password across a
+batch is refused outright: a password twenty people know is not a credential.
+
+A pasted list accepts `Name <a@b.com>` as well as bare addresses, drops repeats, and fills in
+missing names from the address — `grace.hopper@` becomes Grace Hopper — with the derived names
+shown on the review step rather than discovered afterwards in the user list. Every row reports
+its own outcome, so one address that already has an account does not cost the others theirs.
+
+**Creating a link is a wizard, not a wall.** "Invite by Link" asked seven questions at once
+— role, workspace, groups, recipient, expiry, seat cap, domain — with no starting point, and
+parked the sentence describing the whole invite below the fold, under the fields it was meant
+to check. It is now a four-step wizard built to the same pattern as the view and asset
+onboarding wizards: its own overlay, a header stating which step you are on, a progress rail
+whose completed steps carry a one-line summary of what you chose and can be clicked to go
+back, directional transitions, keyboard navigation with a focus trap, and a guard against
+closing with work in progress. The steps are *who it's for → what they get → safety →
+review*, in that order because the first question is the only one that constrains the others
+— and the one the inviter can already answer before opening the dialog, so it carries the
+defaults for everything downstream.
+
+**The link itself gets a proper hand-off.** Generating one used to drop a result card into
+the same modal shell. It now ends on a success screen: the URL as the hero, monospaced and
+copyable in one press, with what the link grants, who it is for, its seats and its lifetime as
+tiles beneath — and a plain statement that this is the only time the URL is shown, because the
+links list deliberately never returns it again.
+
+**A link's reach is visible before it is minted.** The safety step shows how far the invite
+actually reaches — audience, seat cap, lifetime and role, as a single meter with the reasons
+written beside it — so "anyone · unlimited · 90 days · org admin" feels different from "one
+person · 1 seat · 7 days" at the point of creation rather than in an audit later.
+
+**An open link arrives bounded.** Picking "anyone with the link" used to be the *default*
+state, at unlimited uses for 30 days — the widest invite the product can mint, reached by
+touching nothing. It now arrives capped at 5 people for 7 days and says so on the way past.
+Unlimited is still one click away; the difference is which direction you have to move to get
+there. A link pinned to one address defaults to a single seat and no longer offers a seat cap
+at all, because it cannot use one.
+
+**Privileged role descriptions are readable.** They were clamped to one line, so every one of
+them was cut mid-sentence — "Platform owner. Carries system:admin; implies every permission,
+…" — on exactly the choices where knowing what you are granting matters most.
+
+**The email-pin rule explains itself.** Attaching a privileged role or a group to a shareable
+link used to grey out the submit button with the explanation in a different column. It now
+names the conflict against the audience already chosen and offers both resolutions: pin it to
+one person, or take the documented override.
+
+**The links panel leads rather than lists.** It opens on what needs doing — how many links are
+live, how many people have joined, and how many are about to expire or run out of seats — and
+sorts by urgency so the link you came to deal with is at the top. You can create a link from
+the panel that manages them, which previously meant closing it to find a different button.
+Search and sort appear only once there are enough links to need them, and a single contextual
+tip surfaces things worth knowing (an uncapped link with no restriction on who can use it, for
+instance) and disappears when they stop being true.
+
+### Security
+
+Auto sign-in makes the signup endpoint's enumeration-safe response distinguishable for someone
+holding a valid invite (the created path sets cookies, the already-exists path does not). This
+is an accepted trade, not an oversight: it requires a live invite, every probe is bounded by
+that invite's seat cap, and the ledger records who held it. Documented at the call site.
+
+**Node sorting is now enforced by the server.** `nodeSortingEnabled` had no backend half at
+all: an admin could switch node sorting off, the canvas would hide the sort menu, and anyone
+posting to the view-layout endpoint directly would still set sort modes and custom orders — the
+exact "toggle that only hides a button" the feature registry's drift guard exists to prevent.
+View-layout writes now strip `nodeSortMode`, `orderKey` and `defaultNodeSortMode` when the flag
+is off. It strips rather than refuses, because the canvas rewrites the whole layout on every
+gesture and a 403 would block someone for dragging a node; orders already stored are untouched
+and still render, exactly as the flag's admin copy promises.
+
+### Fixed
+
+**The feature registry was under-reporting itself.** `nodeSortingEnabled` had no wiring entry
+at all and `toursEnabled` declared no UI surfaces despite being read in six components, so the
+admin Features page reported both as "not implemented" and two drift-guard tests failed on
+`main`. Both now declare what actually exists. The end-to-end registry test has also been taught
+the `stage` exemption that `feature_wiring.py` documents and its sibling test already applied —
+experimental flags are not required to have a server gate yet, which is the whole reason the
+stage exists. Active flags are still checked in full.
+
+**Nothing in the invite dialog had an edge.** Every unselected chip, role row, group row and
+text input used the house `border-glass-border` recipe, which in light mode is a *white*
+hairline — so inside a dialog that is itself `bg-canvas-elevated`, the form rendered as
+floating text and only whichever option happened to be selected looked like a control. Same
+root cause as the rows below, fixed the same way, and limited to this flow.
+
+**Invite rows had no edges.** They used the house `border-glass-border` recipe, which in light
+mode is a *white* hairline — it works everywhere else because those cards sit on the page
+background and take their edge from the fill, but this list lives in a drawer that is the same
+colour as the cards, so the rows dissolved into one stream. They now draw a real hairline.
+Separately, `bg-accent-lineage/10` and friends emit no CSS at all — Tailwind cannot apply an
+opacity modifier to a variable holding a full hex — so every tint in the panel was silently
+invisible, including the seat meter's track. This panel now uses the palette colour the token
+resolves to, which renders. The same class is used ~850 times elsewhere in the app and is
+untouched here; worth a separate look.
+
+---
+
 ## [0.2.0] — 2026-07-19 — Versioned Graph: rollback, admin flag, and enable-VC at scale
 
 Version control for a data graph becomes usable on a *real* graph: you can turn it on for a

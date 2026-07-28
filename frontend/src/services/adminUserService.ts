@@ -34,6 +34,70 @@ export interface InviteResponse {
     /** Phase 13: groups the new user is added to on signup. */
     groupIds: string[] | null
     expiresAt: string
+    /** Phase 15: the ledger row backing this link, so the success card
+     *  can point at something revocable. */
+    inviteId: string | null
+    maxUses: number | null
+    emailDomain: string | null
+}
+
+/** Phase 15: a row in the outstanding-links list. Carries NO token —
+ *  the link is copyable when it is created, and a read-only list must
+ *  not become somewhere credentials can be harvested. */
+export interface InviteSummary {
+    id: string
+    role: string | null
+    workspaceId: string | null
+    workspaceName: string | null
+    email: string | null
+    emailDomain: string | null
+    groupIds: string[]
+    groupNames: string[]
+    maxUses: number | null
+    useCount: number
+    redemptionCount: number
+    /** Derived server-side, never stored. */
+    status: 'active' | 'revoked' | 'expired' | 'exhausted'
+    createdBy: string
+    createdAt: string
+    expiresAt: string
+    revokedAt: string | null
+    revokedBy: string | null
+}
+
+/** Phase 15: what happened for one address in a bulk invite. */
+export interface BulkInviteResult {
+    email: string
+    outcome: 'created' | 'already_a_user' | 'invalid_email' | 'duplicate' | 'failed'
+    inviteToken: string | null
+    inviteId: string | null
+    detail: string | null
+}
+
+export interface BulkInviteResponse {
+    created: number
+    skipped: number
+    results: BulkInviteResult[]
+    expiresAt: string
+}
+
+/** Phase 15: somebody joined through one of MY links. */
+export interface InviteActivityItem {
+    id: string
+    email: string
+    userId: string
+    redeemedAt: string
+    inviteId: string
+    role: string | null
+    workspaceId: string | null
+    workspaceName: string | null
+}
+
+export interface InviteRedemption {
+    id: string
+    userId: string
+    email: string
+    redeemedAt: string
 }
 
 export interface CreateInviteOptions {
@@ -48,6 +112,11 @@ export interface CreateInviteOptions {
      *  bypass the privileged-role email requirement. */
     allowShareableWithGroups?: boolean
     expiresInHours?: number
+    /** Phase 15: seat cap. Omit / null for unlimited until expiry. */
+    maxUses?: number | null
+    /** Phase 15: restrict a shareable link to one mail domain. Ignored
+     *  when ``email`` pins a single address, which is narrower. */
+    emailDomain?: string | null
 }
 
 export const adminUserService = {
@@ -131,9 +200,172 @@ export const adminUserService = {
         if (opts.email) body.email = opts.email
         if (opts.groupIds && opts.groupIds.length > 0) body.groupIds = opts.groupIds
         if (opts.allowShareableWithGroups) body.allowShareableWithGroups = true
+        if (opts.maxUses) body.maxUses = opts.maxUses
+        if (opts.emailDomain) body.emailDomain = opts.emailDomain
         return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
             method: 'POST',
             body: JSON.stringify(body),
         })
     },
+
+    /** Outstanding links. A platform admin sees all of them; anyone
+     *  else sees only the ones they created. */
+    listInvites(status: string = 'active'): Promise<InviteSummary[]> {
+        return authFetch<InviteSummary[]>(
+            `${ADMIN_USERS_API}/invites?status=${encodeURIComponent(status)}`,
+        )
+    },
+
+    /** Kill a link now, regardless of expiry or remaining seats. */
+    revokeInvite(inviteId: string): Promise<InviteSummary> {
+        return authFetch<InviteSummary>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/revoke`,
+            { method: 'POST' },
+        )
+    },
+
+    /** People who signed up through links I created, newest first.
+     *  Scoped to the caller — this answers "did my invitation work?",
+     *  not "who joined the company". */
+    listMyInviteActivity(): Promise<InviteActivityItem[]> {
+        return authFetch<InviteActivityItem[]>('/api/v1/users/me/invite-activity')
+    },
+
+    /** One email-pinned link per address, from one set of settings.
+     *  Partial success is normal and reported per row. */
+    createBulkInvites(
+        emails: string[],
+        role: string | null,
+        opts: CreateInviteOptions = {},
+    ): Promise<BulkInviteResponse> {
+        const body: Record<string, unknown> = {
+            emails,
+            expiresInHours: opts.expiresInHours ?? 72,
+        }
+        if (role) body.role = role
+        if (opts.workspaceId) body.workspaceId = opts.workspaceId
+        if (opts.groupIds && opts.groupIds.length > 0) body.groupIds = opts.groupIds
+        return authFetch<BulkInviteResponse>(`${ADMIN_USERS_API}/invite/bulk`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Create one account outright, rather than handing out a link.
+     *
+     *  The other door in: an invite is somebody provisioning themselves
+     *  from a link you sent; this is you provisioning them directly. */
+    createUser(body: CreateUserRequest): Promise<CreatedUser> {
+        return authFetch<CreatedUser>(ADMIN_USERS_API, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Several accounts from one set of settings. Reports per row, so
+     *  one address that already exists does not cost the others. */
+    createUsersBulk(body: BulkCreateUsersRequest): Promise<BulkCreateUsersResponse> {
+        return authFetch<BulkCreateUsersResponse>(`${ADMIN_USERS_API}/bulk`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Give a link more time (and optionally more seats). The URL
+     *  already shared keeps working. */
+    extendInvite(
+        inviteId: string,
+        opts: { expiresInHours: number; additionalUses?: number | null },
+    ): Promise<InviteSummary> {
+        const body: Record<string, unknown> = { expiresInHours: opts.expiresInHours }
+        if (opts.additionalUses) body.additionalUses = opts.additionalUses
+        return authFetch<InviteSummary>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/extend`,
+            { method: 'POST', body: JSON.stringify(body) },
+        )
+    },
+
+    /** Issue a fresh URL for the same invitation. Every URL already
+     *  handed out stops working — that is the difference from extend. */
+    regenerateInvite(
+        inviteId: string,
+        opts: { expiresInHours: number },
+    ): Promise<InviteResponse> {
+        return authFetch<InviteResponse>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/regenerate`,
+            { method: 'POST', body: JSON.stringify({ expiresInHours: opts.expiresInHours }) },
+        )
+    },
+
+    listInviteRedemptions(inviteId: string): Promise<InviteRedemption[]> {
+        return authFetch<InviteRedemption[]>(
+            `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/redemptions`,
+        )
+    },
+}
+
+// ── Admin-created accounts ────────────────────────────────────────────
+
+/** How a newly created account first signs in.
+ *
+ *  `setup_link` leaves no usable password at all — the account exists,
+ *  and a one-time link lets the person choose their own, so nobody
+ *  (including the admin who created it) ever knows it. That is why it is
+ *  the default rather than the admin typing one.
+ */
+export type CredentialMode = 'setup_link' | 'password' | 'sso_only'
+
+export interface CreateUserRequest {
+    email: string
+    firstName: string
+    lastName: string
+    role?: string | null
+    workspaceId?: string | null
+    groupIds?: string[] | null
+    credential?: CredentialMode
+    password?: string | null
+    activate?: boolean
+}
+
+export interface CreatedUser {
+    id: string
+    email: string
+    firstName: string
+    lastName: string
+    status: string
+    role: string | null
+    workspaceId: string | null
+    groupIds: string[]
+    /** Present only for `setup_link`, and only this once. */
+    setupToken: string | null
+    setupExpiresAt: string | null
+}
+
+export interface BulkCreateUserRow {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+}
+
+export interface BulkCreateUsersRequest {
+    users: BulkCreateUserRow[]
+    role?: string | null
+    workspaceId?: string | null
+    groupIds?: string[] | null
+    credential?: CredentialMode
+    activate?: boolean
+}
+
+export interface BulkCreateUserResult {
+    email: string
+    outcome: 'created' | 'already_a_user' | 'invalid_email' | 'duplicate' | 'failed'
+    userId: string | null
+    setupToken: string | null
+    detail: string | null
+}
+
+export interface BulkCreateUsersResponse {
+    created: number
+    skipped: number
+    results: BulkCreateUserResult[]
 }

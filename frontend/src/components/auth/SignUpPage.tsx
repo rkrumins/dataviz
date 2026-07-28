@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles } from 'lucide-react'
+import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles, Clock } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
-import { authService } from '@/services/authService'
+import { useFeature, useFeaturesStore } from '@/store/features'
+import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { toUtcDate } from '@/lib/timeAgo'
 
 // Lazy-load zxcvbn to keep the initial bundle small
 let zxcvbnInstance: import('@zxcvbn-ts/core').ZxcvbnFactory | null = null
@@ -31,6 +33,35 @@ async function loadZxcvbn() {
 const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
 const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
 
+/** "Expires in 3 days" — the deadline in words, from a UTC-safe parse. */
+function inviteDeadline(iso: string): string | null {
+    const d = toUtcDate(iso)
+    if (!d) return null
+    const ms = d.getTime() - Date.now()
+    if (ms <= 0) return 'Expired'
+    const hours = ms / 3_600_000
+    if (hours < 1) return `Expires in ${Math.max(1, Math.round(ms / 60_000))} minutes`
+    if (hours < 48) return `Expires in ${Math.round(hours)} hours`
+    return `Expires in ${Math.round(hours / 24)} days`
+}
+
+/** What to tell someone whose link doesn't work. Each of these has a
+ *  different remedy, and only the first is "ask for a new one" — the
+ *  rest tell them who to go back to, or that nothing is wrong with them. */
+const INVITE_REASON_COPY: Record<string, string> = {
+    expired: 'This invite link has expired. Ask whoever sent it for a new one.',
+    revoked: 'This invite link was revoked. Ask whoever sent it for a new one.',
+    exhausted:
+        'This invite link has already been used by as many people as it allows. '
+        + 'Ask whoever sent it for a new one.',
+    links_disabled:
+        'Invite links are turned off for this deployment. Ask an administrator to '
+        + 'set up your account.',
+    domain_mismatch:
+        'This invite link only accepts email addresses from a specific domain.',
+    invalid: 'This invite link is invalid or has expired.',
+}
+
 export function SignUpPage() {
     const brand = useBrand()
     const [firstName, setFirstName] = useState('')
@@ -52,9 +83,42 @@ export function SignUpPage() {
     const [inviteEmail, setInviteEmail] = useState<string | null>(null)
     // Phase 13: groups the user will be added to on signup.
     const [inviteGroupNames, setInviteGroupNames] = useState<string[] | null>(null)
+    // Phase 15: why a link is unusable. Revoked, out of seats, expired and
+    // "invite links are switched off" are four situations with four
+    // different remedies; "invalid or expired" told the recipient nothing
+    // they could act on.
+    const [inviteReason, setInviteReason] = useState<string | null>(null)
+    // Phase 15: a capped link should say so. Being turned away at the door
+    // is the worst moment to discover the limit existed.
+    const [inviteSeatsLeft, setInviteSeatsLeft] = useState<number | null>(null)
+    const [inviteExpiresAt, setInviteExpiresAt] = useState<string | null>(null)
+    // Phase 15: SSO providers, offered only to an invite holder. Without
+    // this, an invitee at an SSO org is asked to invent a password that
+    // local login then refuses — and whether they can get in at all
+    // depends on their IdP marking the email verified.
+    const [ssoProviders, setSsoProviders] = useState<SsoProviderSummary[]>([])
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
+
+    // Self-registration gate. This lives here rather than in a route-level
+    // RequireFeature for two reasons, both of which broke invite links:
+    //
+    //   1. An invite OUTRANKS the flag. `signupEnabled` off means "strangers
+    //      may not create accounts" — it has never meant "invitations stop
+    //      working", and the server agrees (auth.py validates the invite
+    //      BEFORE consulting the flag). A guard that cannot see ?invite=
+    //      cannot honour that.
+    //   2. The flag seeds FALSE and loads asynchronously. Deciding before
+    //      `loaded` meant redirecting on a guess — and the redirect discarded
+    //      the invite token, so the link was unrecoverable.
+    //
+    // Hence: never redirect while an invite is present, and never redirect
+    // before we actually know the flag's value.
+    const signupEnabled = useFeature('signupEnabled')
+    const flagsLoaded = useFeaturesStore((s) => s.loaded)
+    const awaitingFlags = !inviteToken && !flagsLoaded
+    const selfSignupBlocked = !inviteToken && flagsLoaded && !signupEnabled
 
     useDocumentTitle('Sign up')
 
@@ -63,13 +127,29 @@ export function SignUpPage() {
         if (isAuthenticated) navigate('/', { replace: true })
     }, [isAuthenticated, navigate])
 
+    useEffect(() => {
+        if (selfSignupBlocked) navigate('/login', { replace: true })
+    }, [selfSignupBlocked, navigate])
+
     useEffect(() => { clearError() }, [clearError])
+
+    // Only fetched when an invite is in hand: a stranger on an open
+    // signup page has no business being offered the company IdP.
+    useEffect(() => {
+        if (!inviteToken) return
+        authService.listProviders()
+            .then(setSsoProviders)
+            .catch(() => setSsoProviders([]))
+    }, [inviteToken])
 
     // Verify invite token on mount
     useEffect(() => {
         if (!inviteToken) return
         authService.verifyInvite(inviteToken).then((res) => {
             setInviteValid(res.valid)
+            setInviteReason(res.reason ?? null)
+            setInviteSeatsLeft(res.seatsRemaining ?? null)
+            setInviteExpiresAt(res.expiresAt ?? null)
             setInviteRole(res.role)
             setInviteWorkspaceName(res.workspaceName ?? null)
             setInviteGroupNames(res.groupNames ?? null)
@@ -105,7 +185,10 @@ export function SignUpPage() {
     }, [password])
 
     const passwordsMatch = confirmPassword.length === 0 || password === confirmPassword
-    const canSubmit = firstName && lastName && email && password && confirmPassword && passwordsMatch && passwordScore >= 3 && !isLoading
+    // A dead invite with self-registration off has no path to an account: the
+    // server would 403. Don't let the form pretend otherwise.
+    const inviteDeadEnd = !!inviteToken && inviteValid === false && !signupEnabled
+    const canSubmit = firstName && lastName && email && password && confirmPassword && passwordsMatch && passwordScore >= 3 && !isLoading && !inviteDeadEnd
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -114,8 +197,26 @@ export function SignUpPage() {
         if (inviteToken && inviteValid) req.inviteToken = inviteToken
         const result = await signup(req)
         if (result.ok) {
+            // Invited signups come back with a live session — land them in
+            // the app (their workspace, when the invite was scoped) rather
+            // than showing a "now go and sign in" card they don't need.
+            if (result.signedIn) {
+                navigate(result.redirectTo ?? '/', { replace: true })
+                return
+            }
             setSuccessMessage(result.message)
         }
+    }
+
+    // Hold the paint rather than guessing. This is the whole fix for the
+    // uninvited case: the previous guard rendered a redirect from the seeded
+    // `false`, so a visitor was gone before the real value ever arrived.
+    if (awaitingFlags || selfSignupBlocked) {
+        return (
+            <div className="absolute inset-0 flex items-center justify-center bg-canvas">
+                <div className="w-6 h-6 border-2 border-accent-lineage border-t-transparent rounded-full animate-spin" />
+            </div>
+        )
     }
 
     return (
@@ -200,11 +301,41 @@ export function SignUpPage() {
                             </p>
                         </div>
                     )}
+
+                    {/* Scarcity, stated plainly. A capped or soon-to-expire link
+                        that says nothing turns the person who clicks it one too
+                        late into the only one who finds out there was a limit. */}
+                    {inviteToken && inviteValid && (inviteSeatsLeft !== null || inviteExpiresAt) && (
+                        <div className="flex items-center gap-2.5 p-2.5 mb-4 rounded-xl bg-amber-500/[0.07] border border-amber-500/20">
+                            <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                            <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                                {inviteSeatsLeft !== null && (
+                                    <span className="font-semibold">
+                                        {inviteSeatsLeft === 0
+                                            ? 'No spots left'
+                                            : inviteSeatsLeft === 1
+                                                ? 'Last spot on this link'
+                                                : `${inviteSeatsLeft} spots left`}
+                                    </span>
+                                )}
+                                {inviteSeatsLeft !== null && inviteExpiresAt ? ' · ' : null}
+                                {inviteExpiresAt ? inviteDeadline(inviteExpiresAt) : null}
+                            </p>
+                        </div>
+                    )}
                     {inviteToken && inviteValid === false && (
                         <div className="flex items-center gap-2.5 p-3 mb-4 rounded-xl bg-red-500/10 border border-red-500/20">
                             <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
                             <p className="text-xs text-red-600 dark:text-red-400">
-                                This invite link is invalid or has expired. You can still sign up — your account will require admin approval.
+                                {/* Only offer the fallback we can actually honour. With
+                                    self-registration off the server refuses an uninvited
+                                    signup, so "you can still sign up" was a promise the
+                                    form could not keep. */}
+                                {INVITE_REASON_COPY[inviteReason ?? 'invalid']
+                                    ?? INVITE_REASON_COPY.invalid}
+                                {signupEnabled && (
+                                    <> You can still sign up — your account will require admin approval.</>
+                                )}
                             </p>
                         </div>
                     )}
@@ -230,6 +361,35 @@ export function SignUpPage() {
                             </motion.div>
                         ) : (
                             <form onSubmit={handleSubmit} className="space-y-4">
+                                {/* Accept the invite with the company identity
+                                    provider. Offered FIRST: where SSO exists it is
+                                    almost always the right door, and in an SSO-only
+                                    deployment it is the only one that works — a
+                                    password chosen below would be refused at login.
+                                    The invite rides along in `next` and is applied
+                                    once the handshake has proved who they are. */}
+                                {inviteToken && inviteValid && ssoProviders.length > 0 && (
+                                    <div className="space-y-2">
+                                        {ssoProviders.map(p => (
+                                            <a
+                                                key={p.id}
+                                                href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${encodeURIComponent(`/invite/accept?invite=${inviteToken}`)}`}
+                                                className="w-full h-11 rounded-xl border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 text-sm font-semibold text-ink transition-colors flex items-center justify-center gap-2"
+                                            >
+                                                <ShieldCheck className="w-4 h-4 text-accent-lineage" />
+                                                {p.buttonLabel || `Continue with ${p.displayName}`}
+                                            </a>
+                                        ))}
+                                        <div className="flex items-center gap-3 pt-1">
+                                            <div className="flex-1 h-px bg-glass-border" />
+                                            <span className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">
+                                                or use a password
+                                            </span>
+                                            <div className="flex-1 h-px bg-glass-border" />
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* Name Row */}
                                 <div className="grid grid-cols-2 gap-3">
                                     <div className="space-y-1.5">
