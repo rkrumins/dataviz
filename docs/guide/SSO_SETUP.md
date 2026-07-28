@@ -120,14 +120,23 @@ nobody but you can see it.
 
 ### Give people roles automatically
 
-**Admin → SSO → Access mapping.** Map an IdP group to a role or to an internal
-group. Reconciliation runs on every sign-in and every session refresh, so
-removing someone from a group in your IdP removes the access here within a few
-minutes.
+**Admin → SSO → Access mapping.** Each rule reads as a sentence — *anyone in
+`engineering` from Corporate Entra gets Editor in Analytics* — and rules are
+listed under the IdP group they belong to, because "what does this group get?" is
+the question you arrive with.
+
+Rules are re-evaluated on **every sign-in and every session refresh**. Add someone
+to a group in your directory and their access appears here; remove them and it
+disappears within a few minutes, with nobody touching this page. That also means
+access granted this way cannot be edited by hand — an override would be undone at
+the next sign-in.
+
+You never pick a scope. It follows from the role: a workspace role asks which
+workspace, an organization-wide role does not ask at all.
 
 Some roles cannot be granted this way. Platform-admin roles require a **verified**
 connection, and `super_admin` can never be auto-granted at all — that one stays a
-deliberate, manual act.
+deliberate, manual act, so it is not offered.
 
 ### Assurance: how much a connection's word is worth
 
@@ -207,6 +216,12 @@ Closing with unsaved edits asks first.
 
 - **Turn off one connection** — the power button on its card. The configuration
   is kept; sign-ins through it stop.
-- **Turn off all SSO** — Settings → *SSO enabled*. The master switch.
-- **SSO only, no passwords** — Settings → *Allow local login*. Refused if it
-  would lock out an admin who has no SSO identity.
+- **Turn off all SSO** — Settings → *Single sign-on*. The master switch.
+- **SSO only, no passwords** — Settings → *Passwords*. Refused if it would lock
+  out an admin who has no SSO identity.
+
+The Settings tab opens with one sentence describing what somebody arriving at the
+sign-in page gets right now, because four independent switches do not add up to
+that on their own. Watch it as you change them — in particular, turning single
+sign-on off while passwords are already off locks everyone out, and that is the
+one combination no individual switch can warn you about.

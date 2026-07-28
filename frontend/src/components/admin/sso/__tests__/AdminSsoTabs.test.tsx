@@ -12,6 +12,7 @@
  *      cannot grant themselves.
  */
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
@@ -50,15 +51,34 @@ describe('tab shell', () => {
 
 describe('diagnostics', () => {
     it('keeps the claim-attribute lookup that lives nowhere else', () => {
+        // It used to be folded inside a <details>; it is now a peer mode.
+        // Either way this is the only search in the product that resolves a
+        // person by something their IdP asserted, so it has to be reachable.
         render(<DiagnosticsTab />)
-        expect(screen.getByText(/find by claim attribute/i)).toBeInTheDocument()
+        expect(screen.getByRole('tab', { name: /claim attribute/i }))
+            .toBeInTheDocument()
+    })
+
+    it('reaches the attribute lookup without opening anything first', async () => {
+        const user = userEvent.setup()
+        render(<DiagnosticsTab />)
+        await user.click(screen.getByRole('tab', { name: /claim attribute/i }))
+        expect(screen.getByLabelText('Attribute name')).toBeInTheDocument()
     })
 
     it('hides the activity log rather than locking it', () => {
         perms.value = false
         render(<DiagnosticsTab />)
         // The lookup half survives — only the audit-backed half goes away.
-        expect(screen.getByText(/find a user/i)).toBeInTheDocument()
+        expect(screen.getByText(/find a person/i)).toBeInTheDocument()
         expect(screen.queryByText(/system:audit:read/i)).not.toBeInTheDocument()
+    })
+
+    it('drops the reference prompt along with the log it points at', () => {
+        // Telling someone to paste a reference into a search that is not
+        // rendered would be worse than saying nothing.
+        perms.value = false
+        render(<DiagnosticsTab />)
+        expect(screen.queryByText(/given a reference/i)).not.toBeInTheDocument()
     })
 })

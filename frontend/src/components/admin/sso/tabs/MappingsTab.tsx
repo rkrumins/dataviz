@@ -1,126 +1,69 @@
 /**
- * MappingsTab — IdP group → role or internal group.
+ * MappingsTab — turning your org chart into access here.
  *
- * Reconciliation runs on every sign-in and refresh, so what is listed
- * here is what people actually get.
+ * The page this replaces opened with a grid of labelled selects using our
+ * schema's vocabulary ("Target type: Role binding (scope + role)"), two
+ * fields asking for opaque ids nothing in the product will show you
+ * (`ws_xxxxxxxx`, `grp_xxxxxxxx`), and an empty table underneath. Nowhere
+ * did it say what a mapping *does*, which for this feature is the whole
+ * point: these rules are re-evaluated on every sign-in and every refresh,
+ * so removing someone from a group in your IdP removes their access here
+ * within minutes. That is the promise, and it was invisible.
+ *
+ * Now: the promise up front, rules grouped by the IdP group they belong to
+ * (because "what does engineering get?" is the question people arrive
+ * with), and creation as a sentence rather than a schema.
  */
-import { useCallback, useEffect, useState } from 'react'
-import { Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { motion } from 'framer-motion'
+import { Loader2, RefreshCw, ShieldAlert, Waypoints } from 'lucide-react'
 
 import {
     ssoAdminService,
     type IdpGroupMapping,
     type IdpProvider,
 } from '@/services/ssoAdminService'
-import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
-import { roleVisualFor } from '@/lib/roleVisual'
-import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
-import { cn } from '@/lib/utils'
+import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { groupsService, type GroupResponse } from '@/services/groupsService'
+import { DocsLink } from '@/components/help/DocsLink'
 import { ErrorBanner } from './ErrorBanner'
+import { MappingComposer } from './mappings/MappingComposer'
+import { MappingGroupCard, groupMappings } from './mappings/MappingGroupCard'
 
 export function MappingsTab() {
     const [rows, setRows] = useState<IdpGroupMapping[]>([])
     const [providers, setProviders] = useState<IdpProvider[]>([])
-    // Available roles come from the live ``/admin/roles`` catalogue so
-    // the picker always reflects the current taxonomy (organization
-    // access + workspace access + custom roles). The old free-text
-    // input forced
-    // admins to know exact role names by heart and produced a 400 on
-    // typos — a dropdown of validated choices is correct UX.
-    const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[]>([])
+    const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
+    const [groups, setGroups] = useState<GroupResponse[]>([])
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
-    const [target, setTarget] = useState<'role_binding' | 'group_membership'>('role_binding')
-
-    // role_binding form fields
-    const [providerId, setProviderId] = useState('')
-    const [idpGroup, setIdpGroup] = useState('')
-    const [roleName, setRoleName] = useState('')
-    const [scopeType, setScopeType] = useState<'global' | 'workspace'>('global')
-    const [scopeId, setScopeId] = useState('')
-
-    // group_membership form fields
-    const [targetGroupId, setTargetGroupId] = useState('')
+    const [loaded, setLoaded] = useState(false)
 
     const refresh = useCallback(async () => {
         try {
-            const [m, p, r] = await Promise.all([
+            const [m, p] = await Promise.all([
                 ssoAdminService.listGroupMappings(),
                 ssoAdminService.listProviders(),
-                permissionsService.listRoles(),
             ])
             setRows(m)
             setProviders(p)
-            // Drop ``system:admin``-equivalent roles that the BE refuses
-            // to auto-grant via SSO (per ``FORBIDDEN_AUTO_ROLE`` in
-            // ``idp_group_mapping_repo``). super_admin is the only one
-            // currently on the list.
-            setAvailableRoles(r.filter(role => !FORBIDDEN_AUTO_GRANT_ROLES.has(role.name as RoleName)))
             setError(null)
         } catch (err) {
             setError((err as Error).message)
+        } finally {
+            setLoaded(true)
         }
+        // Only needed to render an id as the name it was picked by, so a
+        // failure costs legibility, not the page.
+        workspaceService.list().then(setWorkspaces).catch(() => setWorkspaces([]))
+        groupsService.list().then(setGroups).catch(() => setGroups([]))
     }, [])
 
     useEffect(() => { void refresh() }, [refresh])
 
-    // Auto-flip the scope picker to match the selected role. Workspace-
-    // template roles only make sense at workspace scope; platform
-    // tiers only at global scope. The free-text version let admins
-    // pair them wrong and 400 at the BE.
-    const selectedRoleObj = availableRoles.find(r => r.name === roleName)
-    const roleIsWorkspaceScoped = selectedRoleObj
-        ? selectedRoleObj.scopeType === 'workspace'
-            || selectedRoleObj.permissions.some(p => p.startsWith('workspace:'))
-        : false
-    useEffect(() => {
-        if (!selectedRoleObj) return
-        // Only force-flip when the user hasn't deliberately picked the
-        // other scope; otherwise we'd fight their choice on every key
-        // press. The "hint" is presence of ``workspace:*`` perms on the
-        // role — if it's a custom role with mixed perms, we leave the
-        // scope alone.
-        if (roleIsWorkspaceScoped && scopeType === 'global') {
-            setScopeType('workspace')
-        } else if (!roleIsWorkspaceScoped && scopeType === 'workspace') {
-            setScopeType('global')
-            setScopeId('')
-        }
-    }, [selectedRoleObj, roleIsWorkspaceScoped, scopeType])
-
-    async function create(e: React.FormEvent) {
-        e.preventDefault()
-        setBusy(true)
-        try {
-            if (target === 'role_binding') {
-                await ssoAdminService.createRoleBindingMapping({
-                    providerId: providerId || null,
-                    idpGroup,
-                    roleName,
-                    scopeType,
-                    scopeId: scopeType === 'global' ? null : scopeId,
-                })
-            } else {
-                await ssoAdminService.createGroupMembershipMapping({
-                    providerId: providerId || null,
-                    idpGroup,
-                    targetGroupId,
-                })
-            }
-            await refresh()
-            setIdpGroup('')
-            setRoleName('')
-            setScopeId('')
-            setTargetGroupId('')
-        } catch (err) {
-            setError((err as Error).message)
-        } finally {
-            setBusy(false)
-        }
-    }
+    const grouped = useMemo(() => groupMappings(rows), [rows])
 
     async function remove(id: string) {
-        if (!confirm('Delete this mapping?')) return
         setBusy(true)
         try {
             await ssoAdminService.deleteMapping(id)
@@ -132,200 +75,106 @@ export function MappingsTab() {
         }
     }
 
-    return (
-        <div className="space-y-4">
-            {error && <ErrorBanner message={error} />}
-            <h2 className="text-base font-semibold">IdP group → target mappings</h2>
-            <form
-                onSubmit={create}
-                className="p-4 rounded-xl border border-white/10 bg-white/5 space-y-3"
-            >
-                <div className="grid grid-cols-2 gap-3">
-                    <label className="text-xs">
-                        Provider (optional)
-                        <select
-                            className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                            value={providerId}
-                            onChange={(e) => setProviderId(e.target.value)}
-                        >
-                            <option value="">(any provider)</option>
-                            {providers.map((p) => (
-                                <option key={p.id} value={p.id}>{p.displayName} — {p.slug}</option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className="text-xs">
-                        IdP group name
-                        <input
-                            className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                            value={idpGroup}
-                            onChange={(e) => setIdpGroup(e.target.value)}
-                            placeholder="engineering"
-                            required
-                        />
-                    </label>
-                    <label className="text-xs col-span-2">
-                        Target type
-                        <select
-                            className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                            value={target}
-                            onChange={(e) => setTarget(e.target.value as 'role_binding' | 'group_membership')}
-                        >
-                            <option value="role_binding">Role binding (scope + role)</option>
-                            <option value="group_membership">Group membership (internal Group)</option>
-                        </select>
-                    </label>
-                    {target === 'role_binding' ? (
-                        <>
-                            <label className="text-xs">
-                                Role
-                                <select
-                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
-                                    value={roleName}
-                                    onChange={(e) => setRoleName(e.target.value)}
-                                    required
-                                >
-                                    <option value="">Select a role…</option>
-                                    <optgroup label="Organization-wide access">
-                                        {availableRoles
-                                            .filter(r => r.isSystem
-                                                && !r.permissions.some(p => p.startsWith('workspace:')))
-                                            .map(r => (
-                                                <option key={r.name} value={r.name}>
-                                                    {roleVisualFor(r.name).label}
-                                                </option>
-                                            ))}
-                                    </optgroup>
-                                    <optgroup label="Workspace-specific access">
-                                        {availableRoles
-                                            .filter(r => r.isSystem
-                                                && r.permissions.some(p => p.startsWith('workspace:')))
-                                            .map(r => (
-                                                <option key={r.name} value={r.name}>
-                                                    {roleVisualFor(r.name).label}
-                                                </option>
-                                            ))}
-                                    </optgroup>
-                                    {availableRoles.some(r => !r.isSystem) && (
-                                        <optgroup label="Custom roles">
-                                            {availableRoles
-                                                .filter(r => !r.isSystem)
-                                                .map(r => (
-                                                    <option key={r.name} value={r.name}>
-                                                        {r.name}
-                                                    </option>
-                                                ))}
-                                        </optgroup>
-                                    )}
-                                </select>
-                                {selectedRoleObj?.description && (
-                                    <p className="mt-1 text-[10px] text-ink-muted/80">
-                                        {selectedRoleObj.description}
-                                    </p>
-                                )}
-                            </label>
-                            <label className="text-xs">
-                                Scope
-                                <select
-                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs disabled:opacity-60"
-                                    value={scopeType}
-                                    onChange={(e) => setScopeType(e.target.value as 'global' | 'workspace')}
-                                    // Scope is implied by the role selection — workspace-
-                                    // template roles must bind at workspace scope, platform
-                                    // tiers at global. The picker auto-flips above; we
-                                    // disable manual override so they can't drift apart.
-                                    disabled={selectedRoleObj?.isSystem}
-                                    title={selectedRoleObj?.isSystem
-                                        ? 'Scope is fixed by the selected built-in role.'
-                                        : undefined}
-                                >
-                                    <option value="global">Global</option>
-                                    <option value="workspace">Workspace</option>
-                                </select>
-                            </label>
-                            {scopeType === 'workspace' && (
-                                <label className="text-xs col-span-2">
-                                    Workspace ID
-                                    <input
-                                        className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                                        value={scopeId}
-                                        onChange={(e) => setScopeId(e.target.value)}
-                                        placeholder="ws_xxxxxxxx"
-                                        required
-                                    />
-                                </label>
-                            )}
-                        </>
-                    ) : (
-                        <label className="text-xs col-span-2">
-                            Target group ID
-                            <input
-                                className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
-                                value={targetGroupId}
-                                onChange={(e) => setTargetGroupId(e.target.value)}
-                                placeholder="grp_xxxxxxxx"
-                                required
-                            />
-                        </label>
-                    )}
-                </div>
-                <button
-                    type="submit"
-                    disabled={busy}
-                    className="px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm disabled:opacity-50"
-                >
-                    Create mapping
-                </button>
-            </form>
+    if (!loaded) {
+        return (
+            <div className="py-16 flex items-center justify-center gap-2 text-sm text-ink-muted">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Loading rules…
+            </div>
+        )
+    }
 
-            <table className="w-full text-sm">
-                <thead>
-                    <tr className="text-left text-xs uppercase tracking-wider text-ink-muted">
-                        <th className="py-2">Provider</th>
-                        <th>IdP group</th>
-                        <th>Target</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows.map((m) => (
-                        <tr key={m.id} className="border-t border-white/10">
-                            <td className="py-2 font-mono text-xs">
-                                {m.providerId
-                                    ? providers.find((p) => p.id === m.providerId)?.slug ?? m.providerId
-                                    : '(any)'}
-                            </td>
-                            <td className="font-mono text-xs">{m.idpGroup}</td>
-                            <td className="text-xs">
-                                {m.targetType === 'role_binding' ? (
-                                    <span className="flex items-center gap-1.5">
-                                        <span className={cn(
-                                            'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border',
-                                            roleVisualFor(m.roleName ?? '').badge,
-                                        )}>
-                                            {roleVisualFor(m.roleName ?? '').label}
-                                        </span>
-                                        <span className="text-ink-muted">
-                                            @ {m.scopeType}{m.scopeId ? `/${m.scopeId}` : ''}
-                                        </span>
-                                    </span>
-                                ) : (
-                                    `group ${m.targetGroupId}`
-                                )}
-                            </td>
-                            <td className="text-right">
-                                <button
-                                    onClick={() => remove(m.id)}
-                                    disabled={busy}
-                                    className="text-red-400 hover:text-red-300"
-                                >
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
-                            </td>
-                        </tr>
+    return (
+        <div className="space-y-5 max-w-3xl">
+            {error && <ErrorBanner message={error} />}
+
+            {/* The contract. It is the reason to use this feature and the
+                page never stated it. */}
+            <motion.section
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.16 }}
+                className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] p-5"
+            >
+                <div className="flex items-start gap-3">
+                    <div className="shrink-0 w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center">
+                        <RefreshCw className="w-4 h-4 text-indigo-500" />
+                    </div>
+                    <div className="min-w-0">
+                        <h2 className="text-sm font-bold text-ink">
+                            Your directory decides who gets what
+                        </h2>
+                        <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
+                            These rules are re-evaluated on every sign-in and every
+                            session refresh. Add someone to a group in your identity
+                            provider and their access appears here; remove them and
+                            it disappears, within a few minutes, without anybody
+                            touching this page.
+                        </p>
+                        <p className="mt-2 text-[11px] text-ink-muted leading-relaxed">
+                            Access granted this way cannot be edited by hand here —
+                            the directory is the source of truth, and an override
+                            would be undone at the next sign-in.
+                        </p>
+                    </div>
+                    <DocsLink slug="sso-setup" variant="icon" />
+                </div>
+            </motion.section>
+
+            <MappingComposer
+                providers={providers}
+                onCreated={refresh}
+                onError={setError}
+            />
+
+            {grouped.length === 0 ? (
+                <EmptyRules />
+            ) : (
+                <section className="space-y-3">
+                    <div className="flex items-baseline gap-2">
+                        <h3 className="text-sm font-bold text-ink">Live rules</h3>
+                        <span className="text-[11px] text-ink-muted">
+                            {rows.length} across {grouped.length} group
+                            {grouped.length === 1 ? '' : 's'}
+                        </span>
+                    </div>
+                    {grouped.map((g, i) => (
+                        <MappingGroupCard
+                            key={g.idpGroup}
+                            group={g}
+                            providers={providers}
+                            workspaces={workspaces}
+                            groups={groups}
+                            busy={busy}
+                            index={i}
+                            onDelete={id => { void remove(id) }}
+                        />
                     ))}
-                </tbody>
-            </table>
+                </section>
+            )}
+
+            <p className="flex items-start gap-1.5 text-[11px] text-ink-muted leading-relaxed">
+                <ShieldAlert className="w-3.5 h-3.5 mt-px shrink-0" />
+                Platform-admin roles need a <strong>verified</strong> connection,
+                and <code className="font-mono">super_admin</code> can never be
+                granted this way — that one stays a deliberate, manual act.
+            </p>
+        </div>
+    )
+}
+
+function EmptyRules() {
+    return (
+        <div className="rounded-2xl border-2 border-dashed border-black/[0.10] dark:border-white/[0.12] p-8 text-center">
+            <div className="w-11 h-11 mx-auto mb-3 rounded-xl bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center">
+                <Waypoints className="w-5 h-5 text-ink-muted" />
+            </div>
+            <h3 className="text-sm font-semibold text-ink">No rules yet</h3>
+            <p className="mt-1.5 text-xs text-ink-muted max-w-sm mx-auto leading-relaxed">
+                Until you add one, people signing in through a connection arrive
+                with no access beyond whatever their account already had. Start
+                with the group most of your team is in.
+            </p>
         </div>
     )
 }
