@@ -438,3 +438,104 @@ class InviteVerifyResponse(BaseModel):
     #: When the link stops working, so the page can show the deadline
     #: rather than only discovering it after a failed submit.
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+
+
+# ── Admin-created accounts ────────────────────────────────────────────
+#
+# The other way in. An invite is the user provisioning themselves from a
+# link you handed them; this is you provisioning them directly, which is
+# what you need when there is nobody to hand a link TO yet — a contractor
+# starting Monday, a service account, a migration from another tool.
+
+class AdminCreateUserRequest(BaseModel):
+    """Create one account outright.
+
+    Grant fields mirror ``CreateInviteRequest`` deliberately: the same
+    role / workspace / group rules apply, because the account that comes
+    out the far end is the same account either way.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str
+    first_name: str = Field(alias="firstName", min_length=1, max_length=100)
+    last_name: str = Field(alias="lastName", min_length=1, max_length=100)
+
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
+
+    #: How they will first sign in.
+    #:   setup_link — account exists with no usable password; the admin
+    #:                shares a one-time link and the user sets their own.
+    #:                Nobody but them ever knows it, so this is default.
+    #:   password   — the admin sets one and communicates it out of band.
+    #:   sso_only   — no local password at all; they sign in via the IdP.
+    credential: str = Field(default="setup_link")
+    #: Required iff ``credential == 'password'``.
+    password: Optional[str] = None
+
+    #: Skip the pending queue. An account an admin typed out by hand has
+    #: already been approved by the act of typing it.
+    activate: bool = True
+
+
+class AdminCreateUserResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: str
+    first_name: str = Field(alias="firstName")
+    last_name: str = Field(alias="lastName")
+    status: str
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    group_ids: list[str] = Field(default_factory=list, alias="groupIds")
+    #: Present only for ``credential == 'setup_link'``. Shown once.
+    setup_token: Optional[str] = Field(default=None, alias="setupToken")
+    setup_expires_at: Optional[str] = Field(default=None, alias="setupExpiresAt")
+
+
+class BulkCreateUsersRequest(BaseModel):
+    """Several accounts from one set of settings.
+
+    Names are optional per row because the usual source is a column of
+    addresses; when absent they are derived from the local part, which is
+    a better placeholder than an empty string and is editable afterwards.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    users: list["BulkCreateUserRow"] = Field(min_length=1, max_length=200)
+
+    role: Optional[str] = None
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
+    credential: str = Field(default="setup_link")
+    activate: bool = True
+
+
+class BulkCreateUserRow(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str
+    first_name: Optional[str] = Field(default=None, alias="firstName")
+    last_name: Optional[str] = Field(default=None, alias="lastName")
+
+
+class BulkCreateUserResult(BaseModel):
+    """What happened for one row."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str
+    #: created | already_a_user | invalid_email | duplicate | failed
+    outcome: str
+    user_id: Optional[str] = Field(default=None, alias="userId")
+    setup_token: Optional[str] = Field(default=None, alias="setupToken")
+    detail: Optional[str] = None
+
+
+class BulkCreateUsersResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    created: int
+    skipped: int
+    results: list[BulkCreateUserResult]

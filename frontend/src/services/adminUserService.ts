@@ -251,6 +251,26 @@ export const adminUserService = {
         })
     },
 
+    /** Create one account outright, rather than handing out a link.
+     *
+     *  The other door in: an invite is somebody provisioning themselves
+     *  from a link you sent; this is you provisioning them directly. */
+    createUser(body: CreateUserRequest): Promise<CreatedUser> {
+        return authFetch<CreatedUser>(ADMIN_USERS_API, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Several accounts from one set of settings. Reports per row, so
+     *  one address that already exists does not cost the others. */
+    createUsersBulk(body: BulkCreateUsersRequest): Promise<BulkCreateUsersResponse> {
+        return authFetch<BulkCreateUsersResponse>(`${ADMIN_USERS_API}/bulk`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
+    },
+
     /** Give a link more time (and optionally more seats). The URL
      *  already shared keeps working. */
     extendInvite(
@@ -282,4 +302,70 @@ export const adminUserService = {
             `${ADMIN_USERS_API}/invites/${encodeURIComponent(inviteId)}/redemptions`,
         )
     },
+}
+
+// ── Admin-created accounts ────────────────────────────────────────────
+
+/** How a newly created account first signs in.
+ *
+ *  `setup_link` leaves no usable password at all — the account exists,
+ *  and a one-time link lets the person choose their own, so nobody
+ *  (including the admin who created it) ever knows it. That is why it is
+ *  the default rather than the admin typing one.
+ */
+export type CredentialMode = 'setup_link' | 'password' | 'sso_only'
+
+export interface CreateUserRequest {
+    email: string
+    firstName: string
+    lastName: string
+    role?: string | null
+    workspaceId?: string | null
+    groupIds?: string[] | null
+    credential?: CredentialMode
+    password?: string | null
+    activate?: boolean
+}
+
+export interface CreatedUser {
+    id: string
+    email: string
+    firstName: string
+    lastName: string
+    status: string
+    role: string | null
+    workspaceId: string | null
+    groupIds: string[]
+    /** Present only for `setup_link`, and only this once. */
+    setupToken: string | null
+    setupExpiresAt: string | null
+}
+
+export interface BulkCreateUserRow {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+}
+
+export interface BulkCreateUsersRequest {
+    users: BulkCreateUserRow[]
+    role?: string | null
+    workspaceId?: string | null
+    groupIds?: string[] | null
+    credential?: CredentialMode
+    activate?: boolean
+}
+
+export interface BulkCreateUserResult {
+    email: string
+    outcome: 'created' | 'already_a_user' | 'invalid_email' | 'duplicate' | 'failed'
+    userId: string | null
+    setupToken: string | null
+    detail: string | null
+}
+
+export interface BulkCreateUsersResponse {
+    created: number
+    skipped: number
+    results: BulkCreateUserResult[]
 }

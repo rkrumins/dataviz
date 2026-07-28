@@ -15,6 +15,7 @@ Admin:
     POST  /api/v1/admin/users/{user_id}/generate-reset-token
 """
 import logging
+import re
 import uuid
 from typing import Optional
 
@@ -38,8 +39,13 @@ from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.models.auth import (
+    AdminCreateUserRequest,
+    AdminCreateUserResponse,
     AdminUserResponse,
     AdminResetPasswordRequest,
+    BulkCreateUsersRequest,
+    BulkCreateUsersResponse,
+    BulkCreateUserResult,
     ApproveRejectRequest,
     ChangeRoleRequest,
     BulkInviteRequest,
@@ -1409,3 +1415,344 @@ async def list_invite_redemptions(
         )
         for r in rows
     ]
+
+
+# ── Admin-created accounts ────────────────────────────────────────────
+#
+# The other way in. An invite is the user provisioning themselves from a
+# link you handed them; this provisions them directly, which is what you
+# need when there is nobody to hand a link TO yet — somebody starting on
+# Monday, an account migrated from another tool, a shared operations
+# login. ``signup_source`` has carried 'admin_created' since Phase 4;
+# this is the endpoint that finally sets it.
+
+_CREDENTIAL_MODES = frozenset({"setup_link", "password", "sso_only"})
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _derive_names(email: str) -> tuple[str, str]:
+    """A usable name from an address, for the bulk path.
+
+    A column of addresses is the usual source and rarely carries names.
+    "a.hopper@x.com" → ("A", "Hopper") beats an empty string, which the
+    schema forbids anyway, and beats the raw address, which looks like a
+    bug in every list that renders a name.
+    """
+    local = email.split("@", 1)[0]
+    parts = [p for p in re.split(r"[._\-+]+", local) if p]
+    if len(parts) >= 2:
+        return parts[0].capitalize(), " ".join(p.capitalize() for p in parts[1:])
+    return (parts[0].capitalize() if parts else email), ""
+
+
+async def _resolve_grant(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    body,
+) -> tuple[Optional[str], list[str], bool]:
+    """Validate the role/workspace the new accounts will receive.
+
+    Deliberately the same checks the invite path runs, via the same
+    helpers — an account created here and an account created by
+    redeeming an invite are the same account, so a rule that binds one
+    must bind the other or the stricter path is merely the slower one.
+
+    Returns ``(resolved_workspace_id, role_perms, is_privileged)``.
+    """
+    from backend.app.db.repositories import role_repo, workspace_repo
+
+    if not body.role:
+        # No role: nothing to resolve, and nothing to escalate. Still
+        # subject to the group rule below via the ceiling.
+        await _enforce_invite_ceiling(
+            claims, body, resolved_workspace_id=None,
+            role_perms=[], role_is_privileged=False,
+        )
+        return None, [], False
+
+    role = await role_repo.get_role(session, body.role)
+    if role is None:
+        raise HTTPException(status_code=400, detail=f"Unknown role '{body.role}'")
+
+    bundles = await role_repo.role_names_with_permissions(session, [body.role])
+    perms = bundles.get(body.role, [])
+    privileged = _role_is_privileged(perms)
+
+    needs_ws = (
+        body.role in _WORKSPACE_TEMPLATE_ROLES
+        or getattr(role, "scope_type", None) == "workspace"
+    )
+    fixed_ws = getattr(role, "scope_id", None) if getattr(role, "scope_type", None) == "workspace" else None
+    resolved_ws = fixed_ws or body.workspace_id
+
+    if needs_ws and not resolved_ws:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Role '{body.role}' is workspace-scoped and needs a workspace.",
+        )
+    if resolved_ws:
+        ws = await workspace_repo.get_workspace(session, resolved_ws)
+        if ws is None:
+            raise HTTPException(status_code=400, detail="Unknown workspace")
+
+    await _enforce_invite_ceiling(
+        claims, body, resolved_workspace_id=resolved_ws,
+        role_perms=perms, role_is_privileged=privileged,
+    )
+    return resolved_ws, perms, privileged
+
+
+async def _provision_user(
+    session: AsyncSession,
+    *,
+    email: str,
+    first_name: str,
+    last_name: str,
+    role: Optional[str],
+    workspace_id: Optional[str],
+    group_ids: Optional[list[str]],
+    credential: str,
+    password: Optional[str],
+    activate: bool,
+    actor_id: str,
+) -> tuple[str, Optional[str], Optional[str], list[str]]:
+    """Create one account and apply its grants.
+
+    Returns ``(user_id, setup_token, setup_expires_at, attached_groups)``.
+    Raises ValueError for "this address is already taken", which the
+    callers turn into a 409 or a per-row outcome respectively.
+    """
+    from backend.app.db.repositories import group_repo
+    from backend.auth_service.core.password import disabled_password_hash
+    from backend.app.api.v1.endpoints.auth import _grant_invite_role
+
+    normalised = email.strip().lower()
+    existing = await user_repo.get_user_by_email(session, normalised)
+    if existing is not None:
+        raise ValueError("already_a_user")
+
+    # A password the admin typed is the only one that gets hashed. The
+    # other two modes leave no usable local password at all: the setup
+    # link mode expects the user to set their own, and sso_only expects
+    # the IdP to vouch for them. Both use the sentinel rather than a
+    # random string, so `has_usable_password` can tell the difference.
+    if credential == "password":
+        if not password:
+            raise HTTPException(status_code=400, detail="A password is required.")
+        _check_password_strength(password)
+        pw_hash = hash_password(password)
+    else:
+        pw_hash = disabled_password_hash()
+
+    user = await user_repo.create_user(
+        session,
+        email=normalised,
+        password_hash=pw_hash,
+        first_name=first_name,
+        last_name=last_name,
+        status="active" if activate else "pending",
+        signup_source="admin_created",
+    )
+
+    if role:
+        await _grant_invite_role(
+            session, user.id, role, workspace_id, granted_by=actor_id,
+        )
+
+    attached: list[str] = []
+    for gid in (group_ids or []):
+        try:
+            await group_repo.add_member(session, gid, user.id, added_by=actor_id)
+            attached.append(gid)
+        except Exception:  # noqa: BLE001 — one bad group must not lose the account
+            logger.warning("Could not attach group %s to new user %s", gid, user.id)
+
+    setup_token: Optional[str] = None
+    setup_expires: Optional[str] = None
+    if credential == "setup_link":
+        setup_token, setup_expires = await user_repo.create_reset_token(session, user.id)
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.created_by_admin",
+        payload={
+            "user_id": user.id,
+            "created_by": actor_id,
+            "role": role,
+            "workspace_id": workspace_id,
+            "group_ids": attached,
+            "credential": credential,
+            "activated": activate,
+        },
+    )
+    return user.id, setup_token, setup_expires, attached
+
+
+@admin_router.post(
+    "",
+    response_model=AdminCreateUserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user(
+    body: AdminCreateUserRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Create one account directly, with the role and groups it needs.
+
+    Not gated on ``inviteLinksEnabled``: that flag governs *links*, and
+    an admin typing an account out by hand is not a link. Turning links
+    off in order to close the self-service door should not also take
+    away the ability to add somebody deliberately.
+
+    Who may call it follows the invite rule exactly — see
+    ``_enforce_invite_ceiling``. You cannot grant what you do not hold,
+    whichever door the account comes through.
+    """
+    if body.credential not in _CREDENTIAL_MODES:
+        raise HTTPException(status_code=400, detail="Unknown credential mode")
+    if not _EMAIL_RE.match(body.email.strip()):
+        raise HTTPException(status_code=400, detail="That is not a valid email address")
+
+    resolved_ws, _perms, _priv = await _resolve_grant(session, claims, body)
+
+    try:
+        user_id, token, expires, groups = await _provision_user(
+            session,
+            email=body.email,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            role=body.role,
+            workspace_id=resolved_ws,
+            group_ids=body.group_ids,
+            credential=body.credential,
+            password=body.password,
+            activate=body.activate,
+            actor_id=admin.id,
+        )
+    except ValueError:
+        # Not enumeration-sensitive: the caller is already an authenticated
+        # admin who can list every user on the next screen.
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that email already exists.",
+        )
+
+    logger.info("User %s created by admin %s", user_id, admin.id)
+    return AdminCreateUserResponse(
+        id=user_id,
+        email=body.email.strip().lower(),
+        first_name=body.first_name,
+        last_name=body.last_name,
+        status="active" if body.activate else "pending",
+        role=body.role,
+        workspace_id=resolved_ws,
+        group_ids=groups,
+        setup_token=token,
+        setup_expires_at=expires,
+    )
+
+
+@admin_router.post(
+    "/bulk",
+    response_model=BulkCreateUsersResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_users_bulk(
+    body: BulkCreateUsersRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Create several accounts from one set of settings.
+
+    Partial success is the point: one address that already has an
+    account must not cost the other nineteen their onboarding. Every row
+    reports its own outcome, and the grant rules are resolved once for
+    the whole batch rather than per row — they are identical by
+    construction, and re-resolving would only invite drift.
+    """
+    if body.credential not in _CREDENTIAL_MODES:
+        raise HTTPException(status_code=400, detail="Unknown credential mode")
+    if body.credential == "password":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A shared password across a batch is not a credential. "
+                "Use a setup link, or SSO."
+            ),
+        )
+
+    resolved_ws, _perms, _priv = await _resolve_grant(session, claims, body)
+
+    results: list[BulkCreateUserResult] = []
+    seen: set[str] = set()
+    created = 0
+
+    for row in body.users:
+        email = row.email.strip().lower()
+        if not _EMAIL_RE.match(email):
+            results.append(BulkCreateUserResult(
+                email=row.email, outcome="invalid_email",
+                detail="Not a valid email address",
+            ))
+            continue
+        if email in seen:
+            results.append(BulkCreateUserResult(
+                email=email, outcome="duplicate",
+                detail="Listed more than once",
+            ))
+            continue
+        seen.add(email)
+
+        first = (row.first_name or "").strip()
+        last = (row.last_name or "").strip()
+        if not first:
+            first, derived_last = _derive_names(email)
+            last = last or derived_last
+
+        try:
+            user_id, token, _expires, _groups = await _provision_user(
+                session,
+                email=email,
+                first_name=first,
+                last_name=last,
+                role=body.role,
+                workspace_id=resolved_ws,
+                group_ids=body.group_ids,
+                credential=body.credential,
+                password=None,
+                activate=body.activate,
+                actor_id=admin.id,
+            )
+        except ValueError:
+            results.append(BulkCreateUserResult(
+                email=email, outcome="already_a_user",
+                detail="Already has an account",
+            ))
+            continue
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one row must not lose the batch
+            logger.warning("Bulk create failed for %s: %s", email, exc)
+            results.append(BulkCreateUserResult(
+                email=email, outcome="failed", detail="Could not be created",
+            ))
+            continue
+
+        created += 1
+        results.append(BulkCreateUserResult(
+            email=email, outcome="created", user_id=user_id, setup_token=token,
+        ))
+
+    logger.info(
+        "Bulk user creation by admin %s: %d created, %d skipped",
+        admin.id, created, len(results) - created,
+    )
+    return BulkCreateUsersResponse(
+        created=created,
+        skipped=len(results) - created,
+        results=results,
+    )

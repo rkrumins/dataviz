@@ -89,6 +89,24 @@ of dropping a brand-new person onto a cold dashboard.
 up through your links, and when. Sending an invitation and never hearing whether it worked left
 you with no idea whether to follow up or let it expire.
 
+**Admins can add people directly, one at a time or from a list.** Until now the only way
+in was a link somebody had to click — which does not help when there is nobody to hand a link
+TO yet: someone starting Monday, an account migrated from another tool, a shared operations
+login. **Add people** in Admin → Users creates the accounts outright, with the same role,
+workspace and group choices an invite carries, because the account that comes out is the same
+account either way.
+
+Three ways the new account can first sign in. The default, **a setup link**, leaves no
+password on the account at all — the person chooses their own, so nobody, including the admin
+who created it, ever knows it. You can also **set a password yourself** (quick, but you will
+know it, and nothing sends it for you), or leave it **SSO-only**. A shared password across a
+batch is refused outright: a password twenty people know is not a credential.
+
+A pasted list accepts `Name <a@b.com>` as well as bare addresses, drops repeats, and fills in
+missing names from the address — `grace.hopper@` becomes Grace Hopper — with the derived names
+shown on the review step rather than discovered afterwards in the user list. Every row reports
+its own outcome, so one address that already has an account does not cost the others theirs.
+
 **Creating a link is a wizard, not a wall.** "Invite by Link" asked seven questions at once
 — role, workspace, groups, recipient, expiry, seat cap, domain — with no starting point, and
 parked the sentence describing the whole invite below the fold, under the fields it was meant

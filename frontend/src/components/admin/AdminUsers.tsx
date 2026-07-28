@@ -20,13 +20,18 @@ import {
 import {
     adminUserService,
     type AdminUserResponse,
+    type BulkCreateUsersRequest,
+    type BulkCreateUsersResponse,
     type BulkInviteResponse,
+    type CreatedUser,
     type CreateInviteOptions,
+    type CreateUserRequest,
     type InviteResponse,
 } from '@/services/adminUserService'
 import { useFeature } from '@/store/features'
 import { AdminInvites } from './AdminInvites'
 import { InviteWizard } from './InviteWizard'
+import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -54,6 +59,7 @@ type ModalType =
     | { kind: 'suspend'; userId: string; name: string }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
+    | { kind: 'createUser' }
     | { kind: 'editProfile'; userId: string; firstName: string; lastName: string; email: string }
     | null
 
@@ -213,6 +219,12 @@ export function AdminUsers() {
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
     const [bulkResult, setBulkResult] = useState<BulkInviteResponse | null>(null)
+    // Admin-created accounts. Separate state from the invite result
+    // because they are separate wizards producing separate artefacts.
+    const [createdUser, setCreatedUser] = useState<CreatedUser | null>(null)
+    const [bulkCreated, setBulkCreated] = useState<BulkCreateUsersResponse | null>(null)
+    const [createLoading, setCreateLoading] = useState(false)
+    const [createError, setCreateError] = useState<string | null>(null)
     const inviteLinksEnabled = useFeature('inviteLinksEnabled')
     const [invitesOpen, setInvitesOpen] = useState(false)
 
@@ -421,6 +433,43 @@ export function AdminUsers() {
         setResetMode('token')
         setInviteResult(null)
         setInviteCopied(false)
+        setCreatedUser(null)
+        setBulkCreated(null)
+        setCreateError(null)
+    }
+
+    const handleCreateUser = async (body: CreateUserRequest) => {
+        setCreateLoading(true)
+        setCreateError(null)
+        try {
+            const resp = await adminUserService.createUser(body)
+            setCreatedUser(resp)
+            setSuccessMsg(`${resp.email} added`)
+            void fetchUsers()
+        } catch (err: any) {
+            setCreateError(err.message || 'Could not create the account')
+        } finally {
+            setCreateLoading(false)
+        }
+    }
+
+    const handleCreateUsersBulk = async (body: BulkCreateUsersRequest) => {
+        setCreateLoading(true)
+        setCreateError(null)
+        try {
+            const resp = await adminUserService.createUsersBulk(body)
+            setBulkCreated(resp)
+            setSuccessMsg(
+                resp.skipped === 0
+                    ? `${resp.created} accounts added`
+                    : `${resp.created} added, ${resp.skipped} skipped`,
+            )
+            void fetchUsers()
+        } catch (err: any) {
+            setCreateError(err.message || 'Could not create the accounts')
+        } finally {
+            setCreateLoading(false)
+        }
     }
 
     const handleCreateInvite = async (
@@ -554,6 +603,18 @@ export function AdminUsers() {
                     {/* Hidden when an admin has switched invite links off. The
                         server refuses the POST either way; this just stops us
                         offering a button that cannot work. */}
+                    {/* Adding somebody directly is not gated on
+                        `inviteLinksEnabled`: that flag governs LINKS, and an
+                        admin typing an account out by hand is not a link.
+                        Turning self-service off should not take away the
+                        ability to add somebody deliberately. */}
+                    <button
+                        onClick={() => setModal({ kind: 'createUser' })}
+                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-gradient-to-r from-emerald-500 to-teal-600 hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-emerald-500/20"
+                    >
+                        <UserPlus className="w-4 h-4" />
+                        Add people
+                    </button>
                     {inviteLinksEnabled && (
                         <button
                             onClick={() => setModal({ kind: 'invite' })}
@@ -938,13 +999,13 @@ export function AdminUsers() {
             {/* ── Modals ──────────────────────────────────────────────── */}
             {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
                 StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
-            <Backdrop open={!!modal && modal.kind !== 'invite'} onClick={closeModal} zClassName="z-50" className="bg-black/50" />
+            <Backdrop open={!!modal && modal.kind !== 'invite' && modal.kind !== 'createUser'} onClick={closeModal} zClassName="z-50" className="bg-black/50" />
 
             {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
                 through to the Backdrop beneath → outside-click still closes). */}
             <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
                 <AnimatePresence>
-                    {modal && modal.kind !== 'invite' && (
+                    {modal && modal.kind !== 'invite' && modal.kind !== 'createUser' && (
                         <motion.div key="admin-users-modal-card" initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.96, opacity: 0 }} transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
@@ -1271,6 +1332,20 @@ export function AdminUsers() {
                         </motion.aside>
                 )}
             </AnimatePresence>
+
+            {modal?.kind === 'createUser' && (
+                <CreateUserWizard
+                    canGrantSuperAdmin={canGrantSuperAdmin}
+                    loading={createLoading}
+                    error={createError}
+                    result={createdUser}
+                    bulkResult={bulkCreated}
+                    onSubmit={p => p && void handleCreateUser(p.body as CreateUserRequest)}
+                    onSubmitBulk={p => p && void handleCreateUsersBulk(p.body as BulkCreateUsersRequest)}
+                    onAnother={() => { setCreatedUser(null); setBulkCreated(null); setCreateError(null) }}
+                    onClose={closeModal}
+                />
+            )}
 
             {/* The invite wizard is its own overlay, not a card inside the
                 shared modal — same shape as ViewWizard and the asset
