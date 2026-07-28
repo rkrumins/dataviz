@@ -15,8 +15,10 @@ JWT_SECRET_KEY=...`` before every ``uvicorn`` invocation. Both gates
 have to pass; either fails closed -> we never load the file. A stray
 ``.env`` baked into a prod container is therefore inert.
 """
+import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 # ── Gated .env auto-load (local dev only) ────────────────────────────
@@ -73,7 +75,57 @@ def _resolve_secret() -> str:
     return key
 
 
+def _resolve_retired_secrets() -> tuple[str, ...]:
+    """Keys accepted for VERIFICATION but never used to sign.
+
+    Without this, changing ``JWT_SECRET_KEY`` invalidates every
+    outstanding session the instant the new value lands — and during a
+    rolling update, pods holding the old and new key both serve traffic,
+    so the same user's requests flip between authenticated and 401 with
+    no session affinity to pin them. Carrying the previous key here
+    makes rotation and rollouts non-disruptive: sign with the new key,
+    keep accepting the old one until the refresh TTL has drained, then
+    drop it.
+
+    Comma-separated, most-recent first. Each entry is held to the same
+    length floor as the signing key, and duplicates of the active key
+    are dropped so the ring never verifies the same secret twice.
+    """
+    raw = os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
+    keys: list[str] = []
+    for candidate in raw.split(","):
+        key = candidate.strip()
+        if not key:
+            continue
+        if len(key) < _MIN_SECRET_LENGTH:
+            raise MissingSigningSecret(
+                f"JWT_SECRET_KEY_PREVIOUS contains a key that is too weak "
+                f"({len(key)} chars); require >= {_MIN_SECRET_LENGTH}. "
+                "Retired keys are still trusted for verification, so they "
+                "carry the same strength requirement as the active one."
+            )
+        if key != JWT_SECRET_KEY and key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def key_id(secret: str) -> str:
+    """Short, non-reversible fingerprint of a signing key.
+
+    Emitted as the JWT ``kid`` header so verification selects the right
+    key directly instead of trial-decoding, and logged at startup so two
+    environments can be told apart without ever exposing the secret.
+    """
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+
+
 JWT_SECRET_KEY: str = _resolve_secret()
+JWT_SECRET_KEYS_PREVIOUS: tuple[str, ...] = _resolve_retired_secrets()
+JWT_SECRET_KEY_ID: str = key_id(JWT_SECRET_KEY)
+# (kid, key) pairs in verification-preference order: active key first.
+JWT_VERIFICATION_KEYS: tuple[tuple[str, str], ...] = tuple(
+    (key_id(k), k) for k in (JWT_SECRET_KEY, *JWT_SECRET_KEYS_PREVIOUS)
+)
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", _DEFAULT_ALGORITHM)
 JWT_EXPIRY_MINUTES: int = int(
     os.getenv("JWT_EXPIRY_MINUTES", str(_DEFAULT_ACCESS_EXPIRY_MINUTES))
@@ -81,7 +133,39 @@ JWT_EXPIRY_MINUTES: int = int(
 JWT_REFRESH_EXPIRY_DAYS: int = int(
     os.getenv("JWT_REFRESH_EXPIRY_DAYS", str(_DEFAULT_REFRESH_EXPIRY_DAYS))
 )
-JWT_ISSUER: str = os.getenv("JWT_ISSUER", "nexus-lineage")
+# ── Environment identity ─────────────────────────────────────────────
+# Distinguishes one deployment of this app from another (``dev``,
+# ``uat``, ...). Optional: leave it unset and every value below is
+# byte-identical to what a single-environment deployment already emits.
+#
+# Set it when two environments can be open in the same browser. Cookie
+# jars are keyed by DOMAIN, not by cluster, so two deployments that use
+# the same cookie names overwrite each other's session even when they
+# run on different clusters entirely. Because the tokens also carry
+# identical ``iss``/``aud``, the receiving side cannot tell a foreign
+# token from its own and the only symptom is an opaque
+# "Signature verification failed" — the failure this setting removes.
+#
+# Constrained to a cookie-name-safe alphabet: it becomes part of the
+# cookie name, and a stray separator would silently produce a cookie the
+# browser refuses to store.
+_ENV_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+AUTH_ENVIRONMENT_ID: str = os.getenv("AUTH_ENVIRONMENT_ID", "").strip().lower()
+if AUTH_ENVIRONMENT_ID and not _ENV_ID_PATTERN.match(AUTH_ENVIRONMENT_ID):
+    raise RuntimeError(
+        f"AUTH_ENVIRONMENT_ID={AUTH_ENVIRONMENT_ID!r} is invalid. Use 1-32 "
+        "chars of [a-z0-9_-] starting alphanumeric (e.g. 'dev', 'uat') — "
+        "the value becomes part of the session cookie names."
+    )
+
+_BASE_ISSUER: str = os.getenv("JWT_ISSUER", "nexus-lineage")
+# Binding the environment into the issuer is what turns a cross-environment
+# token from an unexplained signature failure into an InvalidIssuerError —
+# a condition the caller can actually recognise and recover from by
+# evicting the cookie instead of looping on 401.
+JWT_ISSUER: str = (
+    f"{_BASE_ISSUER}:{AUTH_ENVIRONMENT_ID}" if AUTH_ENVIRONMENT_ID else _BASE_ISSUER
+)
 JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "nexus-lineage")
 
 # Cookie configuration. SameSite=Lax is safe for top-level navigation;

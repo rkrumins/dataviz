@@ -15,9 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 import jwt
+from jwt import exceptions as pyjwt_exceptions
 
 from .config import (
     JWT_SECRET_KEY,
+    JWT_SECRET_KEY_ID,
+    JWT_VERIFICATION_KEYS,
     JWT_ALGORITHM,
     JWT_EXPIRY_MINUTES,
     JWT_ISSUER,
@@ -31,6 +34,94 @@ _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
 _LINK_INTENT_AUDIENCE = f"{JWT_AUDIENCE}:link_intent"
+
+
+# ── Signing / verification against the key ring ──────────────────────
+#
+# Every family below signs with the ACTIVE key and verifies against the
+# whole ring (active + retired). Routing all of them through this one
+# pair of helpers is what keeps a key rotation from silently breaking
+# one token type while the others keep working.
+
+def _encode(payload: dict) -> str:
+    """Sign *payload* with the active key, stamping its ``kid``."""
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+        headers={"kid": JWT_SECRET_KEY_ID},
+    )
+
+
+def _candidate_keys(token: str) -> tuple[tuple[str, str], ...]:
+    """Which ring entries could plausibly have signed *token*.
+
+    A ``kid`` we recognise narrows this to exactly one key. A ``kid`` we
+    don't hold — or no ``kid`` at all, as on tokens minted before the
+    ring existed — falls back to the full ring so those tokens still
+    verify (and so an unknown ``kid`` still ends in a signature error
+    rather than a distinct "no such key" path the callers don't model).
+    """
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.InvalidTokenError:
+        return JWT_VERIFICATION_KEYS
+    if kid:
+        matched = tuple(entry for entry in JWT_VERIFICATION_KEYS if entry[0] == kid)
+        if matched:
+            return matched
+    return JWT_VERIFICATION_KEYS
+
+
+def is_foreign_token_error(exc: BaseException) -> bool:
+    """True when *exc* means "this token was never ours".
+
+    Distinguishes the unrecoverable failures — signed by a key outside
+    our ring, stamped with another environment's issuer, wrong audience,
+    structurally undecodable — from the ordinary ``ExpiredSignatureError``
+    that the frontend resolves by silently refreshing.
+
+    The distinction is what stops the login loop. A foreign cookie can
+    never verify here no matter how many times it is retried, so it has
+    to be evicted; treating expiry the same way would break the normal
+    5-minute rotation instead.
+    """
+    return isinstance(
+        exc,
+        (
+            pyjwt_exceptions.InvalidSignatureError,
+            pyjwt_exceptions.InvalidIssuerError,
+            pyjwt_exceptions.InvalidAudienceError,
+            pyjwt_exceptions.DecodeError,
+        ),
+    )
+
+
+def _decode(token: str, *, audience: str) -> dict:
+    """Verify *token* against the key ring and return its payload.
+
+    Only a signature mismatch advances to the next key. Every other
+    failure — expiry, issuer, audience — is raised from the first
+    attempt untouched, because those are decided AFTER the signature
+    verifies: retrying them against another key would replace an
+    accurate diagnosis ("this token is expired", "this token belongs to
+    another environment") with a misleading signature error.
+    """
+    last_signature_error: jwt.InvalidSignatureError | None = None
+    for _kid, key in _candidate_keys(token):
+        try:
+            return jwt.decode(
+                token,
+                key,
+                algorithms=[JWT_ALGORITHM],
+                issuer=JWT_ISSUER,
+                audience=audience,
+            )
+        except jwt.InvalidSignatureError as exc:
+            last_signature_error = exc
+    raise last_signature_error or jwt.InvalidSignatureError(
+        "Signature verification failed"
+    )
 
 
 # ── Access tokens ────────────────────────────────────────────────────
@@ -54,7 +145,7 @@ def create_access_token(
     }
     if extra:
         payload.update(extra)
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(payload)
 
 
 def decode_token(token: str) -> dict:
@@ -63,13 +154,7 @@ def decode_token(token: str) -> dict:
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure
     (including audience mismatch — i.e. a refresh token presented as access).
     """
-    return jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=JWT_AUDIENCE,
-    )
+    return _decode(token, audience=JWT_AUDIENCE)
 
 
 # ── Refresh tokens ───────────────────────────────────────────────────
@@ -123,7 +208,7 @@ def create_refresh_token(
         payload["auth_time"] = int(auth_time)
     if extra:
         payload.update(extra)
-    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    token = _encode(payload)
     claims = RefreshClaims(
         sub=user_id,
         jti=jti,
@@ -139,13 +224,7 @@ def decode_refresh_token(token: str) -> RefreshClaims:
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
     """
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_REFRESH_AUDIENCE,
-    )
+    payload = _decode(token, audience=_REFRESH_AUDIENCE)
     sub = payload.get("sub")
     jti = payload.get("jti")
     fam = payload.get("fam")
@@ -236,7 +315,7 @@ def create_invite_token(
         # minted at an older one. Omitted when None so tokens issued
         # before rotation existed stay byte-identical.
         payload["tv"] = token_version
-    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    token = _encode(payload)
     return token, expires_at.isoformat()
 
 
@@ -245,13 +324,7 @@ def decode_invite_token(token: str) -> dict:
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
     """
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_INVITE_AUDIENCE,
-    )
+    payload = _decode(token, audience=_INVITE_AUDIENCE)
     if payload.get("purpose") != "invite":
         raise jwt.InvalidTokenError("Not an invite token")
     return payload
@@ -286,7 +359,7 @@ def create_oidc_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(payload)
 
 
 def decode_oidc_state_token(token: str) -> dict:
@@ -294,13 +367,7 @@ def decode_oidc_state_token(token: str) -> dict:
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
     """
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_OIDC_STATE_AUDIENCE,
-    )
+    payload = _decode(token, audience=_OIDC_STATE_AUDIENCE)
     if payload.get("purpose") != "oidc_state":
         raise jwt.InvalidTokenError("Not an OIDC state token")
     return payload
@@ -329,17 +396,11 @@ def create_saml_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(payload)
 
 
 def decode_saml_state_token(token: str) -> dict:
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_SAML_STATE_AUDIENCE,
-    )
+    payload = _decode(token, audience=_SAML_STATE_AUDIENCE)
     if payload.get("purpose") != "saml_state":
         raise jwt.InvalidTokenError("Not a SAML state token")
     return payload
@@ -367,17 +428,11 @@ def create_mock_identity_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
-    return jwt.encode(envelope, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(envelope)
 
 
 def decode_mock_identity_token(token: str) -> dict:
-    envelope = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_MOCK_IDENTITY_AUDIENCE,
-    )
+    envelope = _decode(token, audience=_MOCK_IDENTITY_AUDIENCE)
     if envelope.get("purpose") != "mock_identity":
         raise jwt.InvalidTokenError("Not a mock-identity token")
     payload = envelope.get("payload")
@@ -409,17 +464,11 @@ def create_link_intent_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(payload)
 
 
 def decode_link_intent_token(token: str) -> dict:
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_LINK_INTENT_AUDIENCE,
-    )
+    payload = _decode(token, audience=_LINK_INTENT_AUDIENCE)
     if payload.get("purpose") != "link_intent":
         raise jwt.InvalidTokenError("Not a link-intent token")
     return payload

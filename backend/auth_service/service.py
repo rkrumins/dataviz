@@ -33,6 +33,7 @@ from .core.tokens import (
     create_refresh_token,
     decode_token,
     decode_refresh_token,
+    is_foreign_token_error,
 )
 from .app_auth_config import (
     AuthConfigProvider,
@@ -255,7 +256,9 @@ class LocalIdentityService:
         try:
             claims = decode_refresh_token(refresh_token)
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-            raise InvalidRefreshToken(str(exc)) from exc
+            raise InvalidRefreshToken(
+                str(exc), foreign=is_foreign_token_error(exc),
+            ) from exc
 
         claims_extra: dict = {}
         async with self._session_factory() as session:

@@ -27,8 +27,12 @@ from fastapi import Depends, HTTPException, Request, status
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.auth_service.cookies import read_access_cookie
-from backend.auth_service.core.tokens import decode_token
+from backend.auth_service.cookies import (
+    ForeignSession,
+    raise_if_foreign_session,
+    read_access_cookie,
+)
+from backend.auth_service.core.tokens import decode_token, is_foreign_token_error
 from backend.auth_service.interface import IdentityService, User
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
@@ -112,6 +116,7 @@ async def get_current_user(request: Request) -> User:
     """
     user = await _identity_service(request).validate_session(read_access_cookie(request))
     if user is None:
+        raise_if_foreign_session(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
@@ -211,7 +216,9 @@ def get_permission_claims(request: Request) -> PermissionClaims:
         )
     try:
         payload = decode_token(token)
-    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
+        if is_foreign_token_error(exc):
+            raise ForeignSession() from exc
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
