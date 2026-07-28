@@ -79,7 +79,7 @@ export function MappingGroupCard({
                         </span>
                         <ArrowRight className="w-3.5 h-3.5 text-ink-muted shrink-0" />
                         <span className="min-w-0 flex-1">
-                            <Target
+                            <RuleTarget
                                 row={row}
                                 workspaces={workspaces}
                                 groups={groups}
@@ -98,7 +98,11 @@ export function MappingGroupCard({
     )
 }
 
-function providerLabel(row: IdpGroupMapping, providers: IdpProvider[]): string {
+/** Exported so the composer's preview renders through the *same* code the
+ *  saved rule does. "Exactly what gets saved" is a claim worth making
+ *  literally true rather than approximating with a second renderer that is
+ *  free to drift. */
+export function providerLabel(row: IdpGroupMapping, providers: IdpProvider[]): string {
     if (!row.providerId) return 'any connection'
     const p = providers.find(x => x.id === row.providerId)
     return p ? (p.displayName || p.slug) : row.providerId
@@ -124,7 +128,7 @@ function inertReason(
     return `${p.displayName || p.slug} is ${p.assurance}`
 }
 
-function Target({
+export function RuleTarget({
     row, workspaces, groups, providers,
 }: {
     row: IdpGroupMapping

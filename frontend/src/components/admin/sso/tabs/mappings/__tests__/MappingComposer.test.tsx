@@ -53,6 +53,10 @@ const ROLES = [
         permissions: ['catalog:read'], description: 'Read the catalogue.',
     },
     {
+        name: 'org_admin', isSystem: true, scopeType: 'global',
+        permissions: ['system:admin'], description: 'Runs the organization.',
+    },
+    {
         name: 'workspace_editor', isSystem: true, scopeType: 'workspace',
         permissions: ['workspace:write'], description: 'Edit one workspace.',
     },
@@ -227,6 +231,79 @@ describe('the preview line', () => {
         // the picker's own placeholder option.
         expect(await screen.findByText(/anyone in engineering gets .*choose a workspace/i))
             .toBeInTheDocument()
+    })
+})
+
+describe('the rule takes shape as you fill it', () => {
+    // Four identical-looking controls give no sense of progress. The count
+    // and the settled-slot marker are the feedback that the rule is going
+    // somewhere.
+    it('counts what is still to choose, and stops when ready', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+        expect(screen.getByText(/0 of 2 chosen/i)).toBeInTheDocument()
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        expect(screen.getByText(/1 of 2 chosen/i)).toBeInTheDocument()
+
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_member')
+        expect(screen.getByText(/ready/i)).toBeInTheDocument()
+    })
+
+    it('asks for a third answer once the role needs a workspace', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        await user.selectOptions(screen.getByLabelText('Role'), 'workspace_editor')
+        expect(screen.getByText(/2 of 3 chosen/i)).toBeInTheDocument()
+    })
+})
+
+describe('the preview is the row it will become', () => {
+    // Rendered through `RuleTarget` — the same component the saved rule
+    // uses — so "exactly what gets saved" is literal rather than a claim.
+    // A second renderer would be free to drift from the first.
+    it('shows the resolved role and workspace once complete', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        await user.selectOptions(screen.getByLabelText('Role'), 'workspace_editor')
+        await user.selectOptions(await screen.findByLabelText('Workspace'), 'ws_abc')
+
+        expect(await screen.findByText(/will be created as/i)).toBeInTheDocument()
+        expect(screen.getByText('in Analytics')).toBeInTheDocument()
+    })
+
+    it('describes the rule in one voice while it is incomplete', async () => {
+        // The sentence stands in for the row until there is a row. Saying
+        // "choose a role" in a prompt *and* in the sentence would be two
+        // voices telling the operator the same thing.
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        expect(screen.getAllByText(/anyone in engineering gets.*choose a role/i))
+            .toHaveLength(1)
+        expect(screen.queryByText(/will be created as/i)).toBeNull()
+    })
+
+    it('does not claim readiness while a privileged rule is blocked', async () => {
+        // The pre-flight and the preview must agree: a rule the server would
+        // refuse is not "will be created as".
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'admins')
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_admin')
+
+        expect(screen.queryByText(/will be created as/i)).toBeNull()
     })
 })
 
