@@ -24,7 +24,7 @@
  * original form offered both and let the pairing 400 at the server.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Loader2, Plus } from 'lucide-react'
+import { ArrowRight, Loader2, Plus, ShieldAlert } from 'lucide-react'
 
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 import {
@@ -33,6 +33,7 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { privilegedRuleBlock } from './privilegedRule'
 import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 
@@ -94,9 +95,18 @@ export function MappingComposer({
             || role.permissions.some(p => p.startsWith('workspace:'))),
     )
 
-    const ready = kind === 'role_binding'
+    /** The server refuses these two shapes outright; catching them here
+     *  turns a 400-after-composing into a sentence beside the control. */
+    const privileged = useMemo(
+        () => (kind === 'role_binding'
+            ? privilegedRuleBlock(roleName, providerId, providers)
+            : null),
+        [kind, roleName, providerId, providers],
+    )
+
+    const ready = !privileged && (kind === 'role_binding'
         ? Boolean(idpGroup.trim() && roleName && (!needsWorkspace || workspaceId))
-        : Boolean(idpGroup.trim() && targetGroupId)
+        : Boolean(idpGroup.trim() && targetGroupId))
 
     async function submit(e: React.FormEvent) {
         e.preventDefault()
@@ -247,6 +257,20 @@ export function MappingComposer({
                     </Slot>
                 )}
             </div>
+
+            {privileged && (
+                <p className="mt-3 flex items-start gap-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                    <ShieldAlert className="w-3.5 h-3.5 mt-px shrink-0" />
+                    <span>
+                        {privileged.message}
+                        {privileged.suggestion && (
+                            <span className="block mt-0.5 text-ink-muted">
+                                {privileged.suggestion}
+                            </span>
+                        )}
+                    </span>
+                </p>
+            )}
 
             {/* The sentence, now doing the job it is actually good at:
                 confirming what is about to be written, with ids resolved. */}
