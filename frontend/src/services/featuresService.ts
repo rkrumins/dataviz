@@ -174,6 +174,7 @@ export class FeaturesConcurrencyError extends Error {
 /** Last-resort defaults when API and fallback file are both unavailable. App never hangs or crashes. */
 const FAILSAFE_VALUES: Record<string, unknown> = {
   signupEnabled: false,
+  inviteLinksEnabled: true,   // fail OPEN — see the note in store/features.ts
   editModeEnabled: true,
   traceEnabled: true,
   allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],

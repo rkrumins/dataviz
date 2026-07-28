@@ -40,7 +40,11 @@ from backend.common.models.management import (
     ViewFacetsResponse,
     ViewCatalogStats,
 )
-from backend.app.services.layout_config import derive_entity_scope, sanitize_node_ordering
+from backend.app.services.layout_config import (
+    derive_entity_scope,
+    sanitize_node_ordering,
+    strip_node_ordering,
+)
 from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
@@ -529,6 +533,28 @@ async def update_view(
     return await _to_enriched_response(session, row)
 
 
+async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
+    """Enforce ``nodeSortingEnabled`` on the write side.
+
+    The gate lives here rather than in the endpoints because this is the
+    one place both layout writers already share. Three endpoints reach
+    these two functions (views.py x2, versioning.py), and a gate repeated
+    three times is a gate somebody will forget on the fourth.
+
+    Fails OPEN, like every capability flag: if the value can't be read we
+    keep accepting orders rather than silently discarding a user's
+    curation over a database hiccup. The switch exists to stop a team
+    re-sorting curated views, not to defend a secret.
+    """
+    from backend.app.services.feature_flags import feature_flags
+
+    if await feature_flags.is_enabled(
+        "nodeSortingEnabled", session, default=True,
+    ):
+        return reference_layout
+    return strip_node_ordering(reference_layout)
+
+
 async def update_view_layout(
     session: AsyncSession,
     view_id: str,
@@ -560,8 +586,11 @@ async def update_view_layout(
     if not isinstance(layout, dict):
         layout = {}
     # Self-heal invalid node-ordering fields (drop, never reject — see
-    # sanitize_node_ordering) before the wholesale write.
-    layout["referenceLayout"] = sanitize_node_ordering(req.reference_layout)
+    # sanitize_node_ordering) before the wholesale write, then apply the
+    # nodeSortingEnabled kill switch.
+    layout["referenceLayout"] = await _gate_node_ordering(
+        session, sanitize_node_ordering(req.reference_layout),
+    )
     config["layout"] = layout
 
     if req.entity_scope is not None:
@@ -717,7 +746,9 @@ async def update_overlay_layout(
 
     overlay = await ensure_overlay(session, view_id, branch_id)
 
-    reference_layout = dict(sanitize_node_ordering(req.reference_layout))
+    reference_layout = dict(await _gate_node_ordering(
+        session, sanitize_node_ordering(req.reference_layout),
+    ))
     if req.display_rules is not None:
         reference_layout["displayRules"] = req.display_rules
     overlay.reference_layout = json.dumps(reference_layout)

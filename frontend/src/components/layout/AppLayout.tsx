@@ -32,6 +32,7 @@ import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
 import { TourLauncher } from '@/features/tour/TourLauncher'
 import { useTourDeepLink } from '@/features/tour/useTourDeepLink'
+import { useInviteWelcome } from '@/hooks/useInviteWelcome'
 
 export { useViewEditorModal }
 
@@ -46,6 +47,10 @@ export function AppLayout() {
 
   // Launch a tour from ?tour=<id> (deep-links from docs / announcements).
   useTourDeepLink()
+
+  // An invited user arrives already signed in and with no idea what any of
+  // this is. Open the Getting Started hub once, on that first landing.
+  useInviteWelcome()
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)

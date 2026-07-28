@@ -177,7 +177,14 @@ interface AuthState {
     /** Call once on app boot — asks the server whether the cookie is valid. */
     bootstrap: () => Promise<void>
     login: (email: string, password: string) => Promise<boolean>
-    signup: (req: SignUpRequest) => Promise<{ ok: boolean; message: string }>
+    signup: (req: SignUpRequest) => Promise<{
+        ok: boolean
+        message: string
+        /** Phase 15: true when the response also established a session.
+         *  The caller navigates instead of showing "now sign in". */
+        signedIn?: boolean
+        redirectTo?: string
+    }>
     logout: () => Promise<void>
     /** Internal: invoked by apiClient when a 401 cannot be recovered. */
     handleSessionLost: () => void
@@ -286,6 +293,23 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, isLoading: true })
         try {
             const resp = await authService.signup(req)
+            // Phase 15: an invited signup arrives already authenticated —
+            // the response carried the same session cookies /login issues.
+            // Run the identical post-login sequence, or the app would be
+            // holding a valid session it does not know about.
+            if (resp.autoSignedIn && resp.user) {
+                resetClaimRecovery()
+                set({ ..._authenticated(resp.user), error: null, isLoading: false })
+                writeUserCache(resp.user)
+                await hydratePermissions(set)
+                void useNavCatalogueStore.getState().hydrate()
+                return {
+                    ok: true,
+                    message: resp.message,
+                    signedIn: true,
+                    redirectTo: resp.redirectTo ?? '/',
+                }
+            }
             set({ isLoading: false })
             return { ok: true, message: resp.message }
         } catch (err: unknown) {

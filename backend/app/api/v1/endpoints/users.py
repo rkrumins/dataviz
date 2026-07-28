@@ -15,22 +15,47 @@ Admin:
     POST  /api/v1/admin/users/{user_id}/generate-reset-token
 """
 import logging
+import re
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import get_current_user, require_admin
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    require_admin,
+)
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.auth.password import hash_password
-from backend.app.api.v1.endpoints.auth import _check_password_strength
+from backend.app.api.v1.endpoints.auth import (
+    _check_password_strength,
+    INVITE_LINKS_FAIL_OPEN,
+)
+from backend.app.api.v1.feature_gate import feature_disabled
+from backend.auth_service.core.tokens import invite_expiry
+from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.models.auth import (
+    AdminCreateUserRequest,
+    AdminCreateUserResponse,
     AdminUserResponse,
     AdminResetPasswordRequest,
+    BulkCreateUsersRequest,
+    BulkCreateUsersResponse,
+    BulkCreateUserResult,
     ApproveRejectRequest,
     ChangeRoleRequest,
+    BulkInviteRequest,
+    BulkInviteResponse,
+    BulkInviteResult,
     CreateInviteRequest,
+    ExtendInviteRequest,
+    InviteActivityItem,
+    InviteRedemptionResponse,
+    InviteSummaryResponse,
     InviteTokenResponse,
     ResetTokenResponse,
     UpdateUserRequest,
@@ -78,6 +103,48 @@ async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
 # ── Authenticated user routes ─────────────────────────────────────────
 
 router = APIRouter()
+
+
+@router.get("/me/invite-activity", response_model=list[InviteActivityItem])
+async def my_invite_activity(
+    limit: int = Query(20, ge=1, le=50),
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """People who have signed up through links I created, newest first.
+
+    The other half of an invitation. Sending one and never hearing
+    whether it was used makes the whole thing feel like shouting into a
+    void, and leaves the sender with no idea whether to follow up or let
+    it expire.
+
+    Scoped to the caller's own links — an invitation is a personal act,
+    and this answers "did mine work?", not "who joined the company".
+    """
+    from backend.app.db.repositories import invite_repo, workspace_repo
+
+    rows = await invite_repo.recent_redemptions_for_creator(
+        session, current_user.id, limit=limit,
+    )
+    ws_names: dict[str, Optional[str]] = {}
+    out: list[InviteActivityItem] = []
+    for redemption, invite in rows:
+        if invite.workspace_id and invite.workspace_id not in ws_names:
+            ws = await workspace_repo.get_workspace_orm(session, invite.workspace_id)
+            ws_names[invite.workspace_id] = ws.name if ws else None
+        out.append(InviteActivityItem(
+            id=redemption.id,
+            email=redemption.email,
+            userId=redemption.user_id,
+            redeemedAt=redemption.redeemed_at,
+            inviteId=invite.id,
+            role=invite.role,
+            workspaceId=invite.workspace_id,
+            workspaceName=(
+                ws_names.get(invite.workspace_id) if invite.workspace_id else None
+            ),
+        ))
+    return out
 
 
 @router.get("/me", response_model=UserPublicResponse)
@@ -413,6 +480,93 @@ def _role_is_privileged(perms: list[str]) -> bool:
     return any(p == "workspace:admin" or p.startswith("system:") for p in perms)
 
 
+async def _enforce_invite_ceiling(
+    claims: PermissionClaims,
+    body: CreateInviteRequest,
+    *,
+    resolved_workspace_id: Optional[str],
+    role_perms: list[str],
+    role_is_privileged: bool,
+) -> None:
+    """Cap what a NON-platform-admin may hand out with an invite.
+
+    Inviting used to be ``require_admin`` — ``system:admin`` only. That
+    is too narrow in practice: a workspace admin is the person who
+    actually knows who should join their workspace, and routing every
+    such request through a platform owner makes onboarding somebody
+    else's chore.
+
+    The rule that keeps that safe is a single sentence: **you cannot
+    grant what you do not hold.** Everything below is that sentence,
+    checked against the same resolved claims the rest of RBAC uses, so
+    an invite can never become a privilege-escalation primitive.
+    """
+    # Platform owners keep full reach.
+    if has_permission(claims, "system:admin"):
+        return
+
+    # 1. Privileged roles stay with platform admins. A role carrying
+    #    workspace:admin or system:* is how an account becomes able to
+    #    grant further access; minting one from a lesser account would
+    #    make the ceiling self-defeating.
+    if role_is_privileged:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This role grants administrative permissions and can only be "
+                "invited by a platform administrator."
+            ),
+        )
+
+    # 2. Groups are GLOBAL (see GroupORM) — membership carries across
+    #    every workspace a group is bound into. A workspace admin has no
+    #    authority outside their own workspace, and the schema has no
+    #    notion of who owns a group, so there is nothing to check
+    #    against. Refuse rather than invent an ownership model here.
+    if body.group_ids:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Groups are organisation-wide, so only a platform administrator "
+                "can attach them to an invite."
+            ),
+        )
+
+    # 3. An invite must land somewhere the caller actually administers.
+    if not resolved_workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only a platform administrator can create an organisation-wide "
+                "invite. Choose a workspace you administer."
+            ),
+        )
+    if not has_permission(claims, "workspace:admin", workspace_id=resolved_workspace_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"You are not an administrator of workspace "
+                f"'{resolved_workspace_id}'."
+            ),
+        )
+
+    # 4. The ceiling proper: every permission the invited role would
+    #    confer must be one the caller already holds in that workspace.
+    #    A workspace:admin passes trivially for ordinary workspace roles
+    #    — `resolve()` implies every workspace leaf for them — while
+    #    anything reaching outside the workspace is refused. One loop,
+    #    no new notion of "seniority".
+    for perm in role_perms:
+        if not has_permission(claims, perm, workspace_id=resolved_workspace_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"You cannot invite someone into role '{body.role}': it "
+                    f"grants '{perm}', which you do not have."
+                ),
+            )
+
+
 @admin_router.post(
     "/invite",
     response_model=InviteTokenResponse,
@@ -420,12 +574,21 @@ def _role_is_privileged(perms: list[str]) -> bool:
 )
 async def create_invite(
     body: CreateInviteRequest,
-    admin=Depends(require_admin),
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Generate a signed invite token that lets a new user sign up and
     be auto-activated with the specified role. The frontend constructs
     the full URL from its own origin.
+
+    Phase 15 — who may call this. No longer ``require_admin``
+    (``system:admin`` only): a workspace admin may invite into a
+    workspace they administer, under the ceiling enforced by
+    ``_enforce_invite_ceiling`` — you cannot grant what you do not
+    hold. ``requires("workspace:admin", workspace=...)`` cannot express
+    it, because that dependency reads the workspace from the URL path
+    and an invite's workspace comes from the body.
 
     Phase 11 — tiered invites:
       * ``role`` omitted → plain activated account.
@@ -439,7 +602,13 @@ async def create_invite(
         another user.
     """
     from backend.app.auth.jwt import create_invite_token
-    from backend.app.db.repositories import group_repo, role_repo, workspace_repo
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, role_repo, workspace_repo,
+    )
+
+    if not await feature_flags.is_enabled_self_session(
+            "inviteLinksEnabled", default=INVITE_LINKS_FAIL_OPEN):
+        raise feature_disabled("inviteLinksEnabled")
 
     resolved_workspace_id: Optional[str] = None
     resolved_group_ids: list[str] = []
@@ -470,6 +639,7 @@ async def create_invite(
     # a role is attached AND it carries workspace:admin or system:*.
     role = None
     role_is_privileged = False
+    role_perms: list[str] = []
     if body.role is not None:
         role = await role_repo.get_role(session, body.role)
         if role is None:
@@ -477,8 +647,8 @@ async def create_invite(
                 status_code=400, detail=f"Unknown role '{body.role}'",
             )
         bundles = await role_repo.role_names_with_permissions(session, [body.role])
-        perms = bundles.get(body.role, [])
-        role_is_privileged = _role_is_privileged(perms)
+        role_perms = bundles.get(body.role, [])
+        role_is_privileged = _role_is_privileged(role_perms)
 
     # Email rules, most restrictive first:
     # 1. Privileged role → email always required (override doesn't
@@ -581,14 +751,30 @@ async def create_invite(
                     ),
                 )
 
-    token, expires_at = create_invite_token(
-        role=body.role,
+    # Authorisation ceiling. Deliberately AFTER the workspace has been
+    # resolved: a custom workspace role fixes its own scope, so the
+    # workspace we must check the caller against is not necessarily the
+    # one they asked for.
+    await _enforce_invite_ceiling(
+        claims, body,
+        resolved_workspace_id=resolved_workspace_id,
+        role_perms=role_perms,
+        role_is_privileged=role_is_privileged,
+    )
+
+    token, expires_at, invite = await _mint_invite(
+        session,
         created_by=admin.id,
-        expires_in_hours=body.expires_in_hours,
+        role=body.role,
         workspace_id=resolved_workspace_id,
         email=body.email,
-        group_ids=resolved_group_ids or None,
+        email_domain=body.email_domain,
+        group_ids=resolved_group_ids,
+        shareable_groups_override=is_shareable_groups_override,
+        max_uses=body.max_uses,
+        expires_in_hours=body.expires_in_hours,
     )
+    resolved_domain = invite.email_domain
 
     # Phase 14: distinct audit event when the shareable-groups override
     # was used, so an auditor can review who bypassed the email-pin
@@ -603,10 +789,13 @@ async def create_invite(
         session,
         event_type=audit_event_type,
         payload={
+            "invite_id": invite.id,
             "role": body.role,
             "workspace_id": resolved_workspace_id,
             "email": body.email,
+            "email_domain": resolved_domain,
             "group_ids": resolved_group_ids,
+            "max_uses": body.max_uses,
             "shareable_groups_override": is_shareable_groups_override,
             "created_by": admin.id,
             "expires_at": expires_at,
@@ -614,10 +803,11 @@ async def create_invite(
     )
 
     logger.info(
-        "Invite token created by admin %s (role=%s ws=%s groups=%d email_bound=%s override=%s)",
-        admin.id, body.role, resolved_workspace_id,
-        len(resolved_group_ids), bool(body.email),
-        is_shareable_groups_override,
+        "Invite %s created by admin %s (role=%s ws=%s groups=%d email_bound=%s "
+        "domain=%s max_uses=%s override=%s)",
+        invite.id, admin.id, body.role, resolved_workspace_id,
+        len(resolved_group_ids), bool(body.email), resolved_domain,
+        body.max_uses, is_shareable_groups_override,
     )
     return InviteTokenResponse(
         inviteToken=token,
@@ -626,4 +816,943 @@ async def create_invite(
         email=body.email,
         groupIds=resolved_group_ids or None,
         expiresAt=expires_at,
+        inviteId=invite.id,
+        maxUses=body.max_uses,
+        emailDomain=resolved_domain,
+    )
+
+
+# ── Invite management ────────────────────────────────────────────────
+#
+# An invite used to be a fire-and-forget JWT: once handed out there was no
+# way to see it, count it, or stop it. These three endpoints are the other
+# half of that — the list an admin can actually act on.
+
+
+async def _mint_invite(
+    session: AsyncSession,
+    *,
+    created_by: str,
+    role: Optional[str],
+    workspace_id: Optional[str],
+    email: Optional[str],
+    email_domain: Optional[str],
+    group_ids: list[str],
+    shareable_groups_override: bool,
+    max_uses: Optional[int],
+    expires_in_hours: int,
+):
+    """Issue one token and its ledger row. Returns (token, expires_at, row).
+
+    Shared by the single and bulk endpoints — a bulk invite is a single
+    invite repeated, and two copies of this would drift the first time a
+    field is added.
+    """
+    from backend.app.auth.jwt import create_invite_token
+    from backend.app.db.repositories import invite_repo
+
+    # Allocate the id before minting so the token and its ledger row can be
+    # created from a SINGLE encode. Minting twice — once for the expiry,
+    # again for the jti — would leave the row's expires_at a few
+    # microseconds behind the token's exp, and the two would disagree about
+    # the instant a link dies.
+    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
+    token, expires_at = create_invite_token(
+        role=role,
+        created_by=created_by,
+        expires_in_hours=expires_in_hours,
+        workspace_id=workspace_id,
+        email=email,
+        group_ids=group_ids or None,
+        jti=invite_id,
+        token_version=1,
+    )
+    # An email pin is strictly narrower than a domain restriction, so a
+    # link carrying both is really just pinned. Drop the redundant field
+    # rather than storing a constraint that can never bind.
+    invite = await invite_repo.create(
+        session,
+        invite_id=invite_id,
+        role=role,
+        workspace_id=workspace_id,
+        email=email,
+        email_domain=None if email else email_domain,
+        group_ids=group_ids,
+        shareable_groups_override=shareable_groups_override,
+        max_uses=max_uses,
+        expires_at=expires_at,
+        created_by=created_by,
+    )
+    return token, expires_at, invite
+
+
+async def _invite_summary(session: AsyncSession, invite) -> InviteSummaryResponse:
+    """Project one row into the shape the admin list renders.
+
+    Four endpoints return this now (revoke, extend, regenerate, and the
+    list's per-row build), and a projection copied four times is one that
+    disagrees with itself the first time a field is added.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    counts = await invite_repo.redemption_counts(session, [invite.id])
+    gids = invite_repo.group_ids_of(invite)
+    gnames = []
+    for gid in gids:
+        grp = await group_repo.get_group_by_id(session, gid)
+        gnames.append(grp.name if grp else gid)
+    ws = (
+        await workspace_repo.get_workspace_orm(session, invite.workspace_id)
+        if invite.workspace_id else None
+    )
+    return InviteSummaryResponse(
+        id=invite.id,
+        role=invite.role,
+        workspaceId=invite.workspace_id,
+        workspaceName=ws.name if ws else None,
+        email=invite.email,
+        emailDomain=invite.email_domain,
+        groupIds=gids,
+        groupNames=gnames,
+        maxUses=invite.max_uses,
+        useCount=invite.use_count,
+        redemptionCount=counts.get(invite.id, 0),
+        status=invite_repo.status_of(invite),
+        createdBy=invite.created_by,
+        createdAt=invite.created_at,
+        expiresAt=invite.expires_at,
+        revokedAt=invite.revoked_at,
+        revokedBy=invite.revoked_by,
+    )
+
+
+@admin_router.get("/invites", response_model=list[InviteSummaryResponse])
+async def list_invites(
+    status_filter: str = Query(
+        "active", alias="status",
+        pattern="^(active|revoked|expired|exhausted|all)$",
+    ),
+    limit: int = Query(200, ge=1, le=500),
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Outstanding invite links, newest first.
+
+    Never returns a token — see ``InviteSummaryResponse``.
+
+    A platform admin sees every link; anyone else sees only the ones
+    they created. ``created_by`` is the natural ownership boundary, and
+    it means widening who can invite did not also widen who can see
+    every outstanding invitation in the organisation.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    mine_only = None if has_permission(claims, "system:admin") else admin.id
+    rows = await invite_repo.list_for_admin(
+        session, created_by=mine_only, status=status_filter, limit=limit,
+    )
+    counts = await invite_repo.redemption_counts(session, [r.id for r in rows])
+
+    # Resolve workspace + group names once per distinct id rather than per
+    # row: a page of invites into the same workspace is the common case.
+    ws_names: dict[str, Optional[str]] = {}
+    grp_names: dict[str, str] = {}
+
+    summaries: list[InviteSummaryResponse] = []
+    for row in rows:
+        if row.workspace_id and row.workspace_id not in ws_names:
+            ws = await workspace_repo.get_workspace_orm(session, row.workspace_id)
+            ws_names[row.workspace_id] = ws.name if ws else None
+
+        gids = invite_repo.group_ids_of(row)
+        for gid in gids:
+            if gid not in grp_names:
+                grp = await group_repo.get_group_by_id(session, gid)
+                grp_names[gid] = grp.name if grp else gid
+
+        summaries.append(InviteSummaryResponse(
+            id=row.id,
+            role=row.role,
+            workspaceId=row.workspace_id,
+            workspaceName=ws_names.get(row.workspace_id) if row.workspace_id else None,
+            email=row.email,
+            emailDomain=row.email_domain,
+            groupIds=gids,
+            groupNames=[grp_names[g] for g in gids],
+            maxUses=row.max_uses,
+            useCount=row.use_count,
+            redemptionCount=counts.get(row.id, 0),
+            status=invite_repo.status_of(row),
+            createdBy=row.created_by,
+            createdAt=row.created_at,
+            expiresAt=row.expires_at,
+            revokedAt=row.revoked_at,
+            revokedBy=row.revoked_by,
+        ))
+    return summaries
+
+
+@admin_router.post("/invites/{invite_id}/revoke", response_model=InviteSummaryResponse)
+async def revoke_invite(
+    invite_id: str,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Kill a link now, regardless of its expiry or remaining seats.
+
+    Idempotent: revoking an already-revoked link keeps the original
+    timestamp, because the first revocation is the one that happened.
+
+    Deliberately NOT gated on ``inviteLinksEnabled`` — an admin who has
+    switched invite links off still needs to clean up what is
+    outstanding, and refusing the cleanup would be exactly backwards.
+    """
+    from backend.app.db.repositories import (
+        group_repo, invite_repo, workspace_repo,
+    )
+
+    existing = await invite_repo.get(session, invite_id)
+    # 404 rather than 403 for someone else's link: a caller who may not
+    # act on it should not learn it exists.
+    if existing is None or (
+        existing.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    invite = await invite_repo.revoke(session, invite_id, revoked_by=admin.id)
+    if invite is None:
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_revoked",
+        payload={
+            "invite_id": invite.id,
+            "role": invite.role,
+            "workspace_id": invite.workspace_id,
+            "use_count": invite.use_count,
+            "revoked_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s revoked by admin %s after %d use(s)",
+        invite.id, admin.id, invite.use_count,
+    )
+    return await _invite_summary(session, invite)
+
+
+@admin_router.post(
+    "/invite/bulk",
+    response_model=BulkInviteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_bulk_invites(
+    body: BulkInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One email-pinned link per address, from one set of settings.
+
+    Onboarding a team meant repeating the same form once per person.
+    This is that, once — and every link comes out pinned to its
+    recipient, so each is separately revocable and each redemption is
+    attributable to the person it was meant for. A single shared link
+    would be less work and strictly worse: it would tell you only that
+    somebody used it.
+
+    Partial success is the norm and is reported per row rather than
+    failing the batch: one address already having an account must not
+    cost the other nineteen their invitations.
+
+    The email-pin rules that govern single invites are satisfied here by
+    construction — every link IS pinned — so a privileged role or an
+    attached group needs no extra opt-in.
+    """
+    from backend.app.db.repositories import (
+        group_repo, role_repo, workspace_repo,
+    )
+
+    if not await feature_flags.is_enabled_self_session(
+            "inviteLinksEnabled", default=INVITE_LINKS_FAIL_OPEN):
+        raise feature_disabled("inviteLinksEnabled")
+
+    # Validate the SETTINGS once. They are identical for every row, so
+    # re-checking per address would just be the same query N times.
+    resolved_group_ids: list[str] = []
+    if body.group_ids:
+        for gid in body.group_ids:
+            grp = await group_repo.get_group_by_id(session, gid)
+            if grp is None:
+                raise HTTPException(400, detail=f"Unknown group '{gid}'")
+            if getattr(grp, "is_protected", False):
+                raise HTTPException(
+                    400,
+                    detail=(
+                        f"Group '{grp.name}' is protected and cannot be "
+                        f"added through invite links."
+                    ),
+                )
+            resolved_group_ids.append(gid)
+
+    resolved_workspace_id: Optional[str] = None
+    role_perms: list[str] = []
+    role_is_privileged = False
+    if body.role is not None:
+        role = await role_repo.get_role(session, body.role)
+        if role is None:
+            raise HTTPException(400, detail=f"Unknown role '{body.role}'")
+        bundles = await role_repo.role_names_with_permissions(session, [body.role])
+        role_perms = bundles.get(body.role, [])
+        role_is_privileged = _role_is_privileged(role_perms)
+
+        is_workspace_role = (
+            body.role in _WORKSPACE_TEMPLATE_ROLES or role.scope_type == "workspace"
+        )
+        if is_workspace_role:
+            if role.scope_type == "workspace":
+                resolved_workspace_id = role.scope_id
+                if body.workspace_id and body.workspace_id != role.scope_id:
+                    raise HTTPException(
+                        400,
+                        detail=(
+                            f"Role '{body.role}' is scoped to workspace "
+                            f"'{role.scope_id}' and cannot be invited into a "
+                            f"different workspace."
+                        ),
+                    )
+            else:
+                if not body.workspace_id:
+                    raise HTTPException(
+                        400,
+                        detail=(
+                            f"Role '{body.role}' is workspace-scoped; a "
+                            f"workspace must be selected for the invite."
+                        ),
+                    )
+                resolved_workspace_id = body.workspace_id
+            if not await workspace_repo.get_workspace_orm(session, resolved_workspace_id):
+                raise HTTPException(
+                    404, detail=f"Workspace '{resolved_workspace_id}' not found",
+                )
+            if not await role_repo.role_is_bindable_in_scope(
+                session, role_name=body.role,
+                binding_scope_type="workspace",
+                binding_scope_id=resolved_workspace_id,
+            ):
+                raise HTTPException(
+                    400,
+                    detail=(
+                        f"Role '{body.role}' cannot be bound in workspace "
+                        f"'{resolved_workspace_id}'."
+                    ),
+                )
+        elif body.workspace_id:
+            raise HTTPException(
+                400,
+                detail=(
+                    f"Role '{body.role}' is global and cannot be "
+                    f"workspace-scoped."
+                ),
+            )
+
+    await _enforce_invite_ceiling(
+        claims, body,
+        resolved_workspace_id=resolved_workspace_id,
+        role_perms=role_perms,
+        role_is_privileged=role_is_privileged,
+    )
+
+    results: list[BulkInviteResult] = []
+    created = 0
+    expires_at = ""
+    seen: set[str] = set()
+
+    for raw in body.emails:
+        addr = (raw or "").strip().lower()
+        if not addr or "@" not in addr or addr.startswith("@") or addr.endswith("@"):
+            results.append(BulkInviteResult(
+                email=raw, outcome="invalid_email",
+                detail="Not a valid email address.",
+            ))
+            continue
+        if addr in seen:
+            results.append(BulkInviteResult(
+                email=addr, outcome="duplicate",
+                detail="Listed more than once.",
+            ))
+            continue
+        seen.add(addr)
+
+        # Someone with an account does not need an invitation, and minting
+        # one would produce a link that can never be redeemed — the signup
+        # path refuses a taken address.
+        if await user_repo.get_user_by_email(session, addr) is not None:
+            results.append(BulkInviteResult(
+                email=addr, outcome="already_a_user",
+                detail="Already has an account.",
+            ))
+            continue
+
+        try:
+            token, expires_at, invite = await _mint_invite(
+                session,
+                created_by=admin.id,
+                role=body.role,
+                workspace_id=resolved_workspace_id,
+                email=addr,
+                email_domain=None,
+                group_ids=resolved_group_ids,
+                shareable_groups_override=False,
+                max_uses=body.max_uses,
+                expires_in_hours=body.expires_in_hours,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bulk invite failed for %s: %s", addr, exc)
+            results.append(BulkInviteResult(
+                email=addr, outcome="failed",
+                detail="Could not create a link for this address.",
+            ))
+            continue
+
+        created += 1
+        results.append(BulkInviteResult(
+            email=addr, outcome="created",
+            inviteToken=token, inviteId=invite.id,
+        ))
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invites_created_bulk",
+        payload={
+            "created": created,
+            "requested": len(body.emails),
+            "role": body.role,
+            "workspace_id": resolved_workspace_id,
+            "group_ids": resolved_group_ids,
+            "created_by": admin.id,
+        },
+    )
+    logger.info(
+        "Bulk invite by %s: %d created of %d requested (role=%s ws=%s)",
+        admin.id, created, len(body.emails), body.role, resolved_workspace_id,
+    )
+    return BulkInviteResponse(
+        created=created,
+        skipped=len(results) - created,
+        results=results,
+        expiresAt=expires_at or invite_expiry(body.expires_in_hours),
+    )
+
+
+async def _load_own_invite(session, invite_id: str, admin, claims):
+    """Fetch a link the caller is allowed to act on, else 404.
+
+    404 rather than 403 for someone else's link: a caller who may not
+    act on it should not learn that it exists.
+    """
+    from backend.app.db.repositories import invite_repo
+
+    invite = await invite_repo.get(session, invite_id)
+    if invite is None or (
+        invite.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+    return invite
+
+
+@admin_router.post("/invites/{invite_id}/extend", response_model=InviteSummaryResponse)
+async def extend_invite(
+    invite_id: str,
+    body: ExtendInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Give a link more time, and optionally more seats.
+
+    The URL already shared keeps working — that is the point. Before
+    this, a link nearing expiry meant minting a replacement, which split
+    one invitation across two rows and left the redemption history on
+    the dead one.
+    """
+    from backend.app.db.repositories import invite_repo
+
+    await _load_own_invite(session, invite_id, admin, claims)
+
+    expires_at = invite_expiry(body.expires_in_hours)
+    invite = await invite_repo.extend(
+        session, invite_id,
+        expires_at=expires_at,
+        additional_uses=body.additional_uses,
+    )
+    if invite is None:
+        # Revoked. Extending would quietly undo a decision somebody made.
+        raise HTTPException(
+            status_code=409,
+            detail="This link was revoked and cannot be extended. Create a new one.",
+        )
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_extended",
+        payload={
+            "invite_id": invite.id, "expires_at": expires_at,
+            "additional_uses": body.additional_uses,
+            "extended_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s extended by %s to %s (+%s seats)",
+        invite.id, admin.id, expires_at, body.additional_uses,
+    )
+    return await _invite_summary(session, invite)
+
+
+@admin_router.post(
+    "/invites/{invite_id}/regenerate", response_model=InviteTokenResponse,
+)
+async def regenerate_invite(
+    invite_id: str,
+    body: ExtendInviteRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Issue a fresh URL for the same invitation.
+
+    Every URL already handed out stops working — that is what separates
+    this from ``extend``. Use it when the link has been lost, or has gone
+    somewhere it shouldn't but the invitation itself is still wanted.
+    The role, scope, groups, seat cap and redemption history all stay on
+    the one row, so the invitation keeps a single audit trail across the
+    rotation instead of fragmenting into a new one.
+    """
+    from backend.app.auth.jwt import create_invite_token
+    from backend.app.db.repositories import invite_repo
+
+    await _load_own_invite(session, invite_id, admin, claims)
+
+    expires_at = invite_expiry(body.expires_in_hours)
+    invite = await invite_repo.regenerate(session, invite_id, expires_at=expires_at)
+    if invite is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This link was revoked and cannot be regenerated. Create a new one.",
+        )
+
+    token, expires_at = create_invite_token(
+        role=invite.role,
+        created_by=invite.created_by,
+        expires_in_hours=body.expires_in_hours,
+        workspace_id=invite.workspace_id,
+        email=invite.email,
+        group_ids=invite_repo.group_ids_of(invite) or None,
+        jti=invite.id,
+        token_version=invite.token_version,
+    )
+    invite.expires_at = expires_at
+    await session.flush()
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_regenerated",
+        payload={
+            "invite_id": invite.id,
+            "token_version": invite.token_version,
+            "regenerated_by": admin.id,
+        },
+    )
+    logger.info(
+        "Invite %s regenerated by %s (now version %s) — previous URLs are dead",
+        invite.id, admin.id, invite.token_version,
+    )
+    return InviteTokenResponse(
+        inviteToken=token,
+        role=invite.role,
+        workspaceId=invite.workspace_id,
+        email=invite.email,
+        groupIds=invite_repo.group_ids_of(invite) or None,
+        expiresAt=expires_at,
+        inviteId=invite.id,
+        maxUses=invite.max_uses,
+        emailDomain=invite.email_domain,
+    )
+
+
+@admin_router.get(
+    "/invites/{invite_id}/redemptions",
+    response_model=list[InviteRedemptionResponse],
+)
+async def list_invite_redemptions(
+    invite_id: str,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who signed up through this link, most recent first."""
+    from backend.app.db.repositories import invite_repo
+
+    existing = await invite_repo.get(session, invite_id)
+    if existing is None or (
+        existing.created_by != admin.id
+        and not has_permission(claims, "system:admin")
+    ):
+        raise HTTPException(status_code=404, detail=f"Invite '{invite_id}' not found")
+
+    rows = await invite_repo.list_redemptions(session, invite_id)
+    return [
+        InviteRedemptionResponse(
+            id=r.id, userId=r.user_id, email=r.email, redeemedAt=r.redeemed_at,
+        )
+        for r in rows
+    ]
+
+
+# ── Admin-created accounts ────────────────────────────────────────────
+#
+# The other way in. An invite is the user provisioning themselves from a
+# link you handed them; this provisions them directly, which is what you
+# need when there is nobody to hand a link TO yet — somebody starting on
+# Monday, an account migrated from another tool, a shared operations
+# login. ``signup_source`` has carried 'admin_created' since Phase 4;
+# this is the endpoint that finally sets it.
+
+_CREDENTIAL_MODES = frozenset({"setup_link", "password", "sso_only"})
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _derive_names(email: str) -> tuple[str, str]:
+    """A usable name from an address, for the bulk path.
+
+    A column of addresses is the usual source and rarely carries names.
+    "a.hopper@x.com" → ("A", "Hopper") beats an empty string, which the
+    schema forbids anyway, and beats the raw address, which looks like a
+    bug in every list that renders a name.
+    """
+    local = email.split("@", 1)[0]
+    parts = [p for p in re.split(r"[._\-+]+", local) if p]
+    if len(parts) >= 2:
+        return parts[0].capitalize(), " ".join(p.capitalize() for p in parts[1:])
+    return (parts[0].capitalize() if parts else email), ""
+
+
+async def _resolve_grant(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    body,
+) -> tuple[Optional[str], list[str], bool]:
+    """Validate the role/workspace the new accounts will receive.
+
+    Deliberately the same checks the invite path runs, via the same
+    helpers — an account created here and an account created by
+    redeeming an invite are the same account, so a rule that binds one
+    must bind the other or the stricter path is merely the slower one.
+
+    Returns ``(resolved_workspace_id, role_perms, is_privileged)``.
+    """
+    from backend.app.db.repositories import role_repo, workspace_repo
+
+    if not body.role:
+        # No role: nothing to resolve, and nothing to escalate. Still
+        # subject to the group rule below via the ceiling.
+        await _enforce_invite_ceiling(
+            claims, body, resolved_workspace_id=None,
+            role_perms=[], role_is_privileged=False,
+        )
+        return None, [], False
+
+    role = await role_repo.get_role(session, body.role)
+    if role is None:
+        raise HTTPException(status_code=400, detail=f"Unknown role '{body.role}'")
+
+    bundles = await role_repo.role_names_with_permissions(session, [body.role])
+    perms = bundles.get(body.role, [])
+    privileged = _role_is_privileged(perms)
+
+    needs_ws = (
+        body.role in _WORKSPACE_TEMPLATE_ROLES
+        or getattr(role, "scope_type", None) == "workspace"
+    )
+    fixed_ws = getattr(role, "scope_id", None) if getattr(role, "scope_type", None) == "workspace" else None
+    resolved_ws = fixed_ws or body.workspace_id
+
+    if needs_ws and not resolved_ws:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Role '{body.role}' is workspace-scoped and needs a workspace.",
+        )
+    if resolved_ws:
+        ws = await workspace_repo.get_workspace(session, resolved_ws)
+        if ws is None:
+            raise HTTPException(status_code=400, detail="Unknown workspace")
+
+    await _enforce_invite_ceiling(
+        claims, body, resolved_workspace_id=resolved_ws,
+        role_perms=perms, role_is_privileged=privileged,
+    )
+    return resolved_ws, perms, privileged
+
+
+async def _provision_user(
+    session: AsyncSession,
+    *,
+    email: str,
+    first_name: str,
+    last_name: str,
+    role: Optional[str],
+    workspace_id: Optional[str],
+    group_ids: Optional[list[str]],
+    credential: str,
+    password: Optional[str],
+    activate: bool,
+    actor_id: str,
+) -> tuple[str, Optional[str], Optional[str], list[str]]:
+    """Create one account and apply its grants.
+
+    Returns ``(user_id, setup_token, setup_expires_at, attached_groups)``.
+    Raises ValueError for "this address is already taken", which the
+    callers turn into a 409 or a per-row outcome respectively.
+    """
+    from backend.app.db.repositories import group_repo
+    from backend.auth_service.core.password import disabled_password_hash
+    from backend.app.api.v1.endpoints.auth import _grant_invite_role
+
+    normalised = email.strip().lower()
+    existing = await user_repo.get_user_by_email(session, normalised)
+    if existing is not None:
+        raise ValueError("already_a_user")
+
+    # A password the admin typed is the only one that gets hashed. The
+    # other two modes leave no usable local password at all: the setup
+    # link mode expects the user to set their own, and sso_only expects
+    # the IdP to vouch for them. Both use the sentinel rather than a
+    # random string, so `has_usable_password` can tell the difference.
+    if credential == "password":
+        if not password:
+            raise HTTPException(status_code=400, detail="A password is required.")
+        _check_password_strength(password)
+        pw_hash = hash_password(password)
+    else:
+        pw_hash = disabled_password_hash()
+
+    user = await user_repo.create_user(
+        session,
+        email=normalised,
+        password_hash=pw_hash,
+        first_name=first_name,
+        last_name=last_name,
+        status="active" if activate else "pending",
+        signup_source="admin_created",
+    )
+
+    if role:
+        await _grant_invite_role(
+            session, user.id, role, workspace_id, granted_by=actor_id,
+        )
+
+    attached: list[str] = []
+    for gid in (group_ids or []):
+        try:
+            await group_repo.add_member(session, gid, user.id, added_by=actor_id)
+            attached.append(gid)
+        except Exception:  # noqa: BLE001 — one bad group must not lose the account
+            logger.warning("Could not attach group %s to new user %s", gid, user.id)
+
+    setup_token: Optional[str] = None
+    setup_expires: Optional[str] = None
+    if credential == "setup_link":
+        setup_token, setup_expires = await user_repo.create_reset_token(session, user.id)
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.created_by_admin",
+        payload={
+            "user_id": user.id,
+            "created_by": actor_id,
+            "role": role,
+            "workspace_id": workspace_id,
+            "group_ids": attached,
+            "credential": credential,
+            "activated": activate,
+        },
+    )
+    return user.id, setup_token, setup_expires, attached
+
+
+@admin_router.post(
+    "",
+    response_model=AdminCreateUserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user(
+    body: AdminCreateUserRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Create one account directly, with the role and groups it needs.
+
+    Not gated on ``inviteLinksEnabled``: that flag governs *links*, and
+    an admin typing an account out by hand is not a link. Turning links
+    off in order to close the self-service door should not also take
+    away the ability to add somebody deliberately.
+
+    Who may call it follows the invite rule exactly — see
+    ``_enforce_invite_ceiling``. You cannot grant what you do not hold,
+    whichever door the account comes through.
+    """
+    if body.credential not in _CREDENTIAL_MODES:
+        raise HTTPException(status_code=400, detail="Unknown credential mode")
+    if not _EMAIL_RE.match(body.email.strip()):
+        raise HTTPException(status_code=400, detail="That is not a valid email address")
+
+    resolved_ws, _perms, _priv = await _resolve_grant(session, claims, body)
+
+    try:
+        user_id, token, expires, groups = await _provision_user(
+            session,
+            email=body.email,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            role=body.role,
+            workspace_id=resolved_ws,
+            group_ids=body.group_ids,
+            credential=body.credential,
+            password=body.password,
+            activate=body.activate,
+            actor_id=admin.id,
+        )
+    except ValueError:
+        # Not enumeration-sensitive: the caller is already an authenticated
+        # admin who can list every user on the next screen.
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that email already exists.",
+        )
+
+    logger.info("User %s created by admin %s", user_id, admin.id)
+    return AdminCreateUserResponse(
+        id=user_id,
+        email=body.email.strip().lower(),
+        first_name=body.first_name,
+        last_name=body.last_name,
+        status="active" if body.activate else "pending",
+        role=body.role,
+        workspace_id=resolved_ws,
+        group_ids=groups,
+        setup_token=token,
+        setup_expires_at=expires,
+    )
+
+
+@admin_router.post(
+    "/bulk",
+    response_model=BulkCreateUsersResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_users_bulk(
+    body: BulkCreateUsersRequest,
+    admin=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Create several accounts from one set of settings.
+
+    Partial success is the point: one address that already has an
+    account must not cost the other nineteen their onboarding. Every row
+    reports its own outcome, and the grant rules are resolved once for
+    the whole batch rather than per row — they are identical by
+    construction, and re-resolving would only invite drift.
+    """
+    if body.credential not in _CREDENTIAL_MODES:
+        raise HTTPException(status_code=400, detail="Unknown credential mode")
+    if body.credential == "password":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A shared password across a batch is not a credential. "
+                "Use a setup link, or SSO."
+            ),
+        )
+
+    resolved_ws, _perms, _priv = await _resolve_grant(session, claims, body)
+
+    results: list[BulkCreateUserResult] = []
+    seen: set[str] = set()
+    created = 0
+
+    for row in body.users:
+        email = row.email.strip().lower()
+        if not _EMAIL_RE.match(email):
+            results.append(BulkCreateUserResult(
+                email=row.email, outcome="invalid_email",
+                detail="Not a valid email address",
+            ))
+            continue
+        if email in seen:
+            results.append(BulkCreateUserResult(
+                email=email, outcome="duplicate",
+                detail="Listed more than once",
+            ))
+            continue
+        seen.add(email)
+
+        first = (row.first_name or "").strip()
+        last = (row.last_name or "").strip()
+        if not first:
+            first, derived_last = _derive_names(email)
+            last = last or derived_last
+
+        try:
+            user_id, token, _expires, _groups = await _provision_user(
+                session,
+                email=email,
+                first_name=first,
+                last_name=last,
+                role=body.role,
+                workspace_id=resolved_ws,
+                group_ids=body.group_ids,
+                credential=body.credential,
+                password=None,
+                activate=body.activate,
+                actor_id=admin.id,
+            )
+        except ValueError:
+            results.append(BulkCreateUserResult(
+                email=email, outcome="already_a_user",
+                detail="Already has an account",
+            ))
+            continue
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one row must not lose the batch
+            logger.warning("Bulk create failed for %s: %s", email, exc)
+            results.append(BulkCreateUserResult(
+                email=email, outcome="failed", detail="Could not be created",
+            ))
+            continue
+
+        created += 1
+        results.append(BulkCreateUserResult(
+            email=email, outcome="created", user_id=user_id, setup_token=token,
+        ))
+
+    logger.info(
+        "Bulk user creation by admin %s: %d created, %d skipped",
+        admin.id, created, len(results) - created,
+    )
+    return BulkCreateUsersResponse(
+        created=created,
+        skipped=len(results) - created,
+        results=results,
     )
