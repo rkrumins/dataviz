@@ -39,7 +39,7 @@ from backend.app.db.repositories.connection_repo import (
 logger = logging.getLogger(__name__)
 
 
-VALID_KINDS = {"oidc", "saml2", "custom"}
+VALID_KINDS = {"oidc", "saml2", "custom", "custom_profile"}
 VALID_LINKING_POLICIES = {"strict", "allow_verified", "manual_only", "disabled"}
 
 # Fields whose values must never be sent to the UI. The set is
@@ -50,6 +50,7 @@ _SECRET_FIELDS = frozenset({
     "sp_private_key",
     "idp_x509_cert",   # not strictly secret but redacted to discourage tampering
     "sp_x509_cert",
+    "shared_secret",   # custom_profile HS256 signing key
 })
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
@@ -91,6 +92,35 @@ def _validate_shape(
         raise ProviderValidationError("priority must be between 0 and 10000")
 
 
+def validate_button_icon(icon: Optional[str]) -> None:
+    """Refuse an icon the login page could never render.
+
+    The app serves ``img-src 'self' data: blob:`` (see
+    ``middleware/security_headers.py``), so a ``https://cdn.example/logo.png``
+    is silently blocked by the browser and the operator sees a broken image
+    with nothing explaining why. Better to refuse it here, where we can say
+    so, than to store a value that cannot work.
+
+    A remote URL would also make every anonymous hit on the login page fetch
+    a third-party asset, handing that third party the IP of everyone who
+    loads it — not something to enable by accident on an internal
+    deployment.
+    """
+    if not icon:
+        return
+    value = icon.strip()
+    if value.startswith("data:image/"):
+        return
+    if value.startswith("/") and not value.startswith("//"):
+        return
+    raise ProviderValidationError(
+        "button_icon must be a data: image URI or a same-origin path "
+        "starting with '/'. Remote URLs are blocked by the app's "
+        "Content-Security-Policy (img-src 'self' data: blob:) and would "
+        "render as a broken image."
+    )
+
+
 def encrypt_settings(settings: dict) -> str:
     """Serialise + Fernet-encrypt the settings dict.
 
@@ -128,17 +158,43 @@ def decrypt_settings(blob: Optional[str]) -> dict:
         return {}
 
 
+REDACTION_MARKER = "********"
+
+
 def redact_settings(settings: dict) -> dict:
-    """Return a shallow copy with secret fields replaced by ``"********"``
-    so the admin UI can show that *something* is configured without
-    leaking the actual value. The presence of the marker also lets the
-    UI know to render a "rotate secret" button instead of an edit
-    box."""
+    """Return a shallow copy with secret fields replaced by
+    ``REDACTION_MARKER`` so the admin UI can show that *something* is
+    configured without leaking the actual value. The presence of the marker
+    also lets the UI know to render a "rotate secret" button instead of an
+    edit box."""
     out = dict(settings)
     for key in list(out.keys()):
         if key in _SECRET_FIELDS and out[key]:
-            out[key] = "********"
+            out[key] = REDACTION_MARKER
     return out
+
+
+def _reject_redaction_marker(settings: dict) -> None:
+    """Refuse a write that would store the redaction marker as a real value.
+
+    ``redact_settings`` puts ``"********"`` on the wire for every secret
+    field, and ``update_provider`` MERGES settings — so the natural
+    GET-mutate-PATCH round-trip a script or Terraform provider performs would
+    write the mask over the actual secret and silently brick that IdP. The
+    admin UI strips these client-side, but a client-side guard is not an
+    invariant. 400 is the right answer: it tells the caller to omit the field
+    (keep the existing secret) or send a new value (rotate it).
+    """
+    offenders = sorted(
+        k for k, v in settings.items()
+        if k in _SECRET_FIELDS and v == REDACTION_MARKER
+    )
+    if offenders:
+        raise ProviderValidationError(
+            f"settings {offenders} still hold the redaction marker "
+            f"'{REDACTION_MARKER}'. Omit a secret field to keep its stored "
+            "value, or send a new value to rotate it."
+        )
 
 
 async def create_provider(
@@ -154,12 +210,18 @@ async def create_provider(
     enabled: bool = True,
     button_label: Optional[str] = None,
     button_icon: Optional[str] = None,
+    email_domains: Optional[list] = None,
+    lifecycle: str = "live",
     created_by: Optional[str] = None,
 ) -> IdpProviderORM:
     _validate_shape(
         slug=slug, display_name=display_name, kind=kind,
         linking_policy=linking_policy, priority=priority,
     )
+    # Also guarded on create: cloning an existing provider by GET-then-POST is
+    # the other obvious way to store the mask as a real secret.
+    _reject_redaction_marker(settings or {})
+    validate_button_icon(button_icon)
     row = IdpProviderORM(
         slug=slug.strip().lower(),
         display_name=display_name.strip(),
@@ -171,6 +233,16 @@ async def create_provider(
         linking_policy=linking_policy,
         button_label=(button_label or None) and button_label.strip(),
         button_icon=(button_icon or None) and button_icon.strip(),
+        email_domains=_encode_domains(email_domains),
+        # Defaults LIVE, and the admin endpoint overrides it to "draft".
+        #
+        # The policy "a provider a human just created is unproven" belongs at
+        # the human boundary, not here. The boot seeder (main.py) migrates
+        # env-var deployments into rows, and those are already serving
+        # traffic — defaulting to draft here would silently switch SSO off
+        # for every existing env-based deployment on upgrade, which is the
+        # same failure the migration's server_default='live' avoids.
+        lifecycle=lifecycle,
         created_at=_now(),
         created_by=created_by,
         updated_at=_now(),
@@ -193,6 +265,7 @@ async def update_provider(
     linking_policy: Optional[str] = None,
     button_label: Optional[str] = None,
     button_icon: Optional[str] = None,
+    email_domains: Optional[list] = None,
     updated_by: Optional[str] = None,
 ) -> Optional[IdpProviderORM]:
     row = await get_provider(session, provider_id)
@@ -213,6 +286,7 @@ async def update_provider(
             )
         row.linking_policy = linking_policy
     if settings is not None:
+        _reject_redaction_marker(settings)
         # Merge instead of replace so the admin UI can PATCH a single
         # secret without round-tripping every other field.
         existing = decrypt_settings(row.settings)
@@ -225,7 +299,10 @@ async def update_provider(
     if button_label is not None:
         row.button_label = (button_label or None) and button_label.strip()
     if button_icon is not None:
+        validate_button_icon(button_icon)
         row.button_icon = (button_icon or None) and button_icon.strip()
+    if email_domains is not None:
+        row.email_domains = _encode_domains(email_domains)
     row.updated_at = _now()
     row.updated_by = updated_by
     await session.flush()
@@ -268,6 +345,41 @@ async def list_providers(
     return list(result.scalars().all())
 
 
+async def list_public_providers(
+    session: AsyncSession,
+) -> list[IdpProviderORM]:
+    """Providers the outside world may see: enabled AND published.
+
+    The one definition of "public", so the answer cannot drift between the
+    login catalog, the login-context endpoint and email-domain routing. A
+    provider is visible only when BOTH are true:
+
+      * ``enabled``   — the operational switch, off during an incident.
+      * ``lifecycle == 'live'`` — readiness, set by an explicit publish.
+
+    A draft is fully rehearsable through the dry-run but reaches no
+    unauthenticated surface, which is what makes "configure it, prove it,
+    then publish it" safe rather than aspirational.
+    """
+    rows = await list_providers(session, only_enabled=True)
+    return [r for r in rows if getattr(r, "lifecycle", "live") == "live"]
+
+
+async def publish_provider(
+    session: AsyncSession, provider_id: str, *, updated_by: Optional[str] = None,
+) -> Optional[IdpProviderORM]:
+    """Promote a draft to live. Idempotent — publishing a live provider is
+    a no-op rather than an error, so a double-click cannot fail."""
+    row = await get_provider(session, provider_id)
+    if row is None:
+        return None
+    row.lifecycle = "live"
+    row.updated_at = _now()
+    row.updated_by = updated_by
+    await session.flush()
+    return row
+
+
 async def delete_provider(
     session: AsyncSession, provider_id: str,
 ) -> bool:
@@ -295,3 +407,107 @@ def parse_claim_mapping(row: IdpProviderORM) -> dict:
         )
         return {}
     return data if isinstance(data, dict) else {}
+
+# ── Email-domain routing (Home Realm Discovery) ──────────────────────
+
+
+def _encode_domains(domains: Optional[list]) -> Optional[str]:
+    """Normalise and store as a JSON array. Strips a leading ``@`` and
+    lower-cases, so ``@Corp.Example`` and ``corp.example`` are one thing."""
+    if domains is None:
+        return None
+    cleaned = sorted({
+        d.strip().lower().lstrip("@")
+        for d in domains if isinstance(d, str) and d.strip()
+    })
+    return json.dumps(cleaned)
+
+
+def parse_email_domains(row) -> list[str]:
+    """Domains that route to this provider, lower-cased. Tolerant of a
+    malformed blob — a bad value must not break the login page."""
+    raw = getattr(row, "email_domains", None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [d.strip().lower().lstrip("@") for d in parsed
+            if isinstance(d, str) and d.strip()]
+
+
+async def find_by_email_domain(
+    session: AsyncSession, domain: str,
+) -> Optional[IdpProviderORM]:
+    """The enabled provider claiming *domain*, or None.
+
+    Scans the enabled set rather than querying by predicate: the row count
+    is small (a handful of IdPs), and a LIKE against a JSON blob would be
+    both slower to reason about and wrong on substrings —
+    ``corp.example.com`` must not match a provider claiming ``example.com``.
+    """
+    needle = (domain or "").strip().lower().lstrip("@")
+    if not needle:
+        return None
+    rows = await list_public_providers(session)
+    for row in rows:
+        if needle in parse_email_domains(row):
+            return row
+    return None
+
+
+# ── Last assertion (claim-mapping aid) ───────────────────────────────
+
+
+#: Claim names whose values are never useful for mapping and are worth not
+#: keeping. The identity claims themselves ARE the point and are retained.
+_ASSERTION_REDACT_HINTS = (
+    "token", "secret", "password", "assertion", "credential", "signature",
+)
+
+
+def redact_assertion(claims: dict) -> dict:
+    """Drop credential-shaped values before storing an assertion.
+
+    An operator maps ``employeeId`` and ``emailAddress``; nobody maps an
+    embedded access token. Keys are kept so the shape stays visible —
+    only the value is replaced.
+    """
+    out: dict = {}
+    for key, value in (claims or {}).items():
+        lowered = str(key).lower()
+        if any(hint in lowered for hint in _ASSERTION_REDACT_HINTS):
+            out[key] = "********"
+        elif isinstance(value, dict):
+            out[key] = redact_assertion(value)
+        else:
+            out[key] = value
+    return out
+
+
+async def record_last_assertion(
+    session: AsyncSession, provider_id: str, claims: dict,
+) -> None:
+    """Store the most recent assertion, encrypted at rest.
+
+    Reuses the ``settings`` Fernet envelope: this is identity data about a
+    real person and must not sit in the clear next to it.
+    """
+    row = await get_provider(session, provider_id)
+    if row is None:
+        return
+    row.last_assertion = encrypt_settings(redact_assertion(claims or {}))
+    row.last_assertion_at = _now()
+
+
+async def read_last_assertion(
+    session: AsyncSession, provider_id: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Decrypt the stored assertion. Returns ``(claims, captured_at)``."""
+    row = await get_provider(session, provider_id)
+    if row is None or not row.last_assertion:
+        return None, None
+    return decrypt_settings(row.last_assertion), row.last_assertion_at

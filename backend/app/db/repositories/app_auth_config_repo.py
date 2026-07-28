@@ -33,6 +33,7 @@ class AuthConfigSnapshot:
     sso_enabled: bool
     allow_local_login: bool
     allow_jit_provisioning: bool
+    email_first_login: bool
     version: int
     updated_at: str
 
@@ -64,6 +65,7 @@ async def get_snapshot(session: AsyncSession) -> AuthConfigSnapshot:
             sso_enabled=True,
             allow_local_login=True,
             allow_jit_provisioning=True,
+            email_first_login=False,
             version=0,
             updated_at="",
         )
@@ -71,6 +73,7 @@ async def get_snapshot(session: AsyncSession) -> AuthConfigSnapshot:
         sso_enabled=bool(row.sso_enabled),
         allow_local_login=bool(row.allow_local_login),
         allow_jit_provisioning=bool(row.allow_jit_provisioning),
+        email_first_login=bool(getattr(row, 'email_first_login', False)),
         version=int(row.version or 1),
         updated_at=row.updated_at or "",
     )
@@ -83,6 +86,7 @@ async def update_config(
     sso_enabled: Optional[bool] = None,
     allow_local_login: Optional[bool] = None,
     allow_jit_provisioning: Optional[bool] = None,
+    email_first_login: Optional[bool] = None,
     updated_by: Optional[str] = None,
 ) -> AppAuthConfigORM:
     """Update one or more fields with optimistic concurrency. When
@@ -98,6 +102,7 @@ async def update_config(
             sso_enabled=True,
             allow_local_login=True,
             allow_jit_provisioning=True,
+            email_first_login=False,
             version=1,
             updated_at=_now(),
             updated_by=updated_by,
@@ -119,6 +124,8 @@ async def update_config(
         row.allow_local_login = bool(allow_local_login)
     if allow_jit_provisioning is not None:
         row.allow_jit_provisioning = bool(allow_jit_provisioning)
+    if email_first_login is not None:
+        row.email_first_login = bool(email_first_login)
     row.version = int(row.version or 1) + 1
     row.updated_at = _now()
     row.updated_by = updated_by

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.password import hash_password
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
+from backend.common.display_name import resolve_display_name
 from backend.common.roles import INVITE_GLOBAL_TIER
 from backend.common.models.auth import (
     SignUpRequest,
@@ -43,7 +44,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-limiter = Limiter(key_func=get_remote_address)
+# Share the auth-service limiter rather than constructing a second one.
+# slowapi's 429 handler reads ``request.app.state.limiter``, so exactly one
+# instance has to be the registered one; two would silently drift in config
+# and only the registered one's settings would shape the response headers.
+# The dependency direction is forced — ``auth_service`` may not import
+# ``backend.app.*`` (enforced by test_auth_service_isolation), so the import
+# goes this way.
+from backend.auth_service.api.router import limiter  # noqa: E402
 
 #: What to assume about ``inviteLinksEnabled`` when the flag cannot be read.
 #:
@@ -129,10 +137,14 @@ async def _build_user_response(session: AsyncSession, user) -> UserPublicRespons
         email=user.email,
         firstName=user.first_name,
         lastName=user.last_name,
-        displayName=f"{user.first_name} {user.last_name}",
+        displayName=resolve_display_name(
+            user.display_name, user.first_name, user.last_name,
+        ),
         status=user.status,
         role=role,
         createdAt=user.created_at,
+        avatarId=user.avatar_id,
+        mustChangePassword=bool(user.must_change_password),
     )
 
 

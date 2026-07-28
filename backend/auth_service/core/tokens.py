@@ -31,6 +31,7 @@ _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
 _LINK_INTENT_AUDIENCE = f"{JWT_AUDIENCE}:link_intent"
+_DRYRUN_AUDIENCE = f"{JWT_AUDIENCE}:dryrun"
 
 
 # ── Access tokens ────────────────────────────────────────────────────
@@ -86,6 +87,21 @@ class RefreshClaims:
     # local password sessions (which keep their 7-day refresh TTL and
     # are not subject to the SSO ceiling).
     auth_time: int | None = None
+    # When this token was minted, in epoch MILLISECONDS. Compared
+    # against the user's ``sessions_valid_from`` cutoff on /refresh so a
+    # revocation cannot be walked around by rotating.
+    #
+    # Milliseconds rather than the standard second-granular ``iat``
+    # because both ends of that comparison routinely land in the same
+    # second: revoking and then immediately refreshing, or revoking and
+    # then immediately signing back in. At second precision one of those
+    # two has to be wrong — either a doomed token survives or a
+    # legitimate new one is refused.
+    #
+    # ``0`` means "this token predates the claim". Those are honoured
+    # rather than refused, so deploying the cutoff does not sign the
+    # whole estate out on the way in.
+    mint_ms: int = 0
 
 
 def create_refresh_token(
@@ -117,6 +133,10 @@ def create_refresh_token(
         "iss": JWT_ISSUER,
         "aud": _REFRESH_AUDIENCE,
         "iat": now,
+        # Millisecond mint instant. ``iat`` is kept as-is for the
+        # standard claim; this one exists because the revocation cutoff
+        # needs sub-second resolution. See ``RefreshClaims.mint_ms``.
+        "mat": int(now.timestamp() * 1000),
         "exp": expires_at,
     }
     if auth_time is not None:
@@ -130,6 +150,7 @@ def create_refresh_token(
         family_id=fam,
         exp=int(expires_at.timestamp()),
         auth_time=int(auth_time) if auth_time is not None else None,
+        mint_ms=int(now.timestamp() * 1000),
     )
     return token, claims
 
@@ -161,8 +182,22 @@ def decode_refresh_token(token: str) -> RefreshClaims:
             auth_time = int(auth_time_raw)
         except (TypeError, ValueError):
             raise jwt.InvalidTokenError("Refresh token auth_time is malformed")
+    # Prefer the millisecond claim. Tokens minted before it existed fall
+    # back to the standard second-granular ``iat``, which is enough to
+    # place them safely on one side of a cutoff stamped later. A token
+    # carrying neither reads as 0 — "cannot tell" — and is let through.
+    try:
+        mint_ms = int(payload.get("mat") or 0)
+    except (TypeError, ValueError):
+        mint_ms = 0
+    if not mint_ms:
+        try:
+            mint_ms = int(payload.get("iat") or 0) * 1000
+        except (TypeError, ValueError):
+            mint_ms = 0
     return RefreshClaims(
         sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
+        mint_ms=mint_ms,
     )
 
 
@@ -422,4 +457,42 @@ def decode_link_intent_token(token: str) -> dict:
     )
     if payload.get("purpose") != "link_intent":
         raise jwt.InvalidTokenError("Not a link-intent token")
+    return payload
+
+
+# ── Dry-run tokens ("what would happen if I signed in here?") ────────
+#
+# An admin starts a real IdP round-trip from the provider form. The
+# signed ``nx_dryrun`` cookie marks the flow so the callback computes the
+# outcome and renders it instead of minting a session. Minted only by an
+# admin-authed endpoint, which is what keeps this from being a way for
+# an anonymous caller to probe identities.
+
+
+def create_dryrun_token(
+    *, admin_id: str, provider_id: str, expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "dryrun",
+        "admin_id": admin_id,
+        "provider_id": provider_id,
+        "iss": JWT_ISSUER,
+        "aud": _DRYRUN_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_dryrun_token(token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_DRYRUN_AUDIENCE,
+    )
+    if payload.get("purpose") != "dryrun":
+        raise jwt.InvalidTokenError("Not a dry-run token")
     return payload

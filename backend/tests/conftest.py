@@ -75,6 +75,14 @@ from backend.auth_service.cookies import CSRF_COOKIE_NAME
 from backend.auth_service.interface import User
 from backend.auth_service.providers import LocalIdentityProvider, register_provider
 from backend.auth_service.service import LocalIdentityService
+from backend.auth_service.providers import PROVIDER_BUILDERS
+from backend.auth_service.providers.registry import (
+    ProviderConfigSnapshot,
+    ProviderRegistry,
+    configure_registry,
+)
+from backend.app.db.repositories import idp_provider_repo as _idp_provider_repo
+from backend.app.db.repositories import user_identity_repo as _user_identity_repo
 
 
 # Process-wide provider registry: register the local provider once for
@@ -454,3 +462,116 @@ async def test_client(
     # Clean up overrides so they don't leak between test modules
     app.dependency_overrides.clear()
     app.state.identity_service = previous_identity_service
+
+
+@pytest.fixture()
+async def csrf_client(
+    test_client: AsyncClient,
+) -> AsyncGenerator[AsyncClient, None]:
+    """A client that carries NO CSRF cookie or header, so ``CSRFMiddleware``
+    actually runs.
+
+    ``test_client`` pre-seeds both halves of the double-submit (see above),
+    which is the right default — hundreds of tests would otherwise have to
+    walk through /login first. The cost is that the middleware is a no-op for
+    the entire suite, and a route wrongly left un-exempt looks fine in tests
+    while 403ing in production. That is exactly how the SAML ACS endpoint —
+    an IdP-originated cross-site form POST that cannot carry a header — stayed
+    broken.
+
+    Depends on ``test_client`` so the app overrides and IdentityService wiring
+    are already installed; this only swaps the transport for one without the
+    tokens.
+    """
+    from backend.app.main import app
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver",
+    ) as client:
+        yield client
+
+
+# ---------------------------------------------------------------------------
+# SSO fixtures
+#
+# Shared rather than per-module: any test that drives a slug-routed
+# ``/auth/{slug}/...`` endpoint needs the provider registry wired to the
+# per-test session, and any test that asserts on SSO auditing needs an
+# IdentityService with the SSO repos attached. The conftest default
+# ``test_client`` service is local-password only, so ``complete_sso_login``
+# would bail with ``identity_repo_unavailable``.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+async def registry(db_session):
+    """Wire the process registry to the per-test session so the
+    slug-routed endpoints resolve real ``idp_providers`` rows."""
+    class _Loader:
+        @staticmethod
+        def _snap(row):
+            return ProviderConfigSnapshot(
+                id=row.id, slug=row.slug, display_name=row.display_name,
+                kind=row.kind, enabled=bool(row.enabled),
+                priority=int(row.priority or 100),
+                settings=_idp_provider_repo.decrypt_settings(row.settings),
+                claim_mapping=_idp_provider_repo.parse_claim_mapping(row),
+                linking_policy=row.linking_policy,
+                button_label=row.button_label, button_icon=row.button_icon,
+            )
+
+        async def get_by_id(self, provider_id):
+            row = await _idp_provider_repo.get_provider(db_session, provider_id)
+            return self._snap(row) if row is not None else None
+
+        async def get_by_slug(self, slug):
+            row = await _idp_provider_repo.get_provider_by_slug(db_session, slug)
+            return self._snap(row) if row is not None else None
+
+        async def list_enabled(self):
+            # Must mirror the real loader in ``main.py``, which asks for
+            # PUBLIC providers (enabled AND published). Calling
+            # ``list_providers(only_enabled=True)`` here instead would make
+            # this double disagree with production about what the world can
+            # see — the one thing a stand-in for a visibility boundary must
+            # never do.
+            rows = await _idp_provider_repo.list_public_providers(db_session)
+            return [self._snap(r) for r in rows]
+
+    reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,
+                           ttl_seconds=0)
+    configure_registry(reg)
+    yield reg
+    await reg.invalidate()
+
+
+@pytest.fixture()
+def sso_events(db_session):
+    """Install an ``IdentityService`` on the app that has the SSO repos
+    wired (the conftest default is local-password only, so
+    ``complete_sso_login`` would bail with ``identity_repo_unavailable``).
+    Yields the captured outbox events."""
+    from backend.app.main import app
+
+    events: list[tuple[str, dict]] = []
+
+    @asynccontextmanager
+    async def _factory():
+        yield db_session
+
+    async def _outbox(session, event_type, payload):
+        events.append((event_type, payload))
+
+    previous = getattr(app.state, "identity_service", None)
+    app.state.identity_service = LocalIdentityService(
+        session_factory=_factory,
+        user_repo=_user_repo,
+        user_identity_repo=_user_identity_repo,
+        refresh_store_factory=lambda s: None,
+        outbox_emit=_outbox,
+        claims_resolver=None,
+    )
+    yield events
+    app.state.identity_service = previous
+
+

@@ -6,9 +6,15 @@
  * `/test-connection` (nothing persisted).
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
+// Spread the real module: the wizard header renders a <DocsLink>, which
+// is a router <Link>, so a one-key factory breaks on mount.
+vi.mock('react-router-dom', async () => ({
+  ...await vi.importActual<typeof import('react-router-dom')>('react-router-dom'),
+  useNavigate: () => vi.fn(),
+}))
 vi.mock('@/store/branding', () => ({ useBrand: () => ({ appName: 'Test' }) }))
 vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
 vi.mock('@/services/redisConfigService', () => ({
@@ -47,15 +53,17 @@ const PROVIDER = {
 describe('ProviderOnboardingWizard edit-mode connectivity test', () => {
   it('review step exposes a pending-payload test that calls /test-connection', async () => {
     render(
-      <ProviderOnboardingWizard
-        isOpen
-        mode="edit"
-        provider={PROVIDER}
-        providers={[PROVIDER]}
-        onClose={() => undefined}
-        onCreated={() => undefined}
-        onUpdated={() => undefined}
-      />,
+      <MemoryRouter>
+        <ProviderOnboardingWizard
+          isOpen
+          mode="edit"
+          provider={PROVIDER}
+          providers={[PROVIDER]}
+          onClose={() => undefined}
+          onCreated={() => undefined}
+          onUpdated={() => undefined}
+        />
+      </MemoryRouter>,
     )
 
     // Edit mode starts on Connection; FalkorDB flow: Connection → Review.

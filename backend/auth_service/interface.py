@@ -16,6 +16,8 @@ from typing import Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.common.display_name import resolve_display_name
+
 
 # ── Domain DTOs ──────────────────────────────────────────────────────
 
@@ -38,17 +40,26 @@ class User(BaseModel):
     email: str
     first_name: str = Field(alias="firstName")
     last_name: str = Field(alias="lastName")
+    # Stored override; None means "derive from first + last".
+    chosen_display_name: Optional[str] = Field(None, alias="chosenDisplayName")
     role: str
     status: str
     auth_provider: str = Field("local", alias="authProvider")
     created_at: str = Field("", alias="createdAt")
     updated_at: str = Field("", alias="updatedAt")
+    # Chosen avatar illustration, or None to fall back to initials.
+    avatar_id: Optional[str] = Field(None, alias="avatarId")
+    # True while the account is holding a password it must rotate before
+    # it can do anything else. See ``get_current_user``.
+    must_change_password: bool = Field(False, alias="mustChangePassword")
     # IdP-mapped attributes. Empty dict for local-only users.
     attributes: dict = Field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
-        return f"{self.first_name} {self.last_name}".strip()
+        return resolve_display_name(
+            self.chosen_display_name, self.first_name, self.last_name,
+        )
 
 
 @dataclass(frozen=True)

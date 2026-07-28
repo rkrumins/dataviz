@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RegistryConnections } from './RegistryConnections'
 
@@ -24,7 +25,12 @@ const {
   testOne: vi.fn(),
 }))
 
-vi.mock('react-router-dom', () => ({
+// Spread the real module rather than listing exports. A one-key factory
+// breaks the moment anything in the tree reaches for another router
+// export — which is exactly how <DocsLink> (a router <Link>) took out
+// the wizard tests. Not currently in this tree; kept safe on purpose.
+vi.mock('react-router-dom', async () => ({
+  ...await vi.importActual<typeof import('react-router-dom')>('react-router-dom'),
   useNavigate: () => vi.fn(),
 }))
 
@@ -82,9 +88,11 @@ const sampleProvider = {
 function renderRegistry() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <QueryClientProvider client={qc}>
-      <RegistryConnections />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <RegistryConnections />
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 }
 

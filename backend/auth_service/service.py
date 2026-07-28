@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import jwt as pyjwt
@@ -27,6 +29,8 @@ from .core.config import (
     JWT_REFRESH_EXPIRY_DAYS,
     SSO_SESSION_MAX_AGE_SECONDS,
 )
+from backend.common.identity_provenance import asserted_fields, build_snapshot
+
 from .core.password import disabled_password_hash
 from .core.tokens import (
     create_access_token,
@@ -72,6 +76,29 @@ def _build_reauth_url(provider_slug: Optional[str], *, next_path: str) -> str:
     return f"{base}?next={quote(safe_next, safe='/')}&force=1"
 
 
+@dataclass(frozen=True)
+class SsoDecision:
+    """What an incoming SSO identity means, before anything is done about it.
+
+    Produced by ``_classify_sso_login`` from reads alone, and consumed two
+    ways: ``complete_sso_login`` executes the writes for the action, and
+    ``preview_sso_login`` renders it for an operator rehearsing a sign-in.
+    One producer is the point — a rehearsal that disagreed with the login
+    it rehearses would be worse than no rehearsal.
+    """
+    #: sign_in_existing | link_intent | provision_new | link_existing | rejected
+    action: str
+    #: The account this would touch, when there is one.
+    user: Any = None
+    #: The ``user_identities`` row to touch, on the returning-subject path.
+    identity_row: Any = None
+    #: Set when ``action == "rejected"``: the ``SSOAuthError`` code.
+    error: Optional[str] = None
+    deny_reasons: tuple[str, ...] = ()
+    has_existing_identity: bool = False
+    email_verified: bool = False
+
+
 class LocalIdentityService:
     """In-process ``IdentityService`` (Phase 3 — multi-IdP, multi-identity).
 
@@ -115,8 +142,11 @@ class LocalIdentityService:
         refresh_store_factory,
         user_identity_repo=None,
         outbox_emit=None,
+        email_domain_resolver=None,
+        assertion_recorder=None,
         claims_resolver: Optional[Callable[..., Awaitable[dict]]] = None,
         sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
+        sso_role_preview: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
     ):
@@ -125,8 +155,18 @@ class LocalIdentityService:
         self._user_identity_repo = user_identity_repo
         self._refresh_store_factory = refresh_store_factory
         self._outbox_emit = outbox_emit
+        # Injected by app startup: (domain) -> ProviderConfigSnapshot | None.
+        # Lives outside this module because resolving it needs the provider
+        # repo, and auth_service may not import backend.app.* .
+        self._email_domain_resolver = email_domain_resolver
+        # (session, provider_id, claims) -> None. Injected for the
+        # same isolation reason as the resolver above.
+        self._assertion_recorder = assertion_recorder
         self._claims_resolver = claims_resolver
         self._sso_role_reconciler = sso_role_reconciler
+        # Read-only sibling of the reconciler, for the dry-run: same
+        # mapping lookup, no writes.
+        self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
@@ -279,6 +319,28 @@ class LocalIdentityService:
                 await store.revoke_family(claims.family_id)
                 raise InvalidRefreshToken("user_inactive")
 
+            # ── Session revocation cutoff ────────────────────────────
+            # Revoking sessions tombstones live access-token ``sid``s in
+            # Redis, but that alone does not sign anyone out: the
+            # revocation entry expires with the access token, and this
+            # method mints a FRESH random ``sid`` on every rotation, so
+            # a client that eats one 401 and silently refreshes — which
+            # the SPA does automatically — comes straight back with a
+            # ``sid`` that was never on the list.
+            #
+            # ``sessions_valid_from`` is the durable half. Anything
+            # issued before the cutoff is refused and its family killed,
+            # so "sign out everywhere" means it.
+            if _refresh_predates_cutoff(
+                claims.mint_ms, getattr(orm, "sessions_valid_from", None),
+            ):
+                await store.revoke_family(claims.family_id)
+                logger.info(
+                    "Refresh rejected (sessions_revoked) for user=%s family=%s",
+                    claims.sub, claims.family_id,
+                )
+                raise InvalidRefreshToken("sessions_revoked")
+
             # ── SSO daily re-auth ceiling ────────────────────────────
             # The presence of ``auth_time`` in the refresh JWT means
             # "this session was minted by an SSO login" — we don't need
@@ -399,6 +461,7 @@ class LocalIdentityService:
         provider_slug: Optional[str] = None,
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
+        assurance: Optional[str] = None,
     ) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue
         a session.
@@ -456,39 +519,52 @@ class LocalIdentityService:
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
-            # 1. Known subject (provider_id, external_id) — reuse the
-            #    account it belongs to, must be active.
-            existing_identity = await self._user_identity_repo.get_by_subject(
-                session, provider_id=provider_id, external_id=external_id,
+            # Which branch fires is decided in one place, shared with the
+            # dry-run so a rehearsal cannot disagree with the real thing.
+            # What follows is only the consequences.
+            decision = await self._classify_sso_login(
+                session, identity, provider_id=provider_id,
+                linking_policy=linking_policy,
+                link_intent_user_id=link_intent_user_id,
             )
-            orm = None
+            orm = decision.user
+            link_metadata = {"groups": idp_groups, "attributes": attributes}
 
-            if existing_identity is not None:
-                orm = await self._user_repo.get_user_by_id(
-                    session, existing_identity.user_id,
-                )
-                if orm is None or orm.deleted_at is not None or orm.status != "active":
-                    raise SSOAuthError("sso_account_inactive")
+            if decision.action == "rejected":
+                # The refusals that operators need to see get an audit
+                # event in its own transaction, since this one rolls back.
+                if decision.error == "jit_disabled":
+                    await self._emit_audit(
+                        "user.sso_jit_blocked",
+                        {"email": email, "provider_id": provider_id,
+                         "external_id": external_id,
+                         "reason": "jit_provisioning_disabled"},
+                    )
+                elif decision.error == "unsafe_auto_link":
+                    await self._emit_audit(
+                        "user.sso_link_denied",
+                        {"email": email, "provider_id": provider_id,
+                         "external_id": external_id,
+                         "reason": "unsafe_auto_link",
+                         "deny_reasons": list(decision.deny_reasons),
+                         "linking_policy": linking_policy,
+                         "email_verified": email_verified,
+                         "existing_status": orm.status if orm else None,
+                         "existing_has_identity": decision.has_existing_identity},
+                    )
+                raise SSOAuthError(decision.error or "sso_rejected")
+
+            if decision.action == "sign_in_existing":
                 await self._user_identity_repo.touch_last_login(
-                    session, existing_identity.id,
-                    metadata={"groups": idp_groups, "attributes": attributes},
+                    session, decision.identity_row.id, metadata=link_metadata,
                 )
 
-            # 2. Link-intent path — bind the subject to the current
-            #    authenticated user. Skips the policy gate because the
-            #    user just authenticated via password / another IdP
-            #    moments ago to start the link.
-            elif link_intent_user_id is not None:
-                orm = await self._user_repo.get_user_by_id(
-                    session, link_intent_user_id,
-                )
-                if orm is None or orm.deleted_at is not None or orm.status != "active":
-                    raise SSOAuthError("link_target_inactive")
+            elif decision.action == "link_intent":
                 await self._user_identity_repo.create_identity(
                     session,
                     user_id=orm.id, provider_id=provider_id,
                     external_id=external_id, email_at_link=email,
-                    metadata={"groups": idp_groups, "attributes": attributes},
+                    metadata=link_metadata,
                 )
                 if self._outbox_emit is not None:
                     await self._outbox_emit(
@@ -497,112 +573,86 @@ class LocalIdentityService:
                          "external_id": external_id, "via": "self_service"},
                     )
 
-            else:
-                # 3. New subject — does the email collide with an
-                #    existing account?
-                by_email = await self._user_repo.get_user_by_email(session, email)
-                if by_email is None:
-                    # Phase 4: JIT provisioning is gated on the
-                    # platform posture. When ``allow_jit_provisioning``
-                    # is false, brand-new IdP subjects with no matching
-                    # local user get rejected here. Audit the deny so
-                    # operators can spot misconfigured users / IdPs.
-                    if not cfg.allow_jit_provisioning:
-                        await self._emit_audit(
-                            "user.sso_jit_blocked",
-                            {"email": email, "provider_id": provider_id,
-                             "external_id": external_id,
-                             "reason": "jit_provisioning_disabled"},
-                        )
-                        raise SSOAuthError("jit_disabled")
-                    if linking_policy == "disabled":
-                        # Policy explicitly says "no linking" — but the
-                        # email is free, so JIT-provision a fresh user.
-                        # This is the same as the "strict, no
-                        # collision" branch; deny only applies to the
-                        # collision case below.
-                        pass
-                    orm = await self._user_repo.create_sso_user(
-                        session,
-                        email=email,
-                        first_name=identity.first_name,
-                        last_name=identity.last_name,
-                        password_hash=disabled_password_hash(),
-                        signup_source="sso_jit",
-                        signup_provider_id=provider_id,
+            elif decision.action == "provision_new":
+                orm = await self._user_repo.create_sso_user(
+                    session,
+                    email=email,
+                    first_name=identity.first_name,
+                    last_name=identity.last_name,
+                    password_hash=disabled_password_hash(),
+                    signup_source="sso_jit",
+                    signup_provider_id=provider_id,
+                )
+                await self._user_identity_repo.create_identity(
+                    session,
+                    user_id=orm.id, provider_id=provider_id,
+                    external_id=external_id, email_at_link=email,
+                    metadata=link_metadata,
+                )
+                if self._outbox_emit is not None:
+                    await self._outbox_emit(
+                        session, "user.sso_provisioned",
+                        {"user_id": orm.id, "email": orm.email,
+                         "provider_id": provider_id,
+                         "external_id": external_id,
+                         "linking_policy": linking_policy,
+                         "signup_source": "sso_jit"},
                     )
-                    await self._user_identity_repo.create_identity(
-                        session,
-                        user_id=orm.id, provider_id=provider_id,
-                        external_id=external_id, email_at_link=email,
-                        metadata={"groups": idp_groups, "attributes": attributes},
-                    )
-                    if self._outbox_emit is not None:
-                        await self._outbox_emit(
-                            session, "user.sso_provisioned",
-                            {"user_id": orm.id, "email": orm.email,
-                             "provider_id": provider_id,
-                             "external_id": external_id,
-                             "linking_policy": linking_policy,
-                             "signup_source": "sso_jit"},
-                        )
-                else:
-                    # Collision branch — apply the linking policy.
-                    has_existing_identity = (
-                        await self._user_identity_repo.has_any_identity(
-                            session, by_email.id,
-                        )
-                    )
-                    deny_reasons: list[str] = []
-                    if linking_policy in ("manual_only", "disabled"):
-                        deny_reasons.append(f"policy:{linking_policy}")
-                    if not email_verified:
-                        deny_reasons.append("email_unverified")
-                    if by_email.status != "active":
-                        deny_reasons.append(f"existing_status:{by_email.status}")
-                    if by_email.deleted_at is not None:
-                        deny_reasons.append("existing_deleted")
-                    if (
-                        linking_policy == "strict"
-                        and has_existing_identity
-                    ):
-                        deny_reasons.append("strict_existing_sso")
 
-                    if deny_reasons:
-                        await self._emit_audit(
-                            "user.sso_link_denied",
-                            {"email": email, "provider_id": provider_id,
-                             "external_id": external_id,
-                             "reason": "unsafe_auto_link",
-                             "deny_reasons": deny_reasons,
-                             "linking_policy": linking_policy,
-                             "email_verified": email_verified,
-                             "existing_status": by_email.status,
-                             "existing_has_identity": has_existing_identity},
-                        )
-                        raise SSOAuthError("unsafe_auto_link")
-
-                    # Auto-link safe. Add the identity row to the
-                    # existing user (no longer destructively rewriting
-                    # password_hash — local + SSO can coexist when
-                    # the policy allows).
-                    orm = by_email
-                    await self._user_identity_repo.create_identity(
-                        session,
-                        user_id=orm.id, provider_id=provider_id,
-                        external_id=external_id, email_at_link=email,
-                        metadata={"groups": idp_groups, "attributes": attributes},
+            elif decision.action == "link_existing":
+                # Add the identity row to the existing user — not a
+                # destructive rewrite of password_hash; local + SSO
+                # coexist when the policy allows.
+                await self._user_identity_repo.create_identity(
+                    session,
+                    user_id=orm.id, provider_id=provider_id,
+                    external_id=external_id, email_at_link=email,
+                    metadata=link_metadata,
+                )
+                if self._outbox_emit is not None:
+                    await self._outbox_emit(
+                        session, "user.sso_linked",
+                        {"user_id": orm.id, "email": orm.email,
+                         "provider_id": provider_id,
+                         "external_id": external_id,
+                         "linking_policy": linking_policy,
+                         "has_password": _has_password(orm),
+                         "had_existing_identity": decision.has_existing_identity},
                     )
-                    if self._outbox_emit is not None:
-                        await self._outbox_emit(
-                            session, "user.sso_linked",
-                            {"user_id": orm.id, "email": orm.email,
-                             "provider_id": provider_id,
-                             "external_id": external_id,
-                             "linking_policy": linking_policy,
-                             "has_password": _has_password(orm),
-                             "had_existing_identity": has_existing_identity},
-                        )
+
+            # ── Profile fields the IdP owns ──────────────────────────
+            #
+            # Names used to be written once, at JIT provisioning, and
+            # never again — so the IdP seeded the profile and then drifted
+            # from it forever. Re-applying them here is what makes "the
+            # IdP is the source of truth" an actual property rather than
+            # a disabled input on a form.
+            #
+            # Only fields this login actually carried are touched. An IdP
+            # that releases no ``given_name`` leaves the field alone
+            # instead of blanking it, and leaves it editable — see
+            # ``identity_provenance``.
+            #
+            # Best-effort, like the metadata write below: a profile that
+            # failed to re-sync must not cost somebody their sign-in.
+            owned = asserted_fields(
+                first_name=identity.first_name, last_name=identity.last_name,
+            )
+            if owned:
+                try:
+                    updates = {}
+                    if "first_name" in owned:
+                        updates["first_name"] = identity.first_name.strip()
+                    if "last_name" in owned:
+                        updates["last_name"] = identity.last_name.strip()
+                    await self._user_repo.update_identity(
+                        session, orm.id, **updates,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "IdP profile re-sync failed (user=%s, provider=%s): %s",
+                        orm.id, provider_id, exc,
+                    )
 
             # Persist the IdP-asserted groups + attributes on the user
             # row so the admin UI / /me can surface the latest snapshot.
@@ -616,6 +666,14 @@ class LocalIdentityService:
                         raw_claims=identity.raw_claims,
                         attributes=attributes,
                         source_provider_id=provider_id,
+                        # Rewritten wholesale each login, which is what
+                        # makes "most recently authenticated provider
+                        # wins" fall out without a precedence table.
+                        idp_managed=build_snapshot(
+                            fields=owned,
+                            provider_id=provider_id,
+                            at=_now_iso(),
+                        ),
                     )
             except TypeError:
                 # Pre-Phase-3 signature (no ``attributes`` kwarg).
@@ -678,6 +736,11 @@ class LocalIdentityService:
                     "provider_slug": provider_slug,
                     "auth_time": auth_time,
                     "groups": idp_groups,
+                    # How well we actually knew this person. Recorded on the
+                    # login itself so the question is answerable later without
+                    # reconstructing what the provider's settings were at the
+                    # time — they may have changed since.
+                    "assurance": assurance,
                 }
                 if reconcile_result is not None:
                     payload["reconcile"] = {
@@ -687,11 +750,199 @@ class LocalIdentityService:
                     }
                 await self._outbox_emit(session, "user.logged_in", payload)
 
+            # Capture what this provider actually sent, so an operator can
+            # build the claim mapping against reality rather than a sample
+            # they typed from memory. Best-effort and last: a failure here
+            # must never cost someone their login.
+            if self._assertion_recorder is not None:
+                try:
+                    await self._assertion_recorder(
+                        session, provider_id,
+                        (identity.raw_claims or {}).get("claims") or {},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Recording last assertion failed (provider=%s): %s",
+                        provider_id, exc,
+                    )
+
         user = _orm_to_user(orm, role=_primary_role(roles))
         tokens = self._issue_tokens(
             user, family_id=None, claims_extra=claims_extra, auth_time=auth_time,
         )
         return user, tokens
+
+    async def _classify_sso_login(
+        self,
+        session,
+        identity,
+        *,
+        provider_id: str,
+        linking_policy: str,
+        link_intent_user_id: Optional[str] = None,
+    ) -> "SsoDecision":
+        """Decide what this identity means, without changing anything.
+
+        Reads only. Every branch of the real login and every branch of the
+        dry-run comes from here, so the rehearsal cannot disagree with the
+        sign-in it rehearses — previously the two mirrored each other's
+        structure and only shared the deny gate, guarded by a test that
+        grepped the source for a function name. A grep is what you write
+        when the structure cannot make the guarantee itself.
+
+        The caller owns the consequences: writes for
+        :meth:`complete_sso_login`, a rendered explanation for
+        :meth:`preview_sso_login`. Audit events for the refusals belong to
+        the caller too — a rehearsal must not emit them.
+        """
+        email_verified = _claims_email_verified(identity.raw_claims)
+
+        # 1. Known subject (provider_id, external_id) — reuse the account
+        #    it belongs to, must be active.
+        existing_identity = await self._user_identity_repo.get_by_subject(
+            session, provider_id=provider_id,
+            external_id=identity.external_id,
+        )
+        if existing_identity is not None:
+            orm = await self._user_repo.get_user_by_id(
+                session, existing_identity.user_id,
+            )
+            if orm is None or orm.deleted_at is not None \
+                    or orm.status != "active":
+                return SsoDecision("rejected", error="sso_account_inactive")
+            return SsoDecision(
+                "sign_in_existing", user=orm, identity_row=existing_identity,
+            )
+
+        # 2. Link-intent path — bind the subject to the current
+        #    authenticated user. Skips the policy gate because the user
+        #    just authenticated moments ago to start the link.
+        if link_intent_user_id is not None:
+            orm = await self._user_repo.get_user_by_id(
+                session, link_intent_user_id,
+            )
+            if orm is None or orm.deleted_at is not None \
+                    or orm.status != "active":
+                return SsoDecision("rejected", error="link_target_inactive")
+            return SsoDecision("link_intent", user=orm)
+
+        # 3. New subject — does the email collide with an existing account?
+        by_email = await self._user_repo.get_user_by_email(
+            session, identity.email,
+        )
+        if by_email is None:
+            cfg = await self._auth_config_provider.get()
+            if not cfg.allow_jit_provisioning:
+                return SsoDecision("rejected", error="jit_disabled")
+            return SsoDecision("provision_new")
+
+        has_existing_identity = await self._user_identity_repo.has_any_identity(
+            session, by_email.id,
+        )
+        deny_reasons = self._link_deny_reasons(
+            by_email, linking_policy=linking_policy,
+            email_verified=email_verified,
+            has_existing_identity=has_existing_identity,
+        )
+        if deny_reasons:
+            return SsoDecision(
+                "rejected", user=by_email, error="unsafe_auto_link",
+                deny_reasons=tuple(deny_reasons),
+                has_existing_identity=has_existing_identity,
+                email_verified=email_verified,
+            )
+        return SsoDecision(
+            "link_existing", user=by_email,
+            has_existing_identity=has_existing_identity,
+        )
+
+    async def preview_sso_login(
+        self,
+        identity,
+        *,
+        provider_id: str,
+        linking_policy: str = "strict",
+        link_intent_user_id: Optional[str] = None,
+    ) -> dict:
+        """What ``complete_sso_login`` WOULD do with this identity.
+
+        Read-only by construction: it runs :meth:`_classify_sso_login` —
+        the *same* function the real login runs — and renders the decision
+        instead of executing it. That is what makes the rehearsal
+        trustworthy: there is one implementation of "which branch fires",
+        not two that have to be kept in agreement.
+
+        The alternative — running the real path inside a rolled-back
+        transaction — would exercise the writers, and the audit helper
+        there commits a session of its own, which would make "writes
+        nothing" untrue in exactly the case an operator is trusting it.
+        """
+        outcome: dict = {
+            "email": identity.email,
+            "external_id": identity.external_id,
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "groups": list(getattr(identity, "groups", ()) or ()),
+            "attributes": dict(getattr(identity, "attributes", {}) or {}),
+            "email_verified": _claims_email_verified(identity.raw_claims),
+            "linking_policy": linking_policy,
+        }
+
+        cfg = await self._auth_config_provider.get()
+        if not cfg.sso_enabled:
+            outcome["action"] = "rejected"
+            outcome["reason"] = "sso_disabled"
+            return outcome
+        if self._user_identity_repo is None:
+            outcome["action"] = "rejected"
+            outcome["reason"] = "identity_repo_unavailable"
+            return outcome
+
+        async with self._session_factory() as session:
+            decision = await self._classify_sso_login(
+                session, identity, provider_id=provider_id,
+                linking_policy=linking_policy,
+                link_intent_user_id=link_intent_user_id,
+            )
+            outcome["action"] = decision.action
+            if decision.user is not None:
+                outcome["user_id"] = decision.user.id
+                outcome["user_email"] = decision.user.email
+            if decision.error:
+                outcome["reason"] = decision.error
+            if decision.deny_reasons:
+                outcome["deny_reasons"] = list(decision.deny_reasons)
+
+            if self._sso_role_previewer is not None:
+                try:
+                    outcome["reconcile"] = await self._sso_role_previewer(
+                        session, idp_groups=outcome["groups"],
+                        provider_id=provider_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Dry-run role preview failed: %s", exc)
+
+        return outcome
+
+    @staticmethod
+    def _link_deny_reasons(
+        existing, *, linking_policy: str, email_verified: bool,
+        has_existing_identity: bool,
+    ) -> list[str]:
+        """The collision-branch gate, in one place so the dry-run and the
+        real path cannot disagree about why a link is refused."""
+        reasons: list[str] = []
+        if linking_policy in ("manual_only", "disabled"):
+            reasons.append(f"policy:{linking_policy}")
+        if not email_verified:
+            reasons.append("email_unverified")
+        if existing.status != "active":
+            reasons.append(f"existing_status:{existing.status}")
+        if existing.deleted_at is not None:
+            reasons.append("existing_deleted")
+        if linking_policy == "strict" and has_existing_identity:
+            reasons.append("strict_existing_sso")
+        return reasons
 
     async def _emit_audit(self, event_type: str, payload: dict) -> None:
         """Emit an audit event in its own committed transaction.
@@ -715,6 +966,24 @@ class LocalIdentityService:
                 await session.commit()
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
+
+    async def resolve_email_domain(self, domain: str):
+        """Which provider claims *domain*, or None. See the injected
+        resolver above; returns None when nothing is wired so the
+        email-first route degrades to "no match" rather than erroring."""
+        if self._email_domain_resolver is None:
+            return None
+        return await self._email_domain_resolver(domain)
+
+    async def emit_audit(self, event_type: str, payload: dict) -> None:
+        """Public entry point to the standalone-transaction audit path.
+
+        Used by routes that need to record a fact about *how* a login
+        was accepted (e.g. an unsigned or header-sourced profile) before
+        the login itself is attempted, so the record survives a
+        subsequent rejection.
+        """
+        await self._emit_audit(event_type, payload)
 
     # ── Identity helpers (refresh path) ──────────────────────────────
 
@@ -763,11 +1032,18 @@ class LocalIdentityService:
         check reads it on the next refresh. ``None`` for local
         password sessions.
         """
+        extra = dict(claims_extra or {})
+        if user.must_change_password:
+            # Carried as a claim rather than looked up per request:
+            # ``get_current_user`` already decodes this token to read
+            # ``sid``, so enforcing the rotation costs one more dict
+            # lookup instead of a database round-trip on every call.
+            extra["mcp"] = True
         access = create_access_token(
             user_id=user.id,
             email=user.email,
             role=user.role,
-            extra=claims_extra or None,
+            extra=extra or None,
         )
         refresh, _ = create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
@@ -782,6 +1058,37 @@ class LocalIdentityService:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _refresh_predates_cutoff(mint_ms: int, cutoff: Optional[str]) -> bool:
+    """True if a refresh token minted at *mint_ms* is older than *cutoff*.
+
+    *cutoff* is the ISO ``users.sessions_valid_from`` stamp; *mint_ms* is
+    the token's mint instant in epoch milliseconds. Both sides are
+    compared at millisecond resolution because both routinely land in
+    the same second — revoke-then-refresh, and revoke-then-sign-in-again
+    are the two ordinary cases, and second precision cannot tell them
+    apart.
+
+    Fails OPEN in every "cannot tell" case: no cutoff, no mint claim, or
+    an unparseable stamp. A session is killed on positive evidence, not
+    on missing evidence — the alternative is a malformed column locking
+    an account out of its own refresh path.
+    """
+    if not cutoff or mint_ms <= 0:
+        return False
+    try:
+        parsed = datetime.fromisoformat(cutoff)
+    except ValueError:
+        logger.warning("Unparseable sessions_valid_from %r — ignoring", cutoff)
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return mint_ms < int(parsed.timestamp() * 1000)
 
 
 def _claims_email_verified(raw_claims: dict) -> bool:
@@ -876,10 +1183,13 @@ def _orm_to_user(orm, *, role: str) -> User:
         email=orm.email,
         first_name=orm.first_name,
         last_name=orm.last_name,
+        chosen_display_name=getattr(orm, "display_name", None),
         role=role,
         status=orm.status,
         auth_provider=auth_provider,
         created_at=getattr(orm, "created_at", "") or "",
         updated_at=getattr(orm, "updated_at", "") or "",
+        avatar_id=getattr(orm, "avatar_id", None),
+        must_change_password=bool(getattr(orm, "must_change_password", False)),
         attributes=attributes,
     )

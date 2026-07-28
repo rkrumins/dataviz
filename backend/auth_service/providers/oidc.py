@@ -387,3 +387,70 @@ def build_oidc_provider(snap: ProviderConfigSnapshot) -> OidcProvider:
     """Factory for the registry. Materialises a working
     :class:`OidcProvider` from a snapshot."""
     return OidcProvider(settings_from_snapshot(snap))
+
+
+# ── Admin-time discovery ─────────────────────────────────────────────
+
+
+async def discover_issuer(issuer: str) -> dict:
+    """Fetch an issuer's ``.well-known/openid-configuration`` and derive the
+    settings an operator would otherwise hand-type.
+
+    Callable before any provider row exists — every ``OidcSettings`` field
+    defaults, and ``_discovery`` reads only ``issuer`` and never checks
+    ``enabled``. That is what lets the admin UI probe an issuer the operator
+    just pasted.
+
+    Returns ``{"settings": {...}, "metadata": {...}, "warnings": [...]}``.
+    Raises :class:`OidcError` on an unreachable or mismatched issuer; the
+    endpoint turns that into a structured failure rather than a 500.
+    """
+    # ``_discovery`` enforces ``metadata["issuer"] == self._s.issuer``, and an
+    # admin pasting a URL from an IdP console very often includes a trailing
+    # slash. Normalising here turns a confusing "issuer mismatch" into a
+    # successful probe. Matches settings_from_snapshot / load_env_oidc_settings.
+    normalised = (issuer or "").strip().rstrip("/")
+    if not normalised:
+        raise OidcError("issuer is required")
+
+    probe = OidcProvider(OidcSettings(issuer=normalised))
+    meta = await probe._discovery()
+
+    warnings: list[str] = []
+    # PKCE is not optional for us — build_authorization always sends a
+    # challenge. An IdP that doesn't advertise S256 may still accept it, so
+    # this is a warning rather than a refusal.
+    methods = meta.get("code_challenge_methods_supported")
+    if isinstance(methods, list) and "S256" not in methods:
+        warnings.append(
+            "This issuer does not advertise PKCE S256 support. Sign-in may "
+            "fail; confirm with your IdP administrator."
+        )
+    if not meta.get("jwks_uri"):
+        warnings.append(
+            "The discovery document has no jwks_uri, so ID tokens cannot be "
+            "verified. This issuer will not work."
+        )
+
+    # Only what the operator would otherwise type. Secrets are theirs to
+    # supply — discovery never invents a client_id or client_secret.
+    scopes_supported = meta.get("scopes_supported")
+    scopes = "openid email profile"
+    if isinstance(scopes_supported, list):
+        wanted = [s for s in ("openid", "email", "profile")
+                  if s in scopes_supported]
+        if wanted:
+            scopes = " ".join(wanted)
+
+    return {
+        "settings": {"issuer": normalised, "scopes": scopes},
+        "metadata": {
+            "issuer": meta.get("issuer"),
+            "authorization_endpoint": meta.get("authorization_endpoint"),
+            "token_endpoint": meta.get("token_endpoint"),
+            "jwks_uri": meta.get("jwks_uri"),
+            "userinfo_endpoint": meta.get("userinfo_endpoint"),
+            "end_session_endpoint": meta.get("end_session_endpoint"),
+        },
+        "warnings": warnings,
+    }

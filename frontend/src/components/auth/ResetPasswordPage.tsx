@@ -13,29 +13,11 @@ import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-
-// Lazy-load zxcvbn for password strength
-let zxcvbnInstance: import('@zxcvbn-ts/core').ZxcvbnFactory | null = null
-async function loadZxcvbn() {
-    if (zxcvbnInstance) return zxcvbnInstance
-    const [core, langCommon, langEn] = await Promise.all([
-        import('@zxcvbn-ts/core'),
-        import('@zxcvbn-ts/language-common'),
-        import('@zxcvbn-ts/language-en'),
-    ])
-    zxcvbnInstance = new core.ZxcvbnFactory({
-        translations: langEn.translations,
-        graphs: langCommon.adjacencyGraphs,
-        dictionary: {
-            ...langCommon.dictionary,
-            ...langEn.dictionary,
-        },
-    })
-    return zxcvbnInstance
-}
-
-const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
-const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
+import {
+    STRENGTH_COLORS,
+    STRENGTH_LABELS,
+    usePasswordStrength,
+} from '@/lib/passwordStrength'
 
 export function ResetPasswordPage() {
     const brand = useBrand()
@@ -43,8 +25,7 @@ export function ResetPasswordPage() {
     const [token, setToken] = useState(searchParams.get('token') || '')
     const [password, setPassword] = useState('')
     const [confirmPassword, setConfirmPassword] = useState('')
-    const [passwordScore, setPasswordScore] = useState(-1)
-    const [passwordFeedback, setPasswordFeedback] = useState('')
+    const { score: passwordScore, feedback: passwordFeedback } = usePasswordStrength(password)
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [success, setSuccess] = useState(false)
@@ -56,26 +37,6 @@ export function ResetPasswordPage() {
     }, [isAuthenticated, navigate])
 
     useDocumentTitle('Reset password')
-
-    // Debounced password strength check
-    useEffect(() => {
-        if (!password) {
-            setPasswordScore(-1)
-            setPasswordFeedback('')
-            return
-        }
-        const timer = setTimeout(async () => {
-            const zxcvbn = await loadZxcvbn()
-            const result = zxcvbn.check(password)
-            setPasswordScore(result.score)
-            const fb = result.feedback
-            const parts: string[] = []
-            if (fb.warning) parts.push(fb.warning)
-            if (fb.suggestions?.length) parts.push(...fb.suggestions)
-            setPasswordFeedback(parts.join(' '))
-        }, 300)
-        return () => clearTimeout(timer)
-    }, [password])
 
     const canSubmit = useMemo(() => {
         return token.length > 0

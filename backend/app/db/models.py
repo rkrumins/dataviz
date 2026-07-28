@@ -1125,6 +1125,11 @@ class UserORM(Base):
     password_hash = Column(Text, nullable=False)
     first_name = Column(Text, nullable=False)
     last_name = Column(Text, nullable=False)
+    # Chosen display name. NULL means "derive it from first + last" —
+    # which is what every row did before the column existed. Resolve it
+    # through ``backend.common.display_name.resolve_display_name`` rather
+    # than reading it directly, so the fallback lives in one place.
+    display_name = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="pending")       # pending | active | suspended
     # NB: ``auth_provider`` / ``external_id`` lived here in Phase 2.
     # Phase 3 normalised SSO identity into the ``user_identities``
@@ -1149,6 +1154,22 @@ class UserORM(Base):
     metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
+    # Force a rotation on the next request. Set on the bootstrap admin
+    # when it is seeded with a shipped default password; cleared by
+    # ``user_repo.update_password``. Carried into the access token as a
+    # claim and enforced by ``get_current_user``.
+    must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
+    # Chosen avatar illustration. Was a browser-local preference, so it
+    # reset on a new machine and nobody else ever saw it.
+    avatar_id = Column(Text, nullable=True)
+    # ISO instant before which refresh tokens are refused. Revoking
+    # sessions only tombstones access-token ``sid``s, and ``refresh()``
+    # mints a fresh ``sid`` rather than reusing one — so without this
+    # cutoff a client that silently refreshed on a 401 walked straight
+    # back in. Stamped by ``user_repo.revoke_sessions_from_now``.
+    sessions_valid_from = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True)                       # soft delete
@@ -1205,7 +1226,7 @@ class IdpProviderORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"idp_{uuid.uuid4().hex[:12]}")
     slug = Column(Text, nullable=False)                     # URL-safe id used in /auth/{slug}/login
     display_name = Column(Text, nullable=False)             # 'Corporate Entra ID'
-    kind = Column(Text, nullable=False)                     # oidc | saml2 | custom
+    kind = Column(Text, nullable=False)                     # oidc | saml2 | custom | custom_profile
     enabled = Column(Boolean, nullable=False, default=True)
     priority = Column(Integer, nullable=False, default=100)
     # Fernet-encrypted JSON of kind-specific settings. The repo wraps
@@ -1222,14 +1243,40 @@ class IdpProviderORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
+    # Email domains that route to this provider when email-first login is
+    # on. Plaintext JSON array, mirroring ``claim_mapping`` — no secrets,
+    # and an operator may want to read it straight out of the DB.
+    email_domains = Column(Text, nullable=True)
+    # The most recent assertion this provider sent us, Fernet-encrypted via
+    # the same envelope as ``settings``. Mapping against a pasted sample is
+    # guesswork; mapping against what actually arrived is not. NEVER on the
+    # provider DTO — it is served by a dedicated admin-only endpoint so it
+    # cannot leak by someone adding a field to the list response.
+    last_assertion = Column(Text, nullable=True)
+    last_assertion_at = Column(Text, nullable=True)
+    # Readiness, distinct from ``enabled``. A ``draft`` is configured but
+    # unproven: invisible to every public surface, fully rehearsable, and
+    # promoted to ``live`` only by an explicit publish. Creating a provider
+    # used to put it on every user's login page the instant it was saved —
+    # before discovery had been reviewed or a dry-run had proved it works.
+    #
+    # ``enabled`` stays the OPERATIONAL switch (turn a live provider off
+    # during an incident). Conflating "configured" with "verified" is what
+    # created the problem, so the two stay separate.
+    lifecycle = Column(Text, nullable=False, default="draft", server_default="live")
+
     identities = relationship("UserIdentityORM", back_populates="provider")
 
     __table_args__ = (
         UniqueConstraint("slug", name="uq_idp_providers_slug"),
         Index("idx_idp_providers_kind_enabled", "kind", "enabled"),
         CheckConstraint(
-            "kind IN ('oidc', 'saml2', 'custom')",
+            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile')",
             name="ck_idp_providers_kind",
+        ),
+        CheckConstraint(
+            "lifecycle IN ('draft', 'live')",
+            name="ck_idp_providers_lifecycle",
         ),
         CheckConstraint(
             "linking_policy IN ('strict', 'allow_verified', 'manual_only', 'disabled')",
@@ -1391,6 +1438,9 @@ class AppAuthConfigORM(Base):
     sso_enabled = Column(Boolean, nullable=False, default=True)
     allow_local_login = Column(Boolean, nullable=False, default=True)
     allow_jit_provisioning = Column(Boolean, nullable=False, default=True)
+    # Email-first login (Home Realm Discovery). Off by default: it changes
+    # what every user sees, and a wrong domain mapping strands them.
+    email_first_login = Column(Boolean, nullable=False, default=False)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(Text, nullable=False, default=_now)
     updated_by = Column(Text, nullable=True)

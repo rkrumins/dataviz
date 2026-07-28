@@ -96,11 +96,37 @@ _ACTIVITY_HIDE = frozenset({
 })
 
 # ``all`` hides nothing.
+#
+# ``sso`` is different in kind from the other three: they subtract noisy
+# event types from the full audit prefix set, whereas ``sso`` narrows the
+# prefix set itself (see ``_SSO_PREFIXES``) and then hides nothing. It
+# answers "why did this person's sign-in fail?", where every event under
+# those prefixes is on-topic — including the chatty ones the security view
+# suppresses.
 _HIDE_BY_CATEGORY: dict[str, frozenset[str]] = {
     "security": _SECURITY_HIDE,
     "activity": _ACTIVITY_HIDE,
+    "sso": frozenset(),
     "all": frozenset(),
 }
+
+# The identity surface: provider CRUD, group-mapping CRUD, platform auth
+# posture changes, and the per-user identity/session events. Deliberately
+# excludes the wider ``user.`` and ``rbac.`` prefixes — a role rename is an
+# audit event but it is not an SSO event, and including it would put this
+# view back in the same haystack it exists to escape.
+_SSO_PREFIXES = (
+    "idp.",                  # provider.created / updated / deleted
+    "auth.",                 # config.updated
+    "rbac.sso_mapping.",     # created / deleted
+    "user.sso_",             # provisioned / linked / link_denied / jit_blocked
+                             # / session_expired / unsigned_accepted
+                             # / header_accepted
+    "user.identity.",        # linked / unlinked / admin_linked / admin_unlinked
+    "user.logged_in",
+    "user.login_failed",
+    "user.logged_out",
+)
 
 
 # Phase 8: per-event display metadata. Each entry maps a known
@@ -239,6 +265,32 @@ def _summary_workspace_lifecycle(verb: str):
     return _build
 
 
+def _summary_sso_failure(p: dict) -> str:
+    # ``ref`` leads the line: it is the handle the stuck user was shown on
+    # the login page, so an admin pastes it into the filter and lands here.
+    ref = p.get("ref")
+    slug = p.get("provider_slug") or "?"
+    reason = p.get("reason") or "unknown"
+    lead = f"[{ref}] " if ref else ""
+    return f"{lead}Sign-in via {slug} failed: {reason}"
+
+
+def _summary_sso_user(verb: str) -> callable:
+    def _build(p: dict) -> str:
+        who = p.get("email") or p.get("user_id") or "?"
+        return f"{who} {verb} {p.get('provider_slug') or 'an IdP'}"
+    return _build
+
+
+def _summary_sso_denied(p: dict) -> str:
+    who = p.get("email") or p.get("user_id") or "?"
+    reasons = p.get("deny_reasons") or p.get("reason")
+    if isinstance(reasons, (list, tuple)):
+        reasons = ", ".join(str(r) for r in reasons)
+    slug = p.get("provider_slug") or "an IdP"
+    return f"Refused {who} from {slug}" + (f": {reasons}" if reasons else "")
+
+
 _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── critical: role / identity changes / forced revocation
     "user.role_changed": ("critical", _summary_role_changed),
@@ -298,6 +350,40 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+
+    # ── SSO sign-in outcomes.
+    # ``ref`` is the handle the stuck user was shown on the login page, so it
+    # leads the summary: an admin pastes it into the filter and lands here.
+    "user.sso_login_failed": ("warning", _summary_sso_failure),
+    "user.sso_provisioned": ("info", _summary_sso_user("provisioned via")),
+    "user.sso_linked": ("info", _summary_sso_user("linked to")),
+    "user.sso_link_denied": ("warning", _summary_sso_denied),
+    "user.sso_jit_blocked": ("warning", _summary_sso_denied),
+    "user.sso_session_expired": (
+        "info",
+        lambda p: (
+            f"SSO session expired for {p.get('user_id') or '?'} "
+            f"({p.get('provider_slug') or 'sso'}) — re-authentication required"
+        ),
+    ),
+    # Degraded-trust logins. Warning, not info: each one is a login the
+    # platform could not cryptographically verify.
+    "user.sso_unsigned_accepted": (
+        "warning",
+        lambda p: (
+            f"Accepted an UNSIGNED profile from "
+            f"{p.get('provider_slug') or '?'} "
+            f"(source {p.get('source') or '?'})"
+        ),
+    ),
+    "user.sso_header_accepted": (
+        "warning",
+        lambda p: (
+            f"Trusted a proxy-injected header from "
+            f"{p.get('provider_slug') or '?'} "
+            f"({p.get('source_key') or '?'})"
+        ),
+    ),
 }
 
 
@@ -396,13 +482,15 @@ async def list_audit_events(
     category: str = Query(
         "security",
         description=(
-            "Three-mode filter (Phase 9). ``security`` (default) "
-            "hides per-request noise (access_denied) plus signup / "
-            "password-reset chrome; surfaces logins, logouts, "
-            "failed logins, session revocations, every RBAC "
-            "mutation. ``activity`` adds back signup + password "
-            "chrome for support work. ``all`` is the unfiltered "
-            "firehose."
+            "``security`` (default) hides per-request noise "
+            "(access_denied) plus signup / password-reset chrome; "
+            "surfaces logins, logouts, failed logins, session "
+            "revocations, every RBAC mutation. ``activity`` adds back "
+            "signup + password chrome for support work. ``all`` is the "
+            "unfiltered firehose. ``sso`` narrows to the identity "
+            "surface only (provider + mapping CRUD, auth posture, "
+            "identity links, login outcomes) and hides nothing within "
+            "it — the view for debugging a failed sign-in."
         ),
     ),
     _admin: User = Depends(requires("system:audit:read")),
@@ -436,11 +524,13 @@ async def list_audit_events(
     else:
         # Default: only RBAC + user lifecycle events, never the
         # everything-else outbox noise (graph cache invalidation,
-        # aggregation jobs, etc.).
+        # aggregation jobs, etc.). The ``sso`` category narrows further
+        # to the identity surface — see _SSO_PREFIXES.
+        prefixes = _SSO_PREFIXES if category == "sso" else _AUDIT_PREFIXES
         stmt = stmt.where(
             or_(*[
                 OutboxEventORM.event_type.like(f"{p}%")
-                for p in _AUDIT_PREFIXES
+                for p in prefixes
             ])
         )
 

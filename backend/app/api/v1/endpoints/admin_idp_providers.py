@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from urllib.parse import quote
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+from fastapi import (
+    APIRouter, Body, Depends, HTTPException, Path, Request, Response, status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -23,15 +26,34 @@ from backend.app.db.repositories import idp_provider_repo, user_repo
 from backend.app.db.repositories.idp_provider_repo import (
     ProviderValidationError,
 )
+from backend.auth_service.cookies import set_dryrun_cookie
+from backend.auth_service.core.tokens import create_dryrun_token
 from backend.auth_service.interface import User
 from backend.auth_service.providers import (
+    ASSURANCE_DESCRIPTIONS,
+    assurance_for,
     apply_claim_mapping,
     ClaimMappingError,
     DEFAULT_OIDC,
     DEFAULT_SAML,
     DEFAULT_CUSTOM,
+    DEFAULT_CUSTOM_PROFILE,
     get_registry,
+    resolved_sources,
 )
+from backend.auth_service.providers.oidc import OidcError, discover_issuer
+
+# SAML metadata import is best-effort for the same reason the provider
+# itself is: an image without libxmlsec1 must still serve the rest of this
+# router. The endpoint reports the capability as missing rather than 500ing.
+try:
+    from backend.auth_service.providers.saml2 import (  # type: ignore
+        fetch_idp_metadata,
+        parse_idp_metadata,
+    )
+except ImportError:  # pragma: no cover - missing system dep
+    fetch_idp_metadata = None  # type: ignore[assignment]
+    parse_idp_metadata = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +81,20 @@ class ProviderDTO(BaseModel):
     linking_policy: str = Field(alias="linkingPolicy")
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    # Derived from kind + settings on every read, never stored — a column
+    # would drift the moment an operator edits settings. See
+    # ``auth_service/providers/assurance.py``.
+    assurance: str
+    assurance_reason: str = Field(alias="assuranceReason")
+    # Domains routed here by email-first login. Plaintext, no secrets.
+    email_domains: list[str] = Field(default_factory=list, alias="emailDomains")
+    # Whether an assertion has been captured, NOT its contents — those
+    # come from a dedicated endpoint so they cannot leak by someone
+    # adding a field to this response.
+    last_assertion_at: Optional[str] = Field(default=None, alias="lastAssertionAt")
+    # Readiness: a draft reaches no public surface until it is published.
+    # Distinct from ``enabled``, which is the operational switch.
+    lifecycle: str = "draft"
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -75,6 +111,7 @@ class CreateProviderRequest(BaseModel):
     enabled: bool = True
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    email_domains: Optional[list[str]] = Field(default=None, alias="emailDomains")
 
 
 class UpdateProviderRequest(BaseModel):
@@ -90,6 +127,33 @@ class UpdateProviderRequest(BaseModel):
     linking_policy: Optional[str] = Field(default=None, alias="linkingPolicy")
     button_label: Optional[str] = Field(default=None, alias="buttonLabel")
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
+    email_domains: Optional[list[str]] = Field(default=None, alias="emailDomains")
+
+
+class DiscoverRequest(BaseModel):
+    """Body for ``POST /admin/idp-providers/discover``.
+
+    One of ``issuer`` (OIDC), ``metadataUrl`` or ``metadataXml`` (SAML).
+    Nothing is persisted — this fills a form, it does not create a row.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    kind: str
+    issuer: Optional[str] = None
+    metadata_url: Optional[str] = Field(default=None, alias="metadataUrl")
+    metadata_xml: Optional[str] = Field(default=None, alias="metadataXml")
+
+
+class DiscoverResult(BaseModel):
+    """Structured outcome. A probe failure is ``success=False`` with an
+    ``error``, never an exception — mirroring the data-source
+    ``/test-connection`` contract, because "your IdP is unreachable" is an
+    answer, not a server fault."""
+    model_config = ConfigDict(populate_by_name=True)
+    success: bool
+    settings: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
 
 
 class TestMappingRequest(BaseModel):
@@ -103,9 +167,29 @@ class TestMappingRequest(BaseModel):
     override: Optional[dict] = None
 
 
+class PreviewMappingRequest(BaseModel):
+    """Body for ``POST /admin/idp-providers/preview-mapping``.
+
+    The provider-less twin of :class:`TestMappingRequest`. ``kind`` picks
+    the default mapping to merge ``override`` onto; ``slug`` only names the
+    connection in an error message, so it is optional while the operator is
+    still deciding what to call it."""
+    model_config = ConfigDict(populate_by_name=True)
+    kind: str
+    claims: dict
+    override: Optional[dict] = None
+    slug: Optional[str] = None
+
+
 def _to_dto(row) -> ProviderDTO:
     settings = idp_provider_repo.decrypt_settings(row.settings)
+    level = assurance_for(row.kind, settings)
     return ProviderDTO(
+        assurance=level,
+        assurance_reason=ASSURANCE_DESCRIPTIONS.get(level, ""),
+        email_domains=idp_provider_repo.parse_email_domains(row),
+        last_assertion_at=getattr(row, "last_assertion_at", None),
+        lifecycle=getattr(row, "lifecycle", "live"),
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,
@@ -141,11 +225,113 @@ async def get_default_mapping(
 ):
     """Return the default claim mapping for a kind so the admin UI can
     pre-fill the editor when an operator starts a fresh provider."""
-    defaults = {"oidc": DEFAULT_OIDC, "saml2": DEFAULT_SAML, "custom": DEFAULT_CUSTOM}
+    defaults = {
+        "oidc": DEFAULT_OIDC,
+        "saml2": DEFAULT_SAML,
+        "custom": DEFAULT_CUSTOM,
+        "custom_profile": DEFAULT_CUSTOM_PROFILE,
+    }
     mapping = defaults.get(kind)
     if mapping is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown kind")
     return mapping
+
+
+@router.get("/status")
+async def provider_health_status(
+    request: Request,
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Last known health for every enabled provider.
+
+    Reads the background sweep's cache and does **NO outbound work** — the
+    same contract ``providers.py:/status`` states for data sources, and for
+    the same reason: this is polled, and a polled endpoint that opens
+    sockets turns a dashboard into a load generator.
+
+    An empty result means the sweep has not run yet (or this replica does
+    not run schedulers), not that every provider is unhealthy.
+    """
+    cache = getattr(request.app.state, "idp_health_cache", None) or {}
+    return {
+        "providers": [
+            {
+                "providerId": h.provider_id,
+                "slug": h.slug,
+                "status": h.status,
+                "detail": h.detail,
+                "certNotAfter": h.cert_not_after,
+                "certDaysRemaining": h.cert_days_remaining,
+                "checkedAt": h.checked_at,
+            }
+            for h in cache.values()
+        ],
+    }
+
+
+@router.post("/discover", response_model=DiscoverResult,
+             response_model_by_alias=True)
+async def discover_provider_settings(
+    body: DiscoverRequest,
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Derive provider settings from the IdP's own published configuration.
+
+    Standing up an IdP meant hand-transcribing ~15 fields — issuer URLs,
+    entity ids, a base64 signing certificate — from one console into
+    another. Every one of those is a chance to introduce a typo that
+    surfaces days later as an opaque login failure. Both protocols publish
+    this information; this reads it.
+
+    Never persists, and never invents secrets: ``client_id`` /
+    ``client_secret`` are the operator's to supply.
+    """
+    kind = (body.kind or "").strip()
+
+    if kind == "oidc":
+        if not body.issuer:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "issuer is required to discover an OIDC provider",
+            )
+        try:
+            found = await discover_issuer(body.issuer)
+        except OidcError as exc:
+            return DiscoverResult(success=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001 — a probe never 500s
+            logger.warning("OIDC discovery failed (%s): %s", body.issuer, exc)
+            return DiscoverResult(success=False, error=str(exc))
+        return DiscoverResult(success=True, **found)
+
+    if kind == "saml2":
+        if parse_idp_metadata is None:
+            return DiscoverResult(
+                success=False,
+                error="SAML support is not available in this deployment.",
+            )
+        xml = body.metadata_xml
+        if not xml:
+            if not body.metadata_url:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "metadataUrl or metadataXml is required to discover a "
+                    "SAML provider",
+                )
+            try:
+                xml = await fetch_idp_metadata(body.metadata_url)
+            except Exception as exc:  # noqa: BLE001 — a probe never 500s
+                return DiscoverResult(success=False, error=str(exc))
+        try:
+            found = parse_idp_metadata(xml)
+        except Exception as exc:  # noqa: BLE001
+            return DiscoverResult(success=False, error=str(exc))
+        return DiscoverResult(success=True, **found)
+
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        f"discovery is not available for kind '{kind}'. Only 'oidc' and "
+        "'saml2' publish their configuration.",
+    )
 
 
 @router.post(
@@ -172,6 +358,12 @@ async def create_provider(
             enabled=body.enabled,
             button_label=body.button_label,
             button_icon=body.button_icon,
+            email_domains=body.email_domains,
+            # A provider a human just created is configured, not proved: it
+            # stays invisible until they publish it. The repo defaults to
+            # "live" for the boot seeder's benefit, so the policy is stated
+            # here, where the actor is an operator.
+            lifecycle="draft",
             created_by=admin.id,
         )
     except ProviderValidationError as exc:
@@ -184,7 +376,7 @@ async def create_provider(
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.created",
         payload={"provider_id": row.id, "slug": row.slug, "kind": row.kind,
-                 "actor": admin.id},
+                 "actor_id": admin.id},
     )
     # Bust the registry cache so the new provider is live immediately.
     try:
@@ -217,6 +409,7 @@ async def update_provider(
             linking_policy=body.linking_policy,
             button_label=body.button_label,
             button_icon=body.button_icon,
+            email_domains=body.email_domains,
             updated_by=admin.id,
         )
     except ProviderValidationError as exc:
@@ -225,7 +418,7 @@ async def update_provider(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.updated",
-        payload={"provider_id": row.id, "slug": row.slug, "actor": admin.id,
+        payload={"provider_id": row.id, "slug": row.slug, "actor_id": admin.id,
                  "fields": [k for k, v in body.model_dump().items() if v is not None]},
     )
     try:
@@ -256,7 +449,7 @@ async def delete_provider(
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.deleted",
         payload={"provider_id": provider_id, "slug": row.slug,
-                 "actor": admin.id},
+                 "actor_id": admin.id},
     )
     try:
         await get_registry().invalidate(provider_id)
@@ -284,16 +477,51 @@ async def test_provider_mapping(
         body.override if body.override is not None
         else idp_provider_repo.parse_claim_mapping(row)
     )
+    result = _resolve_preview(
+        body.claims, kind=row.kind, slug=row.slug, override=override,
+    )
+    result["providerId"] = provider_id
+    return result
+
+
+@router.post("/preview-mapping")
+async def preview_claim_mapping(
+    body: PreviewMappingRequest = Body(...),
+    _admin: User = Depends(requires("system:admin")),
+):
+    """Resolve a mapping that has no provider row behind it yet.
+
+    ``/{provider_id}/test`` needs a saved row, which meant the setup
+    wizard's mapping step — the one place an operator is actively *writing*
+    a mapping — could not preview at all: the draft is not created until
+    the rehearse step that follows it. So the guidance said "here is what
+    your IdP would produce" while the button sat disabled.
+
+    Nothing here reads the database. The row was only ever supplying
+    ``kind`` and ``slug``, and both are known before a row exists — ``kind``
+    from the vendor tile, ``slug`` only to name the provider in an error
+    message.
+    """
+    return _resolve_preview(
+        body.claims, kind=body.kind,
+        slug=body.slug or "this connection", override=body.override,
+    )
+
+
+def _resolve_preview(
+    claims: dict, *, kind: str, slug: str, override: Optional[dict],
+) -> dict:
+    """Shared body of the two preview routes: resolve, and say where each
+    field came from. One implementation so the saved and unsaved paths
+    cannot answer the same question differently."""
     try:
         identity = apply_claim_mapping(
-            body.claims, kind=row.kind, provider_slug=row.slug,
-            override=override,
+            claims, kind=kind, provider_slug=slug, override=override,
         )
     except ClaimMappingError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     return {
-        "providerId": provider_id,
-        "providerSlug": row.slug,
+        "providerSlug": slug,
         "resolved": {
             "external_id": identity.external_id,
             "email": identity.email,
@@ -303,4 +531,102 @@ async def test_provider_mapping(
             "auth_time": identity.auth_time,
             "attributes": identity.attributes,
         },
+        "resolvedFrom": resolved_sources(claims, kind=kind, override=override),
     }
+
+
+@router.post("/{provider_id}/publish", response_model=ProviderDTO,
+             response_model_by_alias=True)
+async def publish_provider(
+    provider_id: str,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Promote a draft provider to live — the moment it becomes visible on
+    the login page for every user.
+
+    Separate from ``PATCH`` on purpose. Making a provider public is not the
+    same kind of act as editing its display name, and a deliberate endpoint
+    is what lets the setup flow say "nothing is live until you press this".
+
+    Idempotent: publishing a live provider is a no-op, so a double-click or
+    a retried request cannot fail.
+    """
+    row = await idp_provider_repo.publish_provider(
+        session, provider_id, updated_by=admin.id,
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+    await user_repo.create_outbox_event(
+        session, event_type="idp.provider.published",
+        payload={"provider_id": row.id, "slug": row.slug, "kind": row.kind,
+                 "actor_id": admin.id},
+    )
+    # Bust the registry cache so the provider reaches the login page
+    # immediately rather than after the 60s TTL.
+    try:
+        await get_registry().invalidate(row.id)
+    except RuntimeError:
+        pass
+    return _to_dto(row)
+
+
+@router.post("/{provider_id}/dry-run/start")
+async def start_dry_run(
+    provider_id: str,
+    response: Response,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Begin a rehearsal sign-in against this provider.
+
+    ``/test`` dry-runs the *claim mapping* against a pasted blob. The half
+    that actually breaks in production — redirect URI registered at the
+    IdP, signature verifies, clock skew, certificate still valid — has no
+    test at all, so today the first real test is a user failing to log in.
+
+    The admin signs in with their own IdP account and the callback reports
+    what would have happened instead of doing it: no session is minted and
+    no rows are written. Requiring an admin to start it is what keeps this
+    from being an identity probe — the marker cookie cannot be obtained
+    anonymously.
+    """
+    row = await idp_provider_repo.get_provider(session, provider_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+
+    set_dryrun_cookie(
+        response, create_dryrun_token(admin_id=admin.id, provider_id=row.id),
+    )
+    return {
+        "loginUrl": f"/api/v1/auth/{quote(row.slug, safe='')}/login",
+        "expiresInMinutes": 10,
+    }
+
+
+@router.get("/{provider_id}/last-assertion")
+async def get_last_assertion(
+    provider_id: str,
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The most recent assertion this provider sent.
+
+    Mapping against a pasted sample is guesswork; mapping against what
+    actually arrived is not. Stored encrypted and served only here — never
+    on ``ProviderDTO``, so it cannot leak by someone adding a field to the
+    list response.
+
+    Credential-shaped values are redacted at capture time, not here: the
+    unredacted form is never written.
+    """
+    claims, captured_at = await idp_provider_repo.read_last_assertion(
+        session, provider_id,
+    )
+    if claims is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No assertion captured yet for this provider. It is recorded on "
+            "the next successful sign-in.",
+        )
+    return {"claims": claims, "capturedAt": captured_at}

@@ -40,6 +40,8 @@ const WorkspaceReviewsPage = lazy(() => import('@/pages/WorkspaceReviewsPage').t
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
+const AccountSettingsPage = lazy(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
+const PasswordChangeRequired = lazy(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
@@ -61,6 +63,10 @@ const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage
 // Dev-only mock IdP login page. Gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED
 // inside the component (renders a "disabled" banner otherwise).
 const DevLogin = lazy(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
+
+// Landing page for a custom_profile provider whose payload lives in
+// browser storage — the backend 302s here from /auth/{slug}/login.
+const PortalLogin = lazy(() => import('@/pages/PortalLogin').then(m => ({ default: m.PortalLogin })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -114,8 +120,14 @@ export const router = createBrowserRouter([
   },
   { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
   { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
+  // Sits outside AppLayout on purpose: the API refuses everything but
+  // the change form while this is pending, so the app chrome around it
+  // would only offer routes that 403.
+  { path: '/password-change-required', element: <Lazy><PasswordChangeRequired /></Lazy> },
   // Dev/demo mock IdP — gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED.
   { path: '/dev-login', element: <Lazy><DevLogin /></Lazy> },
+  // Custom-profile SSO landing page (reads the configured storage key).
+  { path: '/portal-login', element: <Lazy><PortalLogin /></Lazy> },
 
   // Authenticated routes (guarded by AppLayout)
   {
@@ -149,6 +161,9 @@ export const router = createBrowserRouter([
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
+      // Own profile, password, sessions. Ungated for the same reason as
+      // its two siblings: everybody has an account to manage.
+      { path: 'me/account', element: <Lazy><AccountSettingsPage /></Lazy> },
       // SSO identity management — link/unlink IdP connections.
       { path: 'me/identities', element: <Lazy><MyIdentitiesPage /></Lazy> },
 

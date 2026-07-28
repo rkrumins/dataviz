@@ -40,6 +40,83 @@ You can also **suspend/reactivate** accounts and **reset passwords** from the
 same screen. Filter the list by status (**pending / active / suspended**) to find
 who needs attention.
 
+---
+
+## Managing your own account
+
+**Account settings**, in the profile menu behind your avatar, is where you
+change the things about your own account that used to need an administrator:
+
+| Setting | Notes |
+|---|---|
+| **Name** | First and last, plus an optional **display name** if you'd rather be shown as something else. Leave the display name blank to go back to *First Last*. |
+| **Avatar** | Stored on the account, so it follows you to a new browser. |
+| **Password** | Asks for your current one. Changing it **signs you out everywhere, including the device you're on** — so a password change is also how you end a session you think somebody else has. |
+| **Sign out everywhere** | The same revocation without changing your password. |
+| **Recent activity** | Password changes, resets, and session revocations on your account, and whether an administrator did them. History starts when your deployment was upgraded, so it will not show anything older than that. |
+
+Your **email is not editable here** — it identifies you to your identity
+provider, so changing it is a re-link an administrator performs.
+
+### When single sign-on owns your name
+
+If you sign in through an identity provider, the fields it asserts are shown
+**locked and attributed** ("Okta"), because the provider re-applies them every
+time you sign in — a change made here would silently revert. The API refuses
+those writes too, for you and for administrators alike: being an admin does not
+make the edit survive the next sign-in.
+
+Three things make this workable rather than annoying:
+
+- **It is per field, not per account.** A directory that releases a first name
+  but no surname owns only the first. The rest stays yours.
+- **It follows what the provider actually sends.** If your IdP stops releasing a
+  claim, that field is handed back and becomes editable at your next sign-in. It
+  is never locked on the strength of an old login.
+- **Display name is never owned.** It is the one name that is always yours, and
+  it survives every re-sync — so an SSO account can still choose how it appears.
+
+To correct a locked field, fix it in your directory, or set a display name. When
+two providers are linked, the one you **most recently signed in with** owns the
+fields — the same rule group memberships already follow.
+
+If you sign in through SSO and have no password, the password section says so
+rather than offering a form; ask an administrator if you need a local password
+as a fallback.
+
+> **Note:** *Why the whole session ends.* Revoking a session used to only
+> tombstone the short-lived access token, and the browser would quietly obtain a
+> new one seconds later. A revocation now also invalidates the refresh tokens
+> behind it, which is what makes "signed out everywhere" mean it.
+
+---
+
+## The system administrator account
+
+A fresh deployment seeds one administrator from `ADMIN_EMAIL` /
+`ADMIN_PASSWORD`. If that password is one of the defaults published in this
+project's setup documentation (`admin123`, `changeme`), the account is flagged
+and **must choose a new password at first sign-in** — the API refuses everything
+else until it does. Supply your own `ADMIN_PASSWORD` and no prompt appears.
+
+Admin → Users shows a **DEFAULT PASSWORD** badge against any account still in
+that state.
+
+### Locked out
+
+If the only administrator forgets their password there is no way in through the
+UI — **Forgot password** does not send anything (this deployment has no email
+infrastructure); it flags the request for an administrator to action, and in
+this case that is the same person. Recover from the host:
+
+```bash
+python -m backend.scripts.reset_admin_password --email admin@example.com
+```
+
+It prompts for the new password rather than taking it as an argument, so it
+stays out of shell history, and it signs out every existing session. Database
+access is the authorisation model, which is why there is no HTTP equivalent.
+
 > **Tip:** *Prefer central identity?* Administrators can configure **single
 > sign-on** via **OIDC** or **SAML**, so people log in through your
 > organisation's identity provider instead of a local password. Approvals and

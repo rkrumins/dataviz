@@ -8,6 +8,7 @@ Note: The test_client overrides get_current_user, require_admin, and get_optiona
 to return a fake user (usr_test000000). For admin endpoints that operate on *other*
 users, we create additional users via the repo directly through the DB session.
 """
+import pytest
 from httpx import AsyncClient
 
 
@@ -420,3 +421,274 @@ async def test_generate_reset_token(test_client: AsyncClient, db_session):
     body = resp.json()
     assert "resetToken" in body
     assert "expiresAt" in body
+
+
+# ── Self-service: PATCH /users/me ─────────────────────────────────────
+
+async def test_update_me_changes_names(test_client: AsyncClient):
+    """A rename lands and is visible on the next read."""
+    resp = await test_client.patch(
+        "/api/v1/users/me",
+        json={"firstName": "Renamed", "lastName": "Person"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["firstName"] == "Renamed"
+    assert resp.json()["displayName"] == "Renamed Person"
+
+    again = await test_client.get("/api/v1/users/me")
+    assert again.json()["lastName"] == "Person"
+
+
+async def test_update_me_trims_whitespace(test_client: AsyncClient):
+    """Padding around a name is the client's, not part of the name."""
+    resp = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "  Trimmed  "},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["firstName"] == "Trimmed"
+
+
+async def test_update_me_sets_and_clears_display_name(test_client: AsyncClient):
+    """An empty display name is an instruction, not a mistake.
+
+    Clearing the override has to fall back to first + last rather than
+    blanking the account out of every list it appears in.
+    """
+    set_resp = await test_client.patch(
+        "/api/v1/users/me", json={"displayName": "Just Rin"},
+    )
+    assert set_resp.status_code == 200, set_resp.text
+    assert set_resp.json()["displayName"] == "Just Rin"
+
+    cleared = await test_client.patch("/api/v1/users/me", json={"displayName": ""})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["displayName"] == "Test User"
+
+
+async def test_update_me_noop_returns_current_state(test_client: AsyncClient):
+    """An empty body is a read, not a write."""
+    resp = await test_client.patch("/api/v1/users/me", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "usr_test000000"
+
+
+async def test_update_me_rejects_blank_name(test_client: AsyncClient):
+    """A blank first name is a mistake — Pydantic catches it."""
+    resp = await test_client.patch("/api/v1/users/me", json={"firstName": ""})
+    assert resp.status_code == 422
+
+
+async def test_update_me_records_who_did_it(test_client: AsyncClient, db_session):
+    """``updated_by == user_id`` also describes an admin editing their
+    own row. ``via`` is what tells the two apart."""
+    import json as _json
+
+    from sqlalchemy import select
+    from backend.app.db.models import OutboxEventORM
+
+    await test_client.patch("/api/v1/users/me", json={"firstName": "Audited"})
+
+    rows = (await db_session.execute(
+        select(OutboxEventORM).where(
+            OutboxEventORM.event_type == "user.identity_updated",
+        )
+    )).scalars().all()
+    assert rows, "expected an identity_updated event"
+    payload = _json.loads(rows[-1].payload)
+    assert payload["via"] == "self_service"
+    assert rows[-1].aggregate_id == "usr_test000000"
+
+
+# ── Self-service: POST /users/me/password ─────────────────────────────
+#
+# The fake user is seeded with ``password_hash="not-a-real-hash"``
+# (conftest), which ``is_password_set`` reads as "has a password" and
+# ``verify_password`` reads as "wrong" — so the wrong-password case
+# needs no seeding at all. The rest go through ``_set_my_password``.
+
+_STRONG = "C0mpl3x!Passw0rd#2026"
+
+
+@pytest.fixture(autouse=True)
+def _disable_users_rate_limit():
+    """``/users/me/password`` is 5/minute and every test shares an IP."""
+    from backend.app.api.v1.endpoints import users as _users_mod
+    prev = _users_mod.limiter.enabled
+    _users_mod.limiter.enabled = False
+    yield
+    _users_mod.limiter.enabled = prev
+
+
+async def _set_my_password(db_session, password: str | None) -> None:
+    """Give the fake user a real Argon2id hash, or the SSO-only sentinel."""
+    from backend.app.db.repositories import user_repo
+    from backend.auth_service.core.password import (
+        disabled_password_hash, hash_password,
+    )
+
+    hashed = (
+        hash_password(password) if password is not None
+        else disabled_password_hash()
+    )
+    await user_repo.update_password(db_session, "usr_test000000", hashed)
+    await db_session.flush()
+
+
+async def test_change_password_wrong_current_is_403(test_client: AsyncClient):
+    """403, not 401.
+
+    The frontend treats 401 as a dead session — it silently refreshes,
+    retries, then signs the user out. A typo in this field must not end
+    the session it is trying to secure.
+    """
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "whatever-is-wrong", "newPassword": _STRONG},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "Current password is incorrect."
+
+
+async def test_change_password_happy_path(test_client: AsyncClient, db_session):
+    """The new password is what actually ends up on the row."""
+    from backend.app.db.repositories import user_repo
+    from backend.auth_service.core.password import verify_password
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": _STRONG},
+    )
+    assert resp.status_code == 200, resp.text
+
+    user = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert verify_password(_STRONG, user.password_hash)
+
+
+async def test_change_password_weak_new_is_422(test_client: AsyncClient, db_session):
+    """Same zxcvbn floor as every other password entry point."""
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": "password1"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_change_password_short_new_is_422(test_client: AsyncClient):
+    """Caught by the DTO before the handler runs."""
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "anything", "newPassword": "short"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_change_password_sso_only_account_is_409(
+    test_client: AsyncClient, db_session,
+):
+    """An SSO-only account has no password to be wrong about.
+
+    Deliberately sends a wrong ``currentPassword`` too: the 409 has to
+    win, or the user goes hunting for a credential that doesn't exist.
+    """
+    await _set_my_password(db_session, None)
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "definitely-wrong", "newPassword": _STRONG},
+    )
+    assert resp.status_code == 409, resp.text
+    assert "identity provider" in resp.json()["detail"]
+
+
+async def test_change_password_revokes_sessions(test_client: AsyncClient, db_session):
+    """Changing the password has to actually sign the sessions out."""
+    from backend.app.db.repositories import user_repo
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": _STRONG},
+    )
+
+    user = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert user.sessions_valid_from, "expected a revocation cutoff to be stamped"
+
+
+async def test_change_password_clears_pending_reset(
+    test_client: AsyncClient, db_session,
+):
+    """Fixing your own password retires the admin reset you asked for."""
+    from backend.app.db.repositories import user_repo
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    await user_repo.flag_reset_requested(db_session, "usr_test000000")
+    assert await user_repo.has_pending_reset(db_session, "usr_test000000")
+
+    await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": _STRONG},
+    )
+    assert not await user_repo.has_pending_reset(db_session, "usr_test000000")
+
+
+async def test_change_password_clears_forced_rotation(
+    test_client: AsyncClient, db_session,
+):
+    """The whole point of the forced-rotation flag is that rotating clears it."""
+    from backend.app.db.repositories import user_repo
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    await user_repo.set_must_change_password(db_session, "usr_test000000", True)
+
+    await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": _STRONG},
+    )
+    user = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert user.must_change_password is False
+
+
+# ── Self-service: sessions and activity ───────────────────────────────
+
+async def test_revoke_my_sessions_stamps_cutoff(test_client: AsyncClient, db_session):
+    from backend.app.db.repositories import user_repo
+
+    resp = await test_client.post("/api/v1/users/me/sessions/revoke-all")
+    assert resp.status_code == 200, resp.text
+
+    user = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert user.sessions_valid_from
+
+
+async def test_activity_lists_my_own_events(test_client: AsyncClient):
+    """Own security history, newest first."""
+    await test_client.patch("/api/v1/users/me", json={"firstName": "Active"})
+    await test_client.post("/api/v1/users/me/sessions/revoke-all")
+
+    resp = await test_client.get("/api/v1/users/me/activity")
+    assert resp.status_code == 200, resp.text
+    types = [row["eventType"] for row in resp.json()]
+    assert "user.sessions_revoked_by_self" in types
+    assert "user.identity_updated" in types
+
+
+async def test_activity_excludes_other_peoples_events(
+    test_client: AsyncClient, db_session,
+):
+    """It is *my* account activity, not a feed of everyone's."""
+    from backend.app.db.repositories import user_repo
+
+    await user_repo.create_outbox_event(
+        db_session,
+        event_type="user.password_changed",
+        payload={"user_id": "usr_someone_else"},
+        aggregate_type="user",
+        aggregate_id="usr_someone_else",
+    )
+    await db_session.flush()
+
+    resp = await test_client.get("/api/v1/users/me/activity")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []

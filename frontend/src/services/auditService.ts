@@ -52,12 +52,16 @@ export interface AuditFilters {
     toTs?: string
     cursor?: string
     limit?: number
-    /** Phase 9: three-mode filter. ``security`` (default) hides
-     *  per-request noise + password / signup chrome; surfaces
-     *  logins, role changes, every RBAC mutation. ``activity``
-     *  adds back password / signup chrome for support work.
-     *  ``all`` is the unfiltered firehose. */
-    category?: 'security' | 'activity' | 'all'
+    /** ``security`` (default) hides per-request noise + password /
+     *  signup chrome; surfaces logins, role changes, every RBAC
+     *  mutation. ``activity`` adds back password / signup chrome for
+     *  support work. ``all`` is the unfiltered firehose.
+     *
+     *  ``sso`` differs in kind: instead of subtracting noisy event
+     *  types it narrows the prefix set to the identity surface
+     *  (provider + mapping CRUD, auth posture, identity links, sign-in
+     *  outcomes) and hides nothing within it. */
+    category?: 'security' | 'activity' | 'all' | 'sso'
 }
 
 

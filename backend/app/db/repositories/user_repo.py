@@ -21,6 +21,11 @@ from backend.app.db.models import (
     OutboxEventORM,
     RoleBindingORM,
 )
+from backend.common.identity_provenance import (
+    managed_fields as _managed_fields,
+    managing_provider_id as _managing_provider_id,
+    snapshot_key as _snapshot_key,
+)
 from backend.common.roles import (
     DEFAULT_PLATFORM_TIER,
     GLOBAL_ASSIGNABLE_ROLES,
@@ -29,6 +34,26 @@ from backend.common.roles import (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_IDP_MANAGED_KEY = _snapshot_key()
+
+
+def idp_ownership(user: UserORM) -> tuple[frozenset[str], Optional[str]]:
+    """Which profile fields this user's IdP owns, and which IdP.
+
+    Reads the snapshot written on the last SSO login. A local-only
+    account has none, so everything stays editable — which is the point:
+    ownership is asserted per login, never inferred from the mere
+    existence of a linked identity.
+    """
+    try:
+        meta = json.loads(getattr(user, "metadata_", None) or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except (ValueError, TypeError):
+        meta = {}
+    return _managed_fields(meta), _managing_provider_id(meta)
 
 
 # ── Users ──────────────────────────────────────────────────────────────
@@ -145,6 +170,7 @@ async def set_user_idp_metadata(
     raw_claims: Optional[dict] = None,
     attributes: Optional[dict] = None,
     source_provider_id: Optional[str] = None,
+    idp_managed: Optional[dict] = None,
 ) -> Optional[UserORM]:
     """Persist the latest IdP-asserted groups, raw claims, and
     operator-mapped extra attributes (department, employee_id, …)
@@ -177,6 +203,12 @@ async def set_user_idp_metadata(
         merged_attrs = dict(meta.get("attributes", {}))
         merged_attrs.update(attributes)
         meta["attributes"] = merged_attrs
+    if idp_managed is not None:
+        # Replaced, not merged: the snapshot answers "which fields does
+        # the IdP own RIGHT NOW", and a provider that stopped releasing
+        # ``given_name`` must hand that field back rather than keep it
+        # locked on the strength of a login from six months ago.
+        meta[_IDP_MANAGED_KEY] = idp_managed
     meta["idp_last_login_at"] = _now()
     user.metadata_ = json.dumps(meta, default=str)
     user.updated_at = _now()
@@ -408,26 +440,48 @@ async def update_identity(
     *,
     first_name: Optional[str] = None,
     last_name: Optional[str] = None,
+    display_name: Optional[str] = None,
+    avatar_id: Optional[str] = None,
 ) -> None:
-    """Update an admin-editable identity field on a user.
+    """Update an editable identity field on a user.
 
-    Only first / last name are accepted here. Email is the SSO identity
-    key and changes via a separate re-link flow. ``updated_at`` is
-    refreshed so audit lookups can find the change.
+    Email is the SSO identity key and changes via a separate re-link
+    flow. ``updated_at`` is refreshed so audit lookups can find the
+    change.
+
+    ``display_name`` is the one field where the empty string is
+    meaningful: it clears the override so the name falls back to
+    ``first last``. Callers pass ``None`` to leave it alone and ``""``
+    to reset it, so the two intents stay distinguishable all the way
+    down from the request body.
+
+    Mutates the mapped instance rather than issuing a Core UPDATE, so a
+    caller that re-reads the user in the same session sees the change.
+    A Core UPDATE writes past the identity map, leaving any already
+    loaded instance holding the old values — which is how the admin
+    edit came to return a stale profile in its own response body.
     """
-    updates: dict[str, str] = {}
-    if first_name is not None:
-        updates["first_name"] = first_name
-    if last_name is not None:
-        updates["last_name"] = last_name
-    if not updates:
+    user = await get_user_by_id(session, user_id)
+    if user is None:
         return
-    updates["updated_at"] = _now()
-    await session.execute(
-        UserORM.__table__.update()
-        .where(UserORM.id == user_id)
-        .values(**updates)
-    )
+
+    changed = False
+    if first_name is not None:
+        user.first_name = first_name
+        changed = True
+    if last_name is not None:
+        user.last_name = last_name
+        changed = True
+    if display_name is not None:
+        user.display_name = display_name.strip() or None
+        changed = True
+    if avatar_id is not None:
+        user.avatar_id = avatar_id.strip() or None
+        changed = True
+    if not changed:
+        return
+
+    user.updated_at = _now()
     await session.flush()
 
 
@@ -490,10 +544,23 @@ async def create_outbox_event(
     session: AsyncSession,
     event_type: str,
     payload: dict,
+    *,
+    aggregate_type: Optional[str] = None,
+    aggregate_id: Optional[str] = None,
 ) -> OutboxEventORM:
+    """Write a domain event.
+
+    ``aggregate_type`` / ``aggregate_id`` are optional and default to the
+    historic behaviour of leaving both NULL. Set them when the event
+    needs to be *found* by subject later — ``idx_outbox_aggregate``
+    covers that pair, whereas locating the same row through the JSON
+    payload means an unindexed scan.
+    """
     event = OutboxEventORM(
         event_type=event_type,
         payload=json.dumps(payload),
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
     )
     session.add(event)
     await session.flush()
@@ -509,9 +576,46 @@ async def update_password(session: AsyncSession, user_id: str, password_hash: st
     user.password_hash = password_hash
     user.reset_token_hash = None
     user.reset_token_expires_at = None
+    # Whatever route got them here — self-service, admin reset, token —
+    # the account is no longer holding the password it had to rotate.
+    user.must_change_password = False
     user.updated_at = _now()
     await session.flush()
     return user
+
+
+async def set_must_change_password(
+    session: AsyncSession, user_id: str, value: bool,
+) -> None:
+    """Flag (or clear) the forced-rotation requirement."""
+    await session.execute(
+        UserORM.__table__.update()
+        .where(UserORM.id == user_id)
+        .values(must_change_password=value, updated_at=_now())
+    )
+    await session.flush()
+
+
+async def revoke_sessions_from_now(session: AsyncSession, user_id: str) -> str:
+    """Invalidate every refresh token this user currently holds.
+
+    Stamps ``sessions_valid_from``; ``LocalIdentityService.refresh``
+    refuses any refresh token issued before it. This is the half of a
+    revocation that survives — tombstoning access-token ``sid``s only
+    covers the few minutes until the token expires, after which the
+    client silently refreshes into a brand-new ``sid`` that was never
+    revoked.
+
+    Returns the cutoff so callers can log or report it.
+    """
+    cutoff = _now()
+    await session.execute(
+        UserORM.__table__.update()
+        .where(UserORM.id == user_id)
+        .values(sessions_valid_from=cutoff, updated_at=cutoff)
+    )
+    await session.flush()
+    return cutoff
 
 
 def _hash_token(token: str) -> str:
