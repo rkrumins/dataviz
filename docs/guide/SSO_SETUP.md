@@ -68,16 +68,36 @@ before continuing:
 
 ### 3. Map their fields to ours
 
-Already filled in from your provider's known claim names. The preview underneath
-runs your mapping against a real payload of that shape, so you can see a name and
-an email address resolve before anyone has signed in.
+Two columns. On the left, **they send** — every key in the payload. On the right,
+**we store** — our fields, each resolving live as you edit.
 
-**External ID** and **Email** are required — sign-in fails without them.
-External ID must be the *stable* identifier (Entra's `oid`, not the username):
-if it changes, existing accounts are orphaned.
+Already filled in from your provider's known claim names, so the usual job is to
+read it rather than write it. To change something, click a key on the left and
+pick the field it belongs to.
 
-Once someone has signed in, **Load last assertion** replaces the example with
-what your IdP genuinely sent. Map against that in preference to anything else.
+Each of our fields shows three things: the value it resolved to, which key
+produced it, and the full fallback list. The list is walked in order and the
+first key with a value wins — so a key marked **shadowed** is one you are
+maintaining for nothing, and can be dropped.
+
+**External ID** and **Email** are required. If either resolves to nothing, the
+row says so and sign-in would fail. External ID must be the *stable* identifier
+(Entra's `oid`, not the username): if it changes, existing accounts are orphaned.
+
+**First name** and **Last name** are marked *IdP-managed* once they resolve, and
+that marker is a decision, not a label. A field your IdP supplies is re-synced on
+every sign-in and becomes read-only on that person's own profile, attributed to
+this connection — so your directory stays the single source of truth, and nobody
+can drift away from it. Leave the row empty and the field stays theirs to edit.
+**Full / display name** is never taken this way, whatever you map: it is the one
+name a person can always choose for themselves.
+
+> **Note:** *Where the sample came from matters.* Until someone signs in, the
+> preview runs against a worked example of your vendor's payload — good enough to
+> check the shape, but it is not your tenant. The bar above the columns says which
+> you are looking at. Once a real sign-in has happened, **Use last real
+> assertion** swaps in what your IdP genuinely sent; prefer it over everything
+> else.
 
 ### 4. Try it yourself
 
@@ -156,6 +176,30 @@ Two things decide whether this is safe:
   can set the header themselves and impersonate any user. This is why the
   header source is rated *asserted* rather than *verified* — from here, we cannot
   tell a correctly-configured proxy from a missing one.
+
+---
+
+### Changing a connection later
+
+The pencil on a connection's card opens its editor, in five sections:
+
+| Section | What lives there |
+|---|---|
+| **Identity** | Name, and how it decides whether an arriving person is someone you already know |
+| **Connection** | Endpoints and credentials, including rotating a secret |
+| **Claim mapping** | The same two-column mapper as setup — now resolving against this connection's own configuration |
+| **Login page** | Button label and icon, ordering, email domains, and the on/off switch |
+| **Danger zone** | Delete |
+
+Two things it will not let you change: the **slug** and the **protocol**. The
+slug is part of every URL this connection uses, including the redirect URI you
+registered at the IdP, and the protocol is what every setting and every linked
+identity is keyed to. Both would break a working connection rather than edit it.
+
+Secrets are never shown. A configured one reads *Configured* with a **Rotate**
+button, and until you rotate it, saving leaves it untouched.
+
+Closing with unsaved edits asks first.
 
 ---
 

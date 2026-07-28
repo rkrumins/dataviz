@@ -35,6 +35,7 @@ from .claim_mapper import (
     DEFAULT_SAML,
     apply_claim_mapping,
     merge_mapping,
+    resolved_sources,
 )
 
 # SAML import is best-effort: a non-viz Dockerfile may not install the
@@ -173,6 +174,7 @@ __all__ = [
     "known_providers",
     "apply_claim_mapping",
     "merge_mapping",
+    "resolved_sources",
     "ClaimMappingError",
     "DEFAULT_OIDC",
     "DEFAULT_SAML",

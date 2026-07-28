@@ -132,6 +132,7 @@ export function IdpConnectionWizard({
                             claimMapping={w.claimMapping}
                             onChange={w.setClaimMapping}
                             providerId={w.provider?.id}
+                            slug={w.slug}
                         />
                     )}
                     {w.step === 'rehearse' && (
