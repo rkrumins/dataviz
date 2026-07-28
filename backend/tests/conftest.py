@@ -529,9 +529,13 @@ async def registry(db_session):
             return self._snap(row) if row is not None else None
 
         async def list_enabled(self):
-            rows = await _idp_provider_repo.list_providers(
-                db_session, only_enabled=True,
-            )
+            # Must mirror the real loader in ``main.py``, which asks for
+            # PUBLIC providers (enabled AND published). Calling
+            # ``list_providers(only_enabled=True)`` here instead would make
+            # this double disagree with production about what the world can
+            # see — the one thing a stand-in for a visibility boundary must
+            # never do.
+            rows = await _idp_provider_repo.list_public_providers(db_session)
             return [self._snap(r) for r in rows]
 
     reg = ProviderRegistry(loader=_Loader(), builders=PROVIDER_BUILDERS,

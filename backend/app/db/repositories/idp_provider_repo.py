@@ -211,6 +211,7 @@ async def create_provider(
     button_label: Optional[str] = None,
     button_icon: Optional[str] = None,
     email_domains: Optional[list] = None,
+    lifecycle: str = "live",
     created_by: Optional[str] = None,
 ) -> IdpProviderORM:
     _validate_shape(
@@ -233,6 +234,15 @@ async def create_provider(
         button_label=(button_label or None) and button_label.strip(),
         button_icon=(button_icon or None) and button_icon.strip(),
         email_domains=_encode_domains(email_domains),
+        # Defaults LIVE, and the admin endpoint overrides it to "draft".
+        #
+        # The policy "a provider a human just created is unproven" belongs at
+        # the human boundary, not here. The boot seeder (main.py) migrates
+        # env-var deployments into rows, and those are already serving
+        # traffic — defaulting to draft here would silently switch SSO off
+        # for every existing env-based deployment on upgrade, which is the
+        # same failure the migration's server_default='live' avoids.
+        lifecycle=lifecycle,
         created_at=_now(),
         created_by=created_by,
         updated_at=_now(),
@@ -335,6 +345,41 @@ async def list_providers(
     return list(result.scalars().all())
 
 
+async def list_public_providers(
+    session: AsyncSession,
+) -> list[IdpProviderORM]:
+    """Providers the outside world may see: enabled AND published.
+
+    The one definition of "public", so the answer cannot drift between the
+    login catalog, the login-context endpoint and email-domain routing. A
+    provider is visible only when BOTH are true:
+
+      * ``enabled``   — the operational switch, off during an incident.
+      * ``lifecycle == 'live'`` — readiness, set by an explicit publish.
+
+    A draft is fully rehearsable through the dry-run but reaches no
+    unauthenticated surface, which is what makes "configure it, prove it,
+    then publish it" safe rather than aspirational.
+    """
+    rows = await list_providers(session, only_enabled=True)
+    return [r for r in rows if getattr(r, "lifecycle", "live") == "live"]
+
+
+async def publish_provider(
+    session: AsyncSession, provider_id: str, *, updated_by: Optional[str] = None,
+) -> Optional[IdpProviderORM]:
+    """Promote a draft to live. Idempotent — publishing a live provider is
+    a no-op rather than an error, so a double-click cannot fail."""
+    row = await get_provider(session, provider_id)
+    if row is None:
+        return None
+    row.lifecycle = "live"
+    row.updated_at = _now()
+    row.updated_by = updated_by
+    await session.flush()
+    return row
+
+
 async def delete_provider(
     session: AsyncSession, provider_id: str,
 ) -> bool:
@@ -407,7 +452,7 @@ async def find_by_email_domain(
     needle = (domain or "").strip().lower().lstrip("@")
     if not needle:
         return None
-    rows = await list_providers(session, only_enabled=True)
+    rows = await list_public_providers(session)
     for row in rows:
         if needle in parse_email_domains(row):
             return row

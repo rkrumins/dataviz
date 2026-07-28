@@ -1228,6 +1228,16 @@ class IdpProviderORM(Base):
     # cannot leak by someone adding a field to the list response.
     last_assertion = Column(Text, nullable=True)
     last_assertion_at = Column(Text, nullable=True)
+    # Readiness, distinct from ``enabled``. A ``draft`` is configured but
+    # unproven: invisible to every public surface, fully rehearsable, and
+    # promoted to ``live`` only by an explicit publish. Creating a provider
+    # used to put it on every user's login page the instant it was saved —
+    # before discovery had been reviewed or a dry-run had proved it works.
+    #
+    # ``enabled`` stays the OPERATIONAL switch (turn a live provider off
+    # during an incident). Conflating "configured" with "verified" is what
+    # created the problem, so the two stay separate.
+    lifecycle = Column(Text, nullable=False, default="draft", server_default="live")
 
     identities = relationship("UserIdentityORM", back_populates="provider")
 
@@ -1237,6 +1247,10 @@ class IdpProviderORM(Base):
         CheckConstraint(
             "kind IN ('oidc', 'saml2', 'custom', 'custom_profile')",
             name="ck_idp_providers_kind",
+        ),
+        CheckConstraint(
+            "lifecycle IN ('draft', 'live')",
+            name="ck_idp_providers_lifecycle",
         ),
         CheckConstraint(
             "linking_policy IN ('strict', 'allow_verified', 'manual_only', 'disabled')",

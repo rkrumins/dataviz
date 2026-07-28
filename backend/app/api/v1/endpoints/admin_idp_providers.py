@@ -91,6 +91,9 @@ class ProviderDTO(BaseModel):
     # come from a dedicated endpoint so they cannot leak by someone
     # adding a field to this response.
     last_assertion_at: Optional[str] = Field(default=None, alias="lastAssertionAt")
+    # Readiness: a draft reaches no public surface until it is published.
+    # Distinct from ``enabled``, which is the operational switch.
+    lifecycle: str = "draft"
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -171,6 +174,7 @@ def _to_dto(row) -> ProviderDTO:
         assurance_reason=ASSURANCE_DESCRIPTIONS.get(level, ""),
         email_domains=idp_provider_repo.parse_email_domains(row),
         last_assertion_at=getattr(row, "last_assertion_at", None),
+        lifecycle=getattr(row, "lifecycle", "live"),
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,
@@ -340,6 +344,11 @@ async def create_provider(
             button_label=body.button_label,
             button_icon=body.button_icon,
             email_domains=body.email_domains,
+            # A provider a human just created is configured, not proved: it
+            # stays invisible until they publish it. The repo defaults to
+            # "live" for the boot seeder's benefit, so the policy is stated
+            # here, where the actor is an operator.
+            lifecycle="draft",
             created_by=admin.id,
         )
     except ProviderValidationError as exc:
@@ -473,6 +482,42 @@ async def test_provider_mapping(
             "attributes": identity.attributes,
         },
     }
+
+
+@router.post("/{provider_id}/publish", response_model=ProviderDTO,
+             response_model_by_alias=True)
+async def publish_provider(
+    provider_id: str,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Promote a draft provider to live — the moment it becomes visible on
+    the login page for every user.
+
+    Separate from ``PATCH`` on purpose. Making a provider public is not the
+    same kind of act as editing its display name, and a deliberate endpoint
+    is what lets the setup flow say "nothing is live until you press this".
+
+    Idempotent: publishing a live provider is a no-op, so a double-click or
+    a retried request cannot fail.
+    """
+    row = await idp_provider_repo.publish_provider(
+        session, provider_id, updated_by=admin.id,
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+    await user_repo.create_outbox_event(
+        session, event_type="idp.provider.published",
+        payload={"provider_id": row.id, "slug": row.slug, "kind": row.kind,
+                 "actor_id": admin.id},
+    )
+    # Bust the registry cache so the provider reaches the login page
+    # immediately rather than after the 60s TTL.
+    try:
+        await get_registry().invalidate(row.id)
+    except RuntimeError:
+        pass
+    return _to_dto(row)
 
 
 @router.post("/{provider_id}/dry-run/start")

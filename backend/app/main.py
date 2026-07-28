@@ -342,10 +342,11 @@ async def lifespan(_app: FastAPI):
                 return self._to_snapshot(row) if row is not None else None
 
         async def list_enabled(self):
+            # "Enabled" from the registry's perspective means publicly
+            # visible — enabled AND published. A draft is rehearsable but
+            # must never reach the login catalog.
             async with get_async_session() as session:
-                rows = await idp_provider_repo.list_providers(
-                    session, only_enabled=True,
-                )
+                rows = await idp_provider_repo.list_public_providers(session)
                 return [self._to_snapshot(r) for r in rows]
 
         @staticmethod
