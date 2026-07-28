@@ -16,7 +16,7 @@
  * Gated by RequirePermission perm="system:admin" in the route.
  */
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { Trash2, Plus, Pencil, Power, AlertCircle, Beaker, FlaskConical, History, Search, Settings, ShieldOff } from 'lucide-react'
+import { Trash2, Plus, Power, AlertCircle, Beaker, History, Search, Settings, ShieldOff } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -32,8 +32,11 @@ import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProviderForm } from './ProviderForm'
-import { AssurancePill } from './AssurancePill'
 import { SsoActivityTab } from './SsoActivityTab'
+import { DocsLink } from '@/components/help/DocsLink'
+import { SsoFirstRunHero } from './sso/SsoFirstRunHero'
+import { IdpProviderCard } from './sso/IdpProviderCard'
+import { IdpConnectionWizard } from './sso/IdpConnectionWizard'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup' | 'activity'
 
@@ -51,45 +54,6 @@ function ErrorBanner({ message }: { message: string }) {
 // ── Providers tab ──────────────────────────────────────────────────
 
 
-/** Last known health from the background sweep.
- *
- *  The payload that matters is certificate expiry: an expired SAML signing
- *  cert takes every sign-in down at once, and the date was readable months
- *  ahead. ``unknown`` means not probed yet, or a kind with nothing to probe
- *  — it renders muted, never as an alarm. */
-function ProviderHealthCell({ health }: { health?: IdpHealth }) {
-    if (!health) {
-        return <span className="text-[11px] text-ink-muted">—</span>
-    }
-    const dot = {
-        ok: 'bg-emerald-400',
-        warning: 'bg-yellow-400',
-        unavailable: 'bg-red-400',
-        unknown: 'bg-gray-500',
-    }[health.status] ?? 'bg-gray-500'
-
-    const days = health.certDaysRemaining
-    const label =
-        days === null || days === undefined ? health.status
-        : days < 0 ? 'cert expired'
-        : `cert ${days}d`
-
-    return (
-        <span
-            title={health.detail ?? health.status}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px]"
-        >
-            <span className={cn('w-2 h-2 rounded-full shrink-0', dot)} />
-            <span className={cn(
-                health.status === 'unavailable' && 'text-red-400',
-                health.status === 'warning' && 'text-yellow-400',
-                health.status === 'unknown' && 'text-ink-muted',
-            )}>
-                {label}
-            </span>
-        </span>
-    )
-}
 
 
 function ProvidersTab() {
@@ -134,6 +98,18 @@ function ProvidersTab() {
         }
     }
 
+    async function publish(p: IdpProvider) {
+        setBusy(true)
+        try {
+            await ssoAdminService.publishProvider(p.id)
+            await refresh()
+        } catch (err) {
+            setError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
     async function dryRun(p: IdpProvider) {
         if (!confirm(
             `Sign in to ${p.slug} with your own account at that IdP.\n\n` +
@@ -165,117 +141,68 @@ function ProvidersTab() {
         }
     }
 
+    if (rows.length === 0 && !showCreate && !error) {
+        // An empty table with a button above it says nothing about what
+        // the job is. Replace the empty surface with the path through it.
+        return <SsoFirstRunHero onStart={() => setShowCreate(true)} />
+    }
+
     return (
         <div className="space-y-4">
             {error && <ErrorBanner message={error} />}
             <div className="flex justify-between items-center">
-                <h2 className="text-base font-semibold">IdP providers</h2>
-                <button
-                    onClick={() => setShowCreate((v) => !v)}
-                    className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-sm flex items-center gap-1"
-                >
-                    <Plus className="w-4 h-4" />
-                    {showCreate ? 'Cancel' : 'Add provider'}
-                </button>
+                <div>
+                    <h2 className="text-base font-semibold">Connections</h2>
+                    <p className="text-xs text-ink-muted mt-0.5">
+                        {rows.filter(p => p.lifecycle !== 'draft').length} live
+                        {rows.some(p => p.lifecycle === 'draft') &&
+                            `, ${rows.filter(p => p.lifecycle === 'draft').length} draft`}
+                    </p>
+                </div>
+                <div className="flex items-center gap-3">
+                    <DocsLink slug="sso-setup" variant="icon" />
+                    <button
+                        onClick={() => setShowCreate(true)}
+                        className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-sm flex items-center gap-1"
+                    >
+                        <Plus className="w-4 h-4" />
+                        Connect a provider
+                    </button>
+                </div>
             </div>
+
+            <div className="space-y-3">
+                {rows.map((p, i) => (
+                    <Fragment key={p.id}>
+                        <IdpProviderCard
+                            provider={p}
+                            health={health[p.id]}
+                            busy={busy}
+                            index={i}
+                            onEdit={() => setEditingId(editingId === p.id ? null : p.id)}
+                            onRehearse={() => { void dryRun(p) }}
+                            onPublish={() => { void publish(p) }}
+                            onToggleEnabled={() => { void toggleEnabled(p) }}
+                            onDelete={() => { void remove(p) }}
+                        />
+                        {editingId === p.id && (
+                            <ProviderForm
+                                existing={p}
+                                onSaved={() => { setEditingId(null); void refresh() }}
+                                onError={setError}
+                                onCancel={() => setEditingId(null)}
+                            />
+                        )}
+                    </Fragment>
+                ))}
+            </div>
+
             {showCreate && (
-                <ProviderForm
-                    onSaved={() => { setShowCreate(false); void refresh() }}
-                    onError={setError}
-                    onCancel={() => setShowCreate(false)}
+                <IdpConnectionWizard
+                    onClose={() => { setShowCreate(false); void refresh() }}
+                    onPublished={() => { void refresh() }}
                 />
             )}
-            <table className="w-full text-sm">
-                <thead>
-                    <tr className="text-left text-xs uppercase tracking-wider text-ink-muted">
-                        <th className="py-2">Slug</th>
-                        <th>Display</th>
-                        <th>Kind</th>
-                        <th>Health</th>
-                        <th>Linking</th>
-                        <th>Enabled</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows.map((p) => (
-                        <Fragment key={p.id}>
-                            <tr className="border-t border-white/10">
-                                <td className="py-2 font-mono text-xs">{p.slug}</td>
-                                <td>{p.displayName}</td>
-                                <td className="whitespace-nowrap">
-                                    <span className="mr-2">{p.kind}</span>
-                                    <AssurancePill
-                                        level={p.assurance}
-                                        reason={p.assuranceReason}
-                                    />
-                                </td>
-                                <td>
-                                    <ProviderHealthCell health={health[p.id]} />
-                                </td>
-                                <td className="text-xs">{p.linkingPolicy}</td>
-                                <td>
-                                    <button
-                                        onClick={() => toggleEnabled(p)}
-                                        disabled={busy}
-                                        className={
-                                            p.enabled
-                                                ? "text-emerald-400 text-xs"
-                                                : "text-ink-muted text-xs"
-                                        }
-                                    >
-                                        <Power className="inline w-3.5 h-3.5 mr-1" />
-                                        {p.enabled ? 'on' : 'off'}
-                                    </button>
-                                </td>
-                                <td className="text-right whitespace-nowrap">
-                                    <button
-                                        onClick={() => { void dryRun(p) }}
-                                        disabled={busy || !p.enabled}
-                                        title="Rehearse a real sign-in — writes nothing"
-                                        aria-label={`Dry run ${p.slug}`}
-                                        className="mr-3 text-ink-muted hover:text-ink disabled:opacity-40"
-                                    >
-                                        <FlaskConical className="inline w-4 h-4" />
-                                    </button>
-                                    <button
-                                        onClick={() => setEditingId(
-                                            editingId === p.id ? null : p.id,
-                                        )}
-                                        aria-label={`Edit ${p.slug}`}
-                                        className="mr-3 text-ink-muted hover:text-ink"
-                                    >
-                                        <Pencil className="inline w-4 h-4" />
-                                    </button>
-                                    <button
-                                        onClick={() => remove(p)}
-                                        disabled={busy}
-                                        aria-label={`Delete ${p.slug}`}
-                                        className="text-red-400 hover:text-red-300"
-                                    >
-                                        <Trash2 className="inline w-4 h-4" />
-                                    </button>
-                                </td>
-                            </tr>
-                            {editingId === p.id && (
-                                <tr>
-                                    <td colSpan={7} className="pb-4">
-                                        <ProviderForm
-                                            existing={p}
-                                            onSaved={() => {
-                                                setEditingId(null)
-                                                void refresh()
-                                            }}
-                                            onError={setError}
-                                            onCancel={() => setEditingId(null)}
-                                        />
-                                    </td>
-                                </tr>
-                            )}
-                        </Fragment>
-                    ))}
-                </tbody>
-            </table>
         </div>
     )
 }

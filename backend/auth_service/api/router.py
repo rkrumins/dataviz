@@ -327,27 +327,101 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
     import html
     import json
 
+    e = html.escape
     action = str(outcome.get("action", "unknown"))
-    headline = {
-        "sign_in_existing": "Would sign in as an existing user",
-        "provision_new": "Would create a new user",
-        "link_existing": "Would link to an existing user",
-        "rejected": "Would be REFUSED",
-    }.get(action, action)
-    body = html.escape(json.dumps(outcome, indent=2, default=str))
+    verdict = {
+        "sign_in_existing": ("Would sign in", "#059669",
+                             "This person already has an account here and it "
+                             "would be reused."),
+        "provision_new": ("Would create a new account", "#2563eb",
+                          "No account matches. One would be created from the "
+                          "claims below."),
+        "link_existing": ("Would link to an existing account", "#2563eb",
+                          "An account with this email already exists. This "
+                          "identity would be attached to it."),
+        "rejected": ("Would be refused", "#dc2626",
+                     "This sign-in would not be allowed to complete."),
+    }.get(action, (action, "#6b7280", ""))
+    headline, accent, explain = verdict
+
+    rows: list[str] = []
+
+    def row(label: str, value: object) -> None:
+        if value in (None, "", [], {}):
+            return
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value)
+        rows.append(
+            f"<tr><th>{e(label)}</th><td>{e(str(value))}</td></tr>"
+        )
+
+    row("Signing in as", outcome.get("email"))
+    row("Name", " ".join(filter(None, [
+        str(outcome.get("first_name") or ""),
+        str(outcome.get("last_name") or ""),
+    ])).strip())
+    row("Their ID at the IdP", outcome.get("external_id"))
+    row("Email verified by IdP", "yes" if outcome.get("email_verified") else "no")
+    row("Existing account", outcome.get("user_email"))
+    row("Groups asserted", outcome.get("groups"))
+    row("Linking policy", outcome.get("linking_policy"))
+
+    if outcome.get("reason"):
+        row("Refused because", outcome["reason"])
+    for reason in outcome.get("deny_reasons") or []:
+        row("→", reason)
+
+    reconcile = outcome.get("reconcile") or {}
+    for m in reconcile.get("matched") or []:
+        target = m.get("role_name") or m.get("group_id") or "?"
+        row(f"Group '{m.get('idp_group')}' grants", target)
+    if reconcile.get("unmatched_groups"):
+        row("Groups with no mapping", reconcile["unmatched_groups"])
+
+    # The raw outcome stays available, folded away — an operator debugging
+    # a claim-shape problem needs it, and everyone else does not.
+    raw = e(json.dumps(outcome, indent=2, default=str))
+
     return Response(
         content=(
             "<!doctype html><meta charset=utf-8>"
-            f"<title>Dry run: {html.escape(slug)}</title>"
-            "<style>body{font:14px/1.5 ui-monospace,monospace;max-width:52rem;"
-            "margin:3rem auto;padding:0 1rem}h1{font-size:1.1rem}"
-            "pre{background:#f4f4f5;padding:1rem;border-radius:.5rem;"
-            "overflow-x:auto}</style>"
-            f"<h1>{html.escape(headline)}</h1>"
-            f"<p>Provider <code>{html.escape(slug)}</code>. "
-            "Nothing was written and no session was created — close this tab "
-            "and you are still signed in as yourself.</p>"
-            f"<pre>{body}</pre>"
+            '<meta name=viewport content="width=device-width,initial-scale=1">'
+            f"<title>Rehearsal: {e(slug)}</title>"
+            "<style>"
+            ":root{color-scheme:light dark}"
+            "body{font:15px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif;"
+            "max-width:44rem;margin:0 auto;padding:3rem 1.25rem;color:#18181b}"
+            "@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}"
+            "table{background:#18181b}th{color:#a1a1aa}"
+            "details{background:#18181b}pre{color:#d4d4d8}}"
+            ".badge{display:inline-block;padding:.25rem .7rem;border-radius:999px;"
+            "font-size:.75rem;font-weight:600;letter-spacing:.04em;"
+            "text-transform:uppercase;color:#fff;background:" + accent + "}"
+            "h1{font-size:1.6rem;margin:.75rem 0 .35rem;letter-spacing:-.02em}"
+            ".lede{color:#71717a;margin:0 0 1.75rem}"
+            "table{width:100%;border-collapse:collapse;border-radius:.6rem;"
+            "overflow:hidden;background:#fafafa}"
+            "th,td{text-align:left;padding:.6rem .85rem;font-size:.875rem;"
+            "border-bottom:1px solid rgba(128,128,128,.18)}"
+            "th{font-weight:500;color:#52525b;width:42%}"
+            "td{font-variant-numeric:tabular-nums}"
+            "tr:last-child th,tr:last-child td{border-bottom:0}"
+            ".safe{margin:1.75rem 0 0;padding:.85rem 1rem;border-radius:.6rem;"
+            "background:rgba(5,150,105,.09);border:1px solid rgba(5,150,105,.3);"
+            "font-size:.85rem}"
+            "details{margin-top:1.25rem;font-size:.8rem;background:#fafafa;"
+            "border-radius:.6rem;padding:.7rem .9rem}"
+            "summary{cursor:pointer;color:#71717a}"
+            "pre{overflow-x:auto;font-size:.75rem;line-height:1.5}"
+            "</style>"
+            f'<span class="badge">Rehearsal</span>'
+            f"<h1>{e(headline)}</h1>"
+            f'<p class="lede">{e(explain)} Provider <code>{e(slug)}</code>.</p>'
+            + (f"<table>{''.join(rows)}</table>" if rows else "")
+            + '<p class="safe"><strong>Nothing was written.</strong> No account '
+              "was created or changed and no session was started — close this "
+              "tab and you are still signed in as yourself.</p>"
+            f"<details><summary>Full result</summary><pre>{raw}</pre></details>"
         ),
         media_type="text/html",
     )

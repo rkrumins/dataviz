@@ -346,7 +346,7 @@ async def test_the_callback_mints_no_session_for_a_dry_run(
     )
 
     assert resp.status_code == 200
-    assert "Would create a new user" in resp.text
+    assert "Would create a new account" in resp.text
     assert "nx_access" not in resp.headers.get("set-cookie", "")
     assert await _counts(db_session) == before
 
