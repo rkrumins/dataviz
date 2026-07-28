@@ -22,9 +22,16 @@ import pytest_asyncio
 from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
     _compute_searchable_text,
+    _edge_from_row,
     _node_from_props,
     _split_user_properties,
 )
+from backend.app.providers.property_shapes import (
+    coerce_container,
+    coerce_tags,
+    flatten_properties,
+)
+from backend.graph.adapters.schema_mapping import SchemaMapping
 
 
 # ---------------------------------------------------------------------------
@@ -146,30 +153,50 @@ class TestNodeFromProps:
         }, "schemaField")
         assert node.properties == {"logicalType": "STRING", "rowCount": 1000}
 
-    def test_legacy_blob_is_no_longer_hydrated(self):
-        """W1.3 (greenfield cleanup): the pre-refactor JSON blob on
-        ``n.properties`` is no longer parsed by the read path. Pre-
-        refactor nodes lose those properties until backfilled via
-        ``backend/scripts/migrate_native_properties.py``. A one-time
-        warning surfaces so operators notice."""
+    def test_container_is_hydrated_and_flattened(self):
+        """Supersedes ``test_legacy_blob_is_no_longer_hydrated``.
+
+        W1.3 stopped parsing the ``n.properties`` container on the
+        assumption operators would run the backfill script. That left the
+        Properties panel EMPTY meanwhile, and could never help a graph
+        whose container is named something else. The container is read
+        again — flattened, and at the LOWEST priority."""
         node = _node_from_props({
             "urn": "urn:x", "displayName": "X",
             "properties": json.dumps({"logicalType": "STRING", "rowCount": 1000}),
         }, "schemaField")
-        # The legacy-blob keys are NOT visible on the read path.
-        assert node.properties == {}
+        assert node.properties == {"logicalType": "STRING", "rowCount": 1000}
 
-    def test_native_properties_unaffected_by_legacy_blob(self):
-        """Mid-migration nodes carry both — native fields are returned;
-        the blob is ignored (no merge, no override needed)."""
+    def test_container_nesting_becomes_folder_paths(self):
+        """Nested dicts flatten to ``parent/child`` — a real indexable
+        FalkorDB key that PropertyEditor's groupByPath renders as a folder."""
+        node = _node_from_props({
+            "urn": "urn:x",
+            "properties": json.dumps({
+                "technical": {"format": "parquet", "cols": [1, 2]},
+                "owner": "team",
+            }),
+        }, "dataset")
+        assert node.properties == {
+            "technical/format": "parquet",
+            "technical/cols": [1, 2],
+            "owner": "team",
+        }
+
+    def test_native_properties_win_over_container(self):
+        """Mid-migration nodes carry both. Native fields are the source of
+        truth and must override the stale container copy, so already-migrated
+        data is never affected by the fallback."""
         node = _node_from_props({
             "urn": "urn:x", "displayName": "X",
             "logicalType": "STRING_NEW",
-            "properties": json.dumps({"logicalType": "STRING_OLD"}),
+            "properties": json.dumps({
+                "logicalType": "STRING_OLD", "rowCount": 1000,
+            }),
         }, "schemaField")
         assert node.properties["logicalType"] == "STRING_NEW"
-        # Blob keys not in native stay invisible.
-        assert "rowCount" not in node.properties
+        # Container-only keys still surface — that's the whole point.
+        assert node.properties["rowCount"] == 1000
 
     def test_residual_blob_merged(self):
         # Non-scalar user values live in propertiesRaw.
@@ -193,6 +220,16 @@ class TestNodeFromProps:
         # Native still recovered; bad blob silently skipped.
         assert node.properties == {"logicalType": "STRING"}
 
+    def test_residual_wins_over_container(self):
+        """Full priority order: container < native < propertiesRaw."""
+        node = _node_from_props({
+            "urn": "urn:x",
+            "properties": json.dumps({"a": "from-container", "b": "from-container"}),
+            "a": "from-native",
+            "propertiesRaw": json.dumps({"b": "from-residual"}),
+        }, "dataset")
+        assert node.properties == {"a": "from-native", "b": "from-residual"}
+
     def test_reserved_fields_excluded_from_properties(self):
         # The user `properties` dict must not contain provider-owned fields.
         node = _node_from_props({
@@ -209,6 +246,200 @@ class TestNodeFromProps:
         assert node.qualified_name == "x.y.z"
         assert node.layer_assignment == "Source"
         assert node.source_system == "snowflake"
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests — property_shapes transforms
+# ---------------------------------------------------------------------------
+
+class TestCoerceContainer:
+    def test_json_string(self):
+        assert coerce_container('{"a": 1}') == {"a": 1}
+
+    def test_native_map(self):
+        assert coerce_container({"a": 1}) == {"a": 1}
+
+    def test_empty_object_is_not_none(self):
+        """``{}`` (parsed, empty) must be distinguishable from ``None``
+        (unparseable) — the migration's REMOVE hinges on the difference."""
+        assert coerce_container("{}") == {}
+        assert coerce_container("{}") is not None
+
+    def test_non_dict_json_returns_none(self):
+        # A JSON array parses fine but is not a property container.
+        assert coerce_container("[1, 2]") is None
+        assert coerce_container("null") is None
+        assert coerce_container('"a string"') is None
+
+    def test_malformed_returns_none(self):
+        assert coerce_container("not json at all") is None
+
+    def test_empty_and_missing_return_none(self):
+        assert coerce_container("") is None
+        assert coerce_container(None) is None
+        assert coerce_container(42) is None
+
+
+class TestFlattenProperties:
+    def test_nested_dicts_become_paths(self):
+        assert flatten_properties({"a": {"b": {"c": 1}}}) == {"a/b/c": 1}
+
+    def test_scalar_list_stays_at_its_path(self):
+        # FalkorDB stores flat scalar lists natively — already indexable.
+        assert flatten_properties({"a": {"tags": [1, 2]}}) == {"a/tags": [1, 2]}
+
+    def test_list_of_dicts_stays_at_its_path(self):
+        out = flatten_properties({"hist": [{"x": 1}]})
+        assert out == {"hist": [{"x": 1}]}
+
+    def test_empty_dict_is_preserved_as_a_value(self):
+        # Descending into {} would lose the key entirely.
+        assert flatten_properties({"a": {}}) == {"a": {}}
+
+    def test_depth_cap_leaves_remainder_intact(self):
+        deep = {"l1": {"l2": {"l3": "v"}}}
+        assert flatten_properties(deep, max_depth=2) == {"l1/l2": {"l3": "v"}}
+
+    def test_custom_separator(self):
+        assert flatten_properties({"a": {"b": 1}}, separator=".") == {"a.b": 1}
+
+    def test_key_already_containing_separator_kept_verbatim(self):
+        assert flatten_properties({"a/b": 1}) == {"a/b": 1}
+
+    def test_non_mapping_input(self):
+        assert flatten_properties(None) == {}
+        assert flatten_properties("nope") == {}
+
+
+class TestCoerceTags:
+    def test_plain_string_is_a_single_tag(self):
+        """The regression that mattered: this used to raise inside
+        ``_node_from_props``, whose broad ``except`` then dropped the
+        ENTIRE node from every read."""
+        assert coerce_tags("production") == ["production"]
+
+    def test_json_array(self):
+        assert coerce_tags('["a", "b"]') == ["a", "b"]
+
+    def test_native_list(self):
+        assert coerce_tags(["a"]) == ["a"]
+
+    def test_malformed_array_is_empty_not_raising(self):
+        assert coerce_tags("[oops") == []
+
+    def test_empty_inputs(self):
+        assert coerce_tags(None) == []
+        assert coerce_tags("") == []
+        assert coerce_tags("   ") == []
+
+
+# ---------------------------------------------------------------------------
+# Mapping-driven read path — onboarded third-party graph shapes
+# ---------------------------------------------------------------------------
+
+class TestMappedNodeReads:
+    def test_container_under_a_foreign_key(self):
+        """The case the migration script can never fix: the container is
+        not named ``properties``, so the script's WHERE never matches it."""
+        mapping = SchemaMapping(properties_field="attributes")
+        node = _node_from_props({
+            "urn": "urn:x",
+            "attributes": json.dumps({"owner": {"team": "data"}}),
+        }, "dataset", mapping)
+        assert node.properties == {"owner/team": "data"}
+
+    def test_container_as_a_native_map(self):
+        node = _node_from_props({
+            "urn": "urn:x", "properties": {"x": {"y": 2}},
+        }, "dataset")
+        assert node.properties == {"x/y": 2}
+
+    def test_unparseable_container_yields_no_properties_but_keeps_the_node(self):
+        node = _node_from_props({
+            "urn": "urn:x", "properties": "[1,2,3]",
+        }, "dataset")
+        assert node is not None
+        assert node.properties == {}
+
+    def test_custom_separator_from_mapping(self):
+        mapping = SchemaMapping(properties_separator=".")
+        node = _node_from_props({
+            "urn": "urn:x", "properties": json.dumps({"a": {"b": 1}}),
+        }, "dataset", mapping)
+        assert node.properties == {"a.b": 1}
+
+    def test_collect_unmapped_false_hides_physical_noise(self):
+        """A foreign graph's internal fields (``_id``, ``__typename``) would
+        otherwise leak into the Properties panel — the same class of leak
+        that forced ``entityId``/``searchableText`` into the reserved set."""
+        mapping = SchemaMapping(collect_unmapped_as_properties=False)
+        node = _node_from_props({
+            "urn": "urn:x", "_id": "internal", "__typename": "Dataset",
+            "properties": json.dumps({"real": 1}),
+        }, "dataset", mapping)
+        assert node.properties == {"real": 1}
+
+    def test_reserved_key_collision_is_rescued_by_override(self):
+        """A source field named ``level`` is shadowed on read and deleted on
+        write. An explicit override moves it somewhere safe instead."""
+        mapping = SchemaMapping(property_overrides={"level": "source/level"})
+        node = _node_from_props({
+            "urn": "urn:x", "level": "tier-1",
+        }, "dataset", mapping)
+        assert node.properties == {"source/level": "tier-1"}
+
+    def test_override_does_not_clobber_the_platform_value(self):
+        mapping = SchemaMapping(property_overrides={"level": "existing"})
+        node = _node_from_props({
+            "urn": "urn:x", "level": 2, "existing": "keep-me",
+        }, "dataset", mapping)
+        assert node.properties["existing"] == "keep-me"
+
+    def test_container_key_never_leaks_as_a_property(self):
+        """Even a non-default container name must not show up as a property
+        row — it is structure, not data."""
+        mapping = SchemaMapping(properties_field="attributes")
+        node = _node_from_props({
+            "urn": "urn:x", "attributes": json.dumps({"a": 1}),
+        }, "dataset", mapping)
+        assert "attributes" not in node.properties
+
+
+class TestMappedEdgeReads:
+    def test_native_edge_properties_are_collected(self):
+        """The node bug, mirrored: ``_edge_from_row`` read ONLY the
+        container key, so a graph storing edge properties as ordinary
+        fields returned ``{}`` for every edge."""
+        edge = _edge_from_row("a", "b", "TRANSFORMS", {
+            "id": "e1", "confidence": 0.9,
+            "discoveredBy": "auto", "score": 3,
+        })
+        assert edge.properties == {"discoveredBy": "auto", "score": 3}
+        assert edge.confidence == 0.9
+        assert edge.id == "e1"
+
+    def test_container_still_works_and_flattens(self):
+        edge = _edge_from_row("a", "b", "T", {
+            "properties": json.dumps({"n": {"d": 1}}),
+        })
+        assert edge.properties == {"n/d": 1}
+
+    def test_malformed_container_does_not_raise(self):
+        # Previously an unguarded json.loads — one bad edge took down the
+        # whole read.
+        edge = _edge_from_row("a", "b", "T", {"properties": "NOT JSON"})
+        assert edge.properties == {}
+
+    def test_reserved_edge_fields_excluded(self):
+        edge = _edge_from_row("a", "b", "AGGREGATED", {
+            "weight": 5, "aggKey": "k", "sourceLevel": 1, "targetLevel": 2,
+            "realProp": "keep",
+        })
+        assert edge.properties == {"realProp": "keep"}
+
+    def test_edge_id_falls_back_to_composite(self):
+        edge = _edge_from_row("a", "b", "T", {})
+        assert edge.id == "a|T|b"
 
 
 # ---------------------------------------------------------------------------

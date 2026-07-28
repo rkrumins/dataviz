@@ -105,6 +105,26 @@ class SchemaMapping(BaseModel):
                     "are collected into the GraphNode.properties dict.",
     )
 
+    # ── Nested-container unpacking ───────────────────────────────────
+    # A foreign graph usually nests every user property under ONE container
+    # key (``properties_field``). Unpacking it into flat ``parent<sep>child``
+    # keys makes each leaf a real indexable FalkorDB property AND lets
+    # PropertyEditor's `groupByPath` render it as a folder tree.
+    properties_separator: str = Field(
+        default="/",
+        description="Separator joining a nested property path into a flat key "
+                    "(e.g. 'technical' + 'format' -> 'technical/format'). Only '/' "
+                    "renders as a folder tree in the UI; other separators still "
+                    "produce queryable keys but display flat.",
+    )
+    property_overrides: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Explicit physical-property -> property-path renames, applied after "
+                    "unpacking. The escape hatch for a source field whose name collides "
+                    "with a platform-reserved key (e.g. {'level': 'source/level'}), which "
+                    "would otherwise be dropped on read and deleted on write.",
+    )
+
     # ================================================================
     # Factory helpers
     # ================================================================

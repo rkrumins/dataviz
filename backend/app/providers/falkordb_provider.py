@@ -40,6 +40,13 @@ from ..models.graph import (
     TraceResult, TraceFocus,
 )
 from .base import GraphDataProvider
+from .property_shapes import (
+    apply_property_overrides,
+    coerce_container,
+    coerce_tags,
+    flatten_properties,
+)
+from backend.graph.adapters.schema_mapping import SchemaMapping
 from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
@@ -518,6 +525,12 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 _logged_legacy_blob: bool = False
 
 
+# Platform-default property mapping, shared by every call site that doesn't
+# carry a provider instance (module-level helpers, tests, the stub providers).
+# Immutable in practice — never mutate it; build a fresh SchemaMapping instead.
+_DEFAULT_MAPPING = SchemaMapping()
+
+
 def _split_user_properties(
     props: Optional[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], str]:
@@ -586,12 +599,21 @@ def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dic
     return {**payload, "properties": clean}
 
 
-def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
+def _node_from_props(
+    props: Dict[str, Any],
+    entity_type_str: Optional[str] = None,
+    mapping: Optional[SchemaMapping] = None,
+) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
 
-    Reconstructs the user `properties` dict from two layers, in
+    Reconstructs the user `properties` dict from three layers, in
     increasing priority (later wins):
 
+      0. The nested property CONTAINER named by ``mapping.properties_field``
+         (default ``properties``), flattened into ``parent/child`` keys.
+         This covers both the platform's own pre-refactor JSON blob and an
+         onboarded third-party graph that nests everything under one key.
+         Lowest priority, so migrated data is never affected by it.
       1. Non-reserved native keys on the node — written by the
          post-refactor ingest path. The source of truth.
       2. JSON-stringified residual in `props['propertiesRaw']` —
@@ -599,41 +621,52 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
          dicts, lists of dicts). Layered on top of native because
          residual keys are disjoint from native keys by construction.
 
-    The pre-refactor ``n.properties`` legacy JSON blob is no longer
-    consulted (W1.3 / greenfield cleanup). Nodes that still carry
-    that blob will lose those properties on read until the next
-    write hydrates them as native fields — operators run
-    ``backend/scripts/migrate_native_properties.py`` to backfill.
-    A one-time WARNING surfaces if such a node is observed so the
-    operator knows to run the migration.
+    Layer 0 restores a fallback W1.3 removed on the assumption that operators
+    would run ``backend/scripts/migrate_native_properties.py``. That
+    assumption left the Properties panel EMPTY in the meantime, and could
+    never help a graph whose container is named something other than
+    ``properties`` — the script only looks for that one key. The fallback is
+    presentation-only: these properties are still invisible to Advanced
+    Search (they aren't native fields), so the one-time WARNING below still
+    fires to point at the durable fix.
     """
     if not props or "urn" not in props:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
+    mapping = mapping or _DEFAULT_MAPPING
 
-    if "properties" in props:
-        # Pre-refactor node still carries the legacy blob. Flag it once
-        # per provider boot so operators can run the backfill. The
-        # warning is bounded by ``_logged_legacy_blob`` (module-level
-        # set) so we don't spam the logs in production.
+    user_props: Dict[str, Any] = {}
+
+    # ── Layer 0: nested property container ───────────────────────────
+    container_key = mapping.properties_field
+    if container_key and container_key in props:
+        container = coerce_container(props[container_key])
+        if container:
+            user_props.update(
+                flatten_properties(container, mapping.properties_separator)
+            )
+        # Flag once per provider boot so operators can run the alignment.
+        # Bounded by ``_logged_legacy_blob`` so we don't spam production.
         global _logged_legacy_blob
         if not _logged_legacy_blob:
             logger.warning(
-                "deep_search: node urn=%s still carries the pre-refactor "
-                "n.properties JSON blob; run "
-                "backend/scripts/migrate_native_properties.py to backfill. "
-                "These properties are NOT visible to advanced search "
-                "until migrated.",
-                props.get("urn"),
+                "node urn=%s stores its properties nested under n.%s. They are "
+                "rendered from the container on read, but are NOT visible to "
+                "advanced search until unpacked into native fields — align this "
+                "data source's properties (Data source -> Mapping) or run "
+                "backend/scripts/migrate_native_properties.py.",
+                props.get("urn"), container_key,
             )
             _logged_legacy_blob = True
 
-    user_props: Dict[str, Any] = {}
-    for k, v in props.items():
-        if k in _RESERVED_NODE_KEYS:
-            continue
-        user_props[k] = v
+    # ── Layer 1: native non-reserved keys ────────────────────────────
+    if mapping.collect_unmapped_as_properties:
+        for k, v in props.items():
+            if k in _RESERVED_NODE_KEYS or k == container_key:
+                continue
+            user_props[k] = v
 
+    # ── Layer 2: non-scalar residual ─────────────────────────────────
     residual_blob = props.get("propertiesRaw")
     if isinstance(residual_blob, str) and residual_blob:
         try:
@@ -642,6 +675,15 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
                 user_props.update(residual_dict)
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Rescue any physical field whose name collides with a platform-reserved
+    # key by moving it to a configured safe path (e.g. level -> source/level).
+    # Reserved keys never reach `user_props`, so the source value is read from
+    # `props` directly — this is the only way it survives at all.
+    for source_key, target_key in (mapping.property_overrides or {}).items():
+        if source_key in _RESERVED_NODE_KEYS and source_key in props:
+            user_props.setdefault(target_key, props[source_key])
+    apply_property_overrides(user_props, mapping.property_overrides)
 
     try:
         return GraphNode(
@@ -663,7 +705,11 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
             properties=user_props,
-            tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
+            # Tolerant: a source whose `tags` is a plain word (not a JSON
+            # array) used to raise here, and the broad `except` below turned
+            # that into a None return — dropping the WHOLE node from every
+            # read over one malformed field.
+            tags=coerce_tags(props.get("tags")),
             layerAssignment=props.get("layerAssignment"),
             childCount=props.get("childCount"),
             sourceSystem=props.get("sourceSystem"),
@@ -674,16 +720,61 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
         return None
 
 
-def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
-    """Build GraphEdge from FalkorDB edge data."""
-    edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
+# Edge-key counterpart to ``_RESERVED_NODE_KEYS`` — every field the platform's
+# edge writers SET directly (provider bulk/single writes, the FalkorDB
+# projector, and the AGGREGATED materializer's depth/weight stamps). Everything
+# NOT in this set is a user edge property.
+_RESERVED_EDGE_KEYS: frozenset = frozenset({
+    "id", "confidence", "properties",
+    # AGGREGATED materialization + versioning stamps
+    "weight", "latestUpdate", "sourceEdgeTypes", "aggKey",
+    "sourceLevel", "targetLevel", "levelDigest", "sourceDepth", "targetDepth",
+    "gvSeq", "mode", "operator",
+})
+
+
+def _edge_from_row(
+    source_urn: str,
+    target_urn: str,
+    rel_type: str,
+    props: Dict[str, Any],
+    mapping: Optional[SchemaMapping] = None,
+) -> GraphEdge:
+    """Build GraphEdge from FalkorDB edge data.
+
+    Mirrors ``_node_from_props``: the nested container named by
+    ``mapping.edge_properties_field`` first, then native non-reserved fields
+    on top. Without the second layer an onboarded graph that stores its edge
+    properties as ordinary fields returned ``{}`` for every edge — the node
+    bug, mirrored.
+    """
+    mapping = mapping or _DEFAULT_MAPPING
+    edge_id = props.get(mapping.edge_id_field or "id") or f"{source_urn}|{rel_type}|{target_urn}"
+
+    edge_props: Dict[str, Any] = {}
+    container_key = mapping.edge_properties_field
+    if container_key:
+        # coerce_container returns None for a malformed blob rather than
+        # raising — the previous json.loads had no guard at all, so one bad
+        # edge took down the whole read.
+        container = coerce_container(props.get(container_key))
+        if container:
+            edge_props.update(
+                flatten_properties(container, mapping.properties_separator)
+            )
+    if mapping.collect_unmapped_as_properties:
+        for k, v in props.items():
+            if k in _RESERVED_EDGE_KEYS or k == container_key:
+                continue
+            edge_props[k] = v
+
     return GraphEdge(
         id=edge_id,
         sourceUrn=source_urn,
         targetUrn=target_urn,
         edgeType=str(rel_type),
-        confidence=props.get("confidence"),
-        properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+        confidence=props.get(mapping.edge_confidence_field or "confidence"),
+        properties=edge_props,
     )
 
 
@@ -742,6 +833,21 @@ class FalkorDBProvider(GraphDataProvider):
         # — the cache resolves its own auth, never inherits the graph's.
         self._provider_id = provider_id
         self._extra_config = extra_config
+        # Physical→logical property mapping for onboarded third-party graphs
+        # (mirrors Neo4jProvider / SpannerProvider, which have always built
+        # this). Defaults are the platform's own schema, so a graph written by
+        # our write path is unaffected. Only the property/edge-property half is
+        # consumed today — see `_node_from_props` / `_edge_from_row`.
+        try:
+            self._mapping = SchemaMapping.from_extra_config(extra_config)
+        except Exception as exc:
+            # A malformed schemaMapping must not make the provider
+            # unconstructable — fall back to platform defaults and say so.
+            logger.warning(
+                "FalkorDB %s: invalid extra_config.schemaMapping (%s); "
+                "using platform-default property mapping.", graph_name, exc,
+            )
+            self._mapping = SchemaMapping()
         merged_credentials = dict(credentials or {})
         if cache_redis_url and "cache_redis_url" not in merged_credentials:
             merged_credentials["cache_redis_url"] = cache_redis_url
@@ -2579,9 +2685,9 @@ class FalkorDBProvider(GraphDataProvider):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
             entity_type = labels[0] if labels else props.get("entityType", "unknown")
-            return _node_from_props(props, entity_type)
+            return _node_from_props(props, entity_type, self._mapping)
         if isinstance(cell, dict):
-            return _node_from_props(cell)
+            return _node_from_props(cell, None, self._mapping)
         return None
 
     # ---- URN → label cache (Redis Hash) ----
@@ -3212,7 +3318,7 @@ class FalkorDBProvider(GraphDataProvider):
             edges: List[GraphEdge] = []
             for rows in rows_per_bucket:
                 for row in rows:
-                    edges.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                    edges.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}, self._mapping))
                     if len(edges) >= limit:
                         break
                 if len(edges) >= limit:
@@ -3241,7 +3347,7 @@ class FalkorDBProvider(GraphDataProvider):
         edges = []
         for row in (result.result_set or []):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
-            edges.append(_edge_from_row(src, tgt, rel_type, rprops))
+            edges.append(_edge_from_row(src, tgt, rel_type, rprops, self._mapping))
         return edges
 
     async def get_children(
@@ -3452,7 +3558,7 @@ class FalkorDBProvider(GraphDataProvider):
                 child_urns.append(n.urn)
 
                 # Build containment edge from the matched relationship
-                containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
+                containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops, self._mapping))
 
         # --- Step 2: Fetch cross-child lineage edges (scoped to current page only) ---
         # Only use the current page's child URNs + parent, NOT cumulative URNs.
@@ -3512,7 +3618,7 @@ class FalkorDBProvider(GraphDataProvider):
             ])
             for rows in lineage_rows:
                 for row in rows:
-                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}, self._mapping))
 
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)
@@ -6463,7 +6569,7 @@ class FalkorDBProvider(GraphDataProvider):
                     r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "UNKNOWN"
                     r_props = getattr(edge_obj_raw, "properties", {})
 
-                    edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props)
+                    edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props, self._mapping)
 
                     if edge.id not in collected_edges:
                         collected_edges[edge.id] = edge
@@ -6546,7 +6652,7 @@ class FalkorDBProvider(GraphDataProvider):
                          r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "UNKNOWN"
                          r_props = getattr(r_raw, "properties", {})
 
-                         edge = _edge_from_row(parent.urn, child.urn, r_type, r_props)
+                         edge = _edge_from_row(parent.urn, child.urn, r_type, r_props, self._mapping)
                          collected_edges[edge.id] = edge
 
                          # Only add parent to next level if we haven't seen it before
@@ -9202,7 +9308,7 @@ class FalkorDBProvider(GraphDataProvider):
             if not result.result_set:
                 return None
             row = result.result_set[0]
-            return _edge_from_row(row[0], row[1], row[2], row[3] or {})
+            return _edge_from_row(row[0], row[1], row[2], row[3] or {}, self._mapping)
         except Exception as e:
             logger.error(f"update_edge failed: {e}")
             return None
