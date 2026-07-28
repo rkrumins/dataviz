@@ -11,7 +11,91 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ## [Unreleased] — Invite links that actually work, and can be taken back
 
+### Security
+
+**Signing someone out did not sign them out.** Revoking a user's sessions —
+whether an admin killing a compromised account or a role change forcing new
+claims — wrote the session id to a Redis tombstone list that `/auth/refresh`
+never consulted. Worse, a refresh does not reuse the session id; it mints a
+fresh random one. So the sequence was: access token rejected once, the browser
+silently refreshes (which it does automatically), a brand-new session id comes
+back that was never on the list, and the session continues. The only thing that
+ever really ended a session was suspending the account, which `refresh` happens
+to re-check for other reasons.
+
+Revocation now also stamps `users.sessions_valid_from`, and a refresh token
+minted before that instant is refused and its family killed. The Redis
+tombstone still covers the minutes until the access token would have expired;
+the cutoff covers everything after. Tokens issued before this release carry no
+mint claim and are honoured, so upgrading does not sign the estate out.
+
+### Added
+
+**You can manage your own account.** Every account action in this product was
+something an administrator did to somebody else — Admin → Users could rename
+you, reset your password, suspend you — and there was no screen where you could
+do any of it yourself. For the sole System Administrator that meant editing your
+own row through a table built for managing other people, and changing your own
+password through a form that never asked what the old one was.
+
+**Account settings**, in the profile menu, now covers:
+
+- **Your name**, including an optional **display name** for people whose name
+  is not simply their first and last. Clearing it goes back to the derived one.
+- **Your password**, which asks for the current one — the only password entry
+  point in the product that does, because it is the only one not already behind
+  an admin or a one-time token. Changing it signs out every session, including
+  the one you are using, which is now true rather than merely claimed.
+- **Sign out everywhere**, for when you think somebody else has your session.
+- **Recent activity** — password changes, resets and revocations on your
+  account, and whether an administrator did them. Nothing previously showed
+  these events to the person they were about.
+- **Your avatar**, which is now stored on the account. It was a browser-local
+  preference, so it silently reset on a new machine and nobody else ever saw it.
+
+**The default administrator password cannot be kept.** A fresh deployment seeds
+an admin from `ADMIN_PASSWORD`, and a log line asking the operator to change it
+was the only control — while the value itself is printed in the README, the
+quickstart compose file, and every setup doc. When the seeded password is one of
+those published defaults the account must now choose a new one at first
+sign-in, enforced by the API rather than by a redirect the client could decline
+to follow. Supplying your own password skips the prompt entirely. Admin → Users
+badges any account still in that state.
+
+**A locked-out sole administrator can get back in.** `Forgot password` sends
+nothing — this deployment has no email infrastructure — it flags the request for
+an administrator, which for the only administrator is themselves. There is now
+`python -m backend.scripts.reset_admin_password --email …`, which prompts for
+the password rather than taking it as an argument and revokes every existing
+session. Host access is the authorisation model, which is why it is not an
+endpoint.
+
+**Reset password is a labelled button.** It was an unlabelled key icon in a row
+of unlabelled icons — the single action people come to that screen for, findable
+only by hovering things.
+
+### Known limitations
+
+**Account activity starts at upgrade.** The events behind it were always
+written, but without the subject columns needed to find them by account without
+scanning the table. Only events recorded after this release appear, so an empty
+list means "nothing since you upgraded", not "nothing ever happened". The page
+says so.
+
+**"Sign out everywhere" includes the device you are on.** Keeping the current
+session alive would mean re-issuing its cookies past the revocation cutoff,
+which needs session-minting surface on the auth service that is deliberately
+being kept thin ahead of extracting it. The button says what it does.
+
+**Email is still not self-editable.** It is the identity-provider key, so
+changing it is a re-link, not a text field.
+
 ### Fixed
+
+**The admin profile edit returned stale data.** Saving a name change wrote it
+correctly but answered with the values from before the edit, because the write
+went around SQLAlchemy's identity map while the response read through it. The
+database was always right; the screen just did not show it until a reload.
 
 **Shareable signup links were unusable.** Anyone who clicked one landed on the login page
 instead of the signup form, and the invite was discarded on the way. The `/signup` route was

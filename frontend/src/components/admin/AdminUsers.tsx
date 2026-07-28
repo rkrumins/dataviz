@@ -859,6 +859,17 @@ export function AdminUsers() {
                                                                 RESET
                                                             </span>
                                                         )}
+                                                        {/* An account still on the password it
+                                                            shipped with — which is printed in the
+                                                            setup docs, so it is public knowledge.
+                                                            Worth seeing without opening the row. */}
+                                                        {user.mustChangePassword && (
+                                                            <span
+                                                                title="This account is still using its default password. It must choose a new one at next sign-in."
+                                                                className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+                                                                DEFAULT PASSWORD
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div className="flex items-center gap-1 mt-0.5">
                                                         <Mail className="w-3 h-3 text-ink-muted shrink-0" />
@@ -939,16 +950,23 @@ export function AdminUsers() {
                                                             <UserCog className="w-4 h-4" />
                                                         </button>
 
-                                                        {/* Reset password */}
+                                                        {/* Reset password. Carries its label rather
+                                                            than relying on a hover title: this is
+                                                            the action somebody comes to this screen
+                                                            looking for — including for the system
+                                                            administrator account — and a bare key
+                                                            icon is not something you find by
+                                                            looking. */}
                                                         <button onClick={() => setModal({ kind: 'resetPassword', userId: user.id, name: user.displayName })}
                                                             disabled={isActing} title="Reset password"
                                                             className={cn(
-                                                                "p-2 rounded-lg transition-colors disabled:opacity-50",
+                                                                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50",
                                                                 user.resetRequested
                                                                     ? "text-sky-500 bg-sky-500/10 hover:bg-sky-500/20"
                                                                     : "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
                                                             )}>
                                                             <KeyRound className="w-4 h-4" />
+                                                            Reset password
                                                         </button>
 
                                                         {/* Suspend / Reactivate */}

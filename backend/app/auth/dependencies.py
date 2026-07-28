@@ -95,6 +95,25 @@ def _identity_service(request: Request) -> IdentityService:
     return svc
 
 
+#: The only routes reachable while a forced password change is pending.
+#: Kept to what the change screen itself needs — read who you are, set
+#: the new password, or give up and sign out. Anything else would let
+#: the account keep working around the rotation it is being held for.
+_PASSWORD_CHANGE_ALLOWED_PATHS = frozenset({
+    "/api/v1/users/me",
+    "/api/v1/users/me/password",
+    "/api/v1/auth/me",
+    "/api/v1/auth/logout",
+    "/api/v1/auth/refresh",
+    "/api/v1/me/identities",
+})
+
+
+def _password_change_exempt(request: Request) -> bool:
+    """True if this request is part of getting the password changed."""
+    return request.url.path.rstrip("/") in _PASSWORD_CHANGE_ALLOWED_PATHS
+
+
 async def get_current_user(request: Request) -> User:
     """Return the authenticated user or raise 401.
 
@@ -128,6 +147,23 @@ async def get_current_user(request: Request) -> User:
         try:
             payload = decode_token(token)
             sid = payload.get("sid", "") or ""
+            # Phase 19: an account holding a password it must rotate can
+            # reach the handful of routes needed to rotate it, and
+            # nothing else. Enforced here rather than in the SPA because
+            # a client-side redirect is a suggestion, not a control —
+            # the API has to be the thing that refuses.
+            if payload.get("mcp") and not _password_change_exempt(request):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "error": "password_change_required",
+                        "message": (
+                            "This account is using a default or "
+                            "administrator-set password. Choose a new one "
+                            "before continuing."
+                        ),
+                    },
+                )
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
             # validate_session already rejected this above — defensive.
             sid = ""

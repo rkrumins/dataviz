@@ -69,19 +69,46 @@ class ChangeRoleRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
-    """Admin-side identity edit. All fields optional; ``None`` leaves
-    the field unchanged. Email is intentionally NOT mutable here — it
-    changes the SSO identity key and needs its own re-link flow."""
+    """Identity edit, used by both the admin route and the self-service
+    one. All fields optional; ``None`` leaves the field unchanged. Email
+    is intentionally NOT mutable here — it changes the SSO identity key
+    and needs its own re-link flow.
+
+    ``display_name`` accepts the empty string, which is how the UI says
+    "clear my override and go back to first + last". The two name fields
+    do not: a blank first name is a mistake, not an instruction.
+    """
     model_config = ConfigDict(populate_by_name=True)
 
     first_name: Optional[str] = Field(default=None, alias="firstName", min_length=1, max_length=120)
     last_name: Optional[str] = Field(default=None, alias="lastName", min_length=1, max_length=120)
+    display_name: Optional[str] = Field(default=None, alias="displayName", max_length=120)
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId", max_length=64)
 
 
 class AdminResetPasswordRequest(BaseModel):
     """Admin sets a new password for a user directly."""
     model_config = ConfigDict(populate_by_name=True)
 
+    new_password: str = Field(alias="newPassword", min_length=8)
+
+
+class ChangeMyPasswordRequest(BaseModel):
+    """Self-service password change.
+
+    ``current_password`` proves the caller owns the account — this is the
+    only password entry point that asks for it, because it is the only
+    one not already gated behind an admin or a one-time token.
+
+    Its ``min_length`` is 1, not 8, deliberately: an account created
+    before the current strength rules may be holding a short password,
+    and 422-ing someone out of the form that fixes it would be exactly
+    backwards. ``new_password`` carries the real floor, and the zxcvbn
+    check on the server carries the rest.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    current_password: str = Field(alias="currentPassword", min_length=1)
     new_password: str = Field(alias="newPassword", min_length=8)
 
 
@@ -120,6 +147,26 @@ class UserPublicResponse(BaseModel):
     status: str
     role: str
     created_at: str = Field(alias="createdAt")
+    avatar_id: Optional[str] = Field(None, alias="avatarId")
+    # True while the account must rotate its password before it can do
+    # anything else. Sent so the SPA can route to the change screen
+    # rather than discovering it one 403 at a time.
+    must_change_password: bool = Field(False, alias="mustChangePassword")
+
+
+class AccountActivityItem(BaseModel):
+    """One entry in "recent activity" on the account page.
+
+    Deliberately thin. This is the account's owner looking at their own
+    security history, not an operator investigating an incident — the
+    full record, with payloads and actor ids, is the admin audit log.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    event_type: str = Field(alias="eventType")
+    occurred_at: str = Field(alias="occurredAt")
+    by_admin: bool = Field(False, alias="byAdmin")
 
 
 class AdminUserResponse(BaseModel):
@@ -136,6 +183,9 @@ class AdminUserResponse(BaseModel):
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
     reset_requested: bool = Field(False, alias="resetRequested")
+    # Surfaced so an admin can see at a glance which accounts are still
+    # holding a shipped default credential.
+    must_change_password: bool = Field(False, alias="mustChangePassword")
 
 
 class LoginResponse(BaseModel):

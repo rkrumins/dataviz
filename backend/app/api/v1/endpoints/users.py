@@ -14,12 +14,16 @@ Admin:
     POST  /api/v1/admin/users/{user_id}/reset-password
     POST  /api/v1/admin/users/{user_id}/generate-reset-token
 """
+import json
 import logging
 import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import (
@@ -29,6 +33,9 @@ from backend.app.auth.dependencies import (
 )
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.auth.password import hash_password
+# ``is_password_set`` has no re-export on the app-side shim, so it comes
+# from the source module — same as ``me_identities.py``.
+from backend.auth_service.core.password import is_password_set, verify_password
 from backend.app.api.v1.endpoints.auth import (
     _check_password_strength,
     INVITE_LINKS_FAIL_OPEN,
@@ -38,11 +45,14 @@ from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
+from backend.common.display_name import resolve_display_name
 from backend.common.models.auth import (
+    AccountActivityItem,
     AdminCreateUserRequest,
     AdminCreateUserResponse,
     AdminUserResponse,
     AdminResetPasswordRequest,
+    ChangeMyPasswordRequest,
     BulkCreateUsersRequest,
     BulkCreateUsersResponse,
     BulkCreateUserResult,
@@ -75,10 +85,14 @@ async def _public_response(session: AsyncSession, user) -> UserPublicResponse:
         email=user.email,
         firstName=user.first_name,
         lastName=user.last_name,
-        displayName=f"{user.first_name} {user.last_name}",
+        displayName=resolve_display_name(
+            user.display_name, user.first_name, user.last_name,
+        ),
         status=user.status,
         role=role,
         createdAt=user.created_at,
+        avatarId=user.avatar_id,
+        mustChangePassword=bool(user.must_change_password),
     )
 
 
@@ -91,18 +105,26 @@ async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
         email=user.email,
         firstName=user.first_name,
         lastName=user.last_name,
-        displayName=f"{user.first_name} {user.last_name}",
+        displayName=resolve_display_name(
+            user.display_name, user.first_name, user.last_name,
+        ),
         status=user.status,
         role=role,
         createdAt=user.created_at,
         updatedAt=user.updated_at,
         resetRequested=has_reset,
+        mustChangePassword=bool(user.must_change_password),
     )
 
 
 # ── Authenticated user routes ─────────────────────────────────────────
 
 router = APIRouter()
+
+# Own limiter instance, matching ``auth.py``. Only the self-service
+# password route uses it: asking for the current password makes that
+# endpoint a credential oracle, which nothing else on this router is.
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.get("/me/invite-activity", response_model=list[InviteActivityItem])
@@ -152,7 +174,261 @@ async def get_me(
     current_user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    return await _public_response(session, current_user)
+    # Read the row rather than projecting the session DTO: the account
+    # page saves and immediately re-reads, and the DTO is only as fresh
+    # as the access token that carried it.
+    user = await user_repo.get_user_by_id(session, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return await _public_response(session, user)
+
+
+# ── Self-service account management ───────────────────────────────────
+#
+# These live on the ``/users`` router rather than ``/auth`` for two
+# reasons. ``auth.py`` is the unauthenticated subset — signup, forgot,
+# reset — and these are the opposite of that. And ``csrf.py`` exempts a
+# fixed list of ``/api/v1/auth/*`` paths from the double-submit check;
+# an authenticated cookie mutation is exactly what that check exists to
+# protect, so it belongs on a prefix that was never exempted.
+
+
+@router.patch("/me", response_model=UserPublicResponse)
+async def update_my_identity(
+    body: UpdateUserRequest,
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Edit my own profile.
+
+    Same rules as the admin edit (``update_user_identity``): email is
+    the SSO identity key and changes through a re-link flow, not here. A
+    body with nothing to apply returns the current state so the client
+    can refresh without a second GET.
+
+    An empty ``displayName`` is an instruction, not a mistake — it
+    clears the override so the name goes back to being derived from
+    first + last.
+    """
+    user = await user_repo.get_user_by_id(session, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    updates: dict[str, str] = {}
+    if body.first_name is not None and body.first_name.strip():
+        updates["first_name"] = body.first_name.strip()
+    if body.last_name is not None and body.last_name.strip():
+        updates["last_name"] = body.last_name.strip()
+    if body.display_name is not None:
+        updates["display_name"] = body.display_name
+    if body.avatar_id is not None:
+        updates["avatar_id"] = body.avatar_id
+    if not updates:
+        return await _public_response(session, user)
+
+    await user_repo.update_identity(session, current_user.id, **updates)
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.identity_updated",
+        payload={
+            "user_id": current_user.id,
+            "updated_fields": list(updates.keys()),
+            "updated_by": current_user.id,
+            # ``updated_by == user_id`` is ambiguous on its own — an
+            # admin editing their own row looks identical. This is what
+            # tells the two apart. Convention borrowed from
+            # ``me_identities.py``.
+            "via": "self_service",
+        },
+        aggregate_type="user",
+        aggregate_id=current_user.id,
+    )
+
+    logger.info(
+        "User %s updated own profile: %s", current_user.id, list(updates.keys()),
+    )
+
+    refreshed = await user_repo.get_user_by_id(session, current_user.id)
+    return await _public_response(session, refreshed)
+
+
+@router.post("/me/password", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def change_my_password(
+    request: Request,
+    body: ChangeMyPasswordRequest,
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Change my own password, and sign every session out.
+
+    Rate-limited to match ``/auth/reset-password``: verifying
+    ``currentPassword`` turns this into a credential oracle, which none
+    of the other self-service routes are.
+
+    Both halves of the revocation run. Tombstoning the live access
+    tokens covers the next few minutes; stamping ``sessions_valid_from``
+    is what makes it stick, because a refresh mints a brand-new ``sid``
+    that no tombstone covers. The caller's own session dies too — the UI
+    says so before you submit.
+    """
+    user = await user_repo.get_user_by_id(session, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Checked before the current-password comparison: an SSO-only
+    # account has no password to be wrong about, and "incorrect" would
+    # send someone hunting for a credential that does not exist.
+    if not is_password_set(user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This account signs in through an identity provider and has "
+                "no password to change. Sign in with your provider, or ask an "
+                "administrator to set a password for you."
+            ),
+        )
+
+    if not verify_password(body.current_password, user.password_hash):
+        # 403, not 401. The frontend treats 401 as a dead session: it
+        # silently refreshes, retries, and on failure signs the user
+        # out — so a typo here would read as "Session expired" and could
+        # end the session it was trying to secure.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Current password is incorrect.",
+        )
+
+    _check_password_strength(body.new_password)
+
+    # ``update_password`` also clears the reset token and the
+    # forced-rotation flag, so changing your own password retires a
+    # pending admin reset request rather than leaving it live.
+    await user_repo.update_password(
+        session, current_user.id, hash_password(body.new_password),
+    )
+    await _revoke_every_session(session, current_user.id, reason="password_changed")
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.password_changed",
+        payload={"user_id": current_user.id, "via": "self_service"},
+        aggregate_type="user",
+        aggregate_id=current_user.id,
+    )
+
+    logger.info("User %s changed their own password", current_user.id)
+    return {"detail": "Password updated. Sign in again with your new password."}
+
+
+@router.post("/me/sessions/revoke-all", status_code=status.HTTP_200_OK)
+async def revoke_my_sessions(
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Sign out everywhere, this device included.
+
+    The blunt version is the honest one: keeping the calling session
+    alive would mean re-issuing its cookies past the cutoff, which needs
+    session-minting surface on ``IdentityService`` that does not exist
+    and that the extraction plan does not want.
+    """
+    await _revoke_every_session(
+        session, current_user.id, reason="revoked_by_user",
+    )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.sessions_revoked_by_self",
+        payload={"user_id": current_user.id},
+        aggregate_type="user",
+        aggregate_id=current_user.id,
+    )
+    logger.info("User %s revoked all their own sessions", current_user.id)
+    return {"detail": "Signed out on every device."}
+
+
+#: What the account page shows under "recent activity". Deliberately a
+#: whitelist: this is the caller's own security history, not a feed of
+#: everything the platform has ever recorded about them.
+_ACCOUNT_ACTIVITY_TYPES = (
+    "user.password_changed",
+    "user.password_reset_by_admin",
+    "user.password_reset_completed",
+    "user.reset_token_generated",
+    "user.identity_updated",
+    "user.sessions_revoked_by_self",
+    "user.session_revoked",
+    "user.role_changed",
+    "user.suspended",
+    "user.reactivated",
+)
+
+
+@router.get("/me/activity", response_model=list[AccountActivityItem])
+async def my_account_activity(
+    limit: int = Query(20, ge=1, le=50),
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """My own account-security history, newest first.
+
+    Filtered on ``aggregate_type``/``aggregate_id``, which
+    ``idx_outbox_aggregate`` covers — the alternative, matching the
+    user id inside the JSON payload, is an unindexed scan of a table
+    that grows forever.
+
+    Only events written after this feature shipped carry the aggregate
+    columns, so the history starts at upgrade rather than at signup. The
+    page says so; an empty list must not be read as "nothing happened".
+    """
+    from backend.app.db.models import OutboxEventORM
+
+    rows = (await session.execute(
+        select(OutboxEventORM)
+        .where(
+            OutboxEventORM.aggregate_type == "user",
+            OutboxEventORM.aggregate_id == current_user.id,
+            OutboxEventORM.event_type.in_(_ACCOUNT_ACTIVITY_TYPES),
+        )
+        .order_by(desc(OutboxEventORM.created_at))
+        .limit(limit)
+    )).scalars().all()
+
+    out: list[AccountActivityItem] = []
+    for row in rows:
+        try:
+            payload = json.loads(row.payload or "{}")
+        except ValueError:
+            payload = {}
+        actor = payload.get("updated_by") or payload.get("reset_by") or payload.get("changed_by")
+        out.append(AccountActivityItem(
+            id=row.id,
+            eventType=row.event_type,
+            occurredAt=row.created_at,
+            # True when somebody else did this to the account. Worth
+            # distinguishing: "your password was reset" reads very
+            # differently depending on who reset it.
+            byAdmin=bool(actor and actor != current_user.id),
+        ))
+    return out
+
+
+async def _revoke_every_session(
+    session: AsyncSession, user_id: str, *, reason: str,
+) -> None:
+    """Kill a user's sessions, both halves.
+
+    ``revoke_subject_sessions`` tombstones the ``sid``s that are live
+    right now; ``revoke_sessions_from_now`` stamps the cutoff that stops
+    a refresh minting a fresh, untombstoned one. Neither is sufficient
+    alone — the first expires with the access token, and the second only
+    bites at the next rotation.
+    """
+    from backend.app.services.revocation_service import revoke_subject_sessions
+
+    await user_repo.revoke_sessions_from_now(session, user_id)
+    await revoke_subject_sessions("user", user_id, session=session, reason=reason)
 
 
 # ── Admin routes ───────────────────────────────────────────────────────
@@ -251,9 +527,13 @@ async def update_user_identity(
 ):
     """Update an admin-editable identity field on a user.
 
-    Only first / last name are mutable; email change is a separate
-    re-link flow because it's the SSO identity key. Display name is
-    derived from first + last on the server (single source of truth).
+    Email change is a separate re-link flow because it's the SSO
+    identity key. Display name defaults to first + last and is stored
+    only when somebody has deliberately chosen something else; passing
+    an empty string here clears that choice.
+
+    ``avatarId`` on the shared request DTO is deliberately ignored on
+    this route — an avatar is the account owner's to pick.
     """
     user = await user_repo.get_user_by_id(session, user_id)
     if user is None:
@@ -264,6 +544,8 @@ async def update_user_identity(
         updates["first_name"] = body.first_name.strip()
     if body.last_name is not None and body.last_name.strip():
         updates["last_name"] = body.last_name.strip()
+    if body.display_name is not None:
+        updates["display_name"] = body.display_name
     if not updates:
         # Nothing to do — return the current state so the client can
         # refresh without a separate GET.

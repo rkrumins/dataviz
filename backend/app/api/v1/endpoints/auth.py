@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.password import hash_password
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
+from backend.common.display_name import resolve_display_name
 from backend.common.roles import INVITE_GLOBAL_TIER
 from backend.common.models.auth import (
     SignUpRequest,
@@ -136,10 +137,14 @@ async def _build_user_response(session: AsyncSession, user) -> UserPublicRespons
         email=user.email,
         firstName=user.first_name,
         lastName=user.last_name,
-        displayName=f"{user.first_name} {user.last_name}",
+        displayName=resolve_display_name(
+            user.display_name, user.first_name, user.last_name,
+        ),
         status=user.status,
         role=role,
         createdAt=user.created_at,
+        avatarId=user.avatar_id,
+        mustChangePassword=bool(user.must_change_password),
     )
 
 

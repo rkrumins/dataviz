@@ -87,6 +87,21 @@ class RefreshClaims:
     # local password sessions (which keep their 7-day refresh TTL and
     # are not subject to the SSO ceiling).
     auth_time: int | None = None
+    # When this token was minted, in epoch MILLISECONDS. Compared
+    # against the user's ``sessions_valid_from`` cutoff on /refresh so a
+    # revocation cannot be walked around by rotating.
+    #
+    # Milliseconds rather than the standard second-granular ``iat``
+    # because both ends of that comparison routinely land in the same
+    # second: revoking and then immediately refreshing, or revoking and
+    # then immediately signing back in. At second precision one of those
+    # two has to be wrong — either a doomed token survives or a
+    # legitimate new one is refused.
+    #
+    # ``0`` means "this token predates the claim". Those are honoured
+    # rather than refused, so deploying the cutoff does not sign the
+    # whole estate out on the way in.
+    mint_ms: int = 0
 
 
 def create_refresh_token(
@@ -118,6 +133,10 @@ def create_refresh_token(
         "iss": JWT_ISSUER,
         "aud": _REFRESH_AUDIENCE,
         "iat": now,
+        # Millisecond mint instant. ``iat`` is kept as-is for the
+        # standard claim; this one exists because the revocation cutoff
+        # needs sub-second resolution. See ``RefreshClaims.mint_ms``.
+        "mat": int(now.timestamp() * 1000),
         "exp": expires_at,
     }
     if auth_time is not None:
@@ -131,6 +150,7 @@ def create_refresh_token(
         family_id=fam,
         exp=int(expires_at.timestamp()),
         auth_time=int(auth_time) if auth_time is not None else None,
+        mint_ms=int(now.timestamp() * 1000),
     )
     return token, claims
 
@@ -162,8 +182,22 @@ def decode_refresh_token(token: str) -> RefreshClaims:
             auth_time = int(auth_time_raw)
         except (TypeError, ValueError):
             raise jwt.InvalidTokenError("Refresh token auth_time is malformed")
+    # Prefer the millisecond claim. Tokens minted before it existed fall
+    # back to the standard second-granular ``iat``, which is enough to
+    # place them safely on one side of a cutoff stamped later. A token
+    # carrying neither reads as 0 — "cannot tell" — and is let through.
+    try:
+        mint_ms = int(payload.get("mat") or 0)
+    except (TypeError, ValueError):
+        mint_ms = 0
+    if not mint_ms:
+        try:
+            mint_ms = int(payload.get("iat") or 0) * 1000
+        except (TypeError, ValueError):
+            mint_ms = 0
     return RefreshClaims(
         sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
+        mint_ms=mint_ms,
     )
 
 

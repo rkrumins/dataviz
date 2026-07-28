@@ -16,6 +16,9 @@ export interface AdminUserResponse {
     createdAt: string
     updatedAt: string
     resetRequested: boolean
+    /** Still holding a shipped default password, and required to
+     *  change it before it can do anything else. */
+    mustChangePassword: boolean
 }
 
 export interface ResetTokenResponse {

@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, Link2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -58,6 +58,35 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const navigate = useNavigate()
   const avatar = useAvatarContent()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
+  const avatarId = usePreferencesStore((s) => s.avatarId)
+  const setAvatarId = usePreferencesStore((s) => s.setAvatarId)
+  const applyProfile = useAuthStore((s) => s.applyProfile)
+
+  // The avatar preference is browser-local, so on a machine you have
+  // not used before it starts empty and you appear as initials. Seed it
+  // from the account once the session lands.
+  useEffect(() => {
+    if (user?.avatarId && user.avatarId !== avatarId) setAvatarId(user.avatarId)
+    // Deliberately keyed on the server value alone: reacting to local
+    // changes too would re-apply the stored avatar the moment somebody
+    // picked a different one, making the picker look broken.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.avatarId])
+
+  /** Persist whatever the picker left in the preference store. */
+  const handleAvatarPickerClosed = async () => {
+    setAvatarPickerOpen(false)
+    const chosen = usePreferencesStore.getState().avatarId
+    if (chosen === (user?.avatarId ?? null)) return
+    try {
+      const { accountService } = await import('@/services/accountService')
+      await accountService.updateProfile({ avatarId: chosen ?? '' })
+      applyProfile({ avatarId: chosen })
+    } catch {
+      // Already applied locally, so it looks right here. It just will
+      // not follow them to another browser.
+    }
+  }
 
   // Phase 5: derive a workspace-aware role badge. When the route is
   // ``/workspaces/:wsId/...`` (or the admin equivalent), look up the
@@ -267,6 +296,17 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                   </div>
                 </div>
 
+                {/* Account settings — first, because it edits the name and
+                    email printed directly above it. UserCog rather than
+                    Settings: Settings is already the admin cog in this bar. */}
+                <DropdownMenu.Item
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  onSelect={() => navigate('/me/account')}
+                >
+                  <UserCog className="w-4 h-4" />
+                  <span>Account settings</span>
+                </DropdownMenu.Item>
+
                 {/* My access — every authenticated user can read their own permissions */}
                 <DropdownMenu.Item
                   className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
@@ -287,14 +327,10 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                   <span>Identities</span>
                 </DropdownMenu.Item>
 
-                {/* Change Avatar action */}
-                <DropdownMenu.Item
-                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
-                  onSelect={() => setAvatarPickerOpen(true)}
-                >
-                  <Pencil className="w-4 h-4" />
-                  <span>Change Avatar</span>
-                </DropdownMenu.Item>
+                {/* "Change Avatar" used to sit here. The picker is still two
+                    clicks away — hover the avatar just above, or open Account
+                    settings — so a third entry point to one preference was
+                    the row worth losing when this menu gained two. */}
 
                 {/* Reduce motion — accessibility "calm mode". preventDefault
                     keeps the menu open so it reads as a switch. Framer honours
@@ -330,7 +366,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
       {/* Avatar picker dialog */}
       <AvatarPickerDialog
         isOpen={avatarPickerOpen}
-        onClose={() => setAvatarPickerOpen(false)}
+        onClose={handleAvatarPickerClosed}
         initials={initials}
       />
     </>

@@ -433,8 +433,26 @@ export async function fetchWithTimeout(
   // admin-only endpoint to render counts, for example). The Response
   // still flows through so the service can degrade gracefully — only
   // the global modal is suppressed.
-  if (res.status === 403 && !silent403) {
-    void notifyAccessDenied(res, urlPath(input))
+  // A forced password rotation is announced the same structured way,
+  // and needs to win over the access-denied modal: the account is not
+  // missing a permission, it is being held until it picks a new
+  // password. Every route but the change screen answers this way, so
+  // whichever request happens to fire first does the redirect.
+  if (res.status === 403) {
+    try {
+      const body = (await res.clone().json()) as {
+        detail?: { error?: string }
+      }
+      if (body?.detail?.error === 'password_change_required') {
+        if (!window.location.pathname.startsWith('/password-change-required')) {
+          window.location.assign('/password-change-required')
+        }
+        return res
+      }
+    } catch {
+      // Not a JSON body — fall through to the normal 403 handling.
+    }
+    if (!silent403) void notifyAccessDenied(res, urlPath(input))
   }
 
   return res

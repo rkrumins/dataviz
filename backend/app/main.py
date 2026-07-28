@@ -257,6 +257,12 @@ async def lifespan(_app: FastAPI):
         from .auth.password import hash_password
         admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
         admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
+        # Passwords that ship in this repo — in .env.example, the
+        # quickstart compose file, the README, and every setup doc. An
+        # account holding one of these is holding a credential that is
+        # public knowledge, so it is made to rotate on first sign-in.
+        # An operator who supplied their own is not nagged.
+        must_rotate = admin_password in {"changeme", "admin123", "REPLACE_ME"}
         async with get_async_session() as session:
             user_count = await user_repo.count_users(session)
             if user_count == 0:
@@ -269,6 +275,10 @@ async def lifespan(_app: FastAPI):
                         last_name="Admin",
                         status="active",
                     )
+                    if must_rotate:
+                        await user_repo.set_must_change_password(
+                            session, user.id, True,
+                        )
                     # Phase 6: ``set_global_role`` writes both
                     # ``user_roles`` (legacy display) and
                     # ``role_bindings`` (canonical claims) so the
@@ -282,8 +292,13 @@ async def lifespan(_app: FastAPI):
                         session, user.id, status="approved", approved_by="system",
                     )
                     logger.info(
-                        "System admin created: %s (change password after first login!)",
+                        "System admin created: %s%s",
                         admin_email,
+                        (
+                            " (default password — a change is required at "
+                            "first sign-in)"
+                            if must_rotate else ""
+                        ),
                     )
                 except IntegrityError:
                     await session.rollback()

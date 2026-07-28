@@ -1120,6 +1120,11 @@ class UserORM(Base):
     password_hash = Column(Text, nullable=False)
     first_name = Column(Text, nullable=False)
     last_name = Column(Text, nullable=False)
+    # Chosen display name. NULL means "derive it from first + last" —
+    # which is what every row did before the column existed. Resolve it
+    # through ``backend.common.display_name.resolve_display_name`` rather
+    # than reading it directly, so the fallback lives in one place.
+    display_name = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="pending")       # pending | active | suspended
     # NB: ``auth_provider`` / ``external_id`` lived here in Phase 2.
     # Phase 3 normalised SSO identity into the ``user_identities``
@@ -1144,6 +1149,22 @@ class UserORM(Base):
     metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
+    # Force a rotation on the next request. Set on the bootstrap admin
+    # when it is seeded with a shipped default password; cleared by
+    # ``user_repo.update_password``. Carried into the access token as a
+    # claim and enforced by ``get_current_user``.
+    must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
+    # Chosen avatar illustration. Was a browser-local preference, so it
+    # reset on a new machine and nobody else ever saw it.
+    avatar_id = Column(Text, nullable=True)
+    # ISO instant before which refresh tokens are refused. Revoking
+    # sessions only tombstones access-token ``sid``s, and ``refresh()``
+    # mints a fresh ``sid`` rather than reusing one — so without this
+    # cutoff a client that silently refreshed on a 401 walked straight
+    # back in. Stamped by ``user_repo.revoke_sessions_from_now``.
+    sessions_valid_from = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True)                       # soft delete
