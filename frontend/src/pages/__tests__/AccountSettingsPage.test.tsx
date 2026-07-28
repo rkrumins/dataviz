@@ -123,6 +123,28 @@ describe('AccountSettingsPage', () => {
         expect(screen.queryByRole('button', { name: /Change my password/i })).not.toBeInTheDocument()
     })
 
+    it('reads sign-in methods from the shell, not from a default', async () => {
+        // Regression: the page called useAccountIdentity() in its own
+        // body while AccountShell — its child — rendered the Provider.
+        // A component cannot consume context from its own child, so it
+        // silently read the default (passwordSet: null) and decided
+        // every account was password-less. Nothing about the page
+        // looked broken; it just quietly told the truth about nobody.
+        vi.mocked(authService.listMyIdentities).mockResolvedValue({
+            passwordSet: false,
+            identities: [{
+                id: 'idn_1',
+                provider: { id: 'p1', slug: 'okta', displayName: 'Okta', kind: 'oidc' },
+                externalId: 'x', createdAt: '',
+            }],
+        })
+
+        renderPage()
+
+        // Proves the value reached the page rather than the default.
+        expect(await screen.findByText(/no password on this account/i)).toBeInTheDocument()
+    })
+
     it('keeps the password form out of the way until it is asked for', async () => {
         const user = userEvent.setup()
         renderPage()
