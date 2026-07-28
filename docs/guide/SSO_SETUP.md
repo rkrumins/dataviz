@@ -123,9 +123,14 @@ not stored, so it always reflects reality.
 ### When someone cannot sign in
 
 They will see a short reference like `a1b2c3d4`. Ask them for it, then
-**Admin → SSO → Activity** and search for it. The precise reason is recorded
+**Admin → SSO → Diagnostics** and search for it. The precise reason is recorded
 there — deliberately not shown to the person, because it would leak your
 configuration to anyone who can reach the sign-in page.
+
+The same tab finds the person: free text across names and emails, or an exact
+match on a claim attribute such as `staff_id` when you only have their employee
+number. The activity log needs `system:audit:read` on top of admin; without it
+the tab shows the lookup alone.
 
 ### Certificate expiry
 

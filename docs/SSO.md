@@ -462,7 +462,7 @@ ahead of every `helm install/upgrade`.
 
 ### 2.1 Configure a new OIDC provider
 
-1. Admin → SSO → Providers → **Add provider**.
+1. Admin → SSO → Providers → **Connect a provider**.
 2. Fill in:
    * **Slug** — URL-safe identifier (e.g. `entra-staff`). Becomes
      `/api/v1/auth/entra-staff/login`.
@@ -497,8 +497,9 @@ ahead of every `helm install/upgrade`.
    resolves to the expected `ProviderIdentity` (incl. `attributes`).
    Preview needs a saved row, so create the provider first, then reopen
    it with the row's edit (pencil) action.
-4. Toggle **Enabled** on; the login page picks it up within 60 s
-   (registry TTL).
+4. Rehearse a sign-in, then **Publish**. A new connection is created as a
+   draft and is invisible to every login surface until published; after
+   that the login page picks it up within 60 s (registry TTL).
 
 ### 2.2 Configure a new SAML provider
 
@@ -538,7 +539,7 @@ mapping is configured in the admin UI rather than in code.
 > `trusted_proxy_acknowledged`) each require an explicit toggle in the
 > admin UI and emit their own audit event on every login.
 
-1. Admin → SSO → Providers → **Add provider**, kind
+1. Admin → SSO → Providers → **Connect a provider**, kind
    `Custom profile (cookie / browser storage / header)`.
 2. Pick the **source**:
 
@@ -583,9 +584,11 @@ mapping is configured in the admin UI rather than in code.
    the mapping server-side and shows the resulting profile.
 6. Anything else worth keeping (department, employee ID) goes under
    **Extra attributes** — those land in `users.metadata_.attributes` and
-   the indexed `user_external_attributes` table, so Admin → SSO → Find
-   user can search on them.
-7. Toggle **Enabled** on. The login page picks it up within 60 s.
+   the indexed `user_external_attributes` table, so Admin → SSO →
+   Diagnostics can search on them.
+7. Rehearse a sign-in, then **Publish**. Until it is published the
+   connection is a draft and no login page shows it; after publishing,
+   the login page picks it up within 60 s.
 
 Note on `external_id`: it is the durable join key for
 `user_identities`, so it must be stable per user. If the portal has no
@@ -606,7 +609,7 @@ own — otherwise a request can name any user it likes. Audited as
 
 ### 2.3 Set up IdP group → role mapping
 
-Admin → SSO → Group mappings → **Create mapping**.
+Admin → SSO → Access mapping → **Create mapping**.
 
 * **Role-binding target** — "Everyone in the IdP group
   `DataViz-Admins` gets `super_admin` globally":
@@ -639,7 +642,7 @@ Mapping takes effect on the next SSO login OR the next `/refresh`
 > SSO login verified end-to-end **before** you flip it.
 
 Pre-flight: every admin must have at least one linked SSO identity.
-Check via `Admin → SSO → Find user` and confirm each admin has a
+Check via `Admin → SSO → Diagnostics` and confirm each admin has a
 `Linked identities` row, OR have them go to `/me/identities` and
 click **Link** for an IdP.
 
@@ -665,7 +668,7 @@ they can SSO in.
 
 ### 2.7 Find a user
 
-Admin → SSO → Find user. Three modes:
+Admin → SSO → Diagnostics. Three modes:
 
 * **Free-text** — type any of email, name, external_id, or attribute
   value. Fan-out across all four; results show which dimension
@@ -703,7 +706,7 @@ row in the admin UI, set the env vars, restart.
 
 ### 2.10 Onboard a provider by discovery (instead of typing 15 fields)
 
-Admin → SSO → Providers → **Add provider** → paste one of:
+Admin → SSO → Providers → **Connect a provider** → paste one of:
 
 * an **OIDC issuer URL** — the `.well-known/openid-configuration` is
   fetched and `authorization_endpoint` / `token_endpoint` / `jwks_uri` /
