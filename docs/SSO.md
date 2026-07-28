@@ -71,7 +71,13 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
   never sees the access token; the CSRF cookie is JS-readable and
   echoed back as `X-CSRF-Token` on writes (double-submit).
 * Refresh-token rotation with reuse-detection: presenting the same
-  `jti` twice revokes the whole `family_id`.
+  `jti` twice revokes the whole `family_id` — outside a bounded grace
+  window. Within `REFRESH_ROTATION_GRACE_SECONDS` (default 30) the
+  re-presentation is answered with the successor the first caller
+  already minted, because two tabs rotating at once, a retried POST and
+  a lost `Set-Cookie` are all indistinguishable from a replay by the
+  token alone, and revoking on them signed users out of every tab.
+  Set to 0 for strict rotation.
 * Session-cookie cache: `frontend/src/store/userCache.ts`
   sessionStorage-only, schema-versioned, wiped on logout / 401 /
   SSO re-auth bounce. Eliminates the cold-boot `/me` flash without

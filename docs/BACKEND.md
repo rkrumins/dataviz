@@ -610,7 +610,7 @@ graph TB
 | `MANAGEMENT_DB_URL` | SQLite path | No | PostgreSQL URL for production |
 | `CREDENTIAL_ENCRYPTION_KEY` | _(none)_ | Prod | Fernet key for credential encryption |
 | `JWT_SECRET_KEY` | _(random)_ | Prod | HS256 signing key |
-| `JWT_EXPIRY_MINUTES` | `60` | No | Token lifetime |
+| `JWT_EXPIRY_MINUTES` | `15` | No | Access-token lifetime. Permission claims ride in the token, so this is also how long a revoked or demoted session keeps working. Code default is `5`; every shipped config sets `15` |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
 | `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3000,5173` | No | Comma-separated origins |
