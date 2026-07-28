@@ -6,11 +6,19 @@
  * reset your password, suspend you. There was no screen where you could
  * do any of it yourself.
  *
- * Three things drive the layout:
+ * Four things drive the layout:
  *
- * **It opens with who you are, not with a form.** The identity header
- * carries the avatar, the name, the role and the providers that can sign
- * you in — the questions people actually arrive with. Fields come after.
+ * **It is shaped like every other page in the app.** Full-width
+ * PageContainer and the house hero — gradient icon tile, h1, blurb —
+ * the same as My access next door. It briefly used the `narrow` width
+ * that PageContainer documents for settings forms; on a wide monitor
+ * that stranded a 768px column in the middle of nothing, which is the
+ * exact complaint PageContainer's own comment makes about capping too
+ * hard. Width is spent on a second column, not on wider inputs.
+ *
+ * **Who you are sits in the rail.** Avatar, name, role and the methods
+ * that can sign you in stay visible while you scroll the sections —
+ * they are context for the editing, not a step in it.
  *
  * **Provenance is visible.** When an IdP owns a field it is shown locked
  * and attributed, because the alternative is an editable-looking input
@@ -26,7 +34,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
     AlertCircle, Check, ChevronRight, Clock, Fingerprint, KeyRound, Link2,
-    Lock, LogOut, Mail, PencilLine, ShieldCheck, X,
+    Lock, LogOut, Mail, PencilLine, ShieldCheck, UserCog, X,
 } from 'lucide-react'
 
 import { PageContainer, pageGeometry } from '@/components/layout/PageContainer'
@@ -224,64 +232,26 @@ export function AccountSettingsPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-            <PageContainer width="narrow" className="py-8 pb-28 space-y-6">
+            <PageContainer className="py-6 pb-28 space-y-6">
 
-                {/* ── Identity header ────────────────────────────────
-                    Opens with who you are. The avatar is the control —
-                    a separate "Change avatar" row was a second entry
-                    point to the same preference. */}
-                <header className="rounded-2xl border border-glass-border bg-canvas-elevated p-6">
-                    <div className="flex items-start gap-5">
-                        <button
-                            type="button"
-                            onClick={() => setAvatarOpen(true)}
-                            title="Change avatar"
-                            className="relative group shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                        >
-                            {avatar ? (
-                                <div className={cn('w-20 h-20 rounded-full flex items-center justify-center', avatar.bg)}>
-                                    {avatar.content('w-10 h-10 text-ink')}
-                                </div>
-                            ) : (
-                                <div className="w-20 h-20 rounded-full flex items-center justify-center bg-accent-lineage/15">
-                                    <span className="text-2xl font-semibold text-accent-lineage select-none">
-                                        {initials || '?'}
-                                    </span>
-                                </div>
-                            )}
-                            <span className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                                <PencilLine className="w-5 h-5 text-white" />
-                            </span>
-                        </button>
-
-                        <div className="min-w-0 flex-1">
-                            <h1 className="text-2xl font-semibold text-ink truncate">
-                                {displayName.trim() || derivedName || 'Your account'}
-                            </h1>
-                            <div className="flex items-center gap-1.5 mt-1 text-sm text-ink-muted">
-                                <Mail className="w-3.5 h-3.5 shrink-0" />
-                                <span className="truncate">{user?.email}</span>
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-2 mt-3">
-                                {roleLabel && (
-                                    <span className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20">
-                                        {roleLabel}
-                                    </span>
-                                )}
-                                {passwordSet && (
-                                    <Chip icon={KeyRound} label="Password" />
-                                )}
-                                {identities.map((i) => (
-                                    <Chip key={i.id} icon={Fingerprint} label={i.provider.displayName} />
-                                ))}
-                                {passwordSet === false && identities.length === 0 && (
-                                    <Chip icon={AlertCircle} label="No sign-in method" tone="warn" />
-                                )}
-                            </div>
-                        </div>
+                {/* Hero — same shape as My access next door. */}
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-md shrink-0">
+                        <UserCog className="w-6 h-6 text-white" />
                     </div>
-                </header>
+                    <div className="min-w-0">
+                        <h1 className="text-2xl font-bold text-ink">Account settings</h1>
+                        <p className="text-sm text-ink-muted">
+                            Your name, your password, and the devices you are signed in on.
+                        </p>
+                    </div>
+                </div>
+
+                {/* Sections left, identity rail right. The rail is what
+                    earns the full page width — the alternative is one
+                    column of inputs stretched across a monitor. */}
+                <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
+                <div className="space-y-6 min-w-0">
 
                 {/* ── Profile ─────────────────────────────────────── */}
                 <Section
@@ -308,17 +278,22 @@ export function AccountSettingsPage() {
                         />
                     </div>
 
-                    <Field
-                        label="Display name"
-                        value={displayName}
-                        onChange={setDisplayName}
-                        placeholder={derivedName}
-                        help={
-                            displayName.trim()
-                                ? 'Shown instead of your first and last name.'
-                                : `Leave blank to use “${derivedName || 'your name'}”.`
-                        }
-                    />
+                    {/* Paired fields get half the column each; a lone one
+                        would otherwise run the full width of a monitor,
+                        which is unreadable and looks like a mistake. */}
+                    <div className="sm:max-w-[calc(50%-0.5rem)]">
+                        <Field
+                            label="Display name"
+                            value={displayName}
+                            onChange={setDisplayName}
+                            placeholder={derivedName}
+                            help={
+                                displayName.trim()
+                                    ? 'Shown instead of your first and last name.'
+                                    : `Leave blank to use “${derivedName || 'your name'}”.`
+                            }
+                        />
+                    </div>
 
                     {managedFields.length > 0 && (
                         <p className="text-[11px] text-ink-muted flex items-start gap-1.5">
@@ -512,16 +487,73 @@ export function AccountSettingsPage() {
                     </div>
                 </section>
 
-                <nav className="flex flex-wrap gap-x-6 gap-y-2 text-[13px] px-1">
-                    <Link to="/me/identities" className="text-accent-lineage hover:underline inline-flex items-center gap-1.5">
-                        <Link2 className="w-3.5 h-3.5" />
-                        Connected identities
-                    </Link>
-                    <Link to="/my/access" className="text-accent-lineage hover:underline inline-flex items-center gap-1.5">
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        What I can access
-                    </Link>
-                </nav>
+                </div>
+
+                {/* ── Identity rail ───────────────────────────────────
+                    Sticky, because who you are is context for the
+                    editing rather than a step in it — and because it is
+                    what makes the second column worth having. */}
+                <aside className="space-y-4 xl:sticky xl:top-6">
+                    <div className="rounded-2xl border border-glass-border bg-canvas-elevated p-5">
+                        <div className="flex flex-col items-center text-center">
+                            <button
+                                type="button"
+                                onClick={() => setAvatarOpen(true)}
+                                title="Change avatar"
+                                className="relative group rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                            >
+                                {avatar ? (
+                                    <div className={cn('w-20 h-20 rounded-full flex items-center justify-center', avatar.bg)}>
+                                        {avatar.content('w-10 h-10 text-ink')}
+                                    </div>
+                                ) : (
+                                    <div className="w-20 h-20 rounded-full flex items-center justify-center bg-accent-lineage/15">
+                                        <span className="text-2xl font-semibold text-accent-lineage select-none">
+                                            {initials || '?'}
+                                        </span>
+                                    </div>
+                                )}
+                                <span className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                    <PencilLine className="w-5 h-5 text-white" />
+                                </span>
+                            </button>
+
+                            <p className="mt-3 text-base font-semibold text-ink truncate max-w-full">
+                                {displayName.trim() || derivedName || 'Your account'}
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-1 text-xs text-ink-muted max-w-full">
+                                <Mail className="w-3 h-3 shrink-0" />
+                                <span className="truncate">{user?.email}</span>
+                            </div>
+                            {roleLabel && (
+                                <span className="mt-3 px-2 py-1 rounded-lg text-[11px] font-semibold bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20">
+                                    {roleLabel}
+                                </span>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-glass-border">
+                            <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted mb-2">
+                                Ways you sign in
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {passwordSet && <Chip icon={KeyRound} label="Password" />}
+                                {identities.map((i) => (
+                                    <Chip key={i.id} icon={Fingerprint} label={i.provider.displayName} />
+                                ))}
+                                {passwordSet === false && identities.length === 0 && (
+                                    <Chip icon={AlertCircle} label="No sign-in method" tone="warn" />
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <nav className="rounded-2xl border border-glass-border bg-canvas-elevated divide-y divide-glass-border overflow-hidden">
+                        <RailLink to="/me/identities" icon={Link2} label="Connected identities" />
+                        <RailLink to="/my/access" icon={ShieldCheck} label="What I can access" />
+                    </nav>
+                </aside>
+                </div>
             </PageContainer>
 
             {/* ── Sticky save bar ────────────────────────────────────
@@ -533,7 +565,7 @@ export function AccountSettingsPage() {
                     {/* Same cap and gutters as the content it belongs to,
                         via the shared helper — a sticky bar cannot be a
                         PageContainer, but it must line up with one. */}
-                    <div className={cn(pageGeometry({ width: 'narrow' }), 'pb-6')}>
+                    <div className={cn(pageGeometry(), 'pb-6')}>
                         <div className="flex items-center justify-between gap-4 rounded-2xl border border-glass-border bg-canvas-overlay/95 backdrop-blur px-5 py-3 shadow-lg">
                             <span className="text-[13px] text-ink-secondary">Unsaved changes</span>
                             <div className="flex items-center gap-2">
@@ -574,6 +606,27 @@ export function AccountSettingsPage() {
 }
 
 // ── Building blocks ─────────────────────────────────────────────────
+
+function RailLink({
+    to, icon: Icon, label,
+}: {
+    to: string
+    icon: typeof Link2
+    label: string
+}) {
+    return (
+        <Link
+            to={to}
+            className="flex items-center justify-between gap-2 px-4 py-3 text-[13px] text-ink-secondary hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors group"
+        >
+            <span className="inline-flex items-center gap-2">
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+            </span>
+            <ChevronRight className="w-3.5 h-3.5 text-ink-muted group-hover:translate-x-0.5 transition-transform" />
+        </Link>
+    )
+}
 
 function Chip({
     icon: Icon, label, tone = 'neutral',
