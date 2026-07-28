@@ -21,6 +21,11 @@ from backend.app.db.models import (
     OutboxEventORM,
     RoleBindingORM,
 )
+from backend.common.identity_provenance import (
+    managed_fields as _managed_fields,
+    managing_provider_id as _managing_provider_id,
+    snapshot_key as _snapshot_key,
+)
 from backend.common.roles import (
     DEFAULT_PLATFORM_TIER,
     GLOBAL_ASSIGNABLE_ROLES,
@@ -29,6 +34,26 @@ from backend.common.roles import (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_IDP_MANAGED_KEY = _snapshot_key()
+
+
+def idp_ownership(user: UserORM) -> tuple[frozenset[str], Optional[str]]:
+    """Which profile fields this user's IdP owns, and which IdP.
+
+    Reads the snapshot written on the last SSO login. A local-only
+    account has none, so everything stays editable — which is the point:
+    ownership is asserted per login, never inferred from the mere
+    existence of a linked identity.
+    """
+    try:
+        meta = json.loads(getattr(user, "metadata_", None) or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except (ValueError, TypeError):
+        meta = {}
+    return _managed_fields(meta), _managing_provider_id(meta)
 
 
 # ── Users ──────────────────────────────────────────────────────────────
@@ -145,6 +170,7 @@ async def set_user_idp_metadata(
     raw_claims: Optional[dict] = None,
     attributes: Optional[dict] = None,
     source_provider_id: Optional[str] = None,
+    idp_managed: Optional[dict] = None,
 ) -> Optional[UserORM]:
     """Persist the latest IdP-asserted groups, raw claims, and
     operator-mapped extra attributes (department, employee_id, …)
@@ -177,6 +203,12 @@ async def set_user_idp_metadata(
         merged_attrs = dict(meta.get("attributes", {}))
         merged_attrs.update(attributes)
         meta["attributes"] = merged_attrs
+    if idp_managed is not None:
+        # Replaced, not merged: the snapshot answers "which fields does
+        # the IdP own RIGHT NOW", and a provider that stopped releasing
+        # ``given_name`` must hand that field back rather than keep it
+        # locked on the strength of a login from six months ago.
+        meta[_IDP_MANAGED_KEY] = idp_managed
     meta["idp_last_login_at"] = _now()
     user.metadata_ = json.dumps(meta, default=str)
     user.updated_at = _now()

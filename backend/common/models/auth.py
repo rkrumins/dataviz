@@ -152,6 +152,14 @@ class UserPublicResponse(BaseModel):
     # anything else. Sent so the SPA can route to the change screen
     # rather than discovering it one 403 at a time.
     must_change_password: bool = Field(False, alias="mustChangePassword")
+    # Profile fields the identity provider asserted at the last sign-in
+    # and re-applies at every one. The UI renders these read-only and
+    # says which provider owns them, rather than letting somebody type
+    # into a field whose value will revert.
+    idp_managed_fields: list[str] = Field(
+        default_factory=list, alias="idpManagedFields",
+    )
+    idp_managed_by: Optional[str] = Field(None, alias="idpManagedBy")
 
 
 class AccountActivityItem(BaseModel):

@@ -29,6 +29,17 @@ export interface MyProfile {
     createdAt: string
     avatarId: string | null
     mustChangePassword: boolean
+    /**
+     * Profile fields the identity provider asserted at your last sign-in
+     * and re-applies at every one. Render these read-only — a write is
+     * refused with a 409, and would revert anyway.
+     *
+     * Per-field, not per-account: an IdP that releases `given_name` but
+     * no `family_name` owns only the first. Empty for local accounts.
+     */
+    idpManagedFields: string[]
+    /** Provider id owning those fields. Join to /me/identities for a name. */
+    idpManagedBy: string | null
 }
 
 export interface ProfilePatch {

@@ -81,6 +81,17 @@ sequenceDiagram
 | `/api/v1/admin/users/{id}/reset-password` | POST | Admin | - | Set a password directly |
 | `/api/v1/admin/users/{id}/generate-reset-token` | POST | Admin | - | Generate a shareable reset token |
 
+**IdP-owned profile fields.** `complete_sso_login` re-applies the name claims it
+receives on every sign-in and records which fields it asserted in
+`users.metadata_` (see `backend/common/identity_provenance.py`). `PATCH
+/users/me` and `PATCH /admin/users/{id}` both refuse those fields with `409
+{"error": "idp_managed_field", "fields": [...]}`. Ownership is claimed per
+login from what actually arrived — never inferred from a linked identity row —
+so a provider that stops releasing a claim hands the field back at the next
+sign-in, and the snapshot is replaced rather than merged, which is what makes
+"most recently authenticated provider wins" fall out without a precedence
+table. `display_name` is never IdP-owned.
+
 **Self-service password change** returns `409` when the account has no local
 password (SSO-only), and `403` — deliberately not `401` — when `currentPassword`
 is wrong. The frontend treats `401` as a dead session and would silently refresh,
