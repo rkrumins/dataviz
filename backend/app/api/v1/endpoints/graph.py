@@ -1450,6 +1450,108 @@ async def search_discover(
     return await svc.discover(sample_per_label=samplePerLabel)
 
 
+# ---------------------------------------------------------------------------
+# Property storage — how this graph physically stores node properties, and
+# what would change if it were aligned. Powers the data source's Mapping tab.
+# Same cost model as /search/discover (one bounded query per label), so these
+# stay ordinary synchronous reads rather than jobs. Writing is a separate,
+# explicitly-triggered operation.
+# ---------------------------------------------------------------------------
+
+class PropertyMappingInput(BaseModel):
+    """The property half of ``SchemaMapping``, as the Mapping tab edits it.
+
+    Only the fields this feature governs are accepted — the rest of the
+    mapping (identity, display name, entity type, …) is out of scope here and
+    must not be settable through a preview endpoint.
+    """
+    containerKey: Optional[str] = Field(
+        default="properties",
+        description="Node property holding the nested property container. "
+                    "null means the source stores everything as native fields.",
+    )
+    separator: str = Field(
+        default="/",
+        description="Joins a nested path into a flat key. Only '/' renders as "
+                    "a folder tree in the UI.",
+    )
+    collectUnmapped: bool = Field(
+        default=True,
+        description="Collect native non-reserved fields as user properties.",
+    )
+    propertyOverrides: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Physical field -> property path renames, applied after "
+                    "unpacking. The escape hatch for reserved-key collisions.",
+    )
+
+    def to_schema_mapping(self):
+        from backend.graph.adapters.schema_mapping import SchemaMapping
+        return SchemaMapping(
+            properties_field=self.containerKey,
+            properties_separator=self.separator,
+            collect_unmapped_as_properties=self.collectUnmapped,
+            property_overrides=self.propertyOverrides,
+        )
+
+
+class PropertyPreviewRequest(BaseModel):
+    mapping: PropertyMappingInput
+    labels: Optional[List[str]] = Field(
+        default=None,
+        description="Restrict sampling to these labels. Omitted = first few.",
+    )
+    limit: int = Field(default=5, ge=1, le=25)
+
+
+@router.get("/properties/storage")
+async def get_property_storage(
+    samplePerLabel: int = Query(
+        200, ge=1, le=2000,
+        description="Nodes sampled per label before classifying its storage.",
+    ),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Report how each label stores its node properties.
+
+    A graph built outside the platform usually nests every user property under
+    one container key. Those properties render (the read path hydrates the
+    container) but are invisible to Advanced Search, because a nested value is
+    not an indexable field. This says which labels are in that state, what
+    property paths unpacking would produce, exactly how many nodes are
+    affected, and which physical fields collide with platform-reserved names.
+    """
+    from backend.app.services.property_alignment import analyze_property_storage
+
+    mapping = getattr(engine.provider, "_mapping", None)
+    return await analyze_property_storage(
+        engine.provider, mapping, sample_per_label=samplePerLabel,
+    )
+
+
+@router.post("/properties/storage/preview")
+async def preview_property_storage(
+    body: PropertyPreviewRequest,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Before/after property bags for a few real nodes under a proposed mapping.
+
+    Read-only — nothing is written, so an operator can iterate on the mapping
+    freely before committing. Both sides are computed through the same
+    ``_node_from_props`` the drawer's payload comes from, so the preview cannot
+    drift from the result.
+    """
+    from backend.app.services.property_alignment import preview_alignment
+
+    return await preview_alignment(
+        engine.provider,
+        body.mapping.to_schema_mapping(),
+        current=getattr(engine.provider, "_mapping", None),
+        labels=body.labels,
+        limit=body.limit,
+    )
+
+
 # Process-level cache of the SearchQuery JSON Schema. It's static
 # within a release (Pydantic builds it from class definitions at import
 # time), so compute once and reuse on every request.
