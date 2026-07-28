@@ -190,6 +190,9 @@ interface AuthState {
     handleSessionLost: () => void
     /** Internal: invoked after login / silent refresh hydrates claims. */
     setPermissions: (claims: PermissionClaims) => void
+    /** Merge server-confirmed profile fields into the session user, so
+     *  the TopBar reflects a rename without a reload. */
+    applyProfile: (fields: Partial<AuthUser>) => void
     /** Phase 10: re-fetch ``/me/permissions`` after a silent refresh
      *  so route guards and TopBar react to role / binding mutations
      *  that happened mid-session. Fire-and-forget — failures clear
@@ -340,6 +343,20 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     setPermissions: (permissions) => set({ permissions }),
+
+    applyProfile: (fields) => {
+        const user = get().user
+        if (!user) return
+        // Merge rather than replace. The profile endpoint returns a
+        // narrower shape than AuthUser — no authProvider — and
+        // ``userCache._isValidUser`` requires that field. Writing the
+        // response through verbatim would produce a cache entry that
+        // fails validation on the next read, get silently wiped, and
+        // bring back the blank-shell flash on reload.
+        const next = { ...user, ...fields }
+        set({ user: next })
+        writeUserCache(next)
+    },
 
     refreshPermissions: async (opts) => {
         // Mirrors ``hydratePermissions`` but called from outside the

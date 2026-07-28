@@ -39,11 +39,18 @@ export interface AuthUser {
     email: string
     firstName: string
     lastName: string
+    /** Resolved server-side: the chosen name, or first + last. */
+    displayName?: string
     role: string
     status: string
     authProvider: string
     createdAt: string
     updatedAt: string
+    /** Chosen avatar illustration, or null for the initials fallback. */
+    avatarId?: string | null
+    /** True while the account must rotate its password before it can do
+     *  anything else. The API refuses everything but the change screen. */
+    mustChangePassword?: boolean
     /** IdP-mapped extras (department, employee_id, …). Phase 3. */
     attributes?: Record<string, unknown>
 }

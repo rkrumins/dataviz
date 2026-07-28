@@ -82,20 +82,26 @@ def _encrypt(data: dict) -> str:
 - Add audit script to detect plaintext credentials in existing DB
 - Log warning on startup if encryption is disabled
 
-### 1.3 Weak Default Admin Password (HIGH)
+### 1.3 Weak Default Admin Password (HIGH) — MOSTLY RESOLVED
 
-**Files:** `backend/app/main.py`
+**Files:** `backend/app/main.py`, `backend/app/auth/dependencies.py`
 
-```python
-admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
-```
+The bootstrap still accepts a default `ADMIN_PASSWORD`, but the account can no
+longer *use* it. When the seeded password is one of the values published in this
+repo (`changeme`, `admin123`), the user is created with
+`must_change_password=True`. That rides in the access token as the `mcp` claim
+and is enforced in `get_current_user`: every route outside
+`_PASSWORD_CHANGE_ALLOWED_PATHS` returns `403 password_change_required` until a
+new password is set. Supplying a real `ADMIN_PASSWORD` skips the prompt.
 
-A log message ("change password after first login!") is the only control.
+Admin → Users badges any account still in that state, and
+`backend/scripts/reset_admin_password.py` recovers a locked-out sole admin.
 
-**Recommendation:**
-- Generate random 32-character password on first run
-- Print to stdout only (not logged)
-- Force password change on first login (`must_change_password` flag)
+**Still outstanding:**
+- Generate a random password on first run rather than defaulting to `changeme`,
+  and print it to stdout only (not logged). The forced rotation makes the
+  default unusable, but it is still a published string sitting in a
+  `password_hash` column until somebody signs in.
 
 ### 1.4 CORS Wildcard on Graph Service — RESOLVED
 

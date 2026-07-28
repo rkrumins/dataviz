@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 from urllib.parse import quote
 
@@ -278,6 +279,28 @@ class LocalIdentityService:
                 # User no longer eligible — kill the family and bail.
                 await store.revoke_family(claims.family_id)
                 raise InvalidRefreshToken("user_inactive")
+
+            # ── Session revocation cutoff ────────────────────────────
+            # Revoking sessions tombstones live access-token ``sid``s in
+            # Redis, but that alone does not sign anyone out: the
+            # revocation entry expires with the access token, and this
+            # method mints a FRESH random ``sid`` on every rotation, so
+            # a client that eats one 401 and silently refreshes — which
+            # the SPA does automatically — comes straight back with a
+            # ``sid`` that was never on the list.
+            #
+            # ``sessions_valid_from`` is the durable half. Anything
+            # issued before the cutoff is refused and its family killed,
+            # so "sign out everywhere" means it.
+            if _refresh_predates_cutoff(
+                claims.mint_ms, getattr(orm, "sessions_valid_from", None),
+            ):
+                await store.revoke_family(claims.family_id)
+                logger.info(
+                    "Refresh rejected (sessions_revoked) for user=%s family=%s",
+                    claims.sub, claims.family_id,
+                )
+                raise InvalidRefreshToken("sessions_revoked")
 
             # ── SSO daily re-auth ceiling ────────────────────────────
             # The presence of ``auth_time`` in the refresh JWT means
@@ -763,11 +786,18 @@ class LocalIdentityService:
         check reads it on the next refresh. ``None`` for local
         password sessions.
         """
+        extra = dict(claims_extra or {})
+        if user.must_change_password:
+            # Carried as a claim rather than looked up per request:
+            # ``get_current_user`` already decodes this token to read
+            # ``sid``, so enforcing the rotation costs one more dict
+            # lookup instead of a database round-trip on every call.
+            extra["mcp"] = True
         access = create_access_token(
             user_id=user.id,
             email=user.email,
             role=user.role,
-            extra=claims_extra or None,
+            extra=extra or None,
         )
         refresh, _ = create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
@@ -782,6 +812,33 @@ class LocalIdentityService:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _refresh_predates_cutoff(mint_ms: int, cutoff: Optional[str]) -> bool:
+    """True if a refresh token minted at *mint_ms* is older than *cutoff*.
+
+    *cutoff* is the ISO ``users.sessions_valid_from`` stamp; *mint_ms* is
+    the token's mint instant in epoch milliseconds. Both sides are
+    compared at millisecond resolution because both routinely land in
+    the same second — revoke-then-refresh, and revoke-then-sign-in-again
+    are the two ordinary cases, and second precision cannot tell them
+    apart.
+
+    Fails OPEN in every "cannot tell" case: no cutoff, no mint claim, or
+    an unparseable stamp. A session is killed on positive evidence, not
+    on missing evidence — the alternative is a malformed column locking
+    an account out of its own refresh path.
+    """
+    if not cutoff or mint_ms <= 0:
+        return False
+    try:
+        parsed = datetime.fromisoformat(cutoff)
+    except ValueError:
+        logger.warning("Unparseable sessions_valid_from %r — ignoring", cutoff)
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return mint_ms < int(parsed.timestamp() * 1000)
 
 
 def _claims_email_verified(raw_claims: dict) -> bool:
@@ -876,10 +933,13 @@ def _orm_to_user(orm, *, role: str) -> User:
         email=orm.email,
         first_name=orm.first_name,
         last_name=orm.last_name,
+        chosen_display_name=getattr(orm, "display_name", None),
         role=role,
         status=orm.status,
         auth_provider=auth_provider,
         created_at=getattr(orm, "created_at", "") or "",
         updated_at=getattr(orm, "updated_at", "") or "",
+        avatar_id=getattr(orm, "avatar_id", None),
+        must_change_password=bool(getattr(orm, "must_change_password", False)),
         attributes=attributes,
     )

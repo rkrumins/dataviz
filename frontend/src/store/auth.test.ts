@@ -171,3 +171,52 @@ describe('useAuthStore.bootstrap with sessionStorage cache', () => {
 
     afterEach(clearUserCache)
 })
+
+describe('applyProfile', () => {
+    beforeEach(() => {
+        _resetStore()
+        clearUserCache()
+    })
+
+    it('merges the new fields into the session user', () => {
+        useAuthStore.setState({
+            status: 'authenticated', isAuthenticated: true, user: _user(),
+        })
+
+        useAuthStore.getState().applyProfile({
+            firstName: 'Renamed', lastName: 'Person', displayName: 'Renamed Person',
+        })
+
+        const user = useAuthStore.getState().user!
+        expect(user.firstName).toBe('Renamed')
+        expect(user.displayName).toBe('Renamed Person')
+        // Untouched fields have to survive: the profile endpoint returns
+        // a narrower shape than AuthUser.
+        expect(user.authProvider).toBe('oidc')
+        expect(user.email).toBe('alice@example.com')
+    })
+
+    it('writes a cache entry that still validates on read', () => {
+        // The regression the merge exists to prevent. Writing the PATCH
+        // response verbatim would drop authProvider, which
+        // ``_isValidUser`` requires — so the next read would silently
+        // wipe the cache and bring back the blank-shell flash.
+        useAuthStore.setState({
+            status: 'authenticated', isAuthenticated: true, user: _user(),
+        })
+
+        useAuthStore.getState().applyProfile({ firstName: 'Cached' })
+
+        const cached = readUserCache()
+        expect(cached).not.toBeNull()
+        expect(cached!.firstName).toBe('Cached')
+        expect(cached!.authProvider).toBe('oidc')
+    })
+
+    it('does nothing when there is no session', () => {
+        useAuthStore.getState().applyProfile({ firstName: 'Nobody' })
+
+        expect(useAuthStore.getState().user).toBeNull()
+        expect(readUserCache()).toBeNull()
+    })
+})

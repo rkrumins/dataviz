@@ -63,18 +63,42 @@ sequenceDiagram
 
 | Endpoint | Method | Auth | Rate Limit | Purpose |
 |----------|--------|------|------------|---------|
-| `/api/v1/auth/signup` | POST | Public | 5/min | User registration |
+| `/api/v1/auth/signup` | POST | Public | 20/min | User registration |
 | `/api/v1/auth/login` | POST | Public | 10/min | JWT token generation |
-| `/api/v1/auth/forgot-password` | POST | Public | 5/min | Request reset token |
+| `/api/v1/auth/forgot-password` | POST | Public | 3/min | Flag a reset request (mints no token — see below) |
 | `/api/v1/auth/reset-password` | POST | Public | 5/min | Apply password reset |
 | `/api/v1/users/me` | GET | Bearer | - | Current user profile |
+| `/api/v1/users/me` | PATCH | Bearer | - | Edit own name / display name / avatar |
+| `/api/v1/users/me/password` | POST | Bearer | 5/min | Change own password (signs out everywhere) |
+| `/api/v1/users/me/sessions/revoke-all` | POST | Bearer | - | Sign out on every device |
+| `/api/v1/users/me/activity` | GET | Bearer | - | Own account-security history |
 | `/api/v1/admin/users` | GET | Admin | - | List users (filterable by status) |
 | `/api/v1/admin/users/{id}/approve` | POST | Admin | - | Approve pending signup |
 | `/api/v1/admin/users/{id}/reject` | POST | Admin | - | Reject with reason |
 | `/api/v1/admin/users/{id}/suspend` | POST | Admin | - | Disable account |
 | `/api/v1/admin/users/{id}/reactivate` | POST | Admin | - | Re-enable account |
 | `/api/v1/admin/users/{id}/role` | PUT | Admin | - | Assign role |
-| `/api/v1/admin/users/{id}/reset-password` | POST | Admin | - | Generate reset token |
+| `/api/v1/admin/users/{id}/reset-password` | POST | Admin | - | Set a password directly |
+| `/api/v1/admin/users/{id}/generate-reset-token` | POST | Admin | - | Generate a shareable reset token |
+
+**Self-service password change** returns `409` when the account has no local
+password (SSO-only), and `403` — deliberately not `401` — when `currentPassword`
+is wrong. The frontend treats `401` as a dead session and would silently refresh,
+retry, and sign the user out over a typo.
+
+**Session revocation** has two halves, and both are needed. Tombstoning a `sid`
+in Redis covers only the life of the access token, because `/auth/refresh` mints
+a *fresh* `sid` on every rotation and does not consult the revoked set — so a
+client that silently refreshes walks straight back in. `users.sessions_valid_from`
+is the durable half: a refresh token minted before that instant is refused and its
+family killed. Anything calling `revoke_subject_sessions` for a security purpose
+should stamp the cutoff too (see `_revoke_every_session` in `endpoints/users.py`).
+
+**Forced rotation.** `users.must_change_password` rides in the access token as the
+`mcp` claim and is enforced in `get_current_user`: every route except a short
+allowlist (`_PASSWORD_CHANGE_ALLOWED_PATHS`) returns `403 {"error":
+"password_change_required"}`. It is set on the bootstrap admin when
+`ADMIN_PASSWORD` is one of the values published in this repo's setup docs.
 
 ### Admin Infrastructure
 

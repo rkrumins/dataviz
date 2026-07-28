@@ -10,28 +10,11 @@ import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { toUtcDate } from '@/lib/timeAgo'
 
-// Lazy-load zxcvbn to keep the initial bundle small
-let zxcvbnInstance: import('@zxcvbn-ts/core').ZxcvbnFactory | null = null
-async function loadZxcvbn() {
-    if (zxcvbnInstance) return zxcvbnInstance
-    const [core, langCommon, langEn] = await Promise.all([
-        import('@zxcvbn-ts/core'),
-        import('@zxcvbn-ts/language-common'),
-        import('@zxcvbn-ts/language-en'),
-    ])
-    zxcvbnInstance = new core.ZxcvbnFactory({
-        translations: langEn.translations,
-        graphs: langCommon.adjacencyGraphs,
-        dictionary: {
-            ...langCommon.dictionary,
-            ...langEn.dictionary,
-        },
-    })
-    return zxcvbnInstance
-}
-
-const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
-const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
+import {
+    STRENGTH_COLORS,
+    STRENGTH_LABELS,
+    usePasswordStrength,
+} from '@/lib/passwordStrength'
 
 /** "Expires in 3 days" — the deadline in words, from a UTC-safe parse. */
 function inviteDeadline(iso: string): string | null {
@@ -69,8 +52,7 @@ export function SignUpPage() {
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const [confirmPassword, setConfirmPassword] = useState('')
-    const [passwordScore, setPasswordScore] = useState(-1)
-    const [passwordFeedback, setPasswordFeedback] = useState('')
+    const { score: passwordScore, feedback: passwordFeedback } = usePasswordStrength(password)
     const [successMessage, setSuccessMessage] = useState('')
 
     // Invite token handling
@@ -163,26 +145,6 @@ export function SignUpPage() {
             setInviteValid(false)
         })
     }, [inviteToken])
-
-    // Debounced password strength check
-    useEffect(() => {
-        if (!password) {
-            setPasswordScore(-1)
-            setPasswordFeedback('')
-            return
-        }
-        const timer = setTimeout(async () => {
-            const zxcvbn = await loadZxcvbn()
-            const result = zxcvbn.check(password)
-            setPasswordScore(result.score)
-            const fb = result.feedback
-            const parts: string[] = []
-            if (fb.warning) parts.push(fb.warning)
-            if (fb.suggestions?.length) parts.push(...fb.suggestions)
-            setPasswordFeedback(parts.join(' '))
-        }, 300)
-        return () => clearTimeout(timer)
-    }, [password])
 
     const passwordsMatch = confirmPassword.length === 0 || password === confirmPassword
     // A dead invite with self-registration off has no path to an account: the
