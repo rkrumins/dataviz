@@ -118,8 +118,14 @@ SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 # Set-Cookie never made it back to the browser. Inside this window the
 # re-presentation is answered with the successor the first caller
 # already minted, so both racers converge on one token and nobody is
-# signed out. Outside it, reuse detection is unchanged. Set to 0 for
-# strict rotation with no window at all.
+# signed out. Outside it, reuse detection is unchanged.
+#
+# The cost, stated plainly: an attacker who already holds the stolen
+# refresh cookie and presents it within this window gets the same
+# successor rather than tripping detection. That is the same bargain
+# Auth0 and IdentityServer strike with their rotation reuse intervals.
+# Set to 0 to refuse it — at the price of signing users out of every tab
+# whenever two of them rotate at once, which is what this fixes.
 REFRESH_ROTATION_GRACE_SECONDS: int = int(
     os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "30")
 )
