@@ -32,6 +32,7 @@ import {
 import { cn } from '@/lib/utils'
 import { ErrorBanner } from './ErrorBanner'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
+import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
 
 interface SwitchDef {
     field: keyof AuthConfig
@@ -116,24 +117,16 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
     },
 ]
 
-const TONE_STYLES: Record<PostureTone, { wrap: string; icon: string }> = {
-    ok: {
-        wrap: 'border-emerald-400/40 bg-emerald-500/[0.07]',
-        icon: 'text-emerald-500',
-    },
-    warn: {
-        wrap: 'border-amber-400/40 bg-amber-500/[0.07]',
-        icon: 'text-amber-500',
-    },
-    danger: {
-        wrap: 'border-red-500/50 bg-red-500/[0.08]',
-        icon: 'text-red-500',
-    },
+/** The healthy posture is the common one, so it gets the neutral card and
+ *  only a warn/danger state spends colour. As a full-width amber slab this
+ *  shouted on every visit and taught operators to stop reading it. */
+const POSTURE_TONE: Record<PostureTone, CardTone> = {
+    ok: 'neutral', warn: 'warn', danger: 'danger',
 }
 
-export function SettingsTab() {
+export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }) {
     const [cfg, setCfg] = useState<AuthConfig | null>(null)
-    const [providers, setProviders] = useState<IdpProvider[]>([])
+    const [providers, setProviders] = useState<IdpProvider[]>(seeded ?? [])
     const [error, setError] = useState<string | null>(null)
     const [pending, setPending] = useState<keyof AuthConfig | null>(null)
     const [confirming, setConfirming] = useState<keyof AuthConfig | null>(null)
@@ -188,42 +181,10 @@ export function SettingsTab() {
         )
     }
 
-    const tone = TONE_STYLES[posture.tone]
-
     return (
-        <div className="space-y-6 max-w-3xl">
+        <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
+            <div className="min-w-0 space-y-6">
             {error && <ErrorBanner message={error} />}
-
-            {/* The answer first. Four booleans do not add up to it on their own. */}
-            <motion.section
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.16 }}
-                className={cn('rounded-2xl border-2 p-5', tone.wrap)}
-            >
-                <div className="flex items-start gap-3">
-                    {posture.tone === 'ok'
-                        ? <ShieldCheck className={cn('w-5 h-5 mt-0.5 shrink-0', tone.icon)} />
-                        : <AlertTriangle className={cn('w-5 h-5 mt-0.5 shrink-0', tone.icon)} />}
-                    <div className="min-w-0">
-                        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
-                            Right now, at the sign-in page
-                        </h2>
-                        <p className="mt-1 text-base font-semibold text-ink leading-snug">
-                            {posture.headline}
-                        </p>
-                        {posture.notes.length > 0 && (
-                            <ul className="mt-2 space-y-1">
-                                {posture.notes.map(n => (
-                                    <li key={n} className="text-xs text-ink-secondary leading-relaxed">
-                                        {n}
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
-                    </div>
-                </div>
-            </motion.section>
 
             {GROUPS.map((group, gi) => (
                 <motion.section
@@ -232,11 +193,9 @@ export function SettingsTab() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.16, delay: 0.05 + gi * 0.05 }}
                 >
-                    <div className="flex items-center gap-2 mb-2.5">
-                        <group.icon className="w-4 h-4 text-ink-muted" />
-                        <h3 className="text-sm font-bold text-ink">{group.title}</h3>
-                        <span className="text-[11px] text-ink-muted">— {group.blurb}</span>
-                    </div>
+                    <SsoSectionLabel icon={group.icon} hint={`— ${group.blurb}`}>
+                        {group.title}
+                    </SsoSectionLabel>
 
                     <div className="space-y-2.5">
                         {group.switches.map(s => (
@@ -263,6 +222,33 @@ export function SettingsTab() {
             <p className="text-[11px] text-ink-muted">
                 Version {cfg?.version ?? '—'} · last changed {relative(cfg?.updatedAt)}
             </p>
+            </div>
+
+            {/* Sticky, because it is the consequence of the switches beside
+                it. At the top of the page it scrolled away exactly when the
+                operator started flipping things and needed to watch it. */}
+            <aside className="xl:sticky xl:top-6">
+                <SsoCard
+                    icon={posture.tone === 'ok' ? ShieldCheck : AlertTriangle}
+                    tone={POSTURE_TONE[posture.tone]}
+                >
+                    <h2 className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                        Right now, at the sign-in page
+                    </h2>
+                    <p className="mt-1.5 text-sm font-semibold text-ink leading-snug">
+                        {posture.headline}
+                    </p>
+                    {posture.notes.length > 0 && (
+                        <ul className="mt-3 space-y-1.5 pt-3 border-t border-glass-border">
+                            {posture.notes.map(n => (
+                                <li key={n} className="text-[11px] text-ink-secondary leading-relaxed">
+                                    {n}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </SsoCard>
+            </aside>
         </div>
     )
 }
@@ -288,10 +274,10 @@ function SwitchRow({
 
     return (
         <div className={cn(
-            'rounded-xl border-2 p-4 transition-colors duration-150',
+            'rounded-xl border p-4 transition-colors duration-150',
             confirming
-                ? 'border-red-500/50 bg-red-500/[0.06]'
-                : 'border-black/[0.08] dark:border-white/[0.10]',
+                ? 'border-red-500/40 bg-red-500/[0.05]'
+                : 'border-glass-border bg-canvas-elevated',
         )}>
             <div className="flex items-start gap-3.5">
                 <button

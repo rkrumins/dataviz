@@ -1,26 +1,32 @@
 /**
- * Creating a mapping, as the sentence it actually is.
+ * Creating a rule.
  *
- * The form this replaces was a grid of labelled selects — "Target type:
- * Role binding (scope + role)", "Scope: Global", "Workspace ID:
- * ws_xxxxxxxx". Every one of those is our schema's word, and two of them
- * asked an operator to type an opaque id they had no way to look up. There
- * is no screen anywhere in this product that shows you a workspace id.
+ * The form this replaces was a grid of labelled selects using our schema's
+ * words — "Target type: Role binding (scope + role)" — with two fields
+ * asking for opaque ids (`ws_xxxxxxxx`, `grp_xxxxxxxx`) that nothing in
+ * this product will show you. Those are gone: the ids are pickers off
+ * `workspaceService.list()` and `groupsService.list()`, both of which
+ * already existed.
  *
- * A mapping is one sentence — *anyone in GROUP from PROVIDER gets ROLE
- * here* — so it reads as one, with the variable parts as inline controls.
- * The shape of the sentence changes with the target, which is what makes
- * "role binding" versus "group membership" legible without naming either.
+ * The pass after that swung too far and put live `<select>`s inside a
+ * flowing sentence. The reading order was right — *anyone in GROUP from
+ * PROVIDER gets ROLE* is how the rule is thought about, and it makes the
+ * two target types legible without naming either — but controls inside
+ * running prose wrap mid-phrase and read as a broken form.
  *
- * The ids become pickers off `workspaceService.list()` and
- * `groupsService.list()`, both of which already existed.
+ * So the reading order survives as the **column order**, on one baseline,
+ * and the sentence survives as a preview line underneath. That line does
+ * a second job the layout never could: it confirms what will be saved,
+ * with the workspace and role resolved to their names.
+ *
+ * Scope is implied throughout, never asked. A workspace-template role can
+ * only bind at workspace scope and a platform tier only at global; the
+ * original form offered both and let the pairing 400 at the server.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Plus, Sparkles } from 'lucide-react'
+import { ArrowRight, Loader2, Plus } from 'lucide-react'
 
-import {
-    ssoAdminService, type IdpProvider,
-} from '@/services/ssoAdminService'
+import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 import {
     permissionsService, type RoleDefinitionResponse,
 } from '@/services/permissionsService'
@@ -32,11 +38,21 @@ import { cn } from '@/lib/utils'
 
 type TargetKind = 'role_binding' | 'group_membership'
 
-const inlineSelect =
-    'inline-block align-baseline px-2 py-1 rounded-lg border-2 border-black/[0.10] ' +
-    'dark:border-white/[0.12] bg-canvas-elevated text-ink text-sm font-medium ' +
-    'outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 ' +
-    'max-w-[16rem]'
+const control =
+    'w-full h-10 px-3 rounded-xl border border-glass-border bg-canvas ' +
+    'text-ink text-sm outline-none transition-colors duration-150 ' +
+    'focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10'
+
+function Slot({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <label className="block min-w-0">
+            <span className="block text-[10px] font-semibold uppercase tracking-wider text-ink-muted mb-1.5">
+                {label}
+            </span>
+            {children}
+        </label>
+    )
+}
 
 export function MappingComposer({
     providers, onCreated, onError,
@@ -58,8 +74,8 @@ export function MappingComposer({
     const [busy, setBusy] = useState(false)
 
     useEffect(() => {
-        // Roles gate the whole sentence; workspaces and groups only matter
-        // for one branch each, so a failure there must not block the rest.
+        // Roles gate the whole rule; workspaces and groups matter to one
+        // branch each, so a failure there must not block the rest.
         permissionsService.listRoles()
             .then(r => setRoles(r.filter(
                 role => !FORBIDDEN_AUTO_GRANT_ROLES.has(role.name as RoleName),
@@ -73,11 +89,6 @@ export function MappingComposer({
         () => roles.find(r => r.name === roleName), [roles, roleName],
     )
 
-    /**
-     * Scope is *implied*, never asked. A workspace-template role can only
-     * bind at workspace scope and a platform tier only at global — the old
-     * form offered both and let the pairing 400 at the server.
-     */
     const needsWorkspace = Boolean(
         role && (role.scopeType === 'workspace'
             || role.permissions.some(p => p.startsWith('workspace:'))),
@@ -120,63 +131,59 @@ export function MappingComposer({
     }
 
     return (
-        <form
-            onSubmit={submit}
-            className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] p-5"
-        >
-            <div className="flex items-center gap-2 mb-3">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                <h3 className="text-sm font-bold text-ink">New rule</h3>
-            </div>
+        <form onSubmit={submit}>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Slot label="Anyone in">
+                    <input
+                        value={idpGroup}
+                        onChange={e => setIdpGroup(e.target.value)}
+                        placeholder="engineering"
+                        aria-label="IdP group name"
+                        required
+                        className={cn(control, 'font-mono')}
+                    />
+                </Slot>
 
-            {/* The sentence. `leading-loose` so inline controls on wrapped
-                lines do not collide. */}
-            <div className="text-sm text-ink-secondary leading-loose">
-                Anyone in the group{' '}
-                <input
-                    value={idpGroup}
-                    onChange={e => setIdpGroup(e.target.value)}
-                    placeholder="engineering"
-                    aria-label="IdP group name"
-                    required
-                    className={cn(inlineSelect, 'font-mono w-[11rem]')}
-                />
-                {' '}from{' '}
-                <select
-                    value={providerId}
-                    onChange={e => setProviderId(e.target.value)}
-                    aria-label="Provider"
-                    className={inlineSelect}
-                >
-                    <option value="">any connection</option>
-                    {providers.map(p => (
-                        <option key={p.id} value={p.id}>
-                            {p.displayName || p.slug}
-                        </option>
-                    ))}
-                </select>
-                {' '}gets{' '}
-                <select
-                    value={kind}
-                    onChange={e => setKind(e.target.value as TargetKind)}
-                    aria-label="What they get"
-                    className={inlineSelect}
-                >
-                    <option value="role_binding">a role</option>
-                    <option value="group_membership">membership of a group</option>
-                </select>
+                <Slot label="From">
+                    <select
+                        value={providerId}
+                        onChange={e => setProviderId(e.target.value)}
+                        aria-label="Provider"
+                        className={control}
+                    >
+                        <option value="">Any connection</option>
+                        {providers.map(p => (
+                            <option key={p.id} value={p.id}>
+                                {p.displayName || p.slug}
+                            </option>
+                        ))}
+                    </select>
+                </Slot>
 
+                <Slot label="Gets">
+                    <select
+                        value={kind}
+                        onChange={e => setKind(e.target.value as TargetKind)}
+                        aria-label="What they get"
+                        className={control}
+                    >
+                        <option value="role_binding">A role</option>
+                        <option value="group_membership">Membership of a group</option>
+                    </select>
+                </Slot>
+
+                {/* The varying slot. Which control appears here is what makes
+                    the two target types legible without naming either. */}
                 {kind === 'role_binding' ? (
-                    <>
-                        {': '}
+                    <Slot label="Which role">
                         <select
                             value={roleName}
                             onChange={e => { setRoleName(e.target.value); setWorkspaceId('') }}
                             aria-label="Role"
                             required
-                            className={inlineSelect}
+                            className={control}
                         >
-                            <option value="">choose a role…</option>
+                            <option value="">Choose a role…</option>
                             <optgroup label="Organization-wide">
                                 {roles.filter(r => r.isSystem
                                     && !r.permissions.some(p => p.startsWith('workspace:')))
@@ -203,50 +210,74 @@ export function MappingComposer({
                                 </optgroup>
                             )}
                         </select>
-                        {needsWorkspace && (
-                            <>
-                                {' in '}
-                                <select
-                                    value={workspaceId}
-                                    onChange={e => setWorkspaceId(e.target.value)}
-                                    aria-label="Workspace"
-                                    required
-                                    className={inlineSelect}
-                                >
-                                    <option value="">choose a workspace…</option>
-                                    {workspaces.map(w => (
-                                        <option key={w.id} value={w.id}>{w.name}</option>
-                                    ))}
-                                </select>
-                            </>
-                        )}
-                        {role && !needsWorkspace && ' across the whole organization'}
-                    </>
+                    </Slot>
                 ) : (
-                    <>
-                        {': '}
+                    <Slot label="Which group">
                         <select
                             value={targetGroupId}
                             onChange={e => setTargetGroupId(e.target.value)}
                             aria-label="Internal group"
                             required
-                            className={inlineSelect}
+                            className={control}
                         >
-                            <option value="">choose a group…</option>
+                            <option value="">Choose a group…</option>
                             {groups.map(g => (
                                 <option key={g.id} value={g.id}>
                                     {g.name}{g.memberCount ? ` (${g.memberCount})` : ''}
                                 </option>
                             ))}
                         </select>
-                        {' — and whatever that group grants'}
-                    </>
+                    </Slot>
                 )}
-                {'.'}
+
+                {needsWorkspace && (
+                    <Slot label="In which workspace">
+                        <select
+                            value={workspaceId}
+                            onChange={e => setWorkspaceId(e.target.value)}
+                            aria-label="Workspace"
+                            required
+                            className={control}
+                        >
+                            <option value="">Choose a workspace…</option>
+                            {workspaces.map(w => (
+                                <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                        </select>
+                    </Slot>
+                )}
+            </div>
+
+            {/* The sentence, now doing the job it is actually good at:
+                confirming what is about to be written, with ids resolved. */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="flex items-start gap-1.5 text-xs text-ink-secondary min-w-0">
+                    <ArrowRight className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+                    <span>
+                        {preview({
+                            idpGroup, kind, role, workspaces, workspaceId,
+                            groups, targetGroupId, providers, providerId,
+                        })}
+                    </span>
+                </p>
+                <button
+                    type="submit"
+                    disabled={!ready || busy}
+                    className={cn(
+                        'shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
+                        ready && !busy
+                            ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
+                            : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                    )}
+                >
+                    {busy
+                        ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
+                        : <><Plus className="w-4 h-4" />Create rule</>}
+                </button>
             </div>
 
             {role?.description && (
-                <p className="mt-3 text-[11px] text-ink-muted leading-relaxed">
+                <p className="mt-2 text-[11px] text-ink-muted leading-relaxed">
                     <span className="font-medium text-ink-secondary">
                         {roleVisualFor(role.name).label}:
                     </span>{' '}
@@ -255,26 +286,57 @@ export function MappingComposer({
             )}
 
             {kind === 'group_membership' && !groups.length && (
-                <p className="mt-3 text-[11px] text-amber-600 dark:text-amber-400">
+                <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
                     No internal groups exist yet — create one under Admin → Groups
                     first, or map straight to a role instead.
                 </p>
             )}
-
-            <button
-                type="submit"
-                disabled={!ready || busy}
-                className={cn(
-                    'mt-4 inline-flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
-                    ready && !busy
-                        ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
-                        : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
-                )}
-            >
-                {busy
-                    ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
-                    : <><Plus className="w-4 h-4" />Create rule</>}
-            </button>
         </form>
     )
+}
+
+/** The rule as a sentence, with every id resolved to the name it was
+ *  picked by. Falls back to a prompt while it is still incomplete. */
+function preview({
+    idpGroup, kind, role, workspaces, workspaceId,
+    groups, targetGroupId, providers, providerId,
+}: {
+    idpGroup: string
+    kind: TargetKind
+    role?: RoleDefinitionResponse
+    workspaces: WorkspaceResponse[]
+    workspaceId: string
+    groups: GroupResponse[]
+    targetGroupId: string
+    providers: IdpProvider[]
+    providerId: string
+}): string {
+    // Describe as much as is known at every stage rather than waiting for
+    // the whole rule. Someone who picks a role first should learn from this
+    // line that it is organization-wide, before they have named a group.
+    const group = idpGroup.trim() || '…'
+
+    const from = providerId
+        ? ` from ${providers.find(p => p.id === providerId)?.displayName ?? 'that connection'}`
+        : ''
+
+    if (kind === 'group_membership') {
+        const g = groups.find(x => x.id === targetGroupId)
+        return g
+            ? `Anyone in ${group}${from} joins ${g.name}, and gets whatever it grants.`
+            : `Anyone in ${group}${from} joins… choose a group.`
+    }
+
+    if (!role) return `Anyone in ${group}${from} gets… choose a role.`
+
+    const label = roleVisualFor(role.name).label
+    const needsWorkspace = role.scopeType === 'workspace'
+        || role.permissions.some(p => p.startsWith('workspace:'))
+    if (!needsWorkspace) {
+        return `Anyone in ${group}${from} gets ${label} across the whole organization.`
+    }
+    const w = workspaces.find(x => x.id === workspaceId)
+    return w
+        ? `Anyone in ${group}${from} gets ${label} in ${w.name}.`
+        : `Anyone in ${group}${from} gets ${label} in… choose a workspace.`
 }

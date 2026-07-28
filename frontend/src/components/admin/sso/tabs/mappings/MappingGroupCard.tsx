@@ -55,9 +55,9 @@ export function MappingGroupCard({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.16, delay: Math.min(index, 6) * 0.04 }}
-            className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] overflow-hidden"
+            className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden"
         >
-            <div className="flex items-center gap-2 px-4 py-2.5 bg-black/[0.02] dark:bg-white/[0.03] border-b border-black/[0.06] dark:border-white/[0.08]">
+            <div className="flex items-center gap-2 px-4 py-2.5 bg-black/[0.02] dark:bg-white/[0.03] border-b border-glass-border">
                 <Users className="w-3.5 h-3.5 text-ink-muted shrink-0" />
                 <span className="font-mono text-xs font-semibold text-ink truncate">
                     {group.idpGroup}
@@ -67,7 +67,7 @@ export function MappingGroupCard({
                 </span>
             </div>
 
-            <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.08]">
+            <ul className="divide-y divide-glass-border">
                 {group.rows.map(row => (
                     <li
                         key={row.id}

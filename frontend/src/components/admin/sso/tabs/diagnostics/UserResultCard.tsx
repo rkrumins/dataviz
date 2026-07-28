@@ -46,7 +46,7 @@ export function UserResultCard({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.16, delay: Math.min(index, 5) * 0.04 }}
-            className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] overflow-hidden"
+            className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden"
         >
             <div className="p-4">
                 <div className="flex items-start justify-between gap-3">
@@ -88,7 +88,7 @@ export function UserResultCard({
             </div>
 
             {/* The investigation's actual subject. */}
-            <div className="px-4 py-3 border-t border-black/[0.06] dark:border-white/[0.08] bg-black/[0.015] dark:bg-white/[0.02]">
+            <div className="px-4 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
                 <h4 className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
                     Ways in ({ways})
                 </h4>
@@ -126,7 +126,7 @@ export function UserResultCard({
             </div>
 
             {user.attributes.length > 0 && (
-                <div className="px-4 py-3 border-t border-black/[0.06] dark:border-white/[0.08]">
+                <div className="px-4 py-3 border-t border-glass-border">
                     <h4 className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
                         Claim attributes
                     </h4>

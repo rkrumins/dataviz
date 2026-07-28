@@ -25,13 +25,13 @@
  * themselves.
  */
 import { useState } from 'react'
-import { motion } from 'framer-motion'
 import { AtSign, Hash, Loader2, Search, Tag, UserSearch } from 'lucide-react'
 
 import { ssoAdminService, type UserSummary } from '@/services/ssoAdminService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import { SsoActivityTab } from '../../SsoActivityTab'
+import { SsoCard } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
 import { UserResultCard } from './diagnostics/UserResultCard'
 
@@ -87,18 +87,11 @@ function LookupSection() {
 
     return (
         <section className="space-y-4">
-            <div>
-                <h2 className="text-sm font-bold text-ink flex items-center gap-2">
-                    <UserSearch className="w-4 h-4 text-ink-muted" />
-                    Find a person
-                </h2>
-                <p className="mt-1 text-xs text-ink-muted max-w-2xl leading-relaxed">
-                    Whichever handle you were given. This is the only search in the
-                    product that resolves someone by a claim your IdP sends rather
-                    than by their name or email.
-                </p>
-            </div>
-
+            <SsoCard
+                icon={UserSearch}
+                title="Find a person"
+                blurb="Whichever handle you were given. This is the only search in the product that resolves someone by a claim your IdP sends rather than by their name or email."
+            >
             <form onSubmit={runSearch} className="space-y-3">
                 {/* Modes as peers, not one visible and two hidden behind a
                     disclosure triangle. */}
@@ -134,7 +127,7 @@ function LookupSection() {
                             onChange={e => setAttrKey(e.target.value)}
                             aria-label="Attribute name"
                             placeholder="staff_id"
-                            className="w-40 px-3 py-2.5 rounded-xl border-2 border-black/[0.10] dark:border-white/[0.12] bg-canvas-elevated font-mono text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                            className="w-40 h-10 px-3 rounded-xl border border-glass-border bg-canvas font-mono text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
                         />
                     )}
                     <input
@@ -146,15 +139,15 @@ function LookupSection() {
                                 : mode === 'attribute' ? '12345'
                                 : 'name, email, external id, or an attribute value…'
                         }
-                        className="flex-1 min-w-[14rem] px-3 py-2.5 rounded-xl border-2 border-black/[0.10] dark:border-white/[0.12] bg-canvas-elevated text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                        className="flex-1 min-w-[12rem] h-10 px-3 rounded-xl border border-glass-border bg-canvas text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
                     />
                     <button
                         type="submit"
                         disabled={busy || !query.trim()}
                         className={cn(
-                            'inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150',
+                            'inline-flex items-center gap-2 h-10 px-5 rounded-xl text-sm font-medium transition-colors duration-150',
                             query.trim() && !busy
-                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
+                                ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
                                 : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                         )}
                     >
@@ -167,6 +160,7 @@ function LookupSection() {
 
                 <p className="text-[11px] text-ink-muted">{active.hint}</p>
             </form>
+            </SsoCard>
 
             {error && <ErrorBanner message={error} />}
 
@@ -192,40 +186,53 @@ function LookupSection() {
 export function DiagnosticsTab() {
     const canReadAudit = usePermission('system:audit:read')
     return (
-        <div className="space-y-8 max-w-3xl">
-            {canReadAudit && (
-                // Deliberately first. A person who could not sign in was shown
-                // a reference and told to quote it, so pasting it is the
-                // operator's opening move — and it used to be below the fold.
-                <motion.section
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.16 }}
-                    className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] p-4 flex items-start gap-3"
-                >
-                    <div className="shrink-0 w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center">
-                        <Hash className="w-4 h-4 text-indigo-500" />
-                    </div>
-                    <div className="min-w-0">
-                        <h2 className="text-sm font-bold text-ink">
-                            Given a reference?
-                        </h2>
-                        <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
-                            Someone who could not sign in saw a short code like{' '}
-                            <code className="font-mono text-ink">a1b2c3d4</code>.
-                            Paste it into the activity search below — the real
-                            reason is recorded there, and deliberately not shown to
-                            them, because it would describe your configuration to
-                            anyone who can reach the sign-in page.
-                        </p>
-                    </div>
-                </motion.section>
-            )}
+        <div className="space-y-6">
+            <div className="grid xl:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
+                <div className="min-w-0">
+                    <LookupSection />
+                </div>
 
-            <LookupSection />
+                <aside className="space-y-4 xl:sticky xl:top-6">
+                    {canReadAudit && (
+                        // The operator's opening move: a person who could not
+                        // sign in is holding a code and was told to quote it.
+                        <SsoCard
+                            icon={Hash}
+                            tone="info"
+                            title="Given a reference?"
+                            blurb={<>
+                                Someone who could not sign in saw a short code like{' '}
+                                <code className="font-mono text-ink">a1b2c3d4</code>.
+                                Paste it into the activity search below — the real
+                                reason is recorded there, and deliberately not shown
+                                to them, because it would describe your configuration
+                                to anyone who can reach the sign-in page.
+                            </>}
+                        />
+                    )}
 
+                    <SsoCard icon={Search} title="Which search to use">
+                        <dl className="space-y-2.5">
+                            {MODES.map(m => (
+                                <div key={m.id}>
+                                    <dt className="flex items-center gap-1.5 text-[11px] font-semibold text-ink">
+                                        <m.icon className="w-3 h-3 text-ink-muted" />
+                                        {m.label}
+                                    </dt>
+                                    <dd className="mt-0.5 text-[11px] text-ink-muted leading-relaxed">
+                                        {m.hint}
+                                    </dd>
+                                </div>
+                            ))}
+                        </dl>
+                    </SsoCard>
+                </aside>
+            </div>
+
+            {/* Full width, below both columns: it is a table, and tables
+                want the room a 320px rail would otherwise take from it. */}
             {canReadAudit && (
-                <div className="pt-6 border-t border-black/[0.08] dark:border-white/[0.10]">
+                <div className="pt-6 border-t border-glass-border">
                     <SsoActivityTab />
                 </div>
             )}

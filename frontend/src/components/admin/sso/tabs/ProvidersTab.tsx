@@ -5,21 +5,26 @@
  * none and the guided wizard behind "Connect a provider".
  */
 import { useCallback, useEffect, useState } from 'react'
-import { Plus } from 'lucide-react'
-
 import {
     ssoAdminService,
     type IdpHealth,
     type IdpProvider,
 } from '@/services/ssoAdminService'
-import { DocsLink } from '@/components/help/DocsLink'
 import { SsoFirstRunHero } from '../SsoFirstRunHero'
 import { IdpProviderCard } from '../IdpProviderCard'
 import { IdpConnectionWizard } from '../IdpConnectionWizard'
 import { ProviderEditorDrawer } from '../ProviderEditorDrawer'
 import { ErrorBanner } from './ErrorBanner'
 
-export function ProvidersTab() {
+export function ProvidersTab({
+    openWizardSignal = 0, onChanged,
+}: {
+    /** Bumped by the page's "Connect a provider" action. A counter rather
+     *  than a boolean so a second press re-opens after a cancel. */
+    openWizardSignal?: number
+    /** Lets the page's stat tiles follow a change made in here. */
+    onChanged?: () => void
+} = {}) {
     const [rows, setRows] = useState<IdpProvider[]>([])
     const [health, setHealth] = useState<Record<string, IdpHealth>>({})
     const [error, setError] = useState<string | null>(null)
@@ -49,6 +54,11 @@ export function ProvidersTab() {
 
     useEffect(() => { void refresh() }, [refresh])
 
+    // Skip the initial 0 so the wizard does not open on first paint.
+    useEffect(() => {
+        if (openWizardSignal > 0) setShowCreate(true)
+    }, [openWizardSignal])
+
     // Resolved from the freshest list rather than held as a snapshot, so a
     // refresh behind the open drawer does not leave it editing a stale row.
     const editing = rows.find(p => p.id === editingId) ?? null
@@ -58,6 +68,7 @@ export function ProvidersTab() {
         try {
             await ssoAdminService.updateProvider(p.id, { enabled: !p.enabled })
             await refresh()
+            onChanged?.()
         } catch (err) {
             setError((err as Error).message)
         } finally {
@@ -70,6 +81,7 @@ export function ProvidersTab() {
         try {
             await ssoAdminService.publishProvider(p.id)
             await refresh()
+            onChanged?.()
         } catch (err) {
             setError((err as Error).message)
         } finally {
@@ -104,27 +116,9 @@ export function ProvidersTab() {
     return (
         <div className="space-y-4">
             {error && <ErrorBanner message={error} />}
-            <div className="flex justify-between items-center">
-                <div>
-                    <h2 className="text-base font-semibold">Connections</h2>
-                    <p className="text-xs text-ink-muted mt-0.5">
-                        {rows.filter(p => p.lifecycle !== 'draft').length} live
-                        {rows.some(p => p.lifecycle === 'draft') &&
-                            `, ${rows.filter(p => p.lifecycle === 'draft').length} draft`}
-                    </p>
-                </div>
-                <div className="flex items-center gap-3">
-                    <DocsLink slug="sso-setup" variant="icon" />
-                    <button
-                        onClick={() => setShowCreate(true)}
-                        className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-sm flex items-center gap-1"
-                    >
-                        <Plus className="w-4 h-4" />
-                        Connect a provider
-                    </button>
-                </div>
-            </div>
-
+            {/* No heading row of its own: the counts are the page's stat
+                tiles now, and "Connect a provider" is a page action beside
+                Refresh, where every other Admin section puts it. */}
             <div className="space-y-3">
                 {rows.map((p, i) => (
                     <IdpProviderCard
@@ -149,15 +143,15 @@ export function ProvidersTab() {
                 <ProviderEditorDrawer
                     provider={editing}
                     onClose={() => setEditingId(null)}
-                    onSaved={() => { void refresh() }}
-                    onDeleted={() => { setEditingId(null); void refresh() }}
+                    onSaved={() => { void refresh(); onChanged?.() }}
+                    onDeleted={() => { setEditingId(null); void refresh(); onChanged?.() }}
                 />
             )}
 
             {showCreate && (
                 <IdpConnectionWizard
                     onClose={() => { setShowCreate(false); void refresh() }}
-                    onPublished={() => { void refresh() }}
+                    onPublished={() => { void refresh(); onChanged?.() }}
                 />
             )}
         </div>

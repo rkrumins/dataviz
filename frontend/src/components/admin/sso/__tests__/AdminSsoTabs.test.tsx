@@ -11,7 +11,7 @@
  *      A locked panel advertises a capability the operator cannot use and
  *      cannot grant themselves.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -23,21 +23,44 @@ vi.mock('@/store/auth', async () => {
     return { ...actual, usePermission: () => perms.value }
 })
 
+const { listProviders, listGroupMappings, auditList } = vi.hoisted(() => ({
+    listProviders: vi.fn(),
+    listGroupMappings: vi.fn(),
+    auditList: vi.fn(),
+}))
+
 vi.mock('@/services/ssoAdminService', () => ({
     ssoAdminService: {
-        listProviders: vi.fn().mockResolvedValue([]),
+        listProviders,
+        listGroupMappings,
         providerStatus: vi.fn().mockResolvedValue({ providers: [] }),
     },
 }))
 
 vi.mock('@/services/auditService', () => ({
-    auditService: { list: vi.fn().mockResolvedValue({ events: [], nextCursor: null }) },
+    auditService: { list: auditList },
 }))
 
 import { DiagnosticsTab } from '../tabs/DiagnosticsTab'
 import { AdminSso } from '../../AdminSso'
 
-beforeEach(() => { perms.value = true })
+beforeEach(() => {
+    vi.clearAllMocks()
+    perms.value = true
+    listProviders.mockResolvedValue([])
+    listGroupMappings.mockResolvedValue([])
+    auditList.mockResolvedValue({ events: [], nextCursor: null })
+})
+
+function provider(over: Record<string, unknown> = {}) {
+    return {
+        id: 'idp_1', slug: 'entra', displayName: 'Entra', kind: 'oidc',
+        enabled: true, lifecycle: 'live', priority: 100, settings: {},
+        claimMapping: {}, linkingPolicy: 'strict', assurance: 'verified',
+        assuranceReason: '', emailDomains: [], createdAt: '', updatedAt: '',
+        ...over,
+    }
+}
 
 describe('tab shell', () => {
     it('offers four tabs and no longer a Find user tab', () => {
@@ -46,6 +69,47 @@ describe('tab shell', () => {
             expect(screen.getByRole('button', { name })).toBeInTheDocument()
         }
         expect(screen.queryByRole('button', { name: /find user/i })).not.toBeInTheDocument()
+    })
+
+    it('carries the page actions every other Admin section has', () => {
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        // Scoped to the page header: the first-run hero offers its own
+        // "Connect a provider", which is a different affordance.
+        const header = within(screen.getByRole('banner'))
+        expect(header.getByRole('button', { name: /connect a provider/i }))
+            .toBeInTheDocument()
+        expect(header.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
+    })
+})
+
+describe('stat tiles', () => {
+    it('counts live the way the sign-in page does', async () => {
+        // enabled AND published, mirroring list_public_providers. Counting a
+        // draft here would tell an operator a connection reaches people when
+        // it reaches nobody — the confusion the lifecycle exists to prevent.
+        listProviders.mockResolvedValue([
+            provider({ id: 'a' }),
+            provider({ id: 'b', lifecycle: 'draft' }),
+            provider({ id: 'c', enabled: false }),
+        ])
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+
+        const live = await screen.findByText(/live connections/i)
+        expect(within(live.closest('div')!.parentElement!).getByText('1'))
+            .toBeInTheDocument()
+        const drafts = screen.getByText(/drafts to rehearse/i)
+        expect(within(drafts.closest('div')!.parentElement!).getByText('1'))
+            .toBeInTheDocument()
+    })
+
+    it('leaves the failure count unknown without audit access', async () => {
+        perms.value = false
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+
+        const fails = await screen.findByText(/failed sign-ins/i)
+        expect(within(fails.closest('div')!.parentElement!).getByText('—'))
+            .toBeInTheDocument()
+        expect(auditList).not.toHaveBeenCalled()
     })
 })
 

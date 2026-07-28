@@ -184,6 +184,52 @@ describe('incomplete rules cannot be submitted', () => {
     })
 })
 
+describe('the preview line', () => {
+    // The sentence used to be the layout, with live selects inside running
+    // prose that wrapped mid-phrase. It is now a preview underneath, which
+    // lets it do the job it is actually good at: stating what will be
+    // written, with every id resolved to the name it was picked by.
+    it('resolves the workspace to its name, not its id', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        await user.selectOptions(screen.getByLabelText('Role'), 'workspace_editor')
+        await user.selectOptions(await screen.findByLabelText('Workspace'), 'ws_abc')
+
+        expect(await screen.findByText(/anyone in engineering gets .* in Analytics\./i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/ws_abc/)).toBeNull()
+    })
+
+    it('names the connection when the rule is scoped to one', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'staff')
+        await user.selectOptions(screen.getByLabelText('Provider'), 'idp_1')
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_member')
+
+        expect(await screen.findByText(/from Corporate Entra/i)).toBeInTheDocument()
+    })
+
+    it('says what is still missing rather than going blank', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        await user.selectOptions(screen.getByLabelText('Role'), 'workspace_editor')
+
+        // Anchored to the preview's sentence: "choose a workspace…" is also
+        // the picker's own placeholder option.
+        expect(await screen.findByText(/anyone in engineering gets .*choose a workspace/i))
+            .toBeInTheDocument()
+    })
+})
+
 describe('the privileged-role floor', () => {
     it('never offers a role the backend refuses to auto-grant', async () => {
         listRoles.mockResolvedValue([

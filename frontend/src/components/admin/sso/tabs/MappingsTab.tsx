@@ -1,22 +1,19 @@
 /**
  * MappingsTab — turning your org chart into access here.
  *
- * The page this replaces opened with a grid of labelled selects using our
- * schema's vocabulary ("Target type: Role binding (scope + role)"), two
- * fields asking for opaque ids nothing in the product will show you
- * (`ws_xxxxxxxx`, `grp_xxxxxxxx`), and an empty table underneath. Nowhere
- * did it say what a mapping *does*, which for this feature is the whole
- * point: these rules are re-evaluated on every sign-in and every refresh,
- * so removing someone from a group in your IdP removes their access here
- * within minutes. That is the promise, and it was invisible.
+ * Two columns, because the page is 1760px wide and this content is not.
+ * The main column carries the work — compose a rule, read the rules that
+ * exist. The rail carries the reference material: the reconciliation
+ * contract and the privileged-role floor, both read once and then never
+ * again, and both previously eating the top of the page above the thing
+ * the operator came to do.
  *
- * Now: the promise up front, rules grouped by the IdP group they belong to
- * (because "what does engineering get?" is the question people arrive
- * with), and creation as a sentence rather than a schema.
+ * The contract itself is the reason this feature exists and the original
+ * page never stated it: these rules are re-evaluated on every sign-in and
+ * every session refresh, so the directory stays the source of truth.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { motion } from 'framer-motion'
-import { Loader2, RefreshCw, ShieldAlert, Waypoints } from 'lucide-react'
+import { Loader2, RefreshCw, ShieldAlert, Sparkles, Waypoints } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -25,12 +22,12 @@ import {
 } from '@/services/ssoAdminService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
-import { DocsLink } from '@/components/help/DocsLink'
+import { SsoCard, SsoEmpty, SsoSectionLabel } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
 import { MappingComposer } from './mappings/MappingComposer'
 import { MappingGroupCard, groupMappings } from './mappings/MappingGroupCard'
 
-export function MappingsTab() {
+export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
     const [rows, setRows] = useState<IdpGroupMapping[]>([])
     const [providers, setProviders] = useState<IdpProvider[]>([])
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
@@ -68,6 +65,7 @@ export function MappingsTab() {
         try {
             await ssoAdminService.deleteMapping(id)
             await refresh()
+            onChanged?.()
         } catch (err) {
             setError((err as Error).message)
         } finally {
@@ -85,96 +83,83 @@ export function MappingsTab() {
     }
 
     return (
-        <div className="space-y-5 max-w-3xl">
-            {error && <ErrorBanner message={error} />}
+        <div className="grid xl:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
+            <div className="min-w-0 space-y-5">
+                {error && <ErrorBanner message={error} />}
 
-            {/* The contract. It is the reason to use this feature and the
-                page never stated it. */}
-            <motion.section
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.16 }}
-                className="rounded-2xl border-2 border-black/[0.08] dark:border-white/[0.10] p-5"
-            >
-                <div className="flex items-start gap-3">
-                    <div className="shrink-0 w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center">
-                        <RefreshCw className="w-4 h-4 text-indigo-500" />
-                    </div>
-                    <div className="min-w-0">
-                        <h2 className="text-sm font-bold text-ink">
-                            Your directory decides who gets what
-                        </h2>
-                        <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
-                            These rules are re-evaluated on every sign-in and every
-                            session refresh. Add someone to a group in your identity
-                            provider and their access appears here; remove them and
-                            it disappears, within a few minutes, without anybody
-                            touching this page.
-                        </p>
-                        <p className="mt-2 text-[11px] text-ink-muted leading-relaxed">
-                            Access granted this way cannot be edited by hand here —
-                            the directory is the source of truth, and an override
-                            would be undone at the next sign-in.
-                        </p>
-                    </div>
-                    <DocsLink slug="sso-setup" variant="icon" />
-                </div>
-            </motion.section>
+                <SsoCard
+                    icon={Sparkles}
+                    title="New rule"
+                    blurb="Reads left to right, and the preview underneath is exactly what gets saved."
+                >
+                    <MappingComposer
+                        providers={providers}
+                        onCreated={async () => { await refresh(); onChanged?.() }}
+                        onError={setError}
+                    />
+                </SsoCard>
 
-            <MappingComposer
-                providers={providers}
-                onCreated={refresh}
-                onError={setError}
-            />
+                <section>
+                    <SsoSectionLabel
+                        icon={Waypoints}
+                        hint={grouped.length
+                            ? `${rows.length} across ${grouped.length} group${grouped.length === 1 ? '' : 's'}`
+                            : undefined}
+                    >
+                        Live rules
+                    </SsoSectionLabel>
 
-            {grouped.length === 0 ? (
-                <EmptyRules />
-            ) : (
-                <section className="space-y-3">
-                    <div className="flex items-baseline gap-2">
-                        <h3 className="text-sm font-bold text-ink">Live rules</h3>
-                        <span className="text-[11px] text-ink-muted">
-                            {rows.length} across {grouped.length} group
-                            {grouped.length === 1 ? '' : 's'}
-                        </span>
-                    </div>
-                    {grouped.map((g, i) => (
-                        <MappingGroupCard
-                            key={g.idpGroup}
-                            group={g}
-                            providers={providers}
-                            workspaces={workspaces}
-                            groups={groups}
-                            busy={busy}
-                            index={i}
-                            onDelete={id => { void remove(id) }}
-                        />
-                    ))}
+                    {grouped.length === 0 ? (
+                        <SsoCard>
+                            <SsoEmpty icon={Waypoints}>
+                                No rules yet — nobody gains access by signing in.
+                            </SsoEmpty>
+                        </SsoCard>
+                    ) : (
+                        <div className="space-y-3">
+                            {grouped.map((g, i) => (
+                                <MappingGroupCard
+                                    key={g.idpGroup}
+                                    group={g}
+                                    providers={providers}
+                                    workspaces={workspaces}
+                                    groups={groups}
+                                    busy={busy}
+                                    index={i}
+                                    onDelete={id => { void remove(id) }}
+                                />
+                            ))}
+                        </div>
+                    )}
                 </section>
-            )}
-
-            <p className="flex items-start gap-1.5 text-[11px] text-ink-muted leading-relaxed">
-                <ShieldAlert className="w-3.5 h-3.5 mt-px shrink-0" />
-                Platform-admin roles need a <strong>verified</strong> connection,
-                and <code className="font-mono">super_admin</code> can never be
-                granted this way — that one stays a deliberate, manual act.
-            </p>
-        </div>
-    )
-}
-
-function EmptyRules() {
-    return (
-        <div className="rounded-2xl border-2 border-dashed border-black/[0.10] dark:border-white/[0.12] p-8 text-center">
-            <div className="w-11 h-11 mx-auto mb-3 rounded-xl bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center">
-                <Waypoints className="w-5 h-5 text-ink-muted" />
             </div>
-            <h3 className="text-sm font-semibold text-ink">No rules yet</h3>
-            <p className="mt-1.5 text-xs text-ink-muted max-w-sm mx-auto leading-relaxed">
-                Until you add one, people signing in through a connection arrive
-                with no access beyond whatever their account already had. Start
-                with the group most of your team is in.
-            </p>
+
+            <aside className="space-y-4 xl:sticky xl:top-6">
+                <SsoCard
+                    icon={RefreshCw}
+                    tone="info"
+                    title="Your directory decides who gets what"
+                    blurb="Re-evaluated on every sign-in and every session refresh. Add someone to a group in your identity provider and their access appears here; remove them and it disappears within a few minutes, without anybody touching this page."
+                >
+                    <p className="text-[11px] text-ink-muted leading-relaxed">
+                        Access granted this way cannot be edited by hand here — the
+                        directory is the source of truth, and an override would be
+                        undone at the next sign-in.
+                    </p>
+                </SsoCard>
+
+                <SsoCard
+                    icon={ShieldAlert}
+                    tone="warn"
+                    title="What cannot be granted this way"
+                    blurb={<>
+                        Platform-admin roles need a <strong>verified</strong>{' '}
+                        connection, and <code className="font-mono">super_admin</code>{' '}
+                        can never be granted automatically — that one stays a
+                        deliberate, manual act, so it is not offered above.
+                    </>}
+                />
+            </aside>
         </div>
     )
 }
