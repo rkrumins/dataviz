@@ -53,6 +53,36 @@ password through a form that never asked what the old one was.
 - **Your avatar**, which is now stored on the account. It was a browser-local
   preference, so it silently reset on a new machine and nobody else ever saw it.
 
+**Single sign-on is now genuinely the source of truth for the profile.** It
+previously seeded a name at just-in-time provisioning and never looked at it
+again — so a rename in the directory never reached the product, and the profile
+drifted from the directory permanently. Groups and mapped attributes have always
+re-synced on every sign-in; names simply never did.
+
+They do now, and the fields the provider asserts are shown locked and attributed
+on the account page rather than as editable boxes whose values quietly revert.
+Writes to them are refused for administrators too: being an admin does not make
+the edit survive the next sign-in, and an override that silently disappears is
+worse than a clear refusal.
+
+Three details make it usable rather than obstructive. It is **per field** — a
+directory that releases `given_name` and no `family_name` owns only the first,
+because locking whatever an account happens to have linked would hand people a
+blank name they could never fill in. It follows **what the provider actually
+sent**, so a claim removed from the mapping hands the field back at the next
+sign-in instead of staying locked on the strength of an old login. And
+**display name is never owned**, which is what keeps the page worth opening for
+an SSO account. Where two providers are linked, the one you most recently signed
+in with wins — the rule group memberships already followed.
+
+**The account page was rebuilt around identity rather than around a form.** It
+opens with who you are — avatar, name, role, and the methods that can sign you
+in — instead of a stack of equally-weighted input cards. The password form is
+collapsed until asked for (expanded, it was the largest thing on the page),
+Save appears only once something has changed and follows you down the page,
+and signing out everywhere moved into its own zone rather than sitting beside
+an ordinary Save button.
+
 **The default administrator password cannot be kept.** A fresh deployment seeds
 an admin from `ADMIN_PASSWORD`, and a log line asking the operator to change it
 was the only control — while the value itself is printed in the README, the

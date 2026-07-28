@@ -1,64 +1,79 @@
 /**
  * MyIdentitiesPage — self-service SSO identity management.
  *
- * Lists the user's linked IdP identities (per-provider) and lets them:
- *   * link an additional provider via /api/v1/me/identities/link/{slug}/start
- *   * unlink an identity (with a 409 guard preventing lockout when this
- *     is the last way they can log in)
+ * Lists the user's linked IdP identities and lets them link another or
+ * unlink one, with a server-side 409 guard that prevents unlinking the
+ * last thing that can sign them in.
  *
- * Mounted at /me/identities. Requires authentication (route guarded by
- * AppLayout).
+ * Three things were wrong here beyond the layout, and are fixed:
+ *
+ * **The cards were invisible in the light theme.** They used
+ * `border-white/10 bg-white/5` — white on white. Those are dark-mode
+ * values written as if dark were the only mode. Everything now goes
+ * through the theme tokens, so both themes work.
+ *
+ * **Unlinking asked with `confirm()`.** A native browser dialog in an
+ * app with its own dialog system, styled by the OS, unstyleable, and
+ * blocking. It now asks in place.
+ *
+ * **It showed the raw external id.** `external_id: 00u1a2b3c4` is a
+ * debugging detail; it told the person nothing about whether this was
+ * the right account to unlink. The email the identity was linked with
+ * answers that question, so it is shown instead.
  */
-import { useEffect, useState, useCallback } from 'react'
-import { Link2, Unlink2, AlertCircle, Plus, Shield } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { AlertCircle, Fingerprint, Link2, Plus, Unlink2 } from 'lucide-react'
 
 import {
+    AccountCard, AccountShell, EmptyState, useAccountIdentity,
+} from '@/components/account/AccountShell'
+import { useToast } from '@/components/ui/toast'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { cn } from '@/lib/utils'
+import {
     authService,
-    type IdentitiesResponse,
     type SsoProviderSummary,
     type UserIdentity,
 } from '@/services/authService'
-import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { PageContainer } from '@/components/layout/PageContainer'
-
-interface ErrorState {
-    detail: string
-}
 
 export function MyIdentitiesPage() {
-    const [data, setData] = useState<IdentitiesResponse | null>(null)
+    useDocumentTitle('Connected identities')
+
+    return (
+        <AccountShell
+            title="Connected identities"
+            blurb="The identity providers that can sign you in."
+        >
+            <IdentitiesContent />
+        </AccountShell>
+    )
+}
+
+function IdentitiesContent() {
+    const { passwordSet, identities, refresh } = useAccountIdentity()
+    const { showToast } = useToast()
     const [providers, setProviders] = useState<SsoProviderSummary[]>([])
     const [busy, setBusy] = useState(false)
-    const [error, setError] = useState<ErrorState | null>(null)
+    const [error, setError] = useState<string | null>(null)
+    const [confirming, setConfirming] = useState<UserIdentity | null>(null)
 
-    const refresh = useCallback(async () => {
+    const loadProviders = useCallback(async () => {
         try {
-            const [me, all] = await Promise.all([
-                authService.listMyIdentities(),
-                authService.listProviders(),
-            ])
-            setData(me)
-            setProviders(all)
-            setError(null)
-        } catch (err) {
-            setError({ detail: (err as Error).message })
+            setProviders(await authService.listProviders())
+        } catch {
+            // A provider list we could not load only costs the "link
+            // another" section — what is already linked still renders.
         }
     }, [])
 
-    useEffect(() => {
-        void refresh()
-    }, [refresh])
+    useEffect(() => { void loadProviders() }, [loadProviders])
 
-    useDocumentTitle('My Identities')
+    const linkedIds = new Set(identities.map((i) => i.provider.id))
+    const linkable = providers.filter((p) => !linkedIds.has(p.id))
 
-    if (data === null && error === null) {
-        return (
-            <div className="p-8 text-center text-ink-muted">Loading identities…</div>
-        )
-    }
-
-    const linkedProviderIds = new Set((data?.identities ?? []).map((i) => i.provider.id))
-    const linkable = providers.filter((p) => !linkedProviderIds.has(p.id))
+    /** How many ways are left to get in. Unlinking the last one is what
+     *  the server refuses, so the UI should not offer it either. */
+    const signInMethods = identities.length + (passwordSet ? 1 : 0)
 
     async function handleLink(slug: string) {
         setBusy(true)
@@ -67,138 +82,158 @@ export function MyIdentitiesPage() {
             const { loginUrl } = await authService.startIdentityLink(slug)
             window.location.href = loginUrl
         } catch (err) {
-            setError({ detail: (err as Error).message })
+            setError((err as Error).message)
             setBusy(false)
         }
     }
 
     async function handleUnlink(identity: UserIdentity) {
-        if (
-            !confirm(
-                `Unlink ${identity.provider.displayName}? You'll need at least ` +
-                `one other way to sign in (password or another SSO provider).`,
-            )
-        ) {
-            return
-        }
         setBusy(true)
         setError(null)
         try {
             await authService.unlinkMyIdentity(identity.id)
             await refresh()
+            showToast('success', `${identity.provider.displayName} unlinked`)
+            setConfirming(null)
         } catch (err) {
-            setError({ detail: (err as Error).message })
+            setError((err as Error).message)
         } finally {
             setBusy(false)
         }
     }
 
     return (
-        <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <PageContainer width="narrow" className="py-8 space-y-8">
-            <header>
-                <h1 className="text-2xl font-semibold text-ink">Connected identities</h1>
-                <p className="mt-2 text-sm text-ink-secondary">
-                    Each linked Identity Provider can sign you in. You can stack
-                    multiple — your role and permissions stay the same regardless of
-                    which one you use.
-                </p>
-            </header>
-
+        <>
             {error && (
-                <div className="flex items-start gap-2 p-3 rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 text-sm">
+                <div className="flex items-start gap-2 p-3 rounded-lg border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400 text-sm">
                     <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                    <span>{error.detail}</span>
+                    <span>{error}</span>
                 </div>
             )}
 
-            <section>
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted mb-3">
-                    <Shield className="w-3.5 h-3.5" />
-                    Password
-                </div>
-                <div className="p-4 rounded-xl border border-white/10 bg-white/5 text-sm">
-                    {data?.passwordSet
-                        ? 'A password is set on this account. You can use it to sign in alongside any linked IdP.'
-                        : 'No password is set. SSO is the only way you can sign in — keep at least one identity linked or add a password from your profile.'}
-                </div>
-            </section>
-
-            <section>
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted mb-3">
-                    <Link2 className="w-3.5 h-3.5" />
-                    Linked identities
-                </div>
-                {(data?.identities.length ?? 0) === 0 ? (
-                    <div className="p-4 rounded-xl border border-white/10 bg-white/5 text-sm text-ink-muted">
-                        No SSO providers are linked to this account yet.
-                    </div>
+            <AccountCard
+                icon={Link2}
+                title="Linked identities"
+                blurb="Any of these can sign you in. Your role and permissions are the same whichever you use."
+            >
+                {identities.length === 0 ? (
+                    <EmptyState icon={Fingerprint}>
+                        No identity providers are linked to this account yet.
+                    </EmptyState>
                 ) : (
                     <ul className="space-y-2">
-                        {(data?.identities ?? []).map((ident) => (
+                        {identities.map((ident) => (
                             <li
                                 key={ident.id}
-                                className="flex items-center justify-between p-4 rounded-xl border border-white/10 bg-white/5"
+                                className="rounded-xl border border-glass-border bg-canvas p-4"
                             >
-                                <div>
-                                    <div className="text-sm font-medium text-ink">
-                                        {ident.provider.displayName}{' '}
-                                        <span className="text-ink-muted">
-                                            ({ident.provider.kind})
-                                        </span>
-                                    </div>
-                                    <div className="text-xs text-ink-muted mt-0.5 font-mono">
-                                        external_id: {ident.externalId}
-                                    </div>
-                                    {ident.lastLoginAt && (
-                                        <div className="text-xs text-ink-muted mt-0.5">
-                                            last used {new Date(ident.lastLoginAt).toLocaleString()}
+                                <div className="flex items-center justify-between gap-4 flex-wrap">
+                                    <div className="min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-sm font-medium text-ink">
+                                                {ident.provider.displayName}
+                                            </span>
+                                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
+                                                {ident.provider.kind}
+                                            </span>
                                         </div>
+                                        <p className="text-xs text-ink-muted mt-1">
+                                            {ident.emailAtLink
+                                                ? `Linked as ${ident.emailAtLink}`
+                                                : 'Linked to this account'}
+                                            {ident.lastLoginAt && (
+                                                <> · last used {new Date(ident.lastLoginAt).toLocaleDateString()}</>
+                                            )}
+                                        </p>
+                                    </div>
+
+                                    {confirming?.id === ident.id ? (
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => setConfirming(null)}
+                                                disabled={busy}
+                                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={() => handleUnlink(ident)}
+                                                disabled={busy}
+                                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
+                                            >
+                                                {busy ? 'Unlinking…' : 'Yes, unlink'}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <button
+                                            onClick={() => { setError(null); setConfirming(ident) }}
+                                            disabled={busy || signInMethods <= 1}
+                                            title={
+                                                signInMethods <= 1
+                                                    ? 'This is the only way you can sign in.'
+                                                    : undefined
+                                            }
+                                            className={cn(
+                                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                                'border-red-500/20 text-red-600 dark:text-red-400 hover:bg-red-500/10',
+                                                'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+                                                'inline-flex items-center gap-1.5',
+                                            )}
+                                        >
+                                            <Unlink2 className="w-3.5 h-3.5" />
+                                            Unlink
+                                        </button>
                                     )}
                                 </div>
-                                <button
-                                    disabled={busy}
-                                    onClick={() => handleUnlink(ident)}
-                                    className="px-3 py-1.5 rounded-lg border border-red-500/30 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
-                                >
-                                    <Unlink2 className="inline w-3.5 h-3.5 mr-1" /> Unlink
-                                </button>
+
+                                {confirming?.id === ident.id && (
+                                    <p className="text-xs text-ink-muted mt-3 pt-3 border-t border-glass-border">
+                                        You will no longer be able to sign in with{' '}
+                                        {ident.provider.displayName}. You have{' '}
+                                        {signInMethods - 1} other way
+                                        {signInMethods - 1 === 1 ? '' : 's'} to sign in.
+                                    </p>
+                                )}
                             </li>
                         ))}
                     </ul>
                 )}
-            </section>
+            </AccountCard>
 
             {linkable.length > 0 && (
-                <section>
-                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted mb-3">
-                        <Plus className="w-3.5 h-3.5" />
-                        Available providers
-                    </div>
+                <AccountCard
+                    icon={Plus}
+                    title="Link another"
+                    blurb="Adds a way to sign in. It does not change what you can access."
+                >
                     <ul className="space-y-2">
                         {linkable.map((p) => (
                             <li
                                 key={p.id}
-                                className="flex items-center justify-between p-4 rounded-xl border border-white/10 bg-white/5"
+                                className="flex items-center justify-between gap-4 rounded-xl border border-glass-border bg-canvas p-4"
                             >
-                                <div className="text-sm font-medium text-ink">
-                                    {p.displayName}{' '}
-                                    <span className="text-ink-muted">({p.kind})</span>
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-sm font-medium text-ink truncate">
+                                        {p.displayName}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border shrink-0">
+                                        {p.kind}
+                                    </span>
                                 </div>
                                 <button
                                     disabled={busy}
                                     onClick={() => handleLink(p.slug)}
-                                    className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-xs font-medium hover:brightness-110 disabled:opacity-50"
+                                    className="shrink-0 px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-xs font-semibold hover:brightness-110 transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
                                 >
-                                    <Link2 className="inline w-3.5 h-3.5 mr-1" /> Link
+                                    <Link2 className="w-3.5 h-3.5" />
+                                    Link
                                 </button>
                             </li>
                         ))}
                     </ul>
-                </section>
+                </AccountCard>
             )}
-        </PageContainer>
-        </div>
+        </>
     )
 }
 

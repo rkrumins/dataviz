@@ -80,6 +80,10 @@ logger = logging.getLogger(__name__)
 async def _public_response(session: AsyncSession, user) -> UserPublicResponse:
     roles = await user_repo.get_user_roles(session, user.id)
     role = roles[0] if roles else "user"
+    # The provider id, not its display name: the account page already
+    # fetches /me/identities, which carries both, so resolving it here
+    # would be a second query for something the client can join.
+    owned, owned_by = user_repo.idp_ownership(user)
     return UserPublicResponse(
         id=user.id,
         email=user.email,
@@ -93,6 +97,8 @@ async def _public_response(session: AsyncSession, user) -> UserPublicResponse:
         createdAt=user.created_at,
         avatarId=user.avatar_id,
         mustChangePassword=bool(user.must_change_password),
+        idpManagedFields=sorted(owned),
+        idpManagedBy=owned_by,
     )
 
 
@@ -209,16 +215,44 @@ async def update_my_identity(
     An empty ``displayName`` is an instruction, not a mistake — it
     clears the override so the name goes back to being derived from
     first + last.
+
+    Fields the identity provider asserts are refused with a 409: it
+    re-applies them on every sign-in, so accepting a write here would
+    show a change that silently reverted the next time the person
+    logged in. ``displayName`` is never IdP-owned, which is what keeps
+    the page useful for an SSO account.
     """
     user = await user_repo.get_user_by_id(session, current_user.id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    owned, _provider_id = user_repo.idp_ownership(user)
 
     updates: dict[str, str] = {}
     if body.first_name is not None and body.first_name.strip():
         updates["first_name"] = body.first_name.strip()
     if body.last_name is not None and body.last_name.strip():
         updates["last_name"] = body.last_name.strip()
+
+    # Refuse rather than drop. Quietly ignoring a field the user typed
+    # into is how a form comes to feel broken — and the UI already
+    # renders these as read-only, so reaching this branch means
+    # something bypassed it.
+    refused = sorted(set(updates) & owned)
+    if refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "idp_managed_field",
+                "fields": refused,
+                "message": (
+                    "Your identity provider manages your name. It is "
+                    "re-applied every time you sign in, so a change made "
+                    "here would not survive. Set a display name instead, "
+                    "or ask your provider's administrator to update it."
+                ),
+            },
+        )
     if body.display_name is not None:
         updates["display_name"] = body.display_name
     if body.avatar_id is not None:
@@ -534,10 +568,18 @@ async def update_user_identity(
 
     ``avatarId`` on the shared request DTO is deliberately ignored on
     this route — an avatar is the account owner's to pick.
+
+    Fields the user's identity provider asserts are refused here too.
+    Being an administrator does not make the write survive: SSO login
+    re-applies them, so the edit would silently revert and the admin
+    would have no way to tell. Fix it at the provider, or set a display
+    name — which is never IdP-owned.
     """
     user = await user_repo.get_user_by_id(session, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    owned, _provider_id = user_repo.idp_ownership(user)
 
     updates: dict[str, str] = {}
     if body.first_name is not None and body.first_name.strip():
@@ -546,6 +588,22 @@ async def update_user_identity(
         updates["last_name"] = body.last_name.strip()
     if body.display_name is not None:
         updates["display_name"] = body.display_name
+
+    refused = sorted(set(updates) & owned)
+    if refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "idp_managed_field",
+                "fields": refused,
+                "message": (
+                    "This user's identity provider manages those fields and "
+                    "re-applies them at every sign-in, so a change here would "
+                    "not survive. Update them at the provider, or set a "
+                    "display name."
+                ),
+            },
+        )
     if not updates:
         # Nothing to do — return the current state so the client can
         # refresh without a separate GET.

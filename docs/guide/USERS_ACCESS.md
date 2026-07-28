@@ -58,6 +58,28 @@ change the things about your own account that used to need an administrator:
 Your **email is not editable here** — it identifies you to your identity
 provider, so changing it is a re-link an administrator performs.
 
+### When single sign-on owns your name
+
+If you sign in through an identity provider, the fields it asserts are shown
+**locked and attributed** ("Okta"), because the provider re-applies them every
+time you sign in — a change made here would silently revert. The API refuses
+those writes too, for you and for administrators alike: being an admin does not
+make the edit survive the next sign-in.
+
+Three things make this workable rather than annoying:
+
+- **It is per field, not per account.** A directory that releases a first name
+  but no surname owns only the first. The rest stays yours.
+- **It follows what the provider actually sends.** If your IdP stops releasing a
+  claim, that field is handed back and becomes editable at your next sign-in. It
+  is never locked on the strength of an old login.
+- **Display name is never owned.** It is the one name that is always yours, and
+  it survives every re-sync — so an SSO account can still choose how it appears.
+
+To correct a locked field, fix it in your directory, or set a display name. When
+two providers are linked, the one you **most recently signed in with** owns the
+fields — the same rule group memberships already follow.
+
 If you sign in through SSO and have no password, the password section says so
 rather than offering a form; ask an administrator if you need a local password
 as a fallback.

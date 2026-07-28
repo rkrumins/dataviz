@@ -1,13 +1,16 @@
 /**
- * The account page's three load-bearing behaviours.
+ * The account page's load-bearing behaviours.
  *
- * 1. An SSO-only account is told why there is no password form, rather
- *    than being shown one the server would 409.
- * 2. A rename sends trimmed values and pushes the result into the auth
- *    store, which is what updates the TopBar without a reload.
- * 3. A rejected password change shows the reason and keeps what the
- *    user typed — retyping three fields because the current password
- *    had a typo is the worst possible response to a typo.
+ * The ones about identity-provider ownership matter most: the page must
+ * never present an editable-looking field whose value the next sign-in
+ * would revert, and it must never post one either — the server refuses
+ * with a 409, and a user who typed into the box would have earned an
+ * error the UI should have prevented.
+ *
+ * The rest are about not wasting people's input: Save appears only when
+ * there is something to save, the password form stays out of the way
+ * until asked for, and a rejected password change keeps what was typed
+ * rather than making somebody retype three fields over one typo.
  *
  * zxcvbn is stubbed: the real dictionaries are lazily imported and
  * would make this slow and timing-dependent. The scoring itself is the
@@ -50,6 +53,7 @@ vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
 
 const applyProfile = vi.fn()
 vi.mock('@/store/auth', () => ({
+    SYSTEM_ROLE_LABELS: { user: 'User' },
     useAuthStore: (sel: (s: unknown) => unknown) => sel({
         user: {
             id: 'usr_1', email: 'alice@example.com',
@@ -59,6 +63,11 @@ vi.mock('@/store/auth', () => ({
         },
         applyProfile,
     }),
+}))
+
+vi.mock('@/components/layout/AvatarPickerDialog', () => ({
+    AvatarPickerDialog: () => null,
+    useAvatarContent: () => null,
 }))
 
 vi.mock('@/store/preferences', () => {
@@ -77,6 +86,7 @@ const PROFILE = {
     firstName: 'Alice', lastName: 'Doe', displayName: 'Alice Doe',
     status: 'active', role: 'user', createdAt: '', avatarId: null,
     mustChangePassword: false,
+    idpManagedFields: [] as string[], idpManagedBy: null,
 }
 
 function renderPage() {
@@ -110,10 +120,91 @@ describe('AccountSettingsPage', () => {
         renderPage()
 
         expect(await screen.findByText(/You sign in with Okta/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Change my password/i })).not.toBeInTheDocument()
+    })
+
+    it('reads sign-in methods from the shell, not from a default', async () => {
+        // Regression: the page called useAccountIdentity() in its own
+        // body while AccountShell — its child — rendered the Provider.
+        // A component cannot consume context from its own child, so it
+        // silently read the default (passwordSet: null) and decided
+        // every account was password-less. Nothing about the page
+        // looked broken; it just quietly told the truth about nobody.
+        vi.mocked(authService.listMyIdentities).mockResolvedValue({
+            passwordSet: false,
+            identities: [{
+                id: 'idn_1',
+                provider: { id: 'p1', slug: 'okta', displayName: 'Okta', kind: 'oidc' },
+                externalId: 'x', createdAt: '',
+            }],
+        })
+
+        renderPage()
+
+        // Proves the value reached the page rather than the default.
+        expect(await screen.findByText(/no password on this account/i)).toBeInTheDocument()
+    })
+
+    it('keeps the password form out of the way until it is asked for', async () => {
+        const user = userEvent.setup()
+        renderPage()
+
+        // Collapsed on open — the three-field form used to dominate the page.
+        expect(await screen.findByRole('button', { name: /Change my password/i })).toBeInTheDocument()
         expect(screen.queryByLabelText(/Current password/i)).not.toBeInTheDocument()
-        expect(
-            screen.getByRole('link', { name: /Manage connected identities/i }),
-        ).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: /Change my password/i }))
+        expect(screen.getByLabelText(/Current password/i)).toBeInTheDocument()
+    })
+
+    it('locks fields the identity provider owns, and says who owns them', async () => {
+        vi.mocked(accountService.getProfile).mockResolvedValue({
+            ...PROFILE, idpManagedFields: ['first_name'], idpManagedBy: 'p1',
+        })
+        vi.mocked(authService.listMyIdentities).mockResolvedValue({
+            passwordSet: true,
+            identities: [{
+                id: 'idn_1',
+                provider: { id: 'p1', slug: 'okta', displayName: 'Okta', kind: 'oidc' },
+                externalId: 'x', createdAt: '',
+            }],
+        })
+
+        renderPage()
+
+        // Owned field is locked and attributed...
+        expect(await screen.findByLabelText(/First name/i)).toBeDisabled()
+        // ...the one the IdP did not assert stays editable...
+        expect(screen.getByLabelText(/Last name/i)).not.toBeDisabled()
+        // ...and display name is never IdP-owned, which is what keeps
+        // this page useful for an SSO account.
+        expect(screen.getByLabelText(/Display name/i)).not.toBeDisabled()
+    })
+
+    it('never sends an IdP-owned field, so the user cannot trip a 409', async () => {
+        vi.mocked(accountService.getProfile).mockResolvedValue({
+            ...PROFILE, idpManagedFields: ['first_name', 'last_name'], idpManagedBy: 'p1',
+        })
+        vi.mocked(accountService.updateProfile).mockResolvedValue(PROFILE)
+        const user = userEvent.setup()
+        renderPage()
+
+        await user.type(await screen.findByLabelText(/Display name/i), 'Ada')
+        await user.click(await screen.findByRole('button', { name: /Save changes/i }))
+
+        await waitFor(() => expect(accountService.updateProfile).toHaveBeenCalled())
+        expect(accountService.updateProfile).toHaveBeenCalledWith({ displayName: 'Ada' })
+    })
+
+    it('offers Save only once something has changed', async () => {
+        const user = userEvent.setup()
+        renderPage()
+
+        await screen.findByLabelText(/First name/i)
+        expect(screen.queryByRole('button', { name: /Save changes/i })).not.toBeInTheDocument()
+
+        await user.type(screen.getByLabelText(/Display name/i), 'Ada')
+        expect(await screen.findByRole('button', { name: /Save changes/i })).toBeInTheDocument()
     })
 
     it('sends trimmed names and pushes the result into the auth store', async () => {
@@ -126,7 +217,7 @@ describe('AccountSettingsPage', () => {
         const first = await screen.findByLabelText(/First name/i)
         await user.clear(first)
         await user.type(first, '  Alicia  ')
-        await user.click(screen.getByRole('button', { name: /Save changes/i }))
+        await user.click(await screen.findByRole('button', { name: /Save changes/i }))
 
         await waitFor(() => {
             expect(accountService.updateProfile).toHaveBeenCalledWith({
@@ -145,14 +236,13 @@ describe('AccountSettingsPage', () => {
         const user = userEvent.setup()
         renderPage()
 
-        await user.type(await screen.findByLabelText(/Current password/i), 'wrong-one')
+        await user.click(await screen.findByRole('button', { name: /Change my password/i }))
+        await user.type(screen.getByLabelText(/Current password/i), 'wrong-one')
         await user.type(screen.getByLabelText(/^New password/i), 'N3w!Passw0rd#2026')
         await user.type(screen.getByLabelText(/Confirm new password/i), 'N3w!Passw0rd#2026')
-        await user.click(screen.getByRole('button', { name: /Change password/i }))
+        await user.click(screen.getByRole('button', { name: /^Change password$/i }))
 
-        expect(
-            await screen.findByText('Current password is incorrect.'),
-        ).toBeInTheDocument()
+        expect(await screen.findByText('Current password is incorrect.')).toBeInTheDocument()
         expect(screen.getByLabelText(/Current password/i)).toHaveValue('wrong-one')
         expect(navigateSpy).not.toHaveBeenCalled()
     })

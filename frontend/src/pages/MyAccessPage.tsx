@@ -7,9 +7,14 @@
  * to file a ticket or trigger a 403 to find out what they have
  * access to.
  *
- * Layout:
- *   * Hero — gradient icon + "My access" title
- *   * Plain-English summary banner — derived from the new
+ * Renders into ``AccountShell``, the chrome the account pages share.
+ * It used to carry its own hero and full-bleed container, so following
+ * "My access" out of Account settings dropped you into what looked like
+ * a different product — same information, different journey. The rail
+ * and the width now come from the shell; what is left here is the
+ * access map itself:
+ *
+ *   * Plain-English summary banner — derived from the
  *     ``permission.longDescription`` map (4.1) so the user sees
  *     "You can edit views in WS-Finance" rather than
  *     ``workspace:view:edit``.
@@ -33,10 +38,10 @@ import {
     type AccessRequestResponse,
 } from '@/services/accessRequestsService'
 import { AccessSummary } from '@/components/access/AccessSummary'
+import { AccountShell } from '@/components/account/AccountShell'
 import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { PageContainer } from '@/components/layout/PageContainer'
 
 
 export function MyAccessPage() {
@@ -90,33 +95,22 @@ export function MyAccessPage() {
     }
 
     return (
-        <div className="absolute inset-0 overflow-y-auto bg-canvas">
-            <PageContainer className="py-6 space-y-6">
-                {/* Hero */}
-                <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-md shrink-0">
-                            <Shield className="w-6 h-6 text-white" />
-                        </div>
-                        <div className="min-w-0">
-                            <h1 className="text-2xl font-bold text-ink">My access</h1>
-                            <p className="text-sm text-ink-muted">
-                                Everything you can do across the platform, and how you got that access.
-                            </p>
-                        </div>
-                    </div>
-                    <button
-                        onClick={handleRefresh}
-                        disabled={loading || refreshing}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-ink-secondary hover:text-ink bg-glass-base/40 border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors shrink-0"
-                        title="Refresh"
-                    >
-                        <RefreshCw className={cn('w-3.5 h-3.5', refreshing && 'animate-spin')} />
-                        Refresh
-                    </button>
-                </div>
-
-                {/* Body */}
+        <AccountShell
+            title="My access"
+            blurb="Everything you can do across the platform, and how you got it."
+            actions={
+                <button
+                    onClick={handleRefresh}
+                    disabled={loading || refreshing}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-ink-secondary hover:text-ink bg-glass-base/40 border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors"
+                    title="Refresh"
+                >
+                    <RefreshCw className={cn('w-3.5 h-3.5', refreshing && 'animate-spin')} />
+                    Refresh
+                </button>
+            }
+        >
+            <>
                 {loading ? (
                     <div className="flex items-center justify-center py-24">
                         <Loader2 className="w-6 h-6 animate-spin text-ink-muted" />
@@ -147,8 +141,8 @@ export function MyAccessPage() {
                         </div>
                     </>
                 ) : null}
-            </PageContainer>
-        </div>
+            </>
+        </AccountShell>
     )
 }
 

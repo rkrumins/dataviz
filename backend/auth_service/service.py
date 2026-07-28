@@ -29,6 +29,8 @@ from .core.config import (
     JWT_REFRESH_EXPIRY_DAYS,
     SSO_SESSION_MAX_AGE_SECONDS,
 )
+from backend.common.identity_provenance import asserted_fields, build_snapshot
+
 from .core.password import disabled_password_hash
 from .core.tokens import (
     create_access_token,
@@ -618,6 +620,40 @@ class LocalIdentityService:
                          "had_existing_identity": decision.has_existing_identity},
                     )
 
+            # ── Profile fields the IdP owns ──────────────────────────
+            #
+            # Names used to be written once, at JIT provisioning, and
+            # never again — so the IdP seeded the profile and then drifted
+            # from it forever. Re-applying them here is what makes "the
+            # IdP is the source of truth" an actual property rather than
+            # a disabled input on a form.
+            #
+            # Only fields this login actually carried are touched. An IdP
+            # that releases no ``given_name`` leaves the field alone
+            # instead of blanking it, and leaves it editable — see
+            # ``identity_provenance``.
+            #
+            # Best-effort, like the metadata write below: a profile that
+            # failed to re-sync must not cost somebody their sign-in.
+            owned = asserted_fields(
+                first_name=identity.first_name, last_name=identity.last_name,
+            )
+            if owned:
+                try:
+                    updates = {}
+                    if "first_name" in owned:
+                        updates["first_name"] = identity.first_name.strip()
+                    if "last_name" in owned:
+                        updates["last_name"] = identity.last_name.strip()
+                    await self._user_repo.update_identity(
+                        session, orm.id, **updates,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "IdP profile re-sync failed (user=%s, provider=%s): %s",
+                        orm.id, provider_id, exc,
+                    )
+
             # Persist the IdP-asserted groups + attributes on the user
             # row so the admin UI / /me can surface the latest snapshot.
             # Best-effort: failures here MUST NOT block login.
@@ -630,6 +666,14 @@ class LocalIdentityService:
                         raw_claims=identity.raw_claims,
                         attributes=attributes,
                         source_provider_id=provider_id,
+                        # Rewritten wholesale each login, which is what
+                        # makes "most recently authenticated provider
+                        # wins" fall out without a precedence table.
+                        idp_managed=build_snapshot(
+                            fields=owned,
+                            provider_id=provider_id,
+                            at=_now_iso(),
+                        ),
                     )
             except TypeError:
                 # Pre-Phase-3 signature (no ``attributes`` kwarg).
@@ -1014,6 +1058,10 @@ class LocalIdentityService:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _refresh_predates_cutoff(mint_ms: int, cutoff: Optional[str]) -> bool:
