@@ -8,45 +8,74 @@
  * list by name and email, and cannot resolve a claim attribute or an IdP
  * external id. Losing it would lose the lookup entirely.
  *
+ * The page now opens the way the job actually starts. A person who failed
+ * to sign in was shown a short reference like `a1b2c3d4` and told to quote
+ * it; the operator's first act is to paste it. That was buried below a
+ * free-text user search, so the screen's opening move and the operator's
+ * were different things.
+ *
+ * The search modes were behind a `<details>` disclosure headed with a
+ * unicode triangle. Finding someone by staff number is the one thing this
+ * screen can do that nothing else in the product can — hiding it was
+ * backwards.
+ *
  * The activity log needs ``system:audit:read`` on top of the page's own
  * ``system:admin``. Without it the section is simply absent — a locked
- * panel advertises a capability the operator cannot use and cannot grant
+ * panel advertises a capability the operator can neither use nor grant
  * themselves.
  */
 import { useState } from 'react'
-import { Search } from 'lucide-react'
+import { AtSign, Hash, Loader2, Search, Tag, UserSearch } from 'lucide-react'
 
 import { ssoAdminService, type UserSummary } from '@/services/ssoAdminService'
 import { usePermission } from '@/store/auth'
+import { cn } from '@/lib/utils'
 import { SsoActivityTab } from '../../SsoActivityTab'
+import { SsoCard } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
+import { UserResultCard } from './diagnostics/UserResultCard'
+
+type Mode = 'anything' | 'email' | 'attribute'
+
+const MODES: { id: Mode; label: string; icon: typeof Search; hint: string }[] = [
+    {
+        id: 'anything', label: 'Anything', icon: Search,
+        hint: 'Fans out across names, emails, linked identities and indexed claim attributes.',
+    },
+    {
+        id: 'email', label: 'Email', icon: AtSign,
+        hint: 'Exact match on the address, including addresses only an IdP has asserted.',
+    },
+    {
+        id: 'attribute', label: 'Claim attribute', icon: Tag,
+        hint: 'Exact match on a value your IdP sends — staff number, employee id, cost centre.',
+    },
+]
 
 function LookupSection() {
+    const [mode, setMode] = useState<Mode>('anything')
     const [query, setQuery] = useState('')
-    const [structuredMode, setStructuredMode] = useState<
-        'email' | 'attribute' | null
-    >(null)
     const [attrKey, setAttrKey] = useState('staff_id')
-    const [attrValue, setAttrValue] = useState('')
-    const [results, setResults] = useState<UserSummary[]>([])
+    const [results, setResults] = useState<UserSummary[] | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
 
+    const active = MODES.find(m => m.id === mode)!
+
     async function runSearch(e: React.FormEvent) {
         e.preventDefault()
+        if (!query.trim()) return
         setError(null)
         setBusy(true)
         try {
-            if (structuredMode === 'email') {
-                const r = await ssoAdminService.lookupUserByEmail(query)
-                setResults([r])
-            } else if (structuredMode === 'attribute') {
-                const r = await ssoAdminService.lookupUserByAttribute(
-                    attrKey, attrValue,
-                )
-                setResults([r])
+            if (mode === 'email') {
+                setResults([await ssoAdminService.lookupUserByEmail(query.trim())])
+            } else if (mode === 'attribute') {
+                setResults([await ssoAdminService.lookupUserByAttribute(
+                    attrKey.trim(), query.trim(),
+                )])
             } else {
-                setResults(await ssoAdminService.searchUsers(query))
+                setResults(await ssoAdminService.searchUsers(query.trim()))
             }
         } catch (err) {
             setResults([])
@@ -57,181 +86,153 @@ function LookupSection() {
     }
 
     return (
-        <div className="space-y-4">
-            <h2 className="text-base font-semibold">Find a user</h2>
-            <p className="text-xs text-ink-muted">
-                Free-text fan-out across email, names, identities, and indexed claim attributes. Use the structured modes for exact matches.
-            </p>
+        <section className="space-y-4">
+            <SsoCard
+                icon={UserSearch}
+                title="Find a person"
+                blurb="Whichever handle you were given. This is the only search in the product that resolves someone by a claim your IdP sends rather than by their name or email."
+            >
             <form onSubmit={runSearch} className="space-y-3">
-                <div className="flex gap-2">
+                {/* Modes as peers, not one visible and two hidden behind a
+                    disclosure triangle. */}
+                <div
+                    role="tablist"
+                    aria-label="Search by"
+                    className="inline-flex p-1 rounded-xl bg-black/[0.04] dark:bg-white/[0.06]"
+                >
+                    {MODES.map(m => (
+                        <button
+                            key={m.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={mode === m.id}
+                            onClick={() => { setMode(m.id); setResults(null); setError(null) }}
+                            className={cn(
+                                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150',
+                                mode === m.id
+                                    ? 'bg-canvas-elevated text-ink shadow-sm'
+                                    : 'text-ink-muted hover:text-ink',
+                            )}
+                        >
+                            <m.icon className="w-3.5 h-3.5" />
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                    {mode === 'attribute' && (
+                        <input
+                            value={attrKey}
+                            onChange={e => setAttrKey(e.target.value)}
+                            aria-label="Attribute name"
+                            placeholder="staff_id"
+                            className="w-40 h-10 px-3 rounded-xl border border-glass-border bg-canvas font-mono text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                        />
+                    )}
                     <input
-                        className="flex-1 px-3 py-2 rounded border border-white/10 bg-canvas text-sm"
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
+                        onChange={e => setQuery(e.target.value)}
+                        aria-label="Search"
                         placeholder={
-                            structuredMode === 'email'
-                                ? 'alice@corp.com'
-                                : 'name, email, external_id, or attribute value…'
+                            mode === 'email' ? 'alice@corp.example'
+                                : mode === 'attribute' ? '12345'
+                                : 'name, email, external id, or an attribute value…'
                         }
+                        className="flex-1 min-w-[12rem] h-10 px-3 rounded-xl border border-glass-border bg-canvas text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
                     />
                     <button
                         type="submit"
-                        disabled={busy}
-                        className="px-4 py-2 rounded bg-accent-lineage text-white text-sm disabled:opacity-50"
+                        disabled={busy || !query.trim()}
+                        className={cn(
+                            'inline-flex items-center gap-2 h-10 px-5 rounded-xl text-sm font-medium transition-colors duration-150',
+                            query.trim() && !busy
+                                ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
+                                : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                        )}
                     >
-                        <Search className="inline w-4 h-4 mr-1" />
+                        {busy
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Search className="w-4 h-4" />}
                         Search
                     </button>
                 </div>
-                <details className="text-xs">
-                    <summary className="cursor-pointer text-ink-muted">▸ Find by claim attribute (staff_id, employee_id, …)</summary>
-                    <div className="mt-2 p-3 rounded-lg border border-white/10 bg-white/5 grid grid-cols-2 gap-3">
-                        <label>
-                            Key
-                            <input
-                                className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono"
-                                value={attrKey}
-                                onChange={(e) => setAttrKey(e.target.value)}
-                            />
-                        </label>
-                        <label>
-                            Value
-                            <input
-                                className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono"
-                                value={attrValue}
-                                onChange={(e) => setAttrValue(e.target.value)}
-                            />
-                        </label>
-                        <div className="col-span-2 flex gap-2">
-                            <button
-                                type="button"
-                                onClick={(e) => {
-                                    setStructuredMode('attribute')
-                                    runSearch(e as unknown as React.FormEvent)
-                                }}
-                                className="px-3 py-1.5 rounded border border-white/20 text-xs"
-                            >
-                                Run attribute lookup
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setStructuredMode(null)}
-                                className="text-xs text-ink-muted"
-                            >
-                                Back to free-text
-                            </button>
-                        </div>
-                    </div>
-                </details>
+
+                <p className="text-[11px] text-ink-muted">{active.hint}</p>
             </form>
+            </SsoCard>
 
             {error && <ErrorBanner message={error} />}
 
-            {results.length > 0 && (
-                <ul className="space-y-2">
-                    {results.map((u) => (
-                        <li
-                            key={u.id}
-                            className="p-4 rounded-xl border border-white/10 bg-white/5 text-sm space-y-2"
-                        >
-                            <div className="flex items-start justify-between">
-                                <div>
-                                    <div className="font-medium">
-                                        {u.firstName} {u.lastName}{' '}
-                                        <span className="text-ink-muted">
-                                            ({u.email})
-                                        </span>
-                                    </div>
-                                    <div className="text-xs text-ink-muted mt-0.5 font-mono">
-                                        {u.id} · {u.status}
-                                    </div>
-                                </div>
-                                <span
-                                    className={
-                                        'px-2 py-0.5 rounded-full text-xs ' + ({
-                                            'local_signup': 'bg-blue-500/20 text-blue-300',
-                                            'sso_jit': 'bg-violet-500/20 text-violet-300',
-                                            'invite': 'bg-amber-500/20 text-amber-300',
-                                            'admin_created': 'bg-zinc-500/20 text-zinc-300',
-                                            'admin_linked': 'bg-teal-500/20 text-teal-300',
-                                        }[u.signupSource] ?? 'bg-ink-muted/20')
-                                    }
-                                    title={
-                                        u.signupProvider
-                                            ? `via ${u.signupProvider.displayName}`
-                                            : undefined
-                                    }
-                                >
-                                    {u.signupSource}
-                                    {u.signupProvider && (
-                                        <>
-                                            {' '}
-                                            <span className="opacity-70">
-                                                · {u.signupProvider.slug}
-                                            </span>
-                                        </>
-                                    )}
-                                </span>
-                            </div>
-                            {u.matchedOn && u.matchedOn.length > 0 && (
-                                <div className="text-xs text-ink-muted">
-                                    matched on: {u.matchedOn.join(', ')}
-                                </div>
-                            )}
-                            {u.identities.length > 0 && (
-                                <div>
-                                    <div className="text-[11px] uppercase tracking-wider text-ink-muted mt-2">
-                                        Linked identities
-                                    </div>
-                                    <ul className="mt-1 space-y-1 text-xs">
-                                        {u.identities.map((i) => (
-                                            <li key={i.id} className="font-mono">
-                                                {i.provider.slug} · {i.externalId}
-                                                {i.lastLoginAt && (
-                                                    <span className="ml-2 text-ink-muted">
-                                                        last login {new Date(i.lastLoginAt).toLocaleString()}
-                                                    </span>
-                                                )}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
-                            {u.attributes.length > 0 && (
-                                <div>
-                                    <div className="text-[11px] uppercase tracking-wider text-ink-muted mt-2">
-                                        Claim attributes
-                                    </div>
-                                    <ul className="mt-1 space-y-1 text-xs font-mono">
-                                        {u.attributes.map((a) => (
-                                            <li key={a.key}>
-                                                {a.key} = {a.value}
-                                                {a.sourceProvider && (
-                                                    <span className="ml-2 text-ink-muted">
-                                                        (from {a.sourceProvider.slug})
-                                                    </span>
-                                                )}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
-                        </li>
+            {results !== null && results.length === 0 && !error && (
+                <p className="text-xs text-ink-muted">
+                    Nobody matched. If they have never signed in successfully,
+                    there is no account yet — the activity log below will still
+                    show the attempt.
+                </p>
+            )}
+
+            {results !== null && results.length > 0 && (
+                <ul className="space-y-3">
+                    {results.map((u, i) => (
+                        <UserResultCard key={u.id} user={u} index={i} />
                     ))}
                 </ul>
             )}
-        </div>
+        </section>
     )
 }
-
 
 export function DiagnosticsTab() {
     const canReadAudit = usePermission('system:audit:read')
     return (
-        <div className="space-y-8">
-            <LookupSection />
+        <div className="space-y-6">
+            <div className="grid xl:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
+                <div className="min-w-0">
+                    <LookupSection />
+                </div>
+
+                <aside className="space-y-4 xl:sticky xl:top-6">
+                    {canReadAudit && (
+                        // The operator's opening move: a person who could not
+                        // sign in is holding a code and was told to quote it.
+                        <SsoCard
+                            icon={Hash}
+                            tone="info"
+                            title="Given a reference?"
+                            blurb={<>
+                                Someone who could not sign in saw a short code like{' '}
+                                <code className="font-mono text-ink">a1b2c3d4</code>.
+                                Paste it into the activity search below — the real
+                                reason is recorded there, and deliberately not shown
+                                to them, because it would describe your configuration
+                                to anyone who can reach the sign-in page.
+                            </>}
+                        />
+                    )}
+
+                    <SsoCard icon={Search} title="Which search to use">
+                        <dl className="space-y-2.5">
+                            {MODES.map(m => (
+                                <div key={m.id}>
+                                    <dt className="flex items-center gap-1.5 text-[11px] font-semibold text-ink">
+                                        <m.icon className="w-3 h-3 text-ink-muted" />
+                                        {m.label}
+                                    </dt>
+                                    <dd className="mt-0.5 text-[11px] text-ink-muted leading-relaxed">
+                                        {m.hint}
+                                    </dd>
+                                </div>
+                            ))}
+                        </dl>
+                    </SsoCard>
+                </aside>
+            </div>
+
+            {/* Full width, below both columns: it is a table, and tables
+                want the room a 320px rail would otherwise take from it. */}
             {canReadAudit && (
-                <div className="pt-6 border-t border-white/10">
+                <div className="pt-6 border-t border-glass-border">
                     <SsoActivityTab />
                 </div>
             )}
