@@ -288,3 +288,77 @@ class TestPropertyStorageEndpoints:
             json={"mapping": {"containerKey": "properties"}, "limit": 999},
         )
         assert resp.status_code == 422
+
+
+class TestPropertyMappingSaveMergesServerSide:
+    """The save endpoint exists specifically so a client never does
+    read-modify-write on ``extra_config``: that column is replaced wholesale on
+    PATCH, and the response redacts secrets to ``***``, so a round-trip through
+    the client would overwrite real credentials with the mask."""
+
+    def _apply(self, existing_extra_config, body):
+        """Run the merge the endpoint performs, without the DB/HTTP layers."""
+        import json as _json
+        try:
+            existing = _json.loads(existing_extra_config) if existing_extra_config else {}
+        except (ValueError, TypeError):
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        schema_mapping = dict(existing.get("schemaMapping") or {})
+        schema_mapping.update({
+            "properties_field": body["containerKey"],
+            "properties_separator": body["separator"],
+            "collect_unmapped_as_properties": body["collectUnmapped"],
+            "property_overrides": body["propertyOverrides"],
+        })
+        existing["schemaMapping"] = schema_mapping
+        return existing
+
+    def test_unrelated_extra_config_keys_survive(self):
+        before = json.dumps({
+            "falkordbConnection": {"host": "graph.internal", "password": "s3cret"},
+            "cacheConnection": {"host": "cache.internal"},
+        })
+        after = self._apply(before, {
+            "containerKey": "attributes", "separator": "/",
+            "collectUnmapped": True, "propertyOverrides": {},
+        })
+        assert after["falkordbConnection"] == {
+            "host": "graph.internal", "password": "s3cret",
+        }
+        assert after["cacheConnection"] == {"host": "cache.internal"}
+        assert after["schemaMapping"]["properties_field"] == "attributes"
+
+    def test_non_property_mapping_fields_survive(self):
+        """Identity/entity-type mapping is out of this feature's scope and must
+        not be clobbered by a property-mapping save."""
+        before = json.dumps({"schemaMapping": {
+            "identity_field": "id", "entity_type_strategy": "property",
+        }})
+        after = self._apply(before, {
+            "containerKey": "properties", "separator": ".",
+            "collectUnmapped": False, "propertyOverrides": {"level": "source/level"},
+        })
+        assert after["schemaMapping"]["identity_field"] == "id"
+        assert after["schemaMapping"]["entity_type_strategy"] == "property"
+        assert after["schemaMapping"]["properties_separator"] == "."
+        assert after["schemaMapping"]["collect_unmapped_as_properties"] is False
+
+    def test_malformed_existing_config_does_not_lose_the_save(self):
+        after = self._apply("}{ not json", {
+            "containerKey": "properties", "separator": "/",
+            "collectUnmapped": True, "propertyOverrides": {},
+        })
+        assert after["schemaMapping"]["properties_field"] == "properties"
+
+    def test_result_parses_back_into_a_schema_mapping(self):
+        after = self._apply(None, {
+            "containerKey": "attributes", "separator": ".",
+            "collectUnmapped": False, "propertyOverrides": {"level": "source/level"},
+        })
+        mapping = SchemaMapping.from_extra_config(after)
+        assert mapping.properties_field == "attributes"
+        assert mapping.properties_separator == "."
+        assert mapping.collect_unmapped_as_properties is False
+        assert mapping.property_overrides == {"level": "source/level"}

@@ -1552,6 +1552,69 @@ async def preview_property_storage(
     )
 
 
+@router.put("/properties/mapping", dependencies=[Depends(require_ws_manage)])
+async def put_property_mapping(
+    body: PropertyMappingInput,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Persist the property half of this data source's schema mapping.
+
+    Deliberately NOT done through ``PATCH /admin/workspaces/{ws}/data-sources/
+    {ds}``. That endpoint replaces ``extra_config`` wholesale, and the
+    matching response redacts secret-looking values to ``***`` — so a client
+    doing read-modify-write on the blob would overwrite this source's real
+    FalkorDB and cache credentials with the mask. Merging server-side, from
+    the row rather than the response, closes that path: only the four
+    property keys are touched and everything else in ``extra_config`` is
+    carried through untouched.
+    """
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.providers.manager import provider_manager
+
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    ds = await get_data_source_orm(session, ds_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+
+    try:
+        existing = json.loads(ds.extra_config) if ds.extra_config else {}
+    except (ValueError, TypeError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    schema_mapping = dict(existing.get("schemaMapping") or {})
+    schema_mapping.update({
+        "properties_field": body.containerKey,
+        "properties_separator": body.separator,
+        "collect_unmapped_as_properties": body.collectUnmapped,
+        "property_overrides": body.propertyOverrides,
+    })
+    existing["schemaMapping"] = schema_mapping
+    ds.extra_config = json.dumps(existing)
+    await session.commit()
+
+    # The provider caches its SchemaMapping at construction and is itself
+    # cached per (provider_id, graph_name) — without evicting, the new mapping
+    # would not take effect until the pod restarted.
+    try:
+        await provider_manager.evict_data_source(ds.provider_id, ds.graph_name or "")
+    except Exception:                                  # pragma: no cover - cache only
+        logger.exception("could not evict cached provider for %s", ds_id)
+
+    return {
+        "dataSourceId": ds_id,
+        "containerKey": body.containerKey,
+        "separator": body.separator,
+        "collectUnmapped": body.collectUnmapped,
+        "propertyOverrides": body.propertyOverrides,
+    }
+
+
 # Process-level cache of the SearchQuery JSON Schema. It's static
 # within a release (Pydantic builds it from class definitions at import
 # time), so compute once and reuse on every request.
