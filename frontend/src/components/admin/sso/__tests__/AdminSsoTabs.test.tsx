@@ -113,6 +113,64 @@ describe('stat tiles', () => {
     })
 })
 
+describe('stat tiles as navigation', () => {
+    beforeEach(() => {
+        listProviders.mockResolvedValue([
+            provider({ id: 'a', slug: 'entra' }),
+            provider({ id: 'b', slug: 'okta', lifecycle: 'draft' }),
+        ])
+    })
+
+    it('narrows the connection list to the drafts it counted', async () => {
+        const user = userEvent.setup()
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        await screen.findByText('entra')
+
+        await user.click(screen.getByRole('button', { name: /drafts to rehearse/i }))
+
+        expect(screen.getByText('okta')).toBeInTheDocument()
+        expect(screen.queryByText('entra')).toBeNull()
+        expect(screen.getByText(/showing drafts only/i)).toBeInTheDocument()
+    })
+
+    it('gives the filter back', async () => {
+        const user = userEvent.setup()
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        await screen.findByText('entra')
+
+        await user.click(screen.getByRole('button', { name: /drafts to rehearse/i }))
+        await user.click(screen.getByRole('button', { name: /show all/i }))
+
+        expect(screen.getByText('entra')).toBeInTheDocument()
+    })
+
+    it('does not leave the filter on when the tab is chosen by hand', async () => {
+        // Coming back to Providers via the tab means the whole tab, not
+        // whatever a tile last narrowed it to.
+        const user = userEvent.setup()
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        await screen.findByText('entra')
+
+        await user.click(screen.getByRole('button', { name: /drafts to rehearse/i }))
+        await user.click(screen.getByRole('button', { name: /^Access mapping$/ }))
+        await user.click(screen.getByRole('button', { name: /^Providers$/ }))
+
+        expect(await screen.findByText('entra')).toBeInTheDocument()
+        expect(screen.queryByText(/showing drafts only/i)).toBeNull()
+    })
+
+    it('sends the rules tile to access mapping', async () => {
+        const user = userEvent.setup()
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        await screen.findByText('entra')
+
+        await user.click(screen.getByRole('button', { name: /access rules/i }))
+
+        expect(screen.getByRole('button', { name: /^Access mapping$/ }))
+            .toHaveAttribute('aria-current', 'page')
+    })
+})
+
 describe('diagnostics', () => {
     it('keeps the claim-attribute lookup that lives nowhere else', () => {
         // It used to be folded inside a <details>; it is now a peer mode.

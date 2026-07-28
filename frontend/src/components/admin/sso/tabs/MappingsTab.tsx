@@ -13,7 +13,7 @@
  * every session refresh, so the directory stays the source of truth.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Loader2, RefreshCw, ShieldAlert, Sparkles, Waypoints } from 'lucide-react'
+import { RefreshCw, ShieldAlert, Sparkles, Waypoints } from 'lucide-react'
 
 import {
     ssoAdminService,
@@ -23,6 +23,7 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { SsoCard, SsoEmpty, SsoSectionLabel } from '../ui/SsoCard'
+import { SsoMappingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
 import { ErrorBanner } from './ErrorBanner'
 import { MappingComposer } from './mappings/MappingComposer'
 import { MappingGroupCard, groupMappings } from './mappings/MappingGroupCard'
@@ -75,9 +76,11 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
 
     if (!loaded) {
         return (
-            <div className="py-16 flex items-center justify-center gap-2 text-sm text-ink-muted">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Loading rules…
+            <div className="grid xl:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
+                <div className="min-w-0">
+                    <SsoLoading label="Loading access rules" />
+                    <SsoMappingsSkeleton />
+                </div>
             </div>
         )
     }
