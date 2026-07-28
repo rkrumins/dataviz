@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import RevokedRefreshJtiORM
+from backend.auth_service.refresh import RotationRecord
 
 
 # Sentinel jti that marks an entire family as revoked. Picking a prefix
@@ -64,8 +65,64 @@ class SQLAlchemyRefreshStore:
         )
         return result.scalar_one_or_none() is not None
 
+    async def get_rotation(self, jti: str):
+        """Read back what a consumed ``jti`` rotated into.
+
+        Returns a :class:`RotationRecord` or None. Used by the grace
+        window: a refresh that lost the race re-mints this successor
+        instead of being treated as a stolen-chain replay.
+        """
+        result = await self._session.execute(
+            select(
+                RevokedRefreshJtiORM.revoked_at,
+                RevokedRefreshJtiORM.successor_jti,
+                RevokedRefreshJtiORM.successor_exp,
+                RevokedRefreshJtiORM.successor_mint_ms,
+            ).where(RevokedRefreshJtiORM.jti == jti)
+        )
+        row = result.one_or_none()
+        if row is None or row.successor_jti is None:
+            return None
+        return RotationRecord(
+            revoked_at_iso=row.revoked_at,
+            successor_jti=row.successor_jti,
+            successor_exp=row.successor_exp,
+            successor_mint_ms=row.successor_mint_ms,
+        )
+
+    async def claim_jti(
+        self,
+        jti: str,
+        family_id: str,
+        expires_at_iso: str,
+        *,
+        successor_jti: str,
+        successor_exp: int,
+        successor_mint_ms: int,
+    ) -> bool:
+        """Consume ``jti`` and record what it rotated into, atomically.
+
+        Returns True when this call won the row, False when someone else
+        already had it. The primary key is the whole concurrency
+        control: the INSERT either lands or conflicts, with no window
+        between checking and writing. The previous SELECT-then-INSERT
+        let two refreshes on different replicas both pass the check.
+
+        The successor is written in this same statement on purpose — a
+        loser blocks on the index until the winner commits and is then
+        guaranteed to read a successor that exists.
+        """
+        return await self._insert_ignore(
+            jti=jti,
+            family_id=family_id,
+            expires_at_iso=expires_at_iso,
+            successor_jti=successor_jti,
+            successor_exp=successor_exp,
+            successor_mint_ms=successor_mint_ms,
+        )
+
     async def _insert_ignore(
-        self, *, jti: str, family_id: str, expires_at_iso: str,
+        self, *, jti: str, family_id: str, expires_at_iso: str, **successor,
     ) -> bool:
         """Insert a revocation row, swallowing duplicates.
 
@@ -90,6 +147,7 @@ class SQLAlchemyRefreshStore:
                         family_id=family_id,
                         revoked_at=_now_iso(),
                         expires_at=expires_at_iso,
+                        **successor,
                     )
                 )
             return True

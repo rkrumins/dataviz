@@ -103,6 +103,21 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 
 
+# Rotation grace window. Refresh-token rotation treats a re-presented
+# jti as a stolen-chain replay and kills the whole family. That is right
+# for an attacker and wrong for the far more common causes: two tabs
+# refreshing on the same cookie within milliseconds of each other, a
+# retried POST, a tab restored from bfcache, or a rotation whose
+# Set-Cookie never made it back to the browser. Inside this window the
+# re-presentation is answered with the successor the first caller
+# already minted, so both racers converge on one token and nobody is
+# signed out. Outside it, reuse detection is unchanged. Set to 0 for
+# strict rotation with no window at all.
+REFRESH_ROTATION_GRACE_SECONDS: int = int(
+    os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "30")
+)
+
+
 # ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────
 # The Custom provider reads a JWT-signed cookie/header that simulates an
 # IdP returning AD-style attributes (first/last/email/external_id/claims/

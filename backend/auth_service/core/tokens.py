@@ -110,6 +110,9 @@ def create_refresh_token(
     extra: dict | None = None,
     *,
     auth_time: int | None = None,
+    jti: str | None = None,
+    expires_at_epoch: int | None = None,
+    mint_ms: int | None = None,
 ) -> tuple[str, RefreshClaims]:
     """Create a signed refresh JWT.
 
@@ -121,10 +124,23 @@ def create_refresh_token(
     propagated forward unchanged on every rotation so the check on
     ``/refresh`` measures elapsed wall-clock time since the user actually
     authenticated at the IdP, not since the last token rotation.
+
+    ``jti`` / ``expires_at_epoch`` / ``mint_ms`` override the generated
+    values. They exist for one caller: the rotation grace window, which
+    re-mints the successor a concurrent refresh already minted so both
+    racers end up holding the same token instead of one of them being
+    mistaken for a thief. Only the identity of the token matters there,
+    not its bytes — two tokens carrying the same ``jti`` are consumed by
+    the same next rotation.
     """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=JWT_REFRESH_EXPIRY_DAYS)
-    jti = secrets.token_urlsafe(16)
+    expires_at = (
+        datetime.fromtimestamp(expires_at_epoch, tz=timezone.utc)
+        if expires_at_epoch is not None
+        else now + timedelta(days=JWT_REFRESH_EXPIRY_DAYS)
+    )
+    minted_ms = mint_ms if mint_ms is not None else int(now.timestamp() * 1000)
+    jti = jti or secrets.token_urlsafe(16)
     fam = family_id or secrets.token_urlsafe(16)
     payload: dict = {
         "sub": user_id,
@@ -136,7 +152,7 @@ def create_refresh_token(
         # Millisecond mint instant. ``iat`` is kept as-is for the
         # standard claim; this one exists because the revocation cutoff
         # needs sub-second resolution. See ``RefreshClaims.mint_ms``.
-        "mat": int(now.timestamp() * 1000),
+        "mat": minted_ms,
         "exp": expires_at,
     }
     if auth_time is not None:
@@ -150,7 +166,7 @@ def create_refresh_token(
         family_id=fam,
         exp=int(expires_at.timestamp()),
         auth_time=int(auth_time) if auth_time is not None else None,
-        mint_ms=int(now.timestamp() * 1000),
+        mint_ms=minted_ms,
     )
     return token, claims
 

@@ -5,6 +5,7 @@ All primary keys are text UUIDs. JSON columns stored as TEXT for SQLite compat.
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -2207,6 +2208,21 @@ class RevokedRefreshJtiORM(Base):
     family_id = Column(Text, nullable=False)
     revoked_at = Column(Text, nullable=False, default=_now)
     expires_at = Column(Text, nullable=False)  # ISO; rows past this can be GC'd
+
+    # Identity of the token this rotation issued, written in the SAME
+    # transaction as the row that consumes ``jti``. A concurrent refresh
+    # that loses the race blocks on the primary key until that
+    # transaction commits, then reads these back and re-mints the same
+    # successor instead of being mistaken for a stolen-chain replay.
+    #
+    # Claims only, never the signed token: a JWT at rest in the database
+    # would be a live credential, whereas these three fields are
+    # worthless without the signing key. NULL on family-revoked
+    # sentinels and on rows written before the grace window existed —
+    # those fall through to reuse detection, which is the old behaviour.
+    successor_jti = Column(Text, nullable=True)
+    successor_exp = Column(Integer, nullable=True)       # epoch seconds
+    successor_mint_ms = Column(BigInteger, nullable=True)  # epoch millis
 
     __table_args__ = (
         Index("idx_revoked_refresh_family", "family_id"),

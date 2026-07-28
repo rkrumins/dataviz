@@ -186,10 +186,10 @@ async def test_sso_reauth_resolves_the_provider_slug_from_the_real_orm(
         async def is_family_revoked(self, *a, **k):
             return False
 
-        async def is_jti_revoked(self, *a, **k):
-            return False
+        async def claim_jti(self, *a, **k):
+            return True
 
-        async def revoke_jti(self, *a, **k):
+        async def get_rotation(self, *a, **k):
             return None
 
         async def revoke_family(self, *a, **k):

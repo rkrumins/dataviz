@@ -135,6 +135,20 @@ async def _revoked_rows(real_engine) -> list[str]:
         return list(result.scalars().all())
 
 
+@pytest.fixture(autouse=True)
+def _strict_rotation(monkeypatch):
+    """Pin the grace window shut for this module.
+
+    These tests are about what a *genuine* replay does. With the shipped
+    window an immediate re-presentation is read as a concurrent refresh
+    and answered with the successor, which is the subject of
+    ``test_auth_rotation_grace.py`` instead.
+    """
+    monkeypatch.setattr(
+        "backend.auth_service.service.REFRESH_ROTATION_GRACE_SECONDS", 0,
+    )
+
+
 async def test_reuse_detection_persists_the_family_revocation(
     service, scoped_session_factory, real_engine,
 ):

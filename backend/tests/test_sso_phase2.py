@@ -257,13 +257,13 @@ class _StubUserIdentityRepo:
 class _NoopRefreshStore:
     revoked_family = None
 
-    async def is_jti_revoked(self, jti):
-        return False
-
     async def is_family_revoked(self, fam):
         return False
 
-    async def revoke_jti(self, jti, family_id, expires_at_iso):
+    async def claim_jti(self, jti, family_id, expires_at_iso, **successor):
+        return True
+
+    async def get_rotation(self, jti):
         return None
 
     async def revoke_family(self, family_id):

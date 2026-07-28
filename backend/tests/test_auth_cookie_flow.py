@@ -130,14 +130,23 @@ async def test_refresh_rotates_tokens(
 
 
 async def test_refresh_replay_kills_family(
-    test_client: AsyncClient, db_session: AsyncSession
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch
 ):
     """A replayed refresh token revokes the entire family — defence
     against a stolen refresh cookie being used in parallel.
 
+    Grace pinned to 0 so this exercises strict rotation. With the
+    shipped window a replay this fast is read as a concurrent refresh
+    and answered with the successor instead; that path is covered by
+    ``test_refresh_replay_inside_grace_returns_same_token`` below and,
+    against real transactions, in ``test_auth_rotation_grace.py``.
+
     Done with explicit per-request cookies so the test isn't sensitive
     to httpx's cookie-jar layering rules.
     """
+    monkeypatch.setattr(
+        "backend.auth_service.service.REFRESH_ROTATION_GRACE_SECONDS", 0,
+    )
     await _seed(db_session)
     login = await test_client.post(
         "/api/v1/auth/login",
@@ -171,6 +180,47 @@ async def test_refresh_replay_kills_family(
         cookies={REFRESH_COOKIE_NAME: rotated_rt},
     )
     assert third.status_code == 401
+
+
+async def test_refresh_replay_inside_grace_returns_same_token(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Two refreshes on one cookie converge instead of signing you out.
+
+    This is the everyday case the strict rule got wrong: a second tab,
+    a retried POST, or a rotation whose Set-Cookie never landed. Both
+    callers must end up holding the same successor, and the family must
+    survive.
+    """
+    await _seed(db_session, email="grace@example.com")
+    login = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "grace@example.com", "password": _PASSWORD},
+    )
+    captured_rt = login.cookies.get(REFRESH_COOKIE_NAME)
+
+    first = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: captured_rt},
+    )
+    replay = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: captured_rt},
+    )
+    assert first.status_code == 200
+    assert replay.status_code == 200
+
+    # Same successor identity, so whichever response the browser keeps,
+    # the next rotation consumes the same token.
+    from backend.auth_service.core.tokens import decode_refresh_token
+    first_jti = decode_refresh_token(first.cookies.get(REFRESH_COOKIE_NAME)).jti
+    replay_jti = decode_refresh_token(replay.cookies.get(REFRESH_COOKIE_NAME)).jti
+    assert first_jti == replay_jti
+
+    # The family is alive: the successor still rotates.
+    third = await test_client.post(
+        "/api/v1/auth/refresh",
+        cookies={REFRESH_COOKIE_NAME: replay.cookies.get(REFRESH_COOKIE_NAME)},
+    )
+    assert third.status_code == 200
 
 
 async def test_refresh_without_cookie_returns_401(test_client: AsyncClient):

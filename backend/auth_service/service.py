@@ -27,6 +27,7 @@ import jwt as pyjwt
 from .core.config import (
     JWT_EXPIRY_MINUTES,
     JWT_REFRESH_EXPIRY_DAYS,
+    REFRESH_ROTATION_GRACE_SECONDS,
     SSO_SESSION_MAX_AGE_SECONDS,
 )
 from backend.common.identity_provenance import asserted_fields, build_snapshot
@@ -333,7 +334,7 @@ class LocalIdentityService:
         # frees when this scope exits. So rejections are carried out of the
         # scope by ``_RefreshRejected`` and settled once it has closed.
         try:
-            return await self._refresh_within_session(refresh_token, claims)
+            return await self._refresh_within_session(claims)
         except _RefreshRejected as rejection:
             await self._revoke_family_committed(claims.family_id)
             if rejection.kill_sessions_for is not None and self._session_killer:
@@ -348,28 +349,67 @@ class LocalIdentityService:
                 await self._emit_audit(*rejection.audit)
             raise rejection.error from None
 
-    async def _refresh_within_session(
-        self, refresh_token: str, claims,
-    ) -> tuple[User, SessionTokens]:
+    async def _refresh_within_session(self, claims) -> tuple[User, SessionTokens]:
+        # Mint the candidate successor before claiming. Its identity has
+        # to be recorded in the same statement that consumes the
+        # presented token, so a concurrent refresh that loses the race
+        # can read it back instead of being treated as a thief. Minting
+        # is pure CPU; if we lose, this one is simply discarded.
+        successor_token, successor = create_refresh_token(
+            user_id=claims.sub,
+            family_id=claims.family_id,
+            auth_time=claims.auth_time,
+        )
+
         claims_extra: dict = {}
         async with self._session_factory() as session:
             store = self._refresh_store_factory(session)
-            err = await check_and_record_rotation(
+            outcome = await check_and_record_rotation(
                 store,
                 presented_jti=claims.jti,
                 presented_family=claims.family_id,
                 presented_exp=claims.exp,
+                successor_jti=successor.jti,
+                successor_exp=successor.exp,
+                successor_mint_ms=successor.mint_ms,
+                grace_seconds=REFRESH_ROTATION_GRACE_SECONDS,
             )
-            if err is not None:
+            if outcome.status == "family_revoked":
+                # Already dead — nothing to revoke, don't pay for a
+                # second connection just to re-write the sentinel.
                 logger.warning(
-                    "Refresh rejected (%s) for user=%s family=%s",
-                    err, claims.sub, claims.family_id,
+                    "Refresh rejected (family_revoked) for user=%s family=%s",
+                    claims.sub, claims.family_id,
                 )
-                if err == "family_revoked":
-                    # Already dead — nothing to revoke, don't pay for a
-                    # second connection just to re-write the sentinel.
-                    raise InvalidRefreshToken(err)
-                raise _RefreshRejected(InvalidRefreshToken(err))
+                raise InvalidRefreshToken("family_revoked")
+            if outcome.status == "reuse":
+                logger.warning(
+                    "Refresh rejected (reuse_detected) for user=%s family=%s",
+                    claims.sub, claims.family_id,
+                )
+                raise _RefreshRejected(InvalidRefreshToken("reuse_detected"))
+
+            is_replay = outcome.status == "replay"
+            if is_replay:
+                # Someone beat us to this token moments ago. Hand back
+                # what they minted rather than a competing successor:
+                # the refresh cookie is per-browser, so two live
+                # successors would leave one of them orphaned in the
+                # chain — unconsumable, and indistinguishable from theft
+                # if it ever surfaced.
+                logger.info(
+                    "Refresh replayed inside the grace window for user=%s "
+                    "family=%s — returning the successor already issued",
+                    claims.sub, claims.family_id,
+                )
+                successor_token, successor = create_refresh_token(
+                    user_id=claims.sub,
+                    family_id=claims.family_id,
+                    auth_time=claims.auth_time,
+                    jti=outcome.successor.successor_jti,
+                    expires_at_epoch=outcome.successor.successor_exp,
+                    mint_ms=outcome.successor.successor_mint_ms,
+                )
 
             orm = await self._user_repo.get_user_by_id(session, claims.sub)
             if orm is None or orm.deleted_at is not None or orm.status != "active":
@@ -441,7 +481,10 @@ class LocalIdentityService:
             # update on the next rotation rather than waiting for the
             # next full SSO login. The cached ``idp_groups`` snapshot
             # is set by ``set_user_idp_metadata`` at SSO login.
-            if is_sso_session and self._sso_role_reconciler is not None:
+            # Skipped on a replay: the refresh we are echoing reconciled
+            # moments ago, and repeating the write would only lengthen
+            # the transaction every other racer is blocked behind.
+            if is_sso_session and self._sso_role_reconciler and not is_replay:
                 cached_groups = _load_cached_idp_groups(orm)
                 latest_provider_id = await self._latest_identity_provider_id(
                     session, orm.id,
@@ -489,6 +532,7 @@ class LocalIdentityService:
             family_id=claims.family_id,
             claims_extra=claims_extra,
             auth_time=claims.auth_time,
+            refresh_token=successor_token,
         )
         return user, tokens
 
@@ -1098,6 +1142,7 @@ class LocalIdentityService:
         family_id: Optional[str],
         claims_extra: Optional[dict] = None,
         auth_time: Optional[int] = None,
+        refresh_token: Optional[str] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
 
@@ -1106,6 +1151,12 @@ class LocalIdentityService:
         and propagated through every rotation. The 24h SSO re-auth
         check reads it on the next refresh. ``None`` for local
         password sessions.
+
+        ``refresh_token`` supplies an already-minted refresh JWT. The
+        rotation path mints its successor before consuming the presented
+        token — the successor's identity has to be recorded atomically
+        with that consumption — so it passes the token it committed to
+        rather than letting a second one be generated here.
         """
         extra = dict(claims_extra or {})
         if user.must_change_password:
@@ -1120,9 +1171,9 @@ class LocalIdentityService:
             role=user.role,
             extra=extra or None,
         )
-        refresh, _ = create_refresh_token(
+        refresh = refresh_token or create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
-        )
+        )[0]
         return SessionTokens(
             access_token=access,
             access_max_age_seconds=JWT_EXPIRY_MINUTES * 60,
