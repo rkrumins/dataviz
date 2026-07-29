@@ -1,7 +1,7 @@
 """
 Cookie names and helpers for session transport.
 
-Three cookies make up a session:
+Four cookies make up a session:
 
 * ``nx_access``  — the access JWT. ``HttpOnly``, ``Secure``, ``SameSite=Lax``,
   path ``/``. Sent on every request to the API; read by ``get_current_user``.
@@ -9,6 +9,10 @@ Three cookies make up a session:
   path ``/api/v1/auth/refresh`` (so it's only sent to the refresh endpoint).
 * ``nx_csrf``    — the CSRF token. *Readable* by JavaScript so the frontend
   can echo it back as ``X-CSRF-Token``. ``Secure``, ``SameSite=Lax``.
+* ``nx_access_exp`` — when ``nx_access`` expires, as a unix epoch. Also
+  readable by JavaScript: the client cannot inspect an ``HttpOnly`` cookie,
+  so without this it has no way to renew before expiry rather than after a
+  401. Carries no identity and no signature.
 
 All cookie attributes are derived from environment-driven config in
 ``core.config`` so deployments can tune ``Secure`` (off in local HTTP dev),
@@ -21,10 +25,13 @@ rather than by cluster: two deployments sharing these names overwrite each
 other's session in a single browser even when they run on different
 clusters entirely. With the id unset the names are unchanged.
 
-``nx_csrf`` is deliberately excluded from that scoping; see the comment on
-its definition below.
+``nx_csrf`` and ``nx_access_exp`` are deliberately excluded from that
+scoping — both are read from JavaScript by name, and neither is
+signature-bearing. See the comments on their definitions below.
 """
 from __future__ import annotations
+
+import time
 
 import jwt as pyjwt
 from fastapi import HTTPException, Request, Response, status
@@ -44,6 +51,7 @@ from .interface import SessionTokens
 _BASE_ACCESS_COOKIE_NAME = "nx_access"
 _BASE_REFRESH_COOKIE_NAME = "nx_refresh"
 _BASE_CSRF_COOKIE_NAME = "nx_csrf"
+_BASE_ACCESS_EXPIRY_COOKIE_NAME = "nx_access_exp"
 
 
 def _scoped(name: str) -> str:
@@ -73,6 +81,26 @@ REFRESH_COOKIE_NAME = _scoped(_BASE_REFRESH_COOKIE_NAME)
 # script could read the cookie. The signature-bearing cookies above are the
 # ones that must not be shared.
 CSRF_COOKIE_NAME = _BASE_CSRF_COOKIE_NAME
+# When ``nx_access`` expires, as a unix epoch. Readable by JavaScript,
+# because the browser cannot read the HttpOnly access cookie and so has
+# no way to know its own session is about to lapse — which is why token
+# renewal was reactive: wait for a 401, then refresh, then replay. That
+# costs a user-visible request the whole round trip, and in an idle tab
+# nothing issues a request at all, so renewal depended on an unrelated
+# poller happening to fire.
+#
+# Publishing the expiry lets the client rotate BEFORE the token dies.
+# It leaks nothing — an expiry instant is not a secret, carries no
+# identity, and is already implicit in the access cookie's own Max-Age.
+#
+# NOT scoped by environment id, for the same reason as ``nx_csrf``: it
+# is read from JavaScript by name, and a per-environment name would have
+# to be discovered at runtime before the first refresh could be
+# scheduled. Nothing here is signature-bearing, so two environments
+# sharing the name at most makes one of them reschedule sooner than
+# needed — and they cannot collide anyway without also colliding on the
+# access cookie, which IS scoped.
+ACCESS_EXPIRY_COOKIE_NAME = _BASE_ACCESS_EXPIRY_COOKIE_NAME
 # Short-lived signed cookie holding the in-flight OIDC handshake
 # (state / nonce / PKCE verifier). Scoped to the auth subtree so it is
 # only ever sent to the callback. SameSite=Lax is required: the IdP
@@ -115,7 +143,12 @@ _LINK_INTENT_COOKIE_MAX_AGE = 600
 # and mints nothing. Cross-site-scoped for the same reason as ``nx_saml``:
 # a SAML dry-run completes on the ACS POST, and a Lax cookie dropped there
 # would silently turn the rehearsal into a real login.
-DRYRUN_COOKIE_NAME = "nx_dryrun"
+#
+# Environment-scoped like every other signed flow cookie. It was the one
+# that got missed: it carries a JWT, so two environments open in one
+# browser could clobber each other's in-flight rehearsal, and the admin
+# would see a dry run fail for no visible reason.
+DRYRUN_COOKIE_NAME = _scoped("nx_dryrun")
 DRYRUN_COOKIE_PATH = "/api/v1/auth/"
 _DRYRUN_COOKIE_MAX_AGE = 600
 
@@ -188,6 +221,21 @@ def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
         path="/",
         **common,
     )
+    # Same reasoning as the CSRF cookie above, for a different reason:
+    # this one has to OUTLIVE the access cookie it describes. A tab that
+    # boots after the access token died still needs to know *when* it
+    # died — that is precisely the tab that should refresh immediately
+    # rather than fire a request it knows will 401. Matching the access
+    # cookie's own Max-Age would delete this at the exact moment it
+    # becomes useful.
+    response.set_cookie(
+        key=ACCESS_EXPIRY_COOKIE_NAME,
+        value=str(int(time.time()) + tokens.access_max_age_seconds),
+        max_age=tokens.refresh_max_age_seconds,
+        httponly=False,
+        path="/",
+        **common,
+    )
 
 
 def _is_ip_literal(host: str) -> bool:
@@ -240,9 +288,11 @@ def _eviction_targets() -> list[tuple[str, str]]:
         (ACCESS_COOKIE_NAME, "/"),
         (REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH),
         (CSRF_COOKIE_NAME, "/"),
+        (ACCESS_EXPIRY_COOKIE_NAME, "/"),
         (_BASE_ACCESS_COOKIE_NAME, "/"),
         (_BASE_REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH),
         (_BASE_CSRF_COOKIE_NAME, "/"),
+        (_BASE_ACCESS_EXPIRY_COOKIE_NAME, "/"),
     ]
     seen: set[tuple[str, str]] = set()
     unique: list[tuple[str, str]] = []

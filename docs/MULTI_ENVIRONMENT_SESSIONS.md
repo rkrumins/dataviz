@@ -53,22 +53,31 @@ authentication flaps request-to-request rather than failing cleanly. `JWT_SECRET
 
 ## 2. How a session is identified
 
-Three cookies make up a session. Only the ones carrying a signature are environment-scoped:
+Four cookies make up a session. Only the ones carrying a signature are environment-scoped:
 
 | Cookie | Scoped by `AUTH_ENVIRONMENT_ID`? | Path | HttpOnly | Purpose |
 |---|---|---|---|---|
-| `nx_access` → `nx_access_<env>` | **Yes** | `/` | yes | The access JWT, ~5 min |
+| `nx_access` → `nx_access_<env>` | **Yes** | `/` | yes | The access JWT, 15 min |
 | `nx_refresh` → `nx_refresh_<env>` | **Yes** | `/api/v1/auth/` | yes | Rotating refresh JWT, 7 days |
 | `nx_csrf` | **No — deliberately** | `/` | no (JS-readable) | CSRF double-submit token |
-| `nx_oidc`, `nx_saml`, `nx_link_intent`, `nx_mock_identity` | **Yes** | `/api/v1/auth/` | yes | Short-lived SSO handshake state |
+| `nx_access_exp` | **No — deliberately** | `/` | no (JS-readable) | When `nx_access` expires, for scheduled renewal |
+| `nx_oidc`, `nx_saml`, `nx_link_intent`, `nx_mock_identity`, `nx_dryrun` | **Yes** | `/api/v1/auth/` | yes | Short-lived SSO handshake state |
 
-`nx_csrf` is intentionally left unscoped. The frontend reads it from JavaScript by a
-hardcoded name, so a per-environment name would have to be discovered before the first
-write request — and getting that wrong 403s every POST. Sharing it is safe: CSRF here is a
-double-submit check that only ever compares this cookie against the `X-CSRF-Token` header
-**on the same request**. The value carries no identity and no signature, so a token minted
-by another environment still proves exactly what the check is for — that same-origin script
-could read the cookie.
+The two unscoped cookies are the two the frontend reads from JavaScript by a hardcoded
+name, so a per-environment name would have to be discovered at runtime — before the first
+write request for `nx_csrf`, before the first scheduled renewal for `nx_access_exp`.
+
+Sharing them is safe because neither carries identity or a signature. CSRF here is a
+double-submit check that only ever compares the cookie against the `X-CSRF-Token` header
+**on the same request**, so a token minted by another environment still proves exactly what
+the check is for — that same-origin script could read the cookie. `nx_access_exp` is a
+timestamp; the worst a foreign value can do is make a tab reschedule sooner than it needed
+to, and the two cannot diverge without the (scoped) access cookie having diverged first.
+
+`nx_dryrun` was **not** scoped until 2026-07-29, despite carrying a JWT like its siblings —
+it was added after the list and nothing compared the two. It is now, and
+`test_every_signed_cookie_is_scoped` asserts the property rather than re-listing names, so
+the next flow cookie cannot repeat it.
 
 Tokens additionally carry:
 
@@ -194,7 +203,10 @@ every token header.
 {
   "environmentId": "uat",
   "issuer": "nexus-lineage:uat",
-  "cookieNames": { "access": "nx_access_uat", "refresh": "nx_refresh_uat", "csrf": "nx_csrf" },
+  "cookieNames": {
+    "access": "nx_access_uat", "refresh": "nx_refresh_uat",
+    "csrf": "nx_csrf", "access_exp": "nx_access_exp"
+  },
   "activeKid": "aac6b71e",
   "acceptedKids": ["aac6b71e"],
   "cookieSecure": true,
@@ -205,7 +217,8 @@ every token header.
   "sessionCookiesPresented": {
     "access": "foreign: signed by a key this instance does not hold (kid=beefcafe)",
     "refresh": "absent",
-    "csrf": "absent"
+    "csrf": "absent",
+    "access_exp": "expired 41m ago"           // ← this tab never renewed
   }
 }
 ```

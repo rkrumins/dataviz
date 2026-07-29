@@ -100,6 +100,39 @@ def test_handshake_cookies_are_scoped_too(monkeypatch):
     assert uat.OIDC_COOKIE_NAME == "nx_oidc_uat"
     assert uat.SAML_COOKIE_NAME == "nx_saml_uat"
     assert uat.LINK_INTENT_COOKIE_NAME == "nx_link_intent_uat"
+    # nx_dryrun was the one that got missed. It carries a JWT like its
+    # siblings, so two environments open in one browser could clobber
+    # each other's in-flight rehearsal.
+    assert uat.DRYRUN_COOKIE_NAME == "nx_dryrun_uat"
+
+
+def test_every_signed_cookie_is_scoped(monkeypatch):
+    """The inventory check, so the next flow cookie cannot be forgotten.
+
+    Naming them one by one is how ``nx_dryrun`` stayed unscoped: it was
+    added after the list and nothing compared the two. This asserts the
+    property instead — anything carrying a signature is scoped, and the
+    exceptions are named with a reason.
+    """
+    _tokens, uat = _reload_for_env(monkeypatch, "uat")
+
+    # Both are read from JavaScript by name and neither is
+    # signature-bearing, so a shared name costs nothing. See the comments
+    # on their definitions.
+    unscoped_by_design = {"CSRF_COOKIE_NAME", "ACCESS_EXPIRY_COOKIE_NAME"}
+
+    for attr in dir(uat):
+        if not attr.endswith("_COOKIE_NAME") or attr.startswith("_"):
+            continue
+        value = getattr(uat, attr)
+        if attr in unscoped_by_design:
+            assert not value.endswith("_uat"), f"{attr} is scoped unexpectedly"
+        else:
+            assert value.endswith("_uat"), (
+                f"{attr}={value!r} is not environment-scoped. If it carries "
+                "a signature it must be; if it does not, add it to "
+                "unscoped_by_design with the reason."
+            )
 
 
 def test_foreign_token_fails_as_issuer_not_signature(monkeypatch):

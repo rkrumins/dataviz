@@ -167,6 +167,7 @@ def _assert_session_config_coherent() -> None:
     """
     from backend.app.services.revocation_service import REVOCATION_TTL_SECONDS
     from backend.auth_service.core.config import (
+        CLOCK_SKEW_LEEWAY_SECONDS,
         JWT_EXPIRY_MINUTES,
         JWT_REFRESH_EXPIRY_DAYS,
         REFRESH_ROTATION_GRACE_SECONDS,
@@ -174,14 +175,20 @@ def _assert_session_config_coherent() -> None:
     )
 
     access_ttl = JWT_EXPIRY_MINUTES * 60
-    if REVOCATION_TTL_SECONDS < access_ttl:
+    # An access token is honoured until ``exp + leeway``, not ``exp``, so
+    # that — not the raw TTL — is what the tombstone has to outlive.
+    acceptance_window = access_ttl + CLOCK_SKEW_LEEWAY_SECONDS
+    if REVOCATION_TTL_SECONDS < acceptance_window:
         raise RuntimeError(
             f"RBAC_REVOCATION_TTL_SECONDS ({REVOCATION_TTL_SECONDS}s) is "
-            f"shorter than the access-token lifetime "
-            f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
-            "Session revocation would stop taking effect "
-            f"{access_ttl - REVOCATION_TTL_SECONDS}s before each token "
-            "expires. Raise the revocation TTL or lower the access TTL."
+            f"shorter than the window in which an access token is still "
+            f"accepted (JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = "
+            f"{access_ttl}s + {CLOCK_SKEW_LEEWAY_SECONDS}s clock-skew "
+            f"leeway = {acceptance_window}s). Session revocation would "
+            f"stop taking effect "
+            f"{acceptance_window - REVOCATION_TTL_SECONDS}s before each "
+            "token stops being honoured. Raise the revocation TTL or "
+            "lower the access TTL."
         )
     if JWT_EXPIRY_MINUTES > 15:
         logger.warning(
@@ -193,9 +200,10 @@ def _assert_session_config_coherent() -> None:
         )
     logger.info(
         "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
-        "rotation_grace=%ds sso_ceiling=%dh",
+        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh",
         access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
-        REFRESH_ROTATION_GRACE_SECONDS, SSO_SESSION_MAX_AGE_HOURS,
+        REFRESH_ROTATION_GRACE_SECONDS, CLOCK_SKEW_LEEWAY_SECONDS,
+        SSO_SESSION_MAX_AGE_HOURS,
     )
 def _log_auth_fingerprint() -> None:
     """Log how this instance identifies and verifies sessions.

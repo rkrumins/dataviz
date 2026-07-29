@@ -60,6 +60,18 @@ def _restore_modules():
     for name, module in saved.items():
         if module is not None:
             sys.modules[name] = module
+            # ``sys.modules`` is only half of it. Importing a submodule
+            # also binds it as an attribute on its parent package, and
+            # that binding still points at the reloaded copy. Anything
+            # that resolves the module by walking attributes — pytest's
+            # ``monkeypatch.setattr("a.b.c.NAME", ...)`` does exactly
+            # that — then patches a different object than the one
+            # ``from a.b.c import NAME`` reads, and the patch silently
+            # does nothing in whichever test file happens to run next.
+            parent_name, _, leaf = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, module)
         else:
             sys.modules.pop(name, None)
 
@@ -137,12 +149,34 @@ def test_all_token_families_honour_the_ring(monkeypatch):
     refresh, _claims = tokens.create_refresh_token("u1")
     invite, _exp = tokens.create_invite_token("user", "admin")
     link = tokens.create_link_intent_token(user_id="u1", provider_id="p1")
+    # Dry-run was the family that did not: it signed and verified against
+    # JWT_SECRET_KEY directly, so a rotation broke an admin's in-flight
+    # "what would happen if I signed in here?" round trip while every
+    # other family drained cleanly.
+    dryrun = tokens.create_dryrun_token(admin_id="a1", provider_id="p1")
 
     rotated = _reload_auth(monkeypatch, secret=_NEW, previous=_OLD)
     assert rotated.decode_token(access)["sub"] == "u1"
     assert rotated.decode_refresh_token(refresh).sub == "u1"
     assert rotated.decode_invite_token(invite)["role"] == "user"
     assert rotated.decode_link_intent_token(link)["user_id"] == "u1"
+    assert rotated.decode_dryrun_token(dryrun)["admin_id"] == "a1"
+
+
+def test_every_family_stamps_a_kid(monkeypatch):
+    """The converse of the ring: a family that does not stamp ``kid``
+    is a family that skipped the shared signer, which is how the
+    dry-run gap got in unnoticed."""
+    tokens = _reload_auth(monkeypatch, secret=_OLD)
+    minted = (
+        tokens.create_access_token("u1", "a@b.c", "user"),
+        tokens.create_refresh_token("u1")[0],
+        tokens.create_invite_token("user", "admin")[0],
+        tokens.create_link_intent_token(user_id="u1", provider_id="p1"),
+        tokens.create_dryrun_token(admin_id="a1", provider_id="p1"),
+    )
+    for token in minted:
+        assert "kid" in jwt.get_unverified_header(token)
 
 
 def test_expiry_is_reported_as_expiry_not_signature_failure(monkeypatch):

@@ -18,6 +18,7 @@ import jwt
 from jwt import exceptions as pyjwt_exceptions
 
 from .config import (
+    CLOCK_SKEW_LEEWAY_SECONDS,
     JWT_SECRET_KEY,
     JWT_SECRET_KEY_ID,
     JWT_VERIFICATION_KEYS,
@@ -114,6 +115,12 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
     moment that matters. It rides through the key ring rather than
     around it, so the bucket label still comes from a verified
     signature and cannot be forged.
+
+    ``leeway`` absorbs clock skew between the pod that minted the token
+    and the one verifying it. Replicas are NTP-synced, so this rarely
+    matters — but when it does the symptom is a user signed out on a
+    boundary that no single pod can reproduce, which is close to
+    undiagnosable without it.
     """
     last_signature_error: jwt.InvalidSignatureError | None = None
     for _kid, key in _candidate_keys(token):
@@ -124,6 +131,7 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
                 algorithms=[JWT_ALGORITHM],
                 issuer=JWT_ISSUER,
                 audience=audience,
+                leeway=CLOCK_SKEW_LEEWAY_SECONDS,
                 options={"verify_exp": verify_exp},
             )
         except jwt.InvalidSignatureError as exc:
@@ -565,17 +573,11 @@ def create_dryrun_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return _encode(payload)
 
 
 def decode_dryrun_token(token: str) -> dict:
-    payload = jwt.decode(
-        token,
-        JWT_SECRET_KEY,
-        algorithms=[JWT_ALGORITHM],
-        issuer=JWT_ISSUER,
-        audience=_DRYRUN_AUDIENCE,
-    )
+    payload = _decode(token, audience=_DRYRUN_AUDIENCE)
     if payload.get("purpose") != "dryrun":
         raise jwt.InvalidTokenError("Not a dry-run token")
     return payload

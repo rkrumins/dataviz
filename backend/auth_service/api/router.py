@@ -36,6 +36,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from typing import Callable, Optional
 
 import jwt as pyjwt
@@ -47,6 +48,7 @@ from slowapi.util import get_remote_address
 
 from ..cookies import (
     ACCESS_COOKIE_NAME,
+    ACCESS_EXPIRY_COOKIE_NAME,
     CSRF_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
     clear_dryrun_cookie,
@@ -960,6 +962,25 @@ async def diagnostics(request: Request):
         else:
             presented[label] = _describe_token(raw, label)
 
+    # Reported as a delta rather than present/absent: when a session
+    # lapses despite the client-side keepalive, the question is not
+    # whether this cookie arrived but whether it says something the
+    # scheduler could have acted on. "expired 40m ago" means the tab
+    # never rotated; "expires in 12m" means it did and the problem is
+    # elsewhere.
+    raw_expiry = request.cookies.get(ACCESS_EXPIRY_COOKIE_NAME)
+    if raw_expiry is None:
+        presented["access_exp"] = "absent"
+    else:
+        try:
+            delta = int(raw_expiry) - int(time.time())
+        except ValueError:
+            presented["access_exp"] = "malformed"
+        else:
+            presented["access_exp"] = (
+                f"expires in {delta}s" if delta >= 0 else f"expired {-delta}s ago"
+            )
+
     # Honour the proxy header: behind an ingress the TLS hop terminates
     # upstream, so request.url.scheme alone reports http and would
     # misdiagnose a correctly-secured deployment.
@@ -973,6 +994,7 @@ async def diagnostics(request: Request):
             "access": ACCESS_COOKIE_NAME,
             "refresh": REFRESH_COOKIE_NAME,
             "csrf": CSRF_COOKIE_NAME,
+            "access_exp": ACCESS_EXPIRY_COOKIE_NAME,
         },
         active_kid=JWT_SECRET_KEY_ID,
         accepted_kids=[kid for kid, _key in JWT_VERIFICATION_KEYS],

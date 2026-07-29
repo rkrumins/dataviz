@@ -24,7 +24,10 @@ import logging
 import os
 from typing import Iterable, Optional, Protocol
 
-from backend.auth_service.core.config import JWT_EXPIRY_MINUTES
+from backend.auth_service.core.config import (
+    CLOCK_SKEW_LEEWAY_SECONDS,
+    JWT_EXPIRY_MINUTES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +35,9 @@ logger = logging.getLogger(__name__)
 # ── Configuration ────────────────────────────────────────────────────
 
 # Access-token TTL drives how long a revocation entry needs to live —
-# we keep it for TTL + a buffer so a request that arrives at the very
-# end of the token's life still finds the entry.
+# we keep it for as long as a token can still be accepted, plus a buffer
+# so a request that arrives at the very end of that window still finds
+# the entry.
 #
 # DERIVED, not configured alongside it. These two were independent
 # numbers and they drifted: the 360s default was sized for the 5-minute
@@ -43,9 +47,19 @@ logger = logging.getLogger(__name__)
 # user, dropping a binding — silently stopped working for the tail of
 # every token. Deriving it means the invariant cannot be broken by
 # changing one file.
+#
+# The clock-skew leeway is part of that derivation, not decoration: a
+# token verifies for ``leeway`` seconds past its own ``exp``, so a
+# tombstone sized to ``exp`` alone expires while the token it is meant
+# to kill is still being honoured — reopening the exact gap above, but
+# only for the last minute of each token and only on a pod whose clock
+# is behind. Sizing it here is what keeps that from being something
+# anyone has to notice.
 _REVOCATION_TTL_BUFFER_SECONDS = 60
 _DEFAULT_REVOCATION_TTL_SECONDS = (
-    JWT_EXPIRY_MINUTES * 60 + _REVOCATION_TTL_BUFFER_SECONDS
+    JWT_EXPIRY_MINUTES * 60
+    + CLOCK_SKEW_LEEWAY_SECONDS
+    + _REVOCATION_TTL_BUFFER_SECONDS
 )
 REVOCATION_TTL_SECONDS: int = int(
     os.getenv("RBAC_REVOCATION_TTL_SECONDS", str(_DEFAULT_REVOCATION_TTL_SECONDS))

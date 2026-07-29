@@ -345,6 +345,15 @@ All env vars are pre-configured in `.env.dev` (for local dev) and `docker-compos
 source .env.dev
 ```
 
+One exception: `JWT_SECRET_KEY` ships **empty**, because `.env.dev` is tracked and a
+signing key committed to the repo is one every clone shares. `./dev.sh` generates a
+per-machine value on first run. If you start services by hand without ever running it,
+the backend will refuse to boot until you fill it in:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
 ### Core
 
 | Variable | Default | Description |

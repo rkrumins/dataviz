@@ -210,7 +210,7 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JWT_SECRET_KEY` | *(none — required)* | HMAC signing key for JWTs. No fallback: the process refuses to start if unset or under 32 chars. |
+| `JWT_SECRET_KEY` | *(none — required)* | HMAC signing key for JWTs. No fallback: the process refuses to start if unset, under 32 chars, or set to one of the placeholders this repo publishes in its example files. Generate with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`. |
 | `JWT_SECRET_KEY_PREVIOUS` | *(empty)* | Retired keys, comma-separated, accepted for verification only. Set during a rotation so live sessions survive it. |
 | `AUTH_ENVIRONMENT_ID` | *(empty)* | Names this deployment (`dev`/`uat`). Scopes session cookie names and the JWT issuer so two environments open in one browser cannot evict each other's session. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |

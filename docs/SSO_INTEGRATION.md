@@ -1464,14 +1464,15 @@ attacks at the bottom of the section.
 
 | Name | Path | HttpOnly | Secure | SameSite | TTL | Signed | Audience | Source of truth |
 |------|------|----------|--------|----------|-----|--------|----------|-----------------|
-| `nx_access` | `/` | yes | yes | lax | 5 min | HS256 | `nexus-lineage` | `cookies.py` + `tokens.create_access_token` |
+| `nx_access` | `/` | yes | yes | lax | 15 min | HS256 | `nexus-lineage` | `cookies.py` + `tokens.create_access_token` |
 | `nx_refresh` | `/api/v1/auth/` | yes | yes | lax | 7 days | HS256 | `nexus-lineage:refresh` | `cookies.py` + `tokens.create_refresh_token` |
 | `nx_csrf` | `/` | **no** (FE reads it) | yes | lax | follows refresh | unsigned random | — | `cookies.py:set_session_cookies` |
+| `nx_access_exp` | `/` | **no** (FE reads it) | yes | lax | follows refresh | unsigned epoch | — | `cookies.py:set_session_cookies` |
 | `nx_oidc` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:oidc_state` | `cookies.py` + `tokens.create_oidc_state_token` |
 | `nx_saml` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:saml_state` | `cookies.py` + `tokens.create_saml_state_token` |
 | `nx_mock_identity` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:mock_identity` | `cookies.py` + `tokens.create_mock_identity_token` |
 | `nx_link_intent` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:link_intent` | `cookies.py` + `tokens.create_link_intent_token` |
-| `nx_dryrun` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:dryrun` | `cookies.py` + `tokens.create_dryrun_token` |
+| `nx_dryrun` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 (key ring) | `nexus-lineage:dryrun` | `cookies.py` + `tokens.create_dryrun_token` |
 | `nx_user_v1` (sessionStorage) | n/a (browser) | n/a | n/a | n/a | tab lifetime | n/a | n/a | `frontend/src/store/userCache.ts` |
 
 `Secure` and `SameSite` come from
@@ -1487,6 +1488,29 @@ flow is dead, on every IdP. Browsers only send `SameSite=None` alongside
 reintroduce that bug in the off position, which is the configuration where
 it is hardest to notice. `nx_oidc` keeps the default: the OIDC callback is
 a cross-site **GET**, which `Lax` permits.
+
+Two cookies are deliberately readable by JavaScript. `nx_csrf` has to be —
+double-submit works by the page echoing it into a header. `nx_access_exp`
+carries the epoch at which `nx_access` expires, so the client can rotate
+ahead of expiry rather than after a 401; the access token itself is
+HttpOnly, so there is no other way for it to know. Neither value carries
+identity or a signature, and the expiry is already implicit in the access
+cookie's own `Max-Age`.
+
+`nx_access_exp` follows the **refresh** TTL rather than the access TTL it
+describes. Matching the access cookie would delete it at the exact moment
+it becomes useful: a tab restored after the token died still needs to
+read *when* it died, and that tab is precisely the one that should
+refresh immediately instead of firing a request it knows will 401.
+
+`nx_csrf` and `nx_access_exp` are the only two **not** suffixed with
+`AUTH_ENVIRONMENT_ID` — both are read from JS by name, and a
+per-environment name would have to be discovered at runtime before the
+first write or the first scheduled renewal. Neither is signature-bearing,
+so sharing the name across environments is harmless. Every cookie that
+does carry a signature is scoped, `nx_dryrun` included;
+`test_every_signed_cookie_is_scoped` asserts the property rather than a
+list, because the list is what let `nx_dryrun` slip through.
 
 ### 11.2 Endpoints (Phases 0–4)
 

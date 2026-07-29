@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - joserfc ships with Authlib 1.7+
 # which the retry loop resolves by force-refetching the key set.
 _VERIFY_ERRORS = (_AuthlibJoseError, _JoseRfcError, ValueError, KeyError)
 
+from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import apply_claim_mapping, ClaimMappingError
 from .registry import ProviderConfigSnapshot
@@ -56,7 +57,10 @@ from .registry import ProviderConfigSnapshot
 logger = logging.getLogger(__name__)
 
 # Bounded clock skew for ID-token exp/iat/nbf validation (seconds).
-_CLOCK_SKEW_LEEWAY = 60
+# Shared with our own token verification in ``core.tokens`` so the
+# tolerance we extend to an IdP and the one we extend to ourselves
+# cannot drift apart.
+_CLOCK_SKEW_LEEWAY = CLOCK_SKEW_LEEWAY_SECONDS
 # JWKS / discovery cache lifetime (seconds).
 _METADATA_TTL = 3600
 _HTTP_TIMEOUT = 10.0
