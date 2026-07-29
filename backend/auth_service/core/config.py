@@ -131,6 +131,48 @@ REFRESH_ROTATION_GRACE_SECONDS: int = int(
 )
 
 
+# ── Rate limits ──────────────────────────────────────────────────────
+#
+# Two different jobs, so two different keys.
+#
+# The per-IP limits are a coarse flood guard and nothing more. Behind a
+# NAT or an ingress every user shares one address, so a tight per-IP cap
+# does not stop an attacker (they have many addresses) while it does
+# stop an office (they have one). The previous 10/minute on /login meant
+# the eleventh person to arrive at 09:00 was refused. Real DoS handling
+# belongs at the proxy; these values are sized so a legitimate tenant
+# never reaches them — roughly 3x the peak a 2000-seat deployment
+# produces during a morning sign-in rush.
+#
+# The per-account limits are the security control. They key on the
+# account being attacked rather than the address attacking it, so they
+# hold whether the traffic comes from one IP or ten thousand, and a
+# spray against one user cannot be widened by renting more addresses.
+RATELIMIT_LOGIN_PER_IP: str = os.getenv("RATELIMIT_LOGIN_PER_IP", "1000/minute")
+RATELIMIT_SENSITIVE_PER_IP: str = os.getenv(
+    "RATELIMIT_SENSITIVE_PER_IP", "200/minute"
+)
+# Refresh is keyed per rotation family (one browser session), so this is
+# already per-user and needs no headroom for tenant size. A session needs
+# ~4 rotations an hour; 30/minute is ~450x that.
+RATELIMIT_REFRESH_PER_SESSION: str = os.getenv(
+    "RATELIMIT_REFRESH_PER_SESSION", "30/minute"
+)
+
+# Counted on FAILURES only and cleared on a successful sign-in, so
+# someone who signs in correctly twenty times a day is never throttled
+# while a spray against one account stops at ten.
+RATELIMIT_LOGIN_PER_ACCOUNT: str = os.getenv(
+    "RATELIMIT_LOGIN_PER_ACCOUNT", "10 per 15 minutes"
+)
+# Counted on every request: password-reset responses are deliberately
+# identical whether or not the account exists, so there is no failure to
+# distinguish. This bounds mailbombing one person's inbox.
+RATELIMIT_PASSWORD_RESET_PER_ACCOUNT: str = os.getenv(
+    "RATELIMIT_PASSWORD_RESET_PER_ACCOUNT", "3/hour"
+)
+
+
 # ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────
 # The Custom provider reads a JWT-signed cookie/header that simulates an
 # IdP returning AD-style attributes (first/last/email/external_id/claims/

@@ -83,6 +83,21 @@ function isEmptyClaims(claims: PermissionClaims | undefined | null): boolean {
 
 async function pollOnce(): Promise<void> {
     try {
+        // LOAD-BEARING BEYOND PERMISSIONS: this call is also what keeps a
+        // signed-in tab signed in.
+        //
+        // Token refresh is reactive — `fetchWithTimeout` renews on a 401,
+        // and nothing schedules a renewal. In an idle tab this is the only
+        // authenticated request that still fires, so it is what notices the
+        // access cookie has expired: the 401 drives the silent refresh, and
+        // rotation slides the refresh window forward another full TTL. That
+        // is why an open tab stays alive for days without anyone touching it.
+        //
+        // So: do not pass `skipAuthRefresh` here, do not move the interval
+        // above the access-token TTL, and if this poller is ever removed,
+        // move renewal somewhere deliberate first. Breaking any of those
+        // does not fail here — it logs users out minutes later, somewhere
+        // else, with nothing pointing back at this line.
         const claims = await authService.myPermissions()
 
         // NEVER downgrade a real claim set to nothing on the strength of a 200.
@@ -168,11 +183,20 @@ function startChain(): void {
  *  poll still diffs against the seed and invalidates. */
 export function enablePermissionPolling(): void {
     authReady = true
-    if (typeof document !== 'undefined' && document.hidden) return
     // Idempotent: the app shell calls this from an effect that can re-run (and
     // re-runs on every remount), so a second chain must never be spawned.
+    // Checked before seeding — a chain already running owns the snapshot, and
+    // overwriting it would make its next poll diff against the wrong baseline.
     if (running) return
+    // Seed BEFORE the visibility check, not after. A tab that boots hidden —
+    // session restore, cmd-click, opened in the background — used to return
+    // here with ``lastSnapshot`` still ``''``, so its first poll after focus
+    // compared against the empty string, "detected" a change that had not
+    // happened, and ran the unfiltered invalidateAllQueries + cross-tab
+    // broadcast. Restoring a window of ten tabs paid that on every one.
+    // Seeding is pure state, safe to do while hidden; only the chain waits.
     lastSnapshot = claimsSnapshot(useAuthStore.getState().permissions)
+    if (typeof document !== 'undefined' && document.hidden) return
     startChain()
 }
 
