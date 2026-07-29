@@ -208,8 +208,29 @@ limiter = Limiter(
 # Say which backend won. Swallowed storage errors mean a misconfigured
 # endpoint looks identical to a working one from the outside, and the
 # fallback silently makes every limit per-worker.
+#
+# The per-account limiter is built HERE rather than on first use. It used
+# to construct lazily inside ``login``, so a storage it could not build
+# raised on a real user's first sign-in — in production, hours after the
+# deploy, as a 500 with no prior signal. Building it at import turns the
+# same fault into a boot-time log line, and it can no longer raise: the
+# constructor falls back to memory.
+#
+# It gets its own field because the two limiters reach the same Redis by
+# different routes — this one through synchronous storage, that one
+# through asynchronous — so one can work while the other does not. That
+# is precisely what happened: the per-address limits were fine on Redis
+# while the per-account limiter could not be constructed at all.
+#
+# Only appended when a shared store was configured. With none, the
+# "in-memory" ahead of it already says everything.
+_ACCOUNT_LIMITER_BACKEND = get_account_limiter().backend
 logger.info(
-    "Rate-limit storage: %s", describe_storage(_RATELIMIT_STORAGE_URI),
+    "Rate-limit storage: %s%s",
+    describe_storage(_RATELIMIT_STORAGE_URI),
+    ""
+    if _RATELIMIT_STORAGE_URI is None
+    else f" (per-account limiter: {_ACCOUNT_LIMITER_BACKEND})",
 )
 
 

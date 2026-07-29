@@ -230,3 +230,48 @@ def test_an_unreachable_store_does_not_break_the_endpoint():
         "an unreachable rate-limit store must degrade to local counters, "
         "not 500 the login endpoint"
     )
+
+
+def test_the_async_redis_driver_is_a_declared_dependency():
+    """The failure mode this whole file cannot otherwise see.
+
+    ``limits`` ships support for several Redis clients and picks one by
+    default. That default is ``coredis``, which is not in
+    ``requirements.txt`` — so the async storage constructed fine in
+    every environment without Redis (memory backend, driver never
+    touched) and raised ``ConfigurationError`` in the one with Redis,
+    turning every login into a 500.
+
+    Asserting the driver against the requirements file catches the next
+    version of this: a library defaulting to an optional extra we do not
+    install, invisible until something builds the object for real.
+    """
+    import re
+    from pathlib import Path
+
+    from limits.aio.storage import RedisStorage
+
+    from backend.auth_service.ratelimit import _ASYNC_REDIS_IMPLEMENTATION
+
+    # limits names its implementations after the client library, except
+    # redis-py, whose package is ``redis``.
+    package = {"redispy": "redis"}.get(
+        _ASYNC_REDIS_IMPLEMENTATION, _ASYNC_REDIS_IMPLEMENTATION,
+    )
+    assert package in RedisStorage.DEPENDENCIES, (
+        f"limits no longer supports the {_ASYNC_REDIS_IMPLEMENTATION} client"
+    )
+
+    requirements = (
+        Path(__file__).resolve().parents[1] / "requirements.txt"
+    ).read_text()
+    declared = {
+        re.split(r"[<>=!\[ ]", line.strip(), 1)[0].lower()
+        for line in requirements.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert package in declared, (
+        f"the rate limiter's async Redis client ({package}) is not declared "
+        "in backend/requirements.txt. It will work wherever Redis is absent "
+        "and 500 every login wherever it is present."
+    )

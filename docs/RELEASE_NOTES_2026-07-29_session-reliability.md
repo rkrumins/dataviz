@@ -92,6 +92,30 @@ rejects a token that has not expired, and a token minted a second in the future 
 rejected as not-yet-valid. The OIDC path had allowed 60 seconds of skew from the start;
 we did not extend the same tolerance to ourselves.
 
+### A rate limiter that could deny authentication
+
+Introduced by this work and caught in production, so it is worth recording rather than
+quietly fixing. `limits` supports several Redis client libraries for its **asynchronous**
+storage and defaults to `coredis`, which this image does not ship. Its *synchronous*
+storage — the one slowapi drives for the per-address limits — has no such default, which
+is why the flood guard kept working while the new per-account throttle raised
+`ConfigurationError` from its constructor and returned 500 from every `POST /auth/login`
+and `POST /auth/forgot-password`.
+
+No new dependency was needed: `redis>=8.0.1` was already declared, and `limits` will use
+its asyncio client when asked.
+
+The deeper fault was that the constructor was the one place in that class which did not
+fail open. Every method swallows storage errors on the stated grounds that a limiter which
+cannot reach Redis must not become a login outage — but a storage that could not be
+*built* raised straight through into the endpoint. It now falls back to per-worker
+counting and logs at ERROR, so no storage misconfiguration can deny sign-in again.
+
+It reached production because the Redis branch had no test coverage at all: the resolver
+returns nothing in dev and test, so every run built the in-memory backend and the Redis
+path was never constructed. That branch is now covered, including a check that the client
+library it selects is a package listed in `requirements.txt`.
+
 ### One token family outside the key ring
 
 Seven of the eight families sign and verify through the shared key-ring helpers. The
@@ -110,6 +134,7 @@ and the scoping is now asserted as a property rather than as a list of names.
 | Rotation | Atomic claim on the primary key; a re-presented token within `REFRESH_ROTATION_GRACE_SECONDS` gets the successor the winner already minted instead of killing the family |
 | Revocation | Rejections carry their side effects out of the request session and commit separately, so they survive the rollback |
 | Rate limits | Generous per-address flood guard **plus** a strict per-account control; `/refresh` keyed per browser session; counters shared across replicas |
+| Limiter storage | The async limiter uses the redis-py asyncio client we already ship, not the `coredis` default; construction falls back to memory instead of 500ing sign-in; both limiters' backends are reported at boot |
 | Client | `tryRefresh` classifies its outcome — only a definitive 401 signs you out; 429/5xx/network get one bounded retry |
 | Guards | A real `permissionsStatus` tri-state; no denial rendered until the answer is known |
 | Login page | Shows the form, with an explicit "Continue as \<name\>" for a still-valid session |
@@ -152,13 +177,20 @@ through the central Redis resolver on the STREAMS role automatically — the sam
 revocation uses — so if Redis is configured, this already works. Confirm at startup:
 
 ```
-Rate-limit storage: redis://10.1.2.3:6379/0
+Rate-limit storage: redis://10.1.2.3:6379/0 (per-account limiter: redis)
 ```
 
 If it says `in-memory (PER WORKER — limits are not shared across replicas)`, no Redis
 endpoint resolved. Set `RATELIMIT_STORAGE_URI` explicitly to override.
 
-An unreachable store degrades to per-worker counting rather than failing requests.
+**The two limiters are reported separately because they can disagree.** The per-address
+limit runs on synchronous storage and the per-account limit on asynchronous storage —
+different code paths to the same Redis, so one can succeed while the other does not. A
+`per-account limiter: memory (FELL BACK)` against a configured Redis means the per-account
+limits are per-worker; the preceding ERROR line says why.
+
+An unreachable store degrades to per-worker counting rather than failing requests, and so
+does a store that cannot be constructed at all.
 
 ### If two environments can be open in the same browser
 
@@ -235,7 +267,7 @@ second.
 
 ```
 Session config: access_ttl=900s refresh_ttl=7d revocation_ttl=1020s rotation_grace=30s clock_skew_leeway=60s sso_ceiling=24h
-Rate-limit storage: redis://...
+Rate-limit storage: redis://... (per-account limiter: redis)
 ```
 
 **Startup now refuses an incoherent config.** If `RBAC_REVOCATION_TTL_SECONDS` is set
