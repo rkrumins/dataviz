@@ -609,7 +609,12 @@ graph TB
 | `GRAPH_PROVIDER` | `falkordb` | No | Provider type: mock, falkordb, neo4j, datahub |
 | `MANAGEMENT_DB_URL` | SQLite path | No | PostgreSQL URL for production |
 | `CREDENTIAL_ENCRYPTION_KEY` | _(none)_ | Prod | Fernet key for credential encryption |
-| `JWT_SECRET_KEY` | _(random)_ | Prod | HS256 signing key |
+| `JWT_SECRET_KEY` | _(none — required)_ | **All** | HS256 signing key, ≥32 chars. There is no fallback: the process refuses to start without it, in every environment |
+| `JWT_SECRET_KEY_PREVIOUS` | _(none)_ | No | Comma-separated retired keys, verification only. Set this **before** rotating `JWT_SECRET_KEY`, or every live session dies the instant the new value lands — and during a rolling update, pods on the old and new key flip the same user between authenticated and 401 |
+| `AUTH_ENVIRONMENT_ID` | _(none)_ | No | Scopes the session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in the same browser — cookie jars are keyed by domain, not by cluster, so identically-named cookies overwrite each other |
+| `JWT_REFRESH_EXPIRY_DAYS` | `7` | No | Refresh-cookie lifetime — how long "stay signed in" lasts. The window slides on every rotation |
+| `REFRESH_ROTATION_GRACE_SECONDS` | `30` | No | How long a re-presented refresh token reads as a concurrent refresh rather than a stolen chain. `0` = strict rotation, which signs users out of every tab when two rotate at once |
+| `RBAC_REVOCATION_TTL_SECONDS` | _(derived)_ | No | Leave unset. Derived from `JWT_EXPIRY_MINUTES` + 60s; a value below the access TTL makes forced revocation stop taking effect before the token expires, and startup refuses it |
 | `JWT_EXPIRY_MINUTES` | `15` | No | Access-token lifetime. Permission claims ride in the token, so this is also how long a revoked or demoted session keeps working. Code default is `5`; every shipped config sets `15` |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
 | `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
@@ -620,7 +625,15 @@ graph TB
 | `FALKORDB_SEED_FILE` | _(none)_ | No | JSON path for seeding graph data |
 | `DB_ECHO` | `false` | No | SQLAlchemy SQL logging |
 
-> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and a stable `JWT_SECRET_KEY`, and override the bootstrap `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in plaintext; an auto-generated JWT key rotates on every restart and invalidates all tokens. See the [Developer Setup — Production Environment Checklist](/docs/setup).
+> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and override the bootstrap
+> `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in
+> plaintext. `JWT_SECRET_KEY` is mandatory everywhere — the process will not start without
+> one, so there is no auto-generated key to worry about — but note the strength check is a
+> **length** check: the 34-character placeholder in `.env.example` clears the ≥32 floor, so
+> a deployment that never replaces it passes validation while being trivially guessable.
+> See the [Developer Setup — Production Environment Checklist](/docs/setup) and
+> [Multi-Environment Sessions](/docs/multi-environment-sessions) for rotating the key
+> without signing everyone out.
 
 ---
 

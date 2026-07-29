@@ -1420,14 +1420,29 @@ attacks at the bottom of the section.
 
 ### 10.2 Out of scope (defended elsewhere or deferred)
 
-* **DDoS / rate limiting** — `slowapi` decorates `/login` and
-  `/refresh` at 10/min and 30/min respectively. `/login` is keyed on
-  the client address; `/refresh` is keyed on the **rotation family**,
-  so one browser session gets its own budget. Keying it on the address
-  put every user behind a NAT or an ingress in one bucket, and a 429 on
-  refresh reads to the client as a lost session. Storage is shared via
-  `RATELIMIT_STORAGE_URI` when set — otherwise each gunicorn worker
-  counts separately. Anything broader is the reverse proxy / WAF's job.
+* **DDoS / rate limiting** — two controls with different keys, because
+  they do different jobs.
+
+  The **per-address** limits (`RATELIMIT_LOGIN_PER_IP`,
+  `RATELIMIT_SENSITIVE_PER_IP`) are a coarse flood guard. Behind a NAT
+  or an ingress every user shares one address, so a tight cap does not
+  stop an attacker — they have many addresses — while it does stop an
+  office, which has one. They are sized so a ~2000-seat tenant never
+  reaches them during a morning sign-in rush. Anything broader is the
+  reverse proxy / WAF's job.
+
+  The **per-account** limits (`RATELIMIT_LOGIN_PER_ACCOUNT`,
+  `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT`) are the security control.
+  They key on the account being attacked rather than the address
+  attacking it, so a spray is bounded however many hosts it comes from.
+  Login counts failures only and clears on success.
+
+  `/refresh` is keyed on the **rotation family** — one browser session
+  — because keying it on the address put every user behind an ingress
+  in one bucket, and a 429 on refresh reads to the client as a lost
+  session. Counters resolve through the central Redis resolver so they
+  are shared across replicas; an unreachable store degrades to
+  per-worker counting rather than failing requests.
 * **MFA** — not implemented. See `SSO.md §4` for the deferred
   pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
@@ -1571,7 +1586,14 @@ by `source_event_id` UNIQUE.
 | `RBAC_REVOCATION_TTL_SECONDS` | derived: access TTL + 60s | sid TTL in Redis. Derived from `JWT_EXPIRY_MINUTES` rather than set beside it — the two drifted, and a tombstone shorter than the token means revocation silently stops taking effect. Startup refuses an override below the access TTL. |
 | `REFRESH_ROTATION_GRACE_SECONDS` | `30` | how long a re-presented refresh token is read as a concurrent refresh rather than a stolen chain. `0` = strict rotation |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | peers whose `X-Forwarded-For` is trusted. Must name the proxy (or `*`) behind an ingress, or every caller is recorded as the proxy |
-| `RATELIMIT_STORAGE_URI` | (none → per-process) | shared rate-limit storage; falls back to `REDIS_URL` |
+| `RATELIMIT_STORAGE_URI` | (none → resolver) | Override for rate-limit counter storage. Unset, counters resolve through the central Redis resolver on the STREAMS role — the same path revocation takes — so they follow whatever each environment configures, including production's Memorystore coordinates. A defaulted (unconfigured) endpoint means in-process memory |
+| `AUTH_ENVIRONMENT_ID` | (none) | Scopes session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in one browser: cookie jars key on domain, not cluster, so identically-named cookies overwrite each other and the receiving side can only report an opaque signature failure |
+| `JWT_SECRET_KEY_PREVIOUS` | (none) | Comma-separated retired keys, most-recent first, accepted for **verification only**. Set before rotating `JWT_SECRET_KEY`. Same ≥32-char floor as the active key, since a retired key is still trusted |
+| `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Per-address cap on `/login`, `/resolve` and portal login. A coarse flood guard only — behind a NAT every user shares one address, so a tight cap stops the office and not the attacker. Sized so a ~2000-seat tenant never reaches it |
+| `RATELIMIT_SENSITIVE_PER_IP` | `200/minute` | Same, for signup, invite redemption, and password forgot/reset |
+| `RATELIMIT_REFRESH_PER_SESSION` | `30/minute` | Per rotation family, i.e. per browser session. Already per-user, so it needs no headroom for tenant size — a session needs ~4 rotations an hour |
+| `RATELIMIT_LOGIN_PER_ACCOUNT` | `10 per 15 minutes` | **The brute-force control.** Keys on the account under attack, so it holds however many addresses the attempts come from. Counts failures only and is cleared by a successful sign-in, so a legitimate user is never throttled |
+| `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT` | `3/hour` | Bounds mailbombing one person. Counted on every request, since reset responses are deliberately identical whether or not the account exists |
 | `MANAGEMENT_DB_URL` | (none — required) | management Postgres |
 
 ### 11.5 DB schema (auth subset)
