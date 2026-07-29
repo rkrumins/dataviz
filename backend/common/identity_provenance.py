@@ -14,6 +14,13 @@ every field the moment an identity row exists would hand those people a
 blank name they can never fill in — a worse outcome than the drift we
 were trying to prevent.
 
+**A guess is not an assertion.** That display-name fallback is exactly
+that: ``"Doe, Alice"`` and ``"Maria del Carmen García"`` do not divide the
+same way, and no rule gets every name right. Ownership means the person
+loses the ability to correct the field and we re-apply our answer on every
+login — so it is claimed only when the IdP named the halves itself. A
+split name is still written, and stays theirs to fix.
+
 **Ownership implies re-sync.** A read-only field that nothing refreshes
 is not owned by anybody: it is a stale local copy nobody may correct.
 So the same snapshot that marks a field managed is written on every
@@ -41,14 +48,25 @@ _METADATA_KEY = "idp_managed"
 
 
 def asserted_fields(
-    *, first_name: Optional[str], last_name: Optional[str],
+    *,
+    first_name: Optional[str],
+    last_name: Optional[str],
+    derived: bool = False,
 ) -> list[str]:
     """Which of the manageable fields this login actually carried.
 
     Values arrive already mapped by ``claim_mapper``, so a blank here
     means the IdP released nothing usable for that field — regardless of
     which claim path it would have come from.
+
+    *derived* says the two names were split out of a single full-name
+    claim (``ProviderIdentity.names_derived_from``). They are populated,
+    but by us rather than by the directory, so nothing is owned: the
+    values seed the profile and remain editable. Both names come from one
+    split, which is why this is one flag rather than two.
     """
+    if derived:
+        return []
     present = {"first_name": first_name, "last_name": last_name}
     return [f for f in MANAGEABLE_FIELDS if (present.get(f) or "").strip()]
 

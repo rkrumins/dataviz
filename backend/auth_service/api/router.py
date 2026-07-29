@@ -233,15 +233,22 @@ class _Ack(BaseModel):
 class ProviderSummary(BaseModel):
     """One entry in the public ``/auth/providers`` catalog. Contains
     no secrets — operators can render the login UI directly off this
-    list."""
+    list.
+
+    Serialised camelCase, like every other DTO this API returns. It was
+    the one that was not, and the login page reads ``displayName`` and
+    ``buttonLabel`` — so every SSO button rendered with no text in it at
+    all, an empty outline that only the sighted-and-curious would click.
+    Both routes below pass ``response_model_by_alias`` to match.
+    """
     model_config = ConfigDict(populate_by_name=True)
     id: str
     slug: str
-    display_name: str = ""
+    display_name: str = Field("", alias="displayName")
     kind: str
     priority: int = 100
-    button_label: Optional[str] = None
-    button_icon: Optional[str] = None
+    button_label: Optional[str] = Field(None, alias="buttonLabel")
+    button_icon: Optional[str] = Field(None, alias="buttonIcon")
     # Non-secret, per-kind hints the login UI needs to start the flow.
     # Populated from a strict whitelist (see ``_public_config``) — never
     # the raw settings dict, which holds secrets.
@@ -1010,7 +1017,8 @@ async def _enabled_provider_summaries(request: Request, cfg) -> list[ProviderSum
     ]
 
 
-@router.get("/providers", response_model=list[ProviderSummary])
+@router.get("/providers", response_model=list[ProviderSummary],
+            response_model_by_alias=True)
 async def list_providers(request: Request):
     """Return the public catalog of enabled IdPs.
 

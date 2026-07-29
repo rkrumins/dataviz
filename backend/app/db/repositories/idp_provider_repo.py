@@ -272,6 +272,12 @@ async def update_provider(
     if row is None:
         return None
     if display_name is not None:
+        # Same rule as creation, which refuses a blank one. Without this
+        # an edit could empty the field a create could not, and the login
+        # page would be left with nothing to call the connection but its
+        # slug.
+        if not display_name.strip():
+            raise ProviderValidationError("display_name is required")
         row.display_name = display_name.strip()
     if enabled is not None:
         row.enabled = enabled

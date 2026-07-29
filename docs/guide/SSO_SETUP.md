@@ -92,6 +92,23 @@ can drift away from it. Leave the row empty and the field stays theirs to edit.
 **Full / display name** is never taken this way, whatever you map: it is the one
 name a person can always choose for themselves.
 
+#### If your IdP only sends one name
+
+Plenty do — Entra's `name`, a portal's `fullName` — with no separate given and
+family name. Nothing to configure: when both name rows would otherwise be empty,
+we split the full name and the rows say **split from `name`** rather than showing
+you an empty field.
+
+Splitting is a guess. `Doe, Alice` is read as *Alice Doe* — the comma marks the
+family name first, as Active Directory writes it — and everything else divides at
+the first space, so `Maria del Carmen García` keeps the particle with the
+surname. A name with nothing to divide, like `Prince` or `山田太郎`, lands whole
+in the first name rather than being cut somewhere arbitrary.
+
+Because it is a guess, a split name is **not** marked IdP-managed: it fills the
+profile in and stays the person's to correct. Map a claim of its own — even a
+custom one — and the connection owns the field properly.
+
 > **Note:** *Where the sample came from matters.* Until someone signs in, the
 > preview runs against a worked example of your vendor's payload — good enough to
 > check the shape, but it is not your tenant. The bar above the columns says which

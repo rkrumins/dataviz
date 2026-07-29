@@ -106,8 +106,8 @@ describe('local + SSO, email-first off', () => {
         expect(password()).toBeInTheDocument()
         expect(screen.getByText(/enter workspace/i)).toBeInTheDocument()
         expect(screen.getByText(/or sign in with/i)).toBeInTheDocument()
-        expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
-        expect(screen.getByText('Okta')).toBeInTheDocument()
+        expect(await screen.findByText(/Continue with Corporate Entra/)).toBeInTheDocument()
+        expect(screen.getByText(/Continue with Okta/)).toBeInTheDocument()
         expect(screen.getByText(/forgot your password/i)).toBeInTheDocument()
     })
 
@@ -132,7 +132,7 @@ describe('SSO-only', () => {
         posture({ allowLocalLogin: false, providers: [ENTRA] })
         renderLogin()
 
-        expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
+        expect(await screen.findByText(/Continue with Corporate Entra/)).toBeInTheDocument()
         expect(password()).not.toBeInTheDocument()
         expect(screen.queryByText(/enter workspace/i)).not.toBeInTheDocument()
         expect(screen.queryByText(/forgot your password/i)).not.toBeInTheDocument()
@@ -144,7 +144,7 @@ describe('SSO-only', () => {
         posture({ allowLocalLogin: false, providers: [ENTRA] })
         renderLogin()
 
-        await screen.findByText('Corporate Entra')
+        await screen.findByText(/Continue with Corporate Entra/)
         expect(screen.queryByText(/or sign in with/i)).not.toBeInTheDocument()
         expect(emailField()).not.toBeInTheDocument()
     })
@@ -162,8 +162,8 @@ describe('email-first', () => {
 
         expect(await screen.findByLabelText(/^email$/i)).toBeInTheDocument()
         expect(password()).not.toBeInTheDocument()
-        expect(screen.queryByText('Corporate Entra')).not.toBeInTheDocument()
-        expect(screen.queryByText('Okta')).not.toBeInTheDocument()
+        expect(screen.queryByText(/Continue with Corporate Entra/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Continue with Okta/)).not.toBeInTheDocument()
     })
 
     it('routes a known domain to its provider', async () => {
@@ -196,8 +196,8 @@ describe('email-first', () => {
         renderLogin()
 
         await user.click(await screen.findByText(/other ways to sign in/i))
-        expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
-        expect(screen.getByText('Okta')).toBeInTheDocument()
+        expect(await screen.findByText(/Continue with Corporate Entra/)).toBeInTheDocument()
+        expect(screen.getByText(/Continue with Okta/)).toBeInTheDocument()
     })
 
     it('offers no password escape when local login is off', async () => {

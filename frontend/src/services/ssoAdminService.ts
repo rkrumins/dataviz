@@ -152,6 +152,15 @@ export interface TestMappingResult {
      * eventually happens.
      */
     resolvedFrom?: Record<string, string | null>
+    /**
+     * The claim `first_name`/`last_name` were split out of, when the IdP
+     * released one full name instead of naming the halves. Null otherwise.
+     *
+     * Both names are populated in that case but `resolvedFrom` reports
+     * `null` for each — correctly, since none of *their* candidates
+     * matched — so this is what tells the two apart.
+     */
+    namesDerivedFrom?: string | null
 }
 
 export interface IdpGroupMapping {

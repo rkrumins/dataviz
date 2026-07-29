@@ -61,6 +61,13 @@ class ProviderIdentity:
     groups: tuple[str, ...] = field(default_factory=tuple)
     auth_time: Optional[int] = None
     attributes: dict = field(default_factory=dict)
+    #: The claim ``first_name``/``last_name`` were *split out of*, when the
+    #: IdP released a single full name instead of naming the halves —
+    #: ``None`` when it named them. A split is a guess about where one
+    #: name ends and the next begins, so the two are not interchangeable:
+    #: ``identity_provenance`` declines to hand the IdP ownership of a
+    #: field we inferred, and the mapping preview says which it is.
+    names_derived_from: Optional[str] = None
 
 
 @runtime_checkable
