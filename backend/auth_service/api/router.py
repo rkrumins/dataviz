@@ -143,7 +143,19 @@ def _refresh_family_key(request: Request) -> str:
 # across N replicas, so "30/minute" silently meant somewhere between 30
 # and 30xNx4 depending on which worker the load balancer picked. Failures
 # are swallowed: a Redis outage must not become a site-wide lockout.
-_RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("REDIS_URL")
+#
+# The trailing ``or None`` is load-bearing. The production overlay sets
+# ``REDIS_URL: ""`` and expects the Secret to supply the real value; if
+# it doesn't, an empty string reaches here and ``or`` alone would pass
+# ``storage_uri=""`` to the limiter rather than falling back to memory.
+# An unset variable and one set to the empty string mean the same thing
+# at this layer, so normalise both to None.
+def _resolve_ratelimit_storage_uri() -> Optional[str]:
+    """Pick the limiter's storage backend from the environment."""
+    return os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("REDIS_URL") or None
+
+
+_RATELIMIT_STORAGE_URI = _resolve_ratelimit_storage_uri()
 
 limiter = Limiter(
     key_func=get_remote_address,

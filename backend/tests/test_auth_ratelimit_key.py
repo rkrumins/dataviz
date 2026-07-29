@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from starlette.requests import Request
 
-from backend.auth_service.api.router import _refresh_family_key
+from backend.auth_service.api.router import (
+    _refresh_family_key,
+    _resolve_ratelimit_storage_uri,
+)
 from backend.auth_service.cookies import REFRESH_COOKIE_NAME
 from backend.auth_service.core.tokens import create_refresh_token
 
@@ -105,3 +108,50 @@ def test_a_forged_family_cannot_choose_its_bucket():
         algorithm="HS256",
     )
     assert _refresh_family_key(_request(forged)) == "10.0.0.1"
+
+
+# ── Storage URI resolution ───────────────────────────────────────────
+
+def _resolve(monkeypatch, **env):
+    """Resolve the storage URI under *env*.
+
+    Calls the helper directly rather than reloading the module. A reload
+    would rebuild the module-level ``limiter``, and both this router and
+    ``endpoints/auth.py`` are asserted elsewhere to share one instance —
+    so it would leave a different object behind for whatever ran next.
+    """
+    for key in ("RATELIMIT_STORAGE_URI", "REDIS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return _resolve_ratelimit_storage_uri()
+
+
+def test_blank_redis_url_falls_back_to_memory(monkeypatch):
+    """``REDIS_URL: ""`` must not become ``storage_uri=""``.
+
+    The production overlay sets it empty on purpose, expecting the
+    Secret to supply the real value. When the Secret does not, an empty
+    string would reach the limiter as a malformed storage URI instead of
+    the in-memory fallback — a config shape that exists in exactly one
+    environment, which is the worst place to discover it.
+    """
+    assert _resolve(monkeypatch, REDIS_URL="") is None
+
+
+def test_unset_is_the_same_as_blank(monkeypatch):
+    assert _resolve(monkeypatch) is None
+
+
+def test_redis_url_is_used_when_set(monkeypatch):
+    assert _resolve(
+        monkeypatch, REDIS_URL="redis://redis:6379/1",
+    ) == "redis://redis:6379/1"
+
+
+def test_explicit_storage_uri_wins_over_redis_url(monkeypatch):
+    assert _resolve(
+        monkeypatch,
+        RATELIMIT_STORAGE_URI="redis://limits:6379/2",
+        REDIS_URL="redis://redis:6379/0",
+    ) == "redis://limits:6379/2"

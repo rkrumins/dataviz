@@ -34,6 +34,14 @@ data:
   # caching/state. DB index 1 segregates this traffic from REDIS_URL
   # (DB 0) on the same dedicated Redis service.
   CACHE_REDIS_URL: "redis://redis:6379/1"
+  # Shared rate-limit counters. Without this slowapi keeps them in
+  # process memory, so the limit is per gunicorn worker — 4 per pod
+  # across N replicas — and means something different depending on which
+  # worker the ingress happened to pick. DB 1 alongside the cache: both
+  # are TTL'd and loss-tolerant, and they coexist by key prefix. Losing
+  # this Redis costs a window of unlimited requests, not a lockout —
+  # the limiter is constructed with swallow_errors for that reason.
+  RATELIMIT_STORAGE_URI: "redis://redis:6379/1"
   LOG_LEVEL: "INFO"
   DB_POOL_TIMEOUT_SECS: "10"
   DB_POOL_RECYCLE_SECS: "1800"
