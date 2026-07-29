@@ -46,18 +46,18 @@ export const FIELDS: MappingField[] = [
     },
     {
         key: 'first_name', label: 'First name', managed: true,
-        hint: 'Falls back to splitting the display name when both name fields are empty.',
+        hint: 'Split out of the full name when both name fields are empty — a guess, so it is not owned by this connection.',
     },
     {
         key: 'last_name', label: 'Last name', managed: true,
-        hint: 'Falls back to splitting the display name when both name fields are empty.',
+        hint: 'Split out of the full name when both name fields are empty — a guess, so it is not owned by this connection.',
     },
     {
         // Deliberately not `managed`, and the asymmetry is the point: this is
         // the name a person can always set for themselves, which is what makes
         // locking the two above tolerable.
         key: 'display_name', label: 'Full / display name',
-        hint: 'Used only when first and last name are both empty — split on the first space.',
+        hint: 'Used only when first and last name are both empty. Split on the comma for "Doe, Alice", otherwise on the first space.',
     },
     {
         key: 'groups', label: 'Groups',

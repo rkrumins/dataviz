@@ -11,7 +11,7 @@
  * A required field that resolved nothing says so in place, rather than as
  * a red sentence somewhere below.
  */
-import { AlertCircle, Check, Lock, RotateCcw, X } from 'lucide-react'
+import { AlertCircle, Check, Lock, RotateCcw, Scissors, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FIELDS } from './fields'
 
@@ -29,6 +29,9 @@ export interface FieldRow {
     /** Which candidate supplied the value, from the server's provenance.
      *  `undefined` = not resolved yet (no sample); `null` = nothing matched. */
     winner?: string | null
+    /** The full-name claim this row was split out of, when none of its own
+     *  candidates fired. Set only on the two name fields. */
+    derivedFrom?: string | null
     /** The resolved value, already formatted for display. */
     value?: string
 }
@@ -102,6 +105,18 @@ function mapped(row: FieldRow): boolean {
     return typeof row.winner === 'string'
 }
 
+/**
+ * Populated, but by us rather than by the directory.
+ *
+ * A name split out of a full name is a guess about where one name ends and
+ * the next begins, so `asserted_fields` declines to claim it and the person
+ * keeps the ability to correct it. The row has to show both halves of that:
+ * the value is real, and the lock is deliberately absent.
+ */
+function derived(row: FieldRow): boolean {
+    return row.winner === null && Boolean(row.derivedFrom)
+}
+
 function Row({
     row, onRemoveCandidate, onAddCandidate, onRevert,
 }: {
@@ -113,7 +128,8 @@ function Row({
     // Distinguish "we have not resolved anything yet" from "we resolved and
     // nothing matched". A dash for both would read as a broken mapping when
     // the operator has simply not pasted a sample.
-    const unresolved = row.winner === null
+    const isDerived = derived(row)
+    const unresolved = row.winner === null && !isDerived
     const missingRequired = row.required && unresolved
 
     return (
@@ -170,13 +186,20 @@ function Row({
                     </span>
                 ) : row.value !== undefined ? (
                     <span className="inline-flex items-center gap-1.5 min-w-0">
-                        <Check className="w-3 h-3 shrink-0 text-emerald-500" />
+                        {isDerived
+                            ? <Scissors className="w-3 h-3 shrink-0 text-ink-muted" />
+                            : <Check className="w-3 h-3 shrink-0 text-emerald-500" />}
                         <span className="font-mono text-[11px] text-ink truncate">
                             {row.value || '(empty)'}
                         </span>
                         {row.winner && (
                             <span className="shrink-0 text-[10px] text-ink-muted">
                                 from <code className="font-mono">{row.winner}</code>
+                            </span>
+                        )}
+                        {isDerived && (
+                            <span className="shrink-0 text-[10px] text-ink-muted">
+                                split from <code className="font-mono">{row.derivedFrom}</code>
                             </span>
                         )}
                     </span>
@@ -199,6 +222,16 @@ function Row({
                     Mapped here, this becomes read-only on the person&apos;s own
                     profile — kept in step with your directory, and no longer
                     theirs to edit.
+                </p>
+            )}
+
+            {/* The absent lock is the thing to explain. Everywhere else a
+                resolved name is owned by the connection, so its absence
+                here looks like an oversight rather than a decision. */}
+            {row.managed && isDerived && (
+                <p className="mt-1.5 text-[10px] text-ink-muted">
+                    Guessed by splitting the full name, so it stays editable —
+                    map a claim of its own and this connection owns it instead.
                 </p>
             )}
 
