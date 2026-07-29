@@ -16,13 +16,14 @@ The "family" semantics:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import RevokedRefreshJtiORM
+from backend.auth_service.core.config import JWT_REFRESH_EXPIRY_DAYS
 from backend.auth_service.refresh import RotationRecord
 
 
@@ -40,10 +41,54 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _far_future_iso() -> str:
-    # Family-revoked sentinels never expire (the family is dead forever).
-    # Use year 9999 so the GC sweep skips them.
-    return "9999-12-31T23:59:59+00:00"
+# A family sentinel has to outlive every token that could still be
+# presented against it — the newest possible member of that family was
+# minted moments before the revocation, so it expires one refresh TTL
+# from now. Beyond that the sentinel is guarding against tokens that
+# would be refused for being expired anyway.
+#
+# It used to be stamped year 9999 so the sweep would skip it, on the
+# reasoning that a dead family is dead forever. True, and it made every
+# revocation a permanent row: the one kind of row that accumulates for
+# the life of the deployment and can never be reclaimed.
+_SENTINEL_GRACE_DAYS = 1
+
+
+def _sentinel_expiry_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        + timedelta(days=JWT_REFRESH_EXPIRY_DAYS + _SENTINEL_GRACE_DAYS)
+    ).isoformat()
+
+
+async def purge_expired(session: AsyncSession, *, batch: int = 5_000) -> int:
+    """Delete revocation rows whose tokens can no longer be presented.
+
+    Returns the number deleted. Bounded per call so one sweep cannot
+    hold a long transaction on the jobs pool.
+
+    Nothing pruned this table before. ``expires_at`` was written from the
+    start and documented as the GC marker, but no sweep ever read it, so
+    the table grew by one row per rotation for the life of the
+    deployment — at a 15-minute access TTL that is roughly
+    ``users x tabs x 32`` rows a day, forever. Reads stay fast because
+    they are primary-key lookups; it is storage and vacuum pressure
+    rather than latency, which is exactly why nobody noticed.
+    """
+    cutoff = datetime.now(timezone.utc).isoformat()
+    doomed = (
+        await session.execute(
+            select(RevokedRefreshJtiORM.jti)
+            .where(RevokedRefreshJtiORM.expires_at < cutoff)
+            .limit(batch)
+        )
+    ).scalars().all()
+    if not doomed:
+        return 0
+    await session.execute(
+        delete(RevokedRefreshJtiORM).where(RevokedRefreshJtiORM.jti.in_(doomed))
+    )
+    return len(doomed)
 
 
 class SQLAlchemyRefreshStore:
@@ -165,7 +210,7 @@ class SQLAlchemyRefreshStore:
         return await self._insert_ignore(
             jti=_family_sentinel(family_id),
             family_id=family_id,
-            expires_at_iso=_far_future_iso(),
+            expires_at_iso=_sentinel_expiry_iso(),
         )
 
 

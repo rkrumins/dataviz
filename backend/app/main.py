@@ -1047,6 +1047,21 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
+    # Refresh-token revocation sweep. Same owner role as the relay: the
+    # table is shared, so three web replicas sweeping it would only
+    # contend for the same rows.
+    _app.state._refresh_gc_shutdown = asyncio.Event()
+    _app.state._refresh_gc_task = None
+    if runs_scheduler():
+        from .services.refresh_token_gc import run_sweeper as _run_refresh_gc
+        _app.state._refresh_gc_task = asyncio.create_task(
+            _run_refresh_gc(
+                get_jobs_session,
+                _app.state._refresh_gc_shutdown,
+            ),
+            name="refresh-token-gc",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
     # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
     # relay so replicas don't each probe every IdP. The cache is initialised
@@ -1126,6 +1141,21 @@ async def lifespan(_app: FastAPI):
             _outbox_relay_task.cancel()
             try:
                 await _outbox_relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the refresh-token sweeper before DB pool teardown, same shape.
+    _refresh_gc_shutdown = getattr(_app.state, "_refresh_gc_shutdown", None)
+    _refresh_gc_task = getattr(_app.state, "_refresh_gc_task", None)
+    if _refresh_gc_shutdown is not None:
+        _refresh_gc_shutdown.set()
+    if _refresh_gc_task is not None and not _refresh_gc_task.done():
+        try:
+            await asyncio.wait_for(_refresh_gc_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _refresh_gc_task.cancel()
+            try:
+                await _refresh_gc_task
             except (asyncio.CancelledError, Exception):
                 pass
 
