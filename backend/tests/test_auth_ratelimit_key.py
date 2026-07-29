@@ -155,3 +155,78 @@ def test_explicit_storage_uri_wins_over_redis_url(monkeypatch):
         RATELIMIT_STORAGE_URI="redis://limits:6379/2",
         REDIS_URL="redis://redis:6379/0",
     ) == "redis://limits:6379/2"
+
+
+# ── Where the counters actually live ─────────────────────────────────
+
+def _clear_redis_env(monkeypatch):
+    for key in (
+        "RATELIMIT_STORAGE_URI", "REDIS_URL",
+        "REDIS_STREAMS_HOST", "REDIS_STREAMS_PORT", "REDIS_STREAMS_DB",
+        "REDIS_STREAMS_PASSWORD", "REDIS_STREAMS_USERNAME",
+        "REDIS_STREAMS_TLS_ENABLED", "REDIS_STREAMS_TLS_CA_CERTS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_production_role_prefixed_vars_resolve(monkeypatch):
+    """The case that made this necessary.
+
+    Production deletes the in-cluster redis Service and addresses
+    Memorystore through role-prefixed vars with its own AUTH password
+    and TLS CA — while deliberately blanking REDIS_URL so no stale
+    coordinate survives the overlay merge. A limiter reading REDIS_URL
+    finds nothing there and silently reverts to per-worker counting, in
+    the one environment that most needs shared counters.
+    """
+    from backend.auth_service.ratelimit import resolve_storage
+
+    _clear_redis_env(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "")            # as the overlay leaves it
+    monkeypatch.setenv("REDIS_STREAMS_HOST", "10.1.2.3")
+    monkeypatch.setenv("REDIS_STREAMS_PORT", "6379")
+    monkeypatch.setenv("REDIS_STREAMS_DB", "0")
+    monkeypatch.setenv("REDIS_STREAMS_PASSWORD", "s3cret")
+    monkeypatch.setenv("REDIS_STREAMS_TLS_ENABLED", "true")
+
+    uri, options = resolve_storage()
+    assert uri == "rediss://10.1.2.3:6379/0", "TLS must select the rediss scheme"
+    assert options["password"] == "s3cret", "AUTH password must be carried"
+
+
+def test_nothing_configured_means_in_memory(monkeypatch):
+    """A defaulted host is not a configured one.
+
+    The central resolver always answers, falling back to localhost. Only
+    its provenance map distinguishes "somebody configured localhost"
+    from "nobody configured anything" — and treating the default as real
+    points tests and Redis-less dev at a dead port, paying a refused
+    connection per request to reach the answer memory gives for free.
+    """
+    from backend.auth_service.ratelimit import resolve_storage
+
+    _clear_redis_env(monkeypatch)
+    assert resolve_storage() == (None, {})
+
+
+def test_credentials_are_never_logged(monkeypatch):
+    """The startup line names the backend; it must not name the password."""
+    from backend.auth_service.ratelimit import describe_storage
+
+    assert "hunter2" not in describe_storage("rediss://user:hunter2@10.1.2.3:6379/0")
+    assert describe_storage(None).startswith("in-memory")
+
+
+def test_an_unreachable_store_does_not_break_the_endpoint():
+    """swallow_errors is not enough, and the name suggests otherwise.
+
+    A refused connection surfaces from the storage layer during ``incr``
+    and escapes as a 500, so an unreachable Redis did not degrade the
+    limit — it broke every endpoint carrying one, login included.
+    """
+    from backend.auth_service.api.router import limiter
+
+    assert limiter._in_memory_fallback_enabled, (
+        "an unreachable rate-limit store must degrade to local counters, "
+        "not 500 the login endpoint"
+    )

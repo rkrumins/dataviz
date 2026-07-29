@@ -102,7 +102,7 @@ from ..providers.custom_profile import (
     CustomProfileProvider,
 )
 from ..providers.oidc import OidcProvider
-from ..ratelimit import get_account_limiter
+from ..ratelimit import describe_storage, get_account_limiter, resolve_storage
 
 # SAML import is best-effort; the registry will refuse to materialise
 # a saml2 provider when ``SAML_AVAILABLE`` is False, so we just need
@@ -157,16 +157,45 @@ def _refresh_family_key(request: Request) -> str:
 # An unset variable and one set to the empty string mean the same thing
 # at this layer, so normalise both to None.
 def _resolve_ratelimit_storage_uri() -> Optional[str]:
-    """Pick the limiter's storage backend from the environment."""
-    return os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("REDIS_URL") or None
+    """Pick the limiter's storage backend.
+
+    Delegates to ``ratelimit.resolve_storage``, which goes through the
+    central Redis resolver rather than reading ``REDIS_URL`` directly.
+    Production blanks ``REDIS_URL`` on purpose — it addresses two
+    Memorystore instances by role-prefixed vars instead — so a limiter
+    reading it there finds nothing and quietly reverts to per-worker
+    counting in the one environment that most needs shared counters.
+    """
+    uri, _ = resolve_storage()
+    return uri
 
 
-_RATELIMIT_STORAGE_URI = _resolve_ratelimit_storage_uri()
+_RATELIMIT_STORAGE_URI, _RATELIMIT_STORAGE_OPTIONS = resolve_storage()
 
 limiter = Limiter(
     key_func=get_remote_address,
     storage_uri=_RATELIMIT_STORAGE_URI,
+    storage_options=_RATELIMIT_STORAGE_OPTIONS,
     swallow_errors=True,
+    # ``swallow_errors`` alone is not enough, which is not obvious from
+    # its name: a refused connection surfaces from the storage layer
+    # during ``incr`` and escapes as a 500. So an unreachable Redis did
+    # not degrade the rate limit — it broke every endpoint carrying one,
+    # login included. A Memorystore blip would have taken sign-in down
+    # across all replicas.
+    #
+    # ``in_memory_fallback_enabled`` keeps the same limits against
+    # process-local counters while the store is away. Weaker (per
+    # worker) but available, which is the right way round for a control
+    # whose job is to shed load rather than to deny service.
+    in_memory_fallback_enabled=True,
+)
+
+# Say which backend won. Swallowed storage errors mean a misconfigured
+# endpoint looks identical to a working one from the outside, and the
+# fallback silently makes every limit per-worker.
+logger.info(
+    "Rate-limit storage: %s", describe_storage(_RATELIMIT_STORAGE_URI),
 )
 
 
