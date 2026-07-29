@@ -43,11 +43,18 @@ _DEFAULT_ALGORITHM = "HS256"
 # HS256 needs a high-entropy shared secret. 32 chars is the floor we
 # accept; anything shorter is rejected as weak.
 _MIN_SECRET_LENGTH = 32
-# RBAC Phase 1: short access-token TTL paired with Redis revocation
-# set. Old default was 15 minutes; the design plan calls for ≤5 min so
-# revocation lag stays within enterprise tolerances. Operators can
-# override JWT_EXPIRY_MINUTES to fall back to the longer window if the
-# revocation set is unavailable in their environment.
+# RBAC Phase 1: short access-token TTL paired with the Redis revocation
+# set. The design plan calls for ≤5 min so revocation lag stays within
+# enterprise tolerances; the shipped .env files and the k8s configmap
+# use 15, which is the documented ceiling.
+#
+# Raising this is not free and the cost used to be invisible. Permission
+# claims ride in the token, so this is how long a revoked or demoted
+# session keeps working, and the Redis tombstone has to be held for the
+# whole window — which is why RBAC_REVOCATION_TTL_SECONDS is derived
+# from this value rather than configured beside it, and why startup
+# refuses to boot if an explicit override makes the tombstone shorter.
+# See ``_assert_session_config_coherent`` in backend/app/main.py.
 _DEFAULT_ACCESS_EXPIRY_MINUTES = 5
 _DEFAULT_REFRESH_EXPIRY_DAYS = 7
 
@@ -101,6 +108,69 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
     os.getenv("SSO_SESSION_MAX_AGE_HOURS", "24")
 )
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
+
+
+# Rotation grace window. Refresh-token rotation treats a re-presented
+# jti as a stolen-chain replay and kills the whole family. That is right
+# for an attacker and wrong for the far more common causes: two tabs
+# refreshing on the same cookie within milliseconds of each other, a
+# retried POST, a tab restored from bfcache, or a rotation whose
+# Set-Cookie never made it back to the browser. Inside this window the
+# re-presentation is answered with the successor the first caller
+# already minted, so both racers converge on one token and nobody is
+# signed out. Outside it, reuse detection is unchanged.
+#
+# The cost, stated plainly: an attacker who already holds the stolen
+# refresh cookie and presents it within this window gets the same
+# successor rather than tripping detection. That is the same bargain
+# Auth0 and IdentityServer strike with their rotation reuse intervals.
+# Set to 0 to refuse it — at the price of signing users out of every tab
+# whenever two of them rotate at once, which is what this fixes.
+REFRESH_ROTATION_GRACE_SECONDS: int = int(
+    os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "30")
+)
+
+
+# ── Rate limits ──────────────────────────────────────────────────────
+#
+# Two different jobs, so two different keys.
+#
+# The per-IP limits are a coarse flood guard and nothing more. Behind a
+# NAT or an ingress every user shares one address, so a tight per-IP cap
+# does not stop an attacker (they have many addresses) while it does
+# stop an office (they have one). The previous 10/minute on /login meant
+# the eleventh person to arrive at 09:00 was refused. Real DoS handling
+# belongs at the proxy; these values are sized so a legitimate tenant
+# never reaches them — roughly 3x the peak a 2000-seat deployment
+# produces during a morning sign-in rush.
+#
+# The per-account limits are the security control. They key on the
+# account being attacked rather than the address attacking it, so they
+# hold whether the traffic comes from one IP or ten thousand, and a
+# spray against one user cannot be widened by renting more addresses.
+RATELIMIT_LOGIN_PER_IP: str = os.getenv("RATELIMIT_LOGIN_PER_IP", "1000/minute")
+RATELIMIT_SENSITIVE_PER_IP: str = os.getenv(
+    "RATELIMIT_SENSITIVE_PER_IP", "200/minute"
+)
+# Refresh is keyed per rotation family (one browser session), so this is
+# already per-user and needs no headroom for tenant size. A session needs
+# ~4 rotations an hour; 30/minute is ~450x that.
+RATELIMIT_REFRESH_PER_SESSION: str = os.getenv(
+    "RATELIMIT_REFRESH_PER_SESSION", "30/minute"
+)
+
+# Counted on FAILURES only and cleared on a successful sign-in, so
+# someone who signs in correctly twenty times a day is never throttled
+# while a spray against one account stops at ten.
+RATELIMIT_LOGIN_PER_ACCOUNT: str = os.getenv(
+    "RATELIMIT_LOGIN_PER_ACCOUNT", "10 per 15 minutes"
+)
+# Counted on every request: password-reset responses are deliberately
+# identical whether or not the account exists, so there is no failure to
+# distinguish. This bounds mailbombing one person's inbox.
+RATELIMIT_PASSWORD_RESET_PER_ACCOUNT: str = os.getenv(
+    "RATELIMIT_PASSWORD_RESET_PER_ACCOUNT", "3/hour"
+)
 
 
 # ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────

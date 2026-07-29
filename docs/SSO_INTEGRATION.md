@@ -1421,8 +1421,13 @@ attacks at the bottom of the section.
 ### 10.2 Out of scope (defended elsewhere or deferred)
 
 * **DDoS / rate limiting** — `slowapi` decorates `/login` and
-  `/refresh` at 10/min and 30/min respectively. Anything broader
-  is the reverse proxy / WAF's job.
+  `/refresh` at 10/min and 30/min respectively. `/login` is keyed on
+  the client address; `/refresh` is keyed on the **rotation family**,
+  so one browser session gets its own budget. Keying it on the address
+  put every user behind a NAT or an ingress in one bucket, and a 429 on
+  refresh reads to the client as a lost session. Storage is shared via
+  `RATELIMIT_STORAGE_URI` when set — otherwise each gunicorn worker
+  counts separately. Anything broader is the reverse proxy / WAF's job.
 * **MFA** — not implemented. See `SSO.md §4` for the deferred
   pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
@@ -1563,7 +1568,10 @@ by `source_event_id` UNIQUE.
 | `OIDC_*` (legacy) | (none) | env-only seed for `default-oidc` provider |
 | `SAML_*` (legacy) | (none) | env-only seed for `default-saml2` provider |
 | `REDIS_URL` | `redis://localhost:6379/0` | revocation set + replay cache |
-| `RBAC_REVOCATION_TTL_SECONDS` | `360` | sid TTL in Redis |
+| `RBAC_REVOCATION_TTL_SECONDS` | derived: access TTL + 60s | sid TTL in Redis. Derived from `JWT_EXPIRY_MINUTES` rather than set beside it — the two drifted, and a tombstone shorter than the token means revocation silently stops taking effect. Startup refuses an override below the access TTL. |
+| `REFRESH_ROTATION_GRACE_SECONDS` | `30` | how long a re-presented refresh token is read as a concurrent refresh rather than a stolen chain. `0` = strict rotation |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | peers whose `X-Forwarded-For` is trusted. Must name the proxy (or `*`) behind an ingress, or every caller is recorded as the proxy |
+| `RATELIMIT_STORAGE_URI` | (none → per-process) | shared rate-limit storage; falls back to `REDIS_URL` |
 | `MANAGEMENT_DB_URL` | (none — required) | management Postgres |
 
 ### 11.5 DB schema (auth subset)

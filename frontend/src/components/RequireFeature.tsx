@@ -14,7 +14,8 @@
 import type { ReactNode } from 'react'
 import { Navigate, Link, useParams } from 'react-router-dom'
 import { PowerOff, ArrowLeft } from 'lucide-react'
-import { useFeature } from '@/store/features'
+import { useFeature, useFeaturesStore } from '@/store/features'
+import { GuardSkeleton } from '@/components/auth/RequirePermission'
 import { DocsLink } from '@/components/help/DocsLink'
 
 interface RequireFeatureProps {
@@ -44,9 +45,18 @@ export function RequireFeature({
     children,
 }: RequireFeatureProps) {
     const enabled = useFeature(feature)
+    const loaded = useFeaturesStore((s) => s.loaded)
     const params = useParams()
 
     if (enabled) return <>{children}</>
+
+    // "Off" and "not answered yet" are different states, and the flags
+    // start out seeded from bundled defaults plus a localStorage cache —
+    // a guess. Both branches below act on that guess: one commits a
+    // route change, the other tells the user a feature is disabled when
+    // it may well be on. Neither is recoverable by the time the served
+    // values land, so wait for them first.
+    if (!loaded) return <GuardSkeleton />
 
     if (explain) {
         return (

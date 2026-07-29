@@ -10,7 +10,8 @@
  */
 import type { ReactNode } from 'react'
 import { ShieldOff } from 'lucide-react'
-import { useNavPermission } from '@/store/auth'
+import { useNavPermission, usePermissionsReady } from '@/store/auth'
+import { GuardSkeleton } from '@/components/auth/RequirePermission'
 import { useSidebarSpec, useAdminSectionSpec } from '@/store/navCatalogue'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import type { NavigationTab } from '@/store/navigation'
@@ -33,7 +34,11 @@ export function RequireNav({ group, sectionKey, fallback, children }: RequireNav
     const sidebarSpec = useSidebarSpec(sectionKey as NavigationTab)
     const adminSpec = useAdminSectionSpec(sectionKey)
     const spec = group === 'sidebar' ? sidebarSpec : adminSpec
+    const ready = usePermissionsReady()
     const allowed = useNavPermission(spec)
+    // Un-hydrated claims are indistinguishable from a real denial when
+    // read off the claims slice alone — wait for the answer.
+    if (!ready) return <GuardSkeleton />
     if (allowed) return <>{children}</>
     return <>{fallback ?? <DeniedPanel spec={spec} />}</>
 }

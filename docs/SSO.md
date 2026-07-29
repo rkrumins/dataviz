@@ -71,7 +71,24 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
   never sees the access token; the CSRF cookie is JS-readable and
   echoed back as `X-CSRF-Token` on writes (double-submit).
 * Refresh-token rotation with reuse-detection: presenting the same
-  `jti` twice revokes the whole `family_id`.
+  `jti` twice revokes the whole `family_id` — outside a bounded grace
+  window. Within `REFRESH_ROTATION_GRACE_SECONDS` (default 30) the
+  re-presentation is answered with the successor the first caller
+  already minted, because two tabs rotating at once, a retried POST and
+  a lost `Set-Cookie` are all indistinguishable from a replay by the
+  token alone, and revoking on them signed users out of every tab.
+  Set to 0 for strict rotation.
+* Token renewal is **reactive**, not scheduled: `fetchWithTimeout`
+  refreshes on a 401 and retries. Nothing runs a timer. In an idle tab
+  the thing that notices expiry is the 60 s permission poller
+  (`frontend/src/store/permissionPoller.ts`) — its `/me/permissions`
+  call is the only authenticated request still firing, so its 401 drives
+  the refresh, and rotation slides the refresh window forward another
+  full TTL. That is why an open tab stays signed in for days. The poller
+  is therefore load-bearing for sessions as well as permissions: do not
+  give it `skipAuthRefresh`, do not raise its interval above the access
+  TTL, and if it is removed, move renewal somewhere deliberate first.
+  Hidden tabs pause it and refresh on refocus.
 * Session-cookie cache: `frontend/src/store/userCache.ts`
   sessionStorage-only, schema-versioned, wiped on logout / 401 /
   SSO re-auth bounce. Eliminates the cold-boot `/me` flash without

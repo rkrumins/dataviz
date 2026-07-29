@@ -377,6 +377,67 @@ function SsoFailureBanner({ reference, onDismiss }: {
     )
 }
 
+/**
+ * Shown when someone lands on /login and the session turns out to still
+ * be valid.
+ *
+ * That case used to resolve itself silently — a straight bounce into the
+ * app. Combined with the silent refresh-on-401 (now exempt on this
+ * route), even an EXPIRED access cookie signed people back in without a
+ * keystroke. Either way there was no way to sign in as somebody else,
+ * which is a thing people genuinely need: a shared machine, a second
+ * tenant, an admin account alongside a normal one.
+ */
+function AlreadySignedIn({ email }: { email: string }) {
+    const navigate = useNavigate()
+    const logout = useAuthStore((s) => s.logout)
+    const [switching, setSwitching] = useState(false)
+
+    async function switchAccount() {
+        setSwitching(true)
+        // Drop the server session FIRST. Without this, "someone else"
+        // would be typing their password on a page still holding the
+        // previous user's cookies. ``logout`` swallows its own errors
+        // and clears local state either way, so this component always
+        // unmounts — no need to unwind ``switching``.
+        await logout()
+    }
+
+    return (
+        <div className="min-h-screen w-full flex items-center justify-center bg-canvas font-sans p-6">
+            <div className="glass-panel w-full max-w-[420px] p-8 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl text-center">
+                <div className="w-14 h-14 mb-5 mx-auto rounded-2xl bg-gradient-to-br from-accent-lineage to-accent-lineage/80 flex items-center justify-center shadow-lg shadow-accent-lineage/30">
+                    <ShieldCheck className="w-7 h-7 text-white" />
+                </div>
+                <h1 className="text-lg font-bold text-ink">
+                    You're already signed in as {email}
+                </h1>
+                <div className="mt-6 space-y-3">
+                    <button
+                        type="button"
+                        onClick={() => navigate('/', { replace: true })}
+                        className="w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] hover:brightness-110 flex items-center justify-center gap-2"
+                    >
+                        Continue
+                        <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => { void switchAccount() }}
+                        disabled={switching}
+                        className={cn(
+                            "w-full h-12 rounded-xl border border-white/20 text-sm font-medium text-ink transition-colors",
+                            switching ? "opacity-70 cursor-not-allowed" : "hover:bg-white/5",
+                        )}
+                    >
+                        {switching ? 'Signing out…' : 'Sign in as someone else'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    )
+}
+
 /** Session-scoped guard so a rejected auto-attempt can't relaunch on
  *  every render or on a bounce back to /login. A fresh tab retries. */
 const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
@@ -407,7 +468,7 @@ export function LoginPage() {
     const [params] = useSearchParams()
 
     const {
-        login, error, clearError, isLoading, isAuthenticated, status,
+        login, error, clearError, isLoading, isAuthenticated, status, user,
         loginWithBrowserProfile,
     } = useAuthStore()
 
@@ -476,11 +537,6 @@ export function LoginPage() {
         }
     }, [errorCode, collisionEmail])
 
-    // If already authenticated, redirect to dashboard
-    useEffect(() => {
-        if (isAuthenticated) navigate('/', { replace: true })
-    }, [isAuthenticated, navigate])
-
     useEffect(() => {
         clearError()
     }, [clearError])
@@ -533,14 +589,20 @@ export function LoginPage() {
         if (ok) navigate('/', { replace: true })
     }
 
-    // Avoid flashing the form to a user who's about to be redirected to
-    // the dashboard because their cookie is still valid.
+    // Avoid flashing the form to a user whose cookie is still being
+    // checked.
     if (status === 'idle' || status === 'loading') {
         return (
             <div className="min-h-screen w-full flex items-center justify-center bg-canvas">
                 <div className="w-8 h-8 border-2 border-ink-muted/30 border-t-accent-lineage rounded-full animate-spin" />
             </div>
         )
+    }
+
+    // A live session, on the one page whose job is to ask who you are.
+    // Say so and let them choose — do not decide for them.
+    if (isAuthenticated && user) {
+        return <AlreadySignedIn email={user.email} />
     }
 
     return (

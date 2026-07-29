@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 from typing import Callable, Optional
 
@@ -63,7 +64,12 @@ from ..cookies import (
     set_saml_cookie,
     set_session_cookies,
 )
-from ..core.config import AUTH_CUSTOM_PROVIDER_ENABLED
+from ..core.config import (
+    AUTH_CUSTOM_PROVIDER_ENABLED,
+    RATELIMIT_LOGIN_PER_ACCOUNT,
+    RATELIMIT_LOGIN_PER_IP,
+    RATELIMIT_REFRESH_PER_SESSION,
+)
 from ..core.tokens import (
     create_mock_identity_token,
     create_oidc_state_token,
@@ -71,6 +77,7 @@ from ..core.tokens import (
     decode_dryrun_token,
     decode_link_intent_token,
     decode_oidc_state_token,
+    decode_refresh_token,
     decode_saml_state_token,
 )
 from ..interface import (
@@ -95,6 +102,7 @@ from ..providers.custom_profile import (
     CustomProfileProvider,
 )
 from ..providers.oidc import OidcProvider
+from ..ratelimit import describe_storage, get_account_limiter, resolve_storage
 
 # SAML import is best-effort; the registry will refuse to materialise
 # a saml2 provider when ``SAML_AVAILABLE`` is False, so we just need
@@ -107,7 +115,88 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+
+
+def _refresh_family_key(request: Request) -> str:
+    """Bucket /auth/refresh by rotation family rather than by IP.
+
+    ``get_remote_address`` is the wrong granularity for this endpoint and
+    was actively harmful. Behind a proxy it returns the ingress address,
+    so every user in the deployment shared one bucket; anyone in a NAT'd
+    office shared one anyway. Refreshes also cluster — everyone who
+    signed in at 09:00 rotates together — so a synchronised herd hit a
+    shared fixed window, got a 429, and the SPA read that as "session
+    gone" and signed them out. Random logouts under load, none in
+    testing.
+
+    A ``fam`` claim is exactly one browser session, which is the thing
+    this limit is actually meant to protect, and it is immune to both
+    NAT and missing forwarding headers. Requests with no usable cookie
+    fall back to the address — they cannot name a session, and that path
+    is what a flood of cookie-less refreshes would take.
+    """
+    token = read_refresh_cookie(request)
+    if token:
+        try:
+            return f"fam:{decode_refresh_token(token, verify_exp=False).family_id}"
+        except pyjwt.InvalidTokenError:
+            pass
+    return get_remote_address(request)
+
+
+# Storage is shared when a Redis URL is configured. slowapi defaults to
+# per-process memory, and the API runs 4 gunicorn workers per container
+# across N replicas, so "30/minute" silently meant somewhere between 30
+# and 30xNx4 depending on which worker the load balancer picked. Failures
+# are swallowed: a Redis outage must not become a site-wide lockout.
+#
+# The trailing ``or None`` is load-bearing. The production overlay sets
+# ``REDIS_URL: ""`` and expects the Secret to supply the real value; if
+# it doesn't, an empty string reaches here and ``or`` alone would pass
+# ``storage_uri=""`` to the limiter rather than falling back to memory.
+# An unset variable and one set to the empty string mean the same thing
+# at this layer, so normalise both to None.
+def _resolve_ratelimit_storage_uri() -> Optional[str]:
+    """Pick the limiter's storage backend.
+
+    Delegates to ``ratelimit.resolve_storage``, which goes through the
+    central Redis resolver rather than reading ``REDIS_URL`` directly.
+    Production blanks ``REDIS_URL`` on purpose — it addresses two
+    Memorystore instances by role-prefixed vars instead — so a limiter
+    reading it there finds nothing and quietly reverts to per-worker
+    counting in the one environment that most needs shared counters.
+    """
+    uri, _ = resolve_storage()
+    return uri
+
+
+_RATELIMIT_STORAGE_URI, _RATELIMIT_STORAGE_OPTIONS = resolve_storage()
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=_RATELIMIT_STORAGE_URI,
+    storage_options=_RATELIMIT_STORAGE_OPTIONS,
+    swallow_errors=True,
+    # ``swallow_errors`` alone is not enough, which is not obvious from
+    # its name: a refused connection surfaces from the storage layer
+    # during ``incr`` and escapes as a 500. So an unreachable Redis did
+    # not degrade the rate limit — it broke every endpoint carrying one,
+    # login included. A Memorystore blip would have taken sign-in down
+    # across all replicas.
+    #
+    # ``in_memory_fallback_enabled`` keeps the same limits against
+    # process-local counters while the store is away. Weaker (per
+    # worker) but available, which is the right way round for a control
+    # whose job is to shed load rather than to deny service.
+    in_memory_fallback_enabled=True,
+)
+
+# Say which backend won. Swallowed storage errors mean a misconfigured
+# endpoint looks identical to a working one from the outside, and the
+# fallback silently makes every limit per-worker.
+logger.info(
+    "Rate-limit storage: %s", describe_storage(_RATELIMIT_STORAGE_URI),
+)
 
 
 # ── Request / response models ─────────────────────────────────────────
@@ -623,13 +712,31 @@ async def _provider_snapshot(slug: str):
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-@limiter.limit("10/minute")
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def login(
     request: Request,
     response: Response,
     body: LoginBody,
 ):
     svc = _identity_service(request)
+
+    # Per-account throttle. The per-IP limit above is a flood guard sized
+    # so a whole office signing in at 09:00 never reaches it, which by
+    # construction makes it useless against a password spray. This is the
+    # control that stops one: it keys on the account under attack, so it
+    # holds however many addresses the attempts arrive from.
+    accounts = get_account_limiter()
+    if not await accounts.check("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT):
+        retry_after = await accounts.retry_after_seconds(
+            "login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT,
+        )
+        logger.warning("Login throttled for account (too many failures)")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     try:
         user, tokens = await svc.login(body.email, body.password)
     except LocalLoginDisabled:
@@ -641,11 +748,17 @@ async def login(
             detail={"error": "local_login_disabled"},
         )
     except InvalidCredentials:
+        # Only failures accumulate, so someone who signs in correctly
+        # twenty times a day is never throttled.
+        await accounts.record("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
+    # A success clears the count: a user who mistyped twice and then got
+    # it right starts clean rather than carrying failures into next time.
+    await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
     return SessionResponse(user=user)
@@ -671,7 +784,7 @@ async def logout(request: Request, response: Response):
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-@limiter.limit("30/minute")
+@limiter.limit(RATELIMIT_REFRESH_PER_SESSION, key_func=_refresh_family_key)
 async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)
@@ -826,7 +939,7 @@ class ResolveResult(BaseModel):
 
 @router.post("/resolve", response_model=ResolveResult,
              response_model_by_alias=True)
-@limiter.limit("20/minute")
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def resolve_email_domain(request: Request, body: _ResolveBody):
     """Route an email address to its IdP (Home Realm Discovery).
 
@@ -1322,7 +1435,7 @@ async def _custom_profile_login_flow(
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
              response_model_by_alias=True)
-@limiter.limit("10/minute")
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def custom_profile_browser_login(
     slug: str,
     request: Request,

@@ -437,6 +437,23 @@ async def test_client(
 
     # Wire a real IdentityService against the per-test session so
     # /api/v1/auth/* endpoints can be exercised end-to-end.
+    #
+    # NOTE: this factory does NOT model production transaction
+    # semantics, and it cannot. Production passes ``get_async_session``,
+    # which commits on success and rolls back on exception; this yields
+    # one shared session that does neither. It cannot be fixed in place
+    # either: ``db_engine`` is in-memory SQLite, which SQLAlchemy backs
+    # with a StaticPool, so every session here checks out the SAME
+    # connection and there is only ever one transaction to speak of.
+    #
+    # Consequence: any bug about work being rolled back — or about
+    # writes that must survive their caller's rollback — is INVISIBLE to
+    # tests built on this fixture. That is how the refresh-family
+    # revocations came to be silently discarded in production while
+    # ``test_auth_cookie_flow.py`` reported them working. Tests that
+    # depend on real transaction boundaries need their own file-backed
+    # engine; see ``test_auth_revocation_durability.py`` for the setup,
+    # including the pysqlite savepoint workaround it needs.
     @asynccontextmanager
     async def _test_session_factory():
         yield db_session

@@ -135,6 +135,54 @@ async def _db_health_loop(_app: FastAPI, interval: float = 15.0) -> None:
             logger.debug("DB health loop iteration failed unexpectedly: %s", exc)
 
 
+def _assert_session_config_coherent() -> None:
+    """Fail fast when the access TTL outlives its revocation tombstone.
+
+    Forced revocation works by tombstoning a session's ``sid`` in Redis
+    until the access token carrying it expires. If the tombstone expires
+    first, revoking someone's access silently stops taking effect for
+    the remainder of every token — the account looks revoked in the
+    admin UI and keeps working in the browser.
+
+    That is exactly what shipped: a 360s tombstone against a 60-minute
+    access TTL. The TTL is derived now, so this only fires when
+    ``RBAC_REVOCATION_TTL_SECONDS`` is set explicitly and set too low.
+    Refusing to boot is right — the failure is otherwise invisible.
+    """
+    from backend.app.services.revocation_service import REVOCATION_TTL_SECONDS
+    from backend.auth_service.core.config import (
+        JWT_EXPIRY_MINUTES,
+        JWT_REFRESH_EXPIRY_DAYS,
+        REFRESH_ROTATION_GRACE_SECONDS,
+        SSO_SESSION_MAX_AGE_HOURS,
+    )
+
+    access_ttl = JWT_EXPIRY_MINUTES * 60
+    if REVOCATION_TTL_SECONDS < access_ttl:
+        raise RuntimeError(
+            f"RBAC_REVOCATION_TTL_SECONDS ({REVOCATION_TTL_SECONDS}s) is "
+            f"shorter than the access-token lifetime "
+            f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
+            "Session revocation would stop taking effect "
+            f"{access_ttl - REVOCATION_TTL_SECONDS}s before each token "
+            "expires. Raise the revocation TTL or lower the access TTL."
+        )
+    if JWT_EXPIRY_MINUTES > 15:
+        logger.warning(
+            "JWT_EXPIRY_MINUTES=%s is long for claims-in-token auth: a "
+            "permission or role change does not reach a live session until "
+            "its next rotation, and every revocation has to be held in "
+            "Redis for the whole window. 15 or less is the intended range.",
+            JWT_EXPIRY_MINUTES,
+        )
+    logger.info(
+        "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
+        "rotation_grace=%ds sso_ceiling=%dh",
+        access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
+        REFRESH_ROTATION_GRACE_SECONDS, SSO_SESSION_MAX_AGE_HOURS,
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -600,6 +648,7 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         auth_config_provider=_auth_config_provider,
     )
+    _assert_session_config_coherent()
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 
     # 5. Wire up the aggregation service (role-gated)

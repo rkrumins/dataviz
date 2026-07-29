@@ -260,11 +260,17 @@ class OidcProvider:
         the route signs it into the ``nx_oidc`` cookie via
         :mod:`core.tokens`.
 
-        ``force_reauth`` is set by the daily-SSO-re-auth path: it
-        pins ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` so the IdP itself
-        refuses to short-circuit when its own session is older than
-        our ceiling, and requests ``prompt=login`` so the IdP shows
-        the login form even when its session is still warm.
+        ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` is sent on EVERY
+        authorization request, not only the re-auth bounce. It stops the
+        IdP short-circuiting a session older than our ceiling, and —
+        just as importantly — obliges a compliant provider to return
+        ``auth_time``, which is what the ceiling measures from. Without
+        it many providers omit the claim and the ceiling silently falls
+        back to timing from our own login instead.
+
+        ``force_reauth`` is set by the daily-SSO-re-auth path and adds
+        ``prompt=login`` so the IdP shows the login form even when its
+        session is still warm.
         """
         if not self.enabled:
             raise OidcError("OIDC is not enabled/configured")
