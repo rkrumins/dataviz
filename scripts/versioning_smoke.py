@@ -85,7 +85,10 @@ def login(client: httpx.Client, base: str, email: str, password: str) -> None:
     r = client.post(f"{base}/api/v1/auth/login", json={"email": email, "password": password})
     if r.status_code != 200:
         raise SystemExit(f"login failed ({r.status_code}): {r.text[:300]}")
-    if not client.cookies.get("nx_access"):
+    # The access cookie carries an AUTH_ENVIRONMENT_ID suffix when the target
+    # deployment sets one (nx_access_uat), so match the prefix rather than an
+    # exact name — otherwise this reports a login failure that did not happen.
+    if not any(name.startswith("nx_access") for name in client.cookies.keys()):
         raise SystemExit("login returned 200 but no nx_access cookie was set")
 
 

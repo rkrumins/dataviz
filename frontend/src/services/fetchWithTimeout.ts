@@ -319,6 +319,33 @@ async function tryRefresh(): Promise<RefreshOutcome> {
   return refreshInFlight
 }
 
+/**
+ * True when a 401 body carries the backend's ``session_foreign`` marker —
+ * the session was minted by a different environment or signing key, so no
+ * amount of refreshing will recover it.
+ *
+ * Reads a clone so the caller keeps an unconsumed body.
+ */
+async function isForeignSession(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.clone().json()) as {
+      detail?: { error?: string }
+    }
+    return body?.detail?.error === 'session_foreign'
+  } catch {
+    return false
+  }
+}
+
+async function clearCachedUser(): Promise<void> {
+  try {
+    const mod = await import('@/store/userCache')
+    mod.clearUserCache()
+  } catch {
+    // best-effort — the session-lost event still routes to /login
+  }
+}
+
 function notifySessionLost(): void {
   if (typeof window === 'undefined') return
   // One announcement per window. A burst of 401s arrives STAGGERED, so
@@ -510,6 +537,19 @@ export async function fetchWithTimeout(
     && !skipAuthRefresh
     && !onLoginRoute()
   ) {
+    // A session belonging to another environment (or signed with a key
+    // this backend no longer holds) can never be refreshed into a valid
+    // one — retrying just reproduces the 401. This is checked BEFORE
+    // tryRefresh rather than folded into its outcome: the classification
+    // below distinguishes "the session is gone" from "the refresh call
+    // failed", and a foreign token is neither. It is definitively
+    // unusable, so it short-circuits to one clean sign-out instead of
+    // ping-ponging on every section the user clicks.
+    if (await isForeignSession(res)) {
+      await clearCachedUser()
+      notifySessionLost()
+      return res
+    }
     const outcome = await tryRefresh()
     if (outcome === 'ok' || outcome === 'reauth') {
       try {

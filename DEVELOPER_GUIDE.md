@@ -359,7 +359,9 @@ source .env.dev
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JWT_SECRET_KEY` | auto-generated | Secret for JWT signing (set in production) |
+| `JWT_SECRET_KEY` | none — required | Secret for JWT signing. Fails fast at startup if unset or under 32 chars |
+| `JWT_SECRET_KEY_PREVIOUS` | empty | Retired signing keys (comma-separated), verify-only — set during a rotation |
+| `AUTH_ENVIRONMENT_ID` | empty | Names this deployment; scopes cookie names + JWT issuer so environments don't collide in one browser |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm |
 | `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |

@@ -11,6 +11,10 @@ Single source of truth for the SSO/IdP integration. Read this end-to-end
 before working on the auth surface; share the relevant sub-sections with
 operators standing up a new IdP.
 
+> **Running more than one environment?** Session cookies and JWT issuers must be scoped
+> per instance or two deployments will evict each other's sessions in the same browser —
+> see [Running several environments side by side](MULTI_ENVIRONMENT_SESSIONS.md).
+
 > **For developers integrating on top of SSO** — read alongside
 > [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md). That guide covers
 > developer setup (Day 1), architecture + component diagrams, 15

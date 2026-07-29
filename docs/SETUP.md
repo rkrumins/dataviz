@@ -210,7 +210,9 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JWT_SECRET_KEY` | *(auto-generated)* | HMAC signing key for JWTs |
+| `JWT_SECRET_KEY` | *(none — required)* | HMAC signing key for JWTs. No fallback: the process refuses to start if unset or under 32 chars. |
+| `JWT_SECRET_KEY_PREVIOUS` | *(empty)* | Retired keys, comma-separated, accepted for verification only. Set during a rotation so live sessions survive it. |
+| `AUTH_ENVIRONMENT_ID` | *(empty)* | Names this deployment (`dev`/`uat`). Scopes session cookie names and the JWT issuer so two environments open in one browser cannot evict each other's session. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
 | `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |
@@ -235,7 +237,7 @@ Before deploying to production, ensure these **mandatory** settings are configur
 | **Credential encryption key** | Without it, provider credentials (passwords, API tokens) are stored in **plaintext** | Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` → set as `CREDENTIAL_ENCRYPTION_KEY` |
 | **Change admin password** | Default bootstrap password is `admin123` | Set `ADMIN_PASSWORD` env var to a strong password, or change via the admin UI after first login |
 | **Specific CORS origins** | The dev default only allows `http://localhost:5173`; a production deployment must allow-list its real frontend domain(s), not `*` | Set `CORS_ALLOWED_ORIGINS` to your actual frontend domain(s) |
-| **JWT secret key** | Auto-generated key changes on restart, invalidating all tokens | Set a stable `JWT_SECRET_KEY` value |
+| **JWT secret key** | Changing `JWT_SECRET_KEY` invalidates every live session at once, and mid-rollout pods on the old and new key make auth flap request-to-request | Keep it stable and stored out-of-band. To rotate, move the current value to `JWT_SECRET_KEY_PREVIOUS` first, deploy, then drop it after `JWT_REFRESH_EXPIRY_DAYS` |
 
 > See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for a full security risk assessment.
 
@@ -294,6 +296,7 @@ synodic/
 ## Further reading
 
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VM / self-host guide
+- [MULTI_ENVIRONMENT_SESSIONS.md](MULTI_ENVIRONMENT_SESSIONS.md) — running dev/uat/prod side by side without them logging each other out
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system overview
 
 ### Related in-app docs

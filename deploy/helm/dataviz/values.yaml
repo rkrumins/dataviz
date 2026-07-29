@@ -37,6 +37,12 @@ config:
   jwt:
     algorithm: HS256
     expiryMinutes: "60"
+    # Names this deployment (dev / uat / staging). Empty = unchanged
+    # behaviour. Set it — uniquely and stably — whenever users can have two
+    # environments open in the same browser: cookie jars are keyed by domain,
+    # not by cluster, so otherwise both write the same nx_access / nx_refresh
+    # cookies and each login silently evicts the other environment's session.
+    environmentId: ""
   adminEmail: admin@synodic.local
   aggregation:
     jobTimeoutSecs: "7200"
@@ -65,6 +71,9 @@ secrets:
   managementDbUrl: "postgresql+asyncpg://synodic:REPLACE_ME@REPLACE_ME_PG_HOST:5432/synodic"
   redisUrl: "redis://REPLACE_ME_REDIS_HOST:6379/0"
   jwtSecretKey: "REPLACE_ME"
+  # Retired signing keys, comma-separated, most-recent first. Verify-only.
+  # Rotating jwtSecretKey without this logs every user out at once.
+  jwtSecretKeyPrevious: ""
   adminPassword: "REPLACE_ME"
   credentialEncryptionKey: ""
   # Store AUTH passwords (empty = servers run without auth). Set together
