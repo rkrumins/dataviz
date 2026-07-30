@@ -191,6 +191,14 @@ function AccountSettingsContent() {
         try {
             await accountService.changePassword(currentPassword, newPassword)
             showToast('success', 'Password changed. Sign in again.')
+            // Same teardown as the sign-out-everywhere button above, and
+            // for the same reason: changing your password revokes every
+            // session, this one included, so a tab that keeps believing
+            // it is signed in lands on "You're already signed in as …"
+            // instead of the login form the toast just promised.
+            // ``PasswordChangeRequired`` always did this; this caller
+            // did not.
+            await logout()
             navigate('/login', { replace: true })
         } catch (err) {
             setPasswordError((err as Error).message)
