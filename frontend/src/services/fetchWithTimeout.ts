@@ -163,6 +163,18 @@ let sessionLostAt: number | null = null
 const SESSION_LOST_WINDOW_MS = 10_000
 
 /**
+ * True while a CSRF-triggered repair is running.
+ *
+ * A page that fires several writes at once would otherwise have each of
+ * them independently discover the missing cookie and independently POST
+ * /auth/refresh. ``tryRefresh`` already dedupes the network call, but the
+ * *retries* would still stampede, and a failed repair would be retried
+ * once per request instead of once. One repair per burst is enough: the
+ * cookie it re-mints is shared by all of them.
+ */
+let csrfRepairInFlight = false
+
+/**
  * Clear the session-lost latch. Called from the auth store's login /
  * portal-login / auto-signin paths — a fresh session deserves a fresh
  * attempt, exactly like ``resetClaimRecovery()`` next to it.
@@ -327,10 +339,60 @@ export function setAuthEnvironmentId(id: string | null | undefined): void {
   environmentId = id || null
 }
 
-function accessExpiryCookieName(): string {
-  return environmentId
-    ? `${ACCESS_EXPIRY_COOKIE}_${environmentId}`
-    : ACCESS_EXPIRY_COOKIE
+/**
+ * Read a cookie whose name the backend suffixes with the environment id,
+ * preferring this deployment's copy and falling back to the unscoped
+ * name.
+ *
+ * The fallback is not decoration. It covers a tab that has not yet
+ * bootstrapped, and a backend too old to scope the name at all — both of
+ * which must keep working, because the alternative for ``nx_csrf`` is
+ * that every write 403s.
+ */
+function readScopedCookie(base: string): string | null {
+  if (environmentId) {
+    const scoped = readCookie(`${base}_${environmentId}`)
+    if (scoped !== null) return scoped
+  }
+  return readCookie(base)
+}
+
+/**
+ * Re-mint ``nx_csrf`` if this session has lost it.
+ *
+ * Rotation is the only thing that writes that cookie, so once it is gone
+ * — evicted by a sibling deployment's sign-out, cleared by hand, expired
+ * — nothing restores it until the session next rotates. At a 60-minute
+ * access TTL that is up to an hour, and a tab doing nothing but reads
+ * never triggers a rotation at all: reloading the page issues only GETs,
+ * so the cookie stays missing however many times the user refreshes.
+ *
+ * Called before any write, and once at bootstrap, so the repair happens
+ * when the session is known rather than when a write has already failed.
+ *
+ * Gated on there being a session to rotate. ``readAccessExpiryMs()`` is
+ * the client's only evidence of one — the access cookie is HttpOnly — and
+ * without that check an anonymous POST to /auth/login or /auth/signup
+ * would fire a pointless refresh before every attempt.
+ */
+export async function ensureCsrfToken(): Promise<void> {
+  if (
+    csrfRepairInFlight
+    || onLoginRoute()
+    || readScopedCookie(CSRF_COOKIE) !== null
+    || readAccessExpiryMs() === null
+  ) {
+    return
+  }
+  csrfRepairInFlight = true
+  try {
+    await tryRefresh()
+  } catch {
+    // Let the caller's own request report the failure rather than
+    // inventing one here.
+  } finally {
+    csrfRepairInFlight = false
+  }
 }
 
 /**
@@ -346,8 +408,7 @@ export function readAccessExpiryMs(): number | null {
   // not yet bootstrapped, or one served by a backend too old to scope
   // the cookie, still gets a schedule instead of dropping to the probe
   // interval for the life of the tab.
-  const raw =
-    readCookie(accessExpiryCookieName()) ?? readCookie(ACCESS_EXPIRY_COOKIE)
+  const raw = readScopedCookie(ACCESS_EXPIRY_COOKIE)
   if (!raw) return null
   const seconds = Number(raw)
   return Number.isFinite(seconds) ? seconds * 1000 : null
@@ -600,7 +661,7 @@ function buildHeaders(
 ): Headers {
   const headers = new Headers(raw)
   if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
-    const csrf = readCookie(CSRF_COOKIE)
+    const csrf = readScopedCookie(CSRF_COOKIE)
     if (csrf) headers.set(CSRF_HEADER, csrf)
   }
   if (typeof body === 'string' && body.length > 0 && !headers.has('Content-Type')) {
@@ -640,6 +701,17 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, skipAuthRefresh = false, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
+
+  // Don't send a write we already know will fail.
+  //
+  // The double-submit header is mirrored from ``nx_csrf``. If that cookie
+  // is gone the request goes out with no header and the server refuses it
+  // before it reaches a handler, so the reactive repair further down is
+  // spending a guaranteed-403 round trip to learn something readable from
+  // ``document.cookie``.
+  if (!SAFE_METHODS.has(method) && !skipAuthRefresh) {
+    await ensureCsrfToken()
+  }
 
   let res: Response
   try {
@@ -744,6 +816,46 @@ export async function fetchWithTimeout(
         if (!window.location.pathname.startsWith('/password-change-required')) {
           window.location.assign('/password-change-required')
         }
+        return res
+      }
+      // A CSRF failure is NOT an authorization failure, and it has a
+      // repair the authorization case does not: every rotation re-mints
+      // ``nx_csrf``, so a session that is still valid can fix itself by
+      // refreshing once.
+      //
+      // Without this the user is simply stuck. The cookie can go missing
+      // while the session stays live — signing out of a sibling
+      // deployment evicts it across the parent domain they share — and
+      // nothing else re-mints it, because a 403 does not trigger the
+      // refresh path the way a 401 does. Every write then fails forever,
+      // reported as a permission the user demonstrably has.
+      //
+      // Guarded on ``skipAuthRefresh`` for the same reason as the 401
+      // path: it marks a call that already came from a refresh, and
+      // refreshing again there would loop.
+      if (body?.detail?.error === 'csrf_failed') {
+        if (!skipAuthRefresh && !csrfRepairInFlight) {
+          csrfRepairInFlight = true
+          try {
+            if ((await tryRefresh()) === 'ok') {
+              // Retry with a header rebuilt from the re-minted cookie —
+              // ``runOnce`` reads it fresh, so nothing has to be threaded
+              // through.
+              return await runOnce(input, fetchInit, method, timeoutMs)
+            }
+          } catch {
+            // Fall through to the report below.
+          } finally {
+            csrfRepairInFlight = false
+          }
+        }
+        // Repair did not run, or did not help. Say what actually
+        // happened rather than showing the access-denied modal for a
+        // permission the user holds.
+        console.warn(
+          '[auth] CSRF token missing or stale and a refresh did not '
+          + 'restore it. Writes will fail until the session is renewed.',
+        )
         return res
       }
     } catch {

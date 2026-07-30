@@ -29,14 +29,21 @@ from backend.auth_service.cookies import (
     clear_session_cookies as _clear_session_cookies,
     ForeignSession as _ForeignSession,
 )
+# The module, plus the constants that are safe to bind at import.
+#
+# The key ring (``JWT_SECRET_KEY``, ``JWT_SECRET_KEY_ID``,
+# ``JWT_VERIFICATION_KEYS``) is deliberately NOT imported by name: it
+# resolves on first access, and binding it here would make importing this
+# module require a signing secret again. Reached through
+# ``_auth_config`` at the two points that genuinely need it — the startup
+# assertion and the fingerprint log.
+from backend.auth_service.core import config as _auth_config
 from backend.auth_service.core.config import (
     AUTH_ENVIRONMENT_ID as _AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN as _COOKIE_DOMAIN,
     COOKIE_SAMESITE as _COOKIE_SAMESITE,
     COOKIE_SECURE as _COOKIE_SECURE,
     JWT_ISSUER as _JWT_ISSUER,
-    JWT_SECRET_KEY_ID as _JWT_SECRET_KEY_ID,
-    JWT_VERIFICATION_KEYS as _JWT_VERIFICATION_KEYS,
 )
 from backend.auth_service.providers import LocalIdentityProvider, register_provider
 from backend.auth_service.service import LocalIdentityService
@@ -221,8 +228,8 @@ def _log_auth_fingerprint() -> None:
         _AUTH_ENVIRONMENT_ID or "(unset)",
         _JWT_ISSUER,
         f"{_ACCESS_COOKIE_NAME}/{_REFRESH_COOKIE_NAME}/{_CSRF_COOKIE_NAME}",
-        _JWT_SECRET_KEY_ID,
-        ",".join(kid for kid, _key in _JWT_VERIFICATION_KEYS),
+        _auth_config.JWT_SECRET_KEY_ID,
+        ",".join(kid for kid, _key in _auth_config.JWT_VERIFICATION_KEYS),
         _COOKIE_SECURE,
         _COOKIE_DOMAIN or "(host-only)",
         _COOKIE_SAMESITE,
@@ -729,6 +736,14 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         auth_config_provider=_auth_config_provider,
     )
+    # Refuse to serve without a signing secret. This used to happen as a
+    # side effect of importing the auth config, which made the secret a
+    # precondition for importing anything that transitively touched it —
+    # including the aggregation control plane, which holds no keys and
+    # signs nothing. The check belongs to the processes that mint and
+    # verify tokens, so it is made here, by name, rather than inherited
+    # by every module in the import graph.
+    _auth_config.assert_signing_secret()
     _assert_session_config_coherent()
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 

@@ -30,10 +30,12 @@ when the client renews, so a sibling deployment writing the same name into
 the same jar leaves each tab scheduling against the other's token. The
 client resolves the suffix from ``environment_id`` on ``GET /auth/me``.
 
-``nx_csrf`` is the one deliberate exclusion. It is read from JavaScript by
-name, and sharing it costs nothing because the double-submit check only
-compares it against the header on the same request. See the comments on
-both definitions below.
+``nx_csrf`` is scoped for a different reason again. Sharing its VALUE is
+harmless — the double-submit check only compares it against the header on
+the same request — but sharing its NAME is not, because eviction is
+name-based: signing out of one deployment deletes the other's CSRF cookie
+across the parent domain they share, leaving a live session unable to
+perform any write. See the comments on each definition below.
 """
 from __future__ import annotations
 
@@ -78,18 +80,31 @@ def _scoped(name: str) -> str:
 
 ACCESS_COOKIE_NAME = _scoped(_BASE_ACCESS_COOKIE_NAME)
 REFRESH_COOKIE_NAME = _scoped(_BASE_REFRESH_COOKIE_NAME)
-# Deliberately NOT scoped. This one is read from JavaScript by name
-# (frontend/src/services/fetchWithTimeout.ts), so a per-environment name
-# would have to be discovered at runtime before the first write request —
-# and getting that wrong fails every POST with a 403.
+# Scoped, though nothing in the VALUE requires it. Sharing the value is
+# genuinely harmless — CSRF here is a double-submit check that only ever
+# compares this cookie against the header on the SAME request, so a token
+# minted by another environment still proves exactly what the check is
+# for: that same-origin script could read the cookie.
 #
-# Leaving it shared is safe: CSRF here is a double-submit check, which only
-# ever compares this cookie against the header on the SAME request. The
-# value carries no identity and no signature, so a token minted by another
-# environment still proves exactly what the check is for — that same-origin
-# script could read the cookie. The signature-bearing cookies above are the
-# ones that must not be shared.
-CSRF_COOKIE_NAME = _BASE_CSRF_COOKIE_NAME
+# Sharing the NAME is not harmless, and the difference is deletion.
+# ``clear_session_cookies`` evicts across every domain scope a cookie
+# might hold, deliberately including the parent that two sibling
+# deployments share (see ``_eviction_domains``). Under one unscoped name
+# that makes signing out of one instance delete the other's CSRF cookie —
+# leaving a session that is still perfectly valid unable to perform any
+# write at all, because every state-changing request now fails the
+# double-submit before it reaches a handler. The user sees "CSRF token
+# missing or invalid" on a delete they are entitled to perform, and no
+# amount of retrying fixes it.
+#
+# The original objection — JavaScript reads this by name, so a scoped
+# name has to be discovered at runtime, and getting it wrong 403s every
+# POST — is answered the same way ``nx_access_exp`` answers it: the SPA
+# learns the suffix from ``environment_id`` on ``GET /auth/me``, and
+# falls back to the unscoped name until it does. Writes only happen after
+# bootstrap, so the window in which the fallback is load-bearing does not
+# overlap with any write.
+CSRF_COOKIE_NAME = _scoped(_BASE_CSRF_COOKIE_NAME)
 # When ``nx_access`` expires, as a unix epoch. Readable by JavaScript,
 # because the browser cannot read the HttpOnly access cookie and so has
 # no way to know its own session is about to lapse — which is why token

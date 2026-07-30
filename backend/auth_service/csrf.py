@@ -123,9 +123,31 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 "CSRF check failed for %s %s (cookie_present=%s header_present=%s)",
                 request.method, path, bool(cookie), bool(header),
             )
+            # Structured, like the ``requires()`` 403, and for a sharper
+            # reason: this is NOT an authorization failure, and a client
+            # that cannot tell the two apart shows the user an
+            # access-denied modal for a permission they hold.
+            #
+            # It also has a recovery the permission case does not.
+            # ``nx_csrf`` is re-minted by every rotation, so a session
+            # that is still valid can repair itself by refreshing — which
+            # is what the SPA does when it sees ``csrf_failed``. That
+            # matters because the cookie can go missing while the session
+            # stays live: ``clear_session_cookies`` evicts across the
+            # parent domain two sibling deployments share, so signing out
+            # of one instance disarms writes in the other.
+            #
+            # ``message`` keeps the original prose so anything scraping
+            # it still matches.
             return JSONResponse(
                 status_code=403,
-                content={"detail": "CSRF token missing or invalid"},
+                content={
+                    "detail": {
+                        "error": "csrf_failed",
+                        "cookie_present": bool(cookie),
+                        "message": "CSRF token missing or invalid",
+                    }
+                },
             )
 
         return await call_next(request)

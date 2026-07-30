@@ -169,11 +169,18 @@ def test_dotenv_skipped_in_prod_even_if_file_present(monkeypatch, tmp_path):
     monkeypatch.setenv("ENV", "production")
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("JWT_SECRET_KEY=" + ("z" * 48) + "\n")
+
+    cfg = _reimport_config()
+
+    # The gate held: the file was not sourced, so no key is configured
+    # and the ring refuses. (The refusal is on use rather than on import
+    # — see ``test_no_dotenv_file_keeps_failfast_behaviour``.)
+    #
     # ``_reimport_config()`` rebinds ``MissingSigningSecret`` to a
     # fresh class object, so we match on the base ``RuntimeError`` +
     # the message to make the assertion class-identity agnostic.
     with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
-        _reimport_config()
+        cfg.JWT_SECRET_KEY
 
 
 def test_explicit_env_wins_over_dotenv_file(monkeypatch, tmp_path):
@@ -191,15 +198,31 @@ def test_explicit_env_wins_over_dotenv_file(monkeypatch, tmp_path):
 
 
 def test_no_dotenv_file_keeps_failfast_behaviour(monkeypatch, tmp_path):
-    """No .env in CWD, no shell value -> fail-fast unchanged."""
+    """No .env in CWD, no shell value -> fail-fast on USE, not on import.
+
+    The failure moved. It used to happen while importing this module,
+    which made a signing secret a precondition for importing anything
+    that transitively reached it — and took down the aggregation control
+    plane, a process that holds no keys and signs nothing. Now the module
+    imports and the key ring refuses.
+
+    Fail-fast is preserved where it matters: ``assert_signing_secret()``
+    is called from the API's startup, so a process that mints tokens
+    still will not boot without one.
+    """
     monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
     monkeypatch.setenv("ENV", "dev")
     monkeypatch.chdir(tmp_path)  # empty dir
+
+    cfg = _reimport_config()  # imports cleanly — that is the change
+
     # ``_reimport_config()`` rebinds ``MissingSigningSecret`` to a
     # fresh class object, so we match on the base ``RuntimeError`` +
     # the message to make the assertion class-identity agnostic.
     with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
-        _reimport_config()
+        cfg.assert_signing_secret()
+    with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
+        cfg.JWT_SECRET_KEY
 
 
 def test_dotenv_prefers_env_dev_over_env(monkeypatch, tmp_path):

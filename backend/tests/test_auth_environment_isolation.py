@@ -80,20 +80,6 @@ def test_cookie_names_are_disjoint_between_environments(monkeypatch):
     assert dev_names.isdisjoint(uat_names)
 
 
-def test_csrf_cookie_name_stays_unscoped(monkeypatch):
-    """The frontend reads this one from JS by a hardcoded name.
-
-    Scoping it would need the name discovered at runtime before the first
-    write, and getting that wrong 403s every POST. Safe to share: the
-    double-submit check only compares this cookie against the header on
-    the same request, so the value carries no cross-environment meaning.
-    """
-    _tokens, dev = _reload_for_env(monkeypatch, "dev")
-    assert dev.CSRF_COOKIE_NAME == "nx_csrf"
-    _tokens, uat = _reload_for_env(monkeypatch, "uat")
-    assert uat.CSRF_COOKIE_NAME == "nx_csrf"
-
-
 def test_handshake_cookies_are_scoped_too(monkeypatch):
     """SSO callbacks are equally reachable cross-environment."""
     _tokens, uat = _reload_for_env(monkeypatch, "uat")
@@ -116,14 +102,11 @@ def test_every_signed_cookie_is_scoped(monkeypatch):
     """
     _tokens, uat = _reload_for_env(monkeypatch, "uat")
 
-    # Read from JavaScript by name and not signature-bearing. A shared
-    # name genuinely costs nothing here: the double-submit check only
-    # compares this cookie against the header on the SAME request, so a
-    # value written by a sibling deployment still proves exactly what the
-    # check is for. ``ACCESS_EXPIRY_COOKIE_NAME`` used to be on this list
-    # for the same stated reason and it did not hold — see
-    # ``test_the_expiry_cookie_is_scoped_so_siblings_cannot_cross_wire``.
-    unscoped_by_design = {"CSRF_COOKIE_NAME"}
+    # Nothing is unscoped any more. Both JS-readable cookies used to be,
+    # on the reasoning that neither carries a signature — true of their
+    # VALUES, and irrelevant to the problem, which turned out to be about
+    # their NAMES. See the two tests below for what each one cost.
+    unscoped_by_design: set[str] = set()
 
     for attr in dir(uat):
         if not attr.endswith("_COOKIE_NAME") or attr.startswith("_"):
@@ -201,6 +184,40 @@ def test_two_backends_writing_one_jar_do_not_overwrite_the_schedule(monkeypatch)
         "an unscoped expiry cookie is still being written; a sibling "
         "deployment will overwrite it and cross-wire the renewal schedule"
     )
+
+
+def test_the_csrf_cookie_is_scoped_so_one_logout_cannot_disarm_the_other(
+    monkeypatch,
+):
+    """Sharing the VALUE is harmless. Sharing the NAME is not.
+
+    The double-submit check only compares this cookie against the header
+    on the same request, so a value minted by a sibling deployment proves
+    exactly what the check is for — that reasoning held, and it is why
+    this cookie stayed unscoped.
+
+    What it missed is deletion. ``clear_session_cookies`` evicts across
+    every domain scope a cookie might hold, deliberately including the
+    parent two sibling deployments share. Under one name, signing out of
+    instance A deletes instance B's CSRF cookie — and B's session is
+    untouched, because ITS access and refresh cookies are scoped. The
+    result is a live, authenticated session that cannot perform a single
+    write, reporting "CSRF token missing or invalid" on operations the
+    user is fully entitled to perform.
+    """
+    _tokens, dev = _reload_for_env(monkeypatch, "dev")
+    _tokens, uat = _reload_for_env(monkeypatch, "uat")
+
+    assert dev.CSRF_COOKIE_NAME == "nx_csrf_dev"
+    assert uat.CSRF_COOKIE_NAME == "nx_csrf_uat"
+
+    # And the eviction list — the mechanism that caused the damage — must
+    # not reach across. Clearing dev's session names dev's cookie and the
+    # legacy unscoped one, never uat's.
+    dev_targets = {name for name, _path in dev._eviction_targets()}
+    assert "nx_csrf_dev" in dev_targets
+    assert "nx_csrf" in dev_targets, "the pre-scoping cookie must still be evictable"
+    assert "nx_csrf_uat" not in dev_targets
 
 
 def test_foreign_token_fails_as_issuer_not_signature(monkeypatch):
