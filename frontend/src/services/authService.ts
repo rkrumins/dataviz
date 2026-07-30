@@ -142,6 +142,11 @@ export type UserPublicResponse = AuthUser
 
 export interface SessionResponse {
     user: AuthUser
+    /** Which deployment answered. Suffixes the cookie names the client
+     *  has to read by name — see ``setAuthEnvironmentId``. Absent when
+     *  the backend sets no ``AUTH_ENVIRONMENT_ID``, which is also when
+     *  those names are unscoped. */
+    environment_id?: string | null
 }
 
 /**

@@ -25,9 +25,15 @@ rather than by cluster: two deployments sharing these names overwrite each
 other's session in a single browser even when they run on different
 clusters entirely. With the id unset the names are unchanged.
 
-``nx_csrf`` and ``nx_access_exp`` are deliberately excluded from that
-scoping — both are read from JavaScript by name, and neither is
-signature-bearing. See the comments on their definitions below.
+``nx_access_exp`` is scoped too, despite carrying no signature: it decides
+when the client renews, so a sibling deployment writing the same name into
+the same jar leaves each tab scheduling against the other's token. The
+client resolves the suffix from ``environment_id`` on ``GET /auth/me``.
+
+``nx_csrf`` is the one deliberate exclusion. It is read from JavaScript by
+name, and sharing it costs nothing because the double-submit check only
+compares it against the header on the same request. See the comments on
+both definitions below.
 """
 from __future__ import annotations
 
@@ -96,14 +102,35 @@ CSRF_COOKIE_NAME = _BASE_CSRF_COOKIE_NAME
 # It leaks nothing — an expiry instant is not a secret, carries no
 # identity, and is already implicit in the access cookie's own Max-Age.
 #
-# NOT scoped by environment id, for the same reason as ``nx_csrf``: it
-# is read from JavaScript by name, and a per-environment name would have
-# to be discovered at runtime before the first refresh could be
-# scheduled. Nothing here is signature-bearing, so two environments
-# sharing the name at most makes one of them reschedule sooner than
-# needed — and they cannot collide anyway without also colliding on the
-# access cookie, which IS scoped.
-ACCESS_EXPIRY_COOKIE_NAME = _BASE_ACCESS_EXPIRY_COOKIE_NAME
+# SCOPED, unlike ``nx_csrf``. This was unscoped on the reasoning that
+# nothing here is signature-bearing, so two environments sharing the name
+# would "at most make one of them reschedule sooner than needed — and
+# they cannot collide anyway without also colliding on the access cookie,
+# which IS scoped."
+#
+# Both halves of that were wrong, and the second one inverted the actual
+# risk. The collision is not between the two cookies; it is two BACKENDS
+# writing one name into one jar, which happens whenever sibling
+# deployments share a parent domain (``AUTH_COOKIE_DOMAIN`` set to
+# ``.example.com``, two instances beneath it). Scoping the access cookie
+# is precisely what leaves this one describing a token that is not the
+# one the reading tab holds.
+#
+# And the effect is not "sooner". The client schedules its rotation at
+# ``expiry - 60s``; handed a sibling's later expiry it schedules PAST its
+# own token's death, never rotates proactively, and falls back to
+# reactive 401 refresh — which an idle tab never triggers, because an
+# idle tab makes no requests. The session then lapses in exactly the way
+# the whole keepalive exists to prevent.
+#
+# The original objection is real but small: JavaScript reads this by
+# name, so the suffix has to be discovered. ``GET /auth/me`` — the
+# bootstrap call, made before the keepalive can start — returns
+# ``environment_id`` for that. Discovery failing is survivable by
+# construction: the reader falls back to the unscoped name, and the
+# scheduler already treats "no published expiry" as "probe again in 60s"
+# rather than an error.
+ACCESS_EXPIRY_COOKIE_NAME = _scoped(_BASE_ACCESS_EXPIRY_COOKIE_NAME)
 # Short-lived signed cookie holding the in-flight OIDC handshake
 # (state / nonce / PKCE verifier). Scoped to the auth subtree so it is
 # only ever sent to the callback. SameSite=Lax is required: the IdP

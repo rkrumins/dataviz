@@ -249,6 +249,20 @@ class SessionResponse(BaseModel):
     ``nx_access`` cookie — never in the response body."""
     model_config = ConfigDict(populate_by_name=True)
     user: User
+    #: Which deployment answered, so the SPA can resolve the
+    #: environment-scoped cookie names it has to read by name.
+    #:
+    #: Only ``nx_access_exp`` needs this today. It is read from
+    #: JavaScript to schedule token renewal, and it is scoped because two
+    #: deployments under one parent domain otherwise write the same name
+    #: into one jar — leaving each tab scheduling against the other's
+    #: token. ``/auth/me`` carries it because that is the bootstrap call,
+    #: made before the keepalive can start.
+    #:
+    #: ``None`` when ``AUTH_ENVIRONMENT_ID`` is unset, which is also the
+    #: case where the names are unscoped — so the client's fallback and
+    #: this field agree without either having to special-case it.
+    environment_id: Optional[str] = None
 
 
 class _Ack(BaseModel):
@@ -827,7 +841,7 @@ async def login(
     await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
-    return SessionResponse(user=user)
+    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────
@@ -902,7 +916,7 @@ async def refresh(request: Request, response: Response):
         )
 
     set_session_cookies(response, tokens)
-    return SessionResponse(user=user)
+    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────
@@ -926,7 +940,7 @@ async def me(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    return SessionResponse(user=user)
+    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 # ── GET /auth/diagnostics ─────────────────────────────────────────────
@@ -1711,4 +1725,4 @@ async def custom_profile_browser_login(
         clear_link_intent_cookie(response)
     logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
                 slug, user.id, provider.settings.source)
-    return SessionResponse(user=user)
+    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)

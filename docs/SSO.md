@@ -79,7 +79,10 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
   renew before expiry rather than after a 401. Neither carries identity
   or a signature. `nx_access_exp` deliberately outlives the cookie it
   describes (it follows the refresh TTL), because a tab that boots after
-  the access token died is exactly the tab that needs to read it.
+  the access token died is exactly the tab that needs to read it — and it
+  is environment-scoped (`nx_access_exp_<env>`), because two deployments
+  sharing a parent domain otherwise write one slot and each tab ends up
+  scheduling its renewal against the other's token.
 * Refresh-token rotation with reuse-detection: presenting the same
   `jti` twice revokes the whole `family_id` — outside a bounded grace
   window. Within `REFRESH_ROTATION_GRACE_SECONDS` (default 30) the
