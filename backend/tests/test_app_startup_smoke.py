@@ -26,7 +26,13 @@ lifespan to complain; a name that does not exist is not.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
+
+_REPO_ROOT = __file__.rsplit("/backend/", 1)[0]
 
 
 def test_the_auth_fingerprint_log_actually_runs():
@@ -85,24 +91,55 @@ def test_the_lifespan_depends_only_on_names_that_exist(name: str):
     )
 
 
-async def test_the_lifespan_never_fails_on_a_missing_name():
+def test_the_lifespan_never_fails_on_a_missing_name():
     """Run the real lifespan and classify how it fails.
 
-    In a unit environment it will not complete — there is no Postgres and
-    no Redis, and the app is designed to start degraded rather than die,
-    so this may also pass cleanly. Either is fine. What is not fine is
-    ``NameError`` or ``AttributeError``: those mean the startup code
-    refers to something that does not exist, which is not a property of
-    the environment and cannot be waited out.
-    """
-    from backend.app.main import app, lifespan
+    **In a subprocess, and that is not incidental.** Running it in-process
+    against the shared ``app`` singleton sets ``app.state.degraded``
+    (there is no database here), and every later test in the session then
+    gets 503 "Service is starting up". The first version of this test did
+    exactly that and broke 376 unrelated tests — a test that damages the
+    suite it belongs to is worse than the gap it closes.
 
-    try:
-        async with lifespan(app):
-            pass
-    except (NameError, AttributeError) as exc:  # pragma: no cover - the bug
-        pytest.fail(f"startup referenced a name that does not exist: {exc}")
-    except Exception:
-        # Infrastructure absent. Legitimate here; the assertion above is
-        # the only thing this test is about.
-        pass
+    In a unit environment startup will not complete: no Postgres, no
+    Redis, and the app is designed to degrade rather than die, so it may
+    also finish cleanly. Either is fine. What is not fine is ``NameError``
+    or ``AttributeError`` — those mean the startup path refers to
+    something that does not exist, which is not a property of the
+    environment and cannot be waited out.
+    """
+    source = textwrap.dedent(
+        """
+        import asyncio, sys
+
+        async def main():
+            from backend.app.main import app, lifespan
+            try:
+                async with lifespan(app):
+                    pass
+            except (NameError, AttributeError) as exc:
+                print(f'BAD_NAME:{exc}')
+                return
+            except Exception:
+                pass
+            print('OK')
+
+        asyncio.run(main())
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True, text=True, timeout=300,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": _REPO_ROOT,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "JWT_SECRET_KEY": "x" * 48,
+        },
+    )
+    assert "BAD_NAME" not in result.stdout, (
+        "startup referenced a name that does not exist: " + result.stdout
+    )
+    assert "OK" in result.stdout, (
+        f"the lifespan did not run at all:\n{result.stderr[-3000:]}"
+    )
