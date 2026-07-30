@@ -59,15 +59,31 @@ Four cookies make up a session. Only the ones carrying a signature are environme
 |---|---|---|---|---|
 | `nx_access` → `nx_access_<env>` | **Yes** | `/` | yes | The access JWT, 15 min |
 | `nx_refresh` → `nx_refresh_<env>` | **Yes** | `/api/v1/auth/` | yes | Rotating refresh JWT, 7 days |
-| `nx_csrf` | **No — deliberately** | `/` | no (JS-readable) | CSRF double-submit token |
+| `nx_csrf` → `nx_csrf_<env>` | **Yes** (since 2026-07-30) | `/` | no (JS-readable) | CSRF double-submit token |
 | `nx_access_exp` → `nx_access_exp_<env>` | **Yes** (since 2026-07-30) | `/` | no (JS-readable) | When `nx_access` expires, for scheduled renewal |
 | `nx_oidc`, `nx_saml`, `nx_link_intent`, `nx_mock_identity`, `nx_dryrun` | **Yes** | `/api/v1/auth/` | yes | Short-lived SSO handshake state |
 
-`nx_csrf` is the one cookie the frontend reads from JavaScript by an unscoped name, and
-sharing it is safe: the double-submit check only ever compares the cookie against the
-`X-CSRF-Token` header **on the same request**, so a token minted by another environment
-still proves exactly what the check is for — that same-origin script could read the cookie.
-It carries no identity and no signature.
+### `nx_csrf`: sharing the value was safe, sharing the name was not
+
+The double-submit check only ever compares the cookie against the `X-CSRF-Token` header
+**on the same request**, so a token minted by another environment still proves exactly what
+the check is for — that same-origin script could read the cookie. That reasoning is sound,
+and it is why this cookie stayed unscoped.
+
+What it missed is **deletion**. `clear_session_cookies` evicts across every domain scope a
+cookie might hold, deliberately including the parent that sibling deployments share. Under
+one shared name, signing out of instance A deletes instance B's CSRF cookie — while B's
+session is untouched, because *its* access and refresh cookies are scoped. B is left
+authenticated and unable to perform a single write, reporting "CSRF token missing or
+invalid" on operations the user is fully entitled to perform, with no path back short of
+signing in again.
+
+The name is now scoped, resolved client-side exactly like `nx_access_exp` below. Two
+independent defences, because this one is worth belt and braces:
+
+* the SPA echoes **this** deployment's cookie into the header, so the server's own
+  comparison cannot be cross-wired; and
+* a CSRF failure is now a **repairable** condition rather than a dead end — see below.
 
 ### `nx_access_exp` was unscoped for the same reason, and it did not hold
 
@@ -208,6 +224,27 @@ across replicas stay authenticated.
 > on every run. Deploying from a different machine, or after re-running setup, silently
 > changes the key. Store it out-of-band and treat it as long-lived.
 
+### A CSRF failure repairs itself
+
+`nx_csrf` is re-minted by every rotation, so a session that is still valid can always fix a
+missing or stale CSRF cookie by refreshing once. Nothing used to do that: a 403 does not
+trigger the refresh path the way a 401 does, so a lost cookie meant every write failed
+indefinitely.
+
+The backend now answers a CSRF failure with a structured body, matching the shape
+`requires()` uses for a permission denial:
+
+```json
+{"detail": {"error": "csrf_failed", "cookie_present": false,
+            "message": "CSRF token missing or invalid"}}
+```
+
+`cookie_present` distinguishes the two causes — an absent cookie is the server's doing
+(eviction, expiry), an absent header is the client's. On `csrf_failed` the SPA refreshes
+once and retries the write; only if that fails does it surface an error, and it no longer
+routes the failure through the access-denied modal, which blamed a permission the user
+holds.
+
 ---
 
 ## 5. Diagnostics
@@ -224,7 +261,7 @@ every token header.
   "issuer": "nexus-lineage:uat",
   "cookieNames": {
     "access": "nx_access_uat", "refresh": "nx_refresh_uat",
-    "csrf": "nx_csrf", "access_exp": "nx_access_exp_uat"
+    "csrf": "nx_csrf_uat", "access_exp": "nx_access_exp_uat"
   },
   "activeKid": "aac6b71e",
   "acceptedKids": ["aac6b71e"],
@@ -250,7 +287,7 @@ that terminates TLS upstream.
 Every boot logs one line, so two deployments can be compared from `kubectl logs`:
 
 ```
-Auth fingerprint: environment_id=uat issuer=nexus-lineage:uat cookies=nx_access_uat/nx_refresh_uat/nx_csrf
+Auth fingerprint: environment_id=uat issuer=nexus-lineage:uat cookies=nx_access_uat/nx_refresh_uat/nx_csrf_uat
   active_kid=aac6b71e accepted_kids=aac6b71e cookie_secure=True cookie_domain=(host-only) cookie_samesite=lax
 ```
 
@@ -268,7 +305,7 @@ whenever `AUTH_COOKIE_SECURE=true` (§6).
 | Everyone logged out after a redeploy | `JWT_SECRET_KEY` changed with no retired key | `activeKid` differs from before the deploy | Populate `JWT_SECRET_KEY_PREVIOUS` (§4) |
 | Auth flaps — some requests fine, some 401 | Replicas disagree on the signing key mid-rollout | `activeKid` differs between pods | Same fix; restart pods so the fleet converges |
 | **Login returns 200 but you land back on `/login`, and no cookie is ever stored** | `AUTH_COOKIE_SECURE=true` on a plain-HTTP host — browsers discard `Secure` cookies over HTTP **silently**, with no console error | `secureCookieWouldBeDropped: true` | Serve the host over HTTPS, or set `AUTH_COOKIE_SECURE=false` for an HTTP-only environment |
-| Every POST 403s with a CSRF error | `nx_csrf` missing or not echoed | `sessionCookiesPresented.csrf` is `absent` | Usually the `Secure`-over-HTTP case above; otherwise check the `X-CSRF-Token` header is being sent |
+| Every POST 403s with a CSRF error | `nx_csrf` missing or not echoed | `sessionCookiesPresented.csrf` is `absent` | The SPA now refreshes once and retries on `csrf_failed`, so a persistent failure means the refresh is failing too. Usually the `Secure`-over-HTTP case above; otherwise check the `X-CSRF-Token` header is being sent |
 | SSO login loops back to the IdP | Handshake cookie lost between redirect and callback | `AUTH_COOKIE_SAMESITE` must be `lax`, not `strict` | Leave `AUTH_COOKIE_SAMESITE` at `lax` |
 
 `secureCookieWouldBeDropped` deserves emphasis: it produces *exactly* the same user-visible

@@ -161,6 +161,48 @@ test had ever put a claim in one — the same shape of blindness as the transact
 gap documented on that fixture. Tests that care now inject a resolver, and the wide-tenant
 test asserts its own premise so it cannot quietly stop testing anything.
 
+### A dead tab after a network blip, and writes that failed forever
+
+Three defects reported from production, with one shape in common: a transient fault left
+the application in a state it could not recover from on its own.
+
+**A failed chunk download was permanent.** Routes are code-split behind `React.lazy`, which
+memoises the promise it creates — so once a dynamic import rejects, every later render
+re-throws the *same* rejection. The network could come back and the route stayed broken for
+the life of the tab. And nothing caught it: the routes were wrapped in `<Suspense>`, which
+handles the pending state and not the rejected one, so with no error boundary above it the
+rejection unmounted the tree to a blank page. Reported as a persistent
+`TypeError: Failed to fetch dynamically imported module LoginPage`.
+
+Two causes, two repairs. A chunk that is *momentarily* unreachable — DNS lost on a VPN
+reconnect or a wake from sleep, which shows up as `ERR_NAME_NOT_RESOLVED` against
+everything in flight — just needs retrying, because the file still exists. A chunk that is
+*gone*, because a deploy replaced the content-hashed bundles while the tab held the old
+`index.html`, needs a fresh `index.html`, which means a real navigation. `lazyWithRetry`
+does both: three attempts with backoff, then one reload, guarded in `sessionStorage` so an
+offline client cannot loop. A `RouteErrorBoundary` catches whatever survives that and
+offers the reload rather than showing nothing.
+
+**A missing CSRF cookie could not be repaired.** `nx_csrf` is re-minted by every rotation,
+so a live session can always fix a stale one by refreshing — but nothing did, because a 403
+does not trigger the refresh path the way a 401 does. Every write then failed indefinitely,
+and because the failure arrived as a bare 403 it was routed through the access-denied
+modal: the user was told they lacked a permission they demonstrably held. The backend now
+answers with a structured `{"error": "csrf_failed", "cookie_present": …}`, the SPA
+refreshes once and retries the write, and the failure no longer masquerades as an
+authorization problem.
+
+**`nx_csrf` was unscoped, and eviction is name-based.** Sharing the *value* between
+deployments is genuinely harmless — the double-submit check only compares the cookie
+against the header on the same request. Sharing the *name* is not: `clear_session_cookies`
+evicts across every domain scope a cookie might hold, deliberately including the parent
+that sibling deployments share. So signing out of one instance deleted the other's CSRF
+cookie, while that instance's session stayed live because its access and refresh cookies
+are scoped — an authenticated session that could not perform a single write. It is scoped
+now, resolved client-side from `environment_id` the same way `nx_access_exp` is.
+
+None of the three needed a new mechanism; each was a recovery that had never been wired up.
+
 ### A rate limiter that could deny authentication
 
 Introduced by this work and caught in production, so it is worth recording rather than
@@ -206,6 +248,8 @@ and the scoping is now asserted as a property rather than as a list of names.
 | Limiter storage | The async limiter uses the redis-py asyncio client we already ship, not the `coredis` default; construction falls back to memory instead of 500ing sign-in; both limiters' backends are reported at boot |
 | Claim transport | Workspace grants moved out of the cookie entirely into the `sid` session store, read in the round trip revocation already made, so the access cookie is O(1) in tenant size; stored payloads deduplicated ~9x; reads accept the old inline layout so open tabs survive the deploy |
 | Unknown vs none | Grants that no source can supply are flagged, not flattened to an empty map: a workspace-scoped check answers 503 rather than "Missing permission", and global checks are untouched |
+| Chunk loading | Lazy routes retry, then reload once for a stale build, behind an error boundary — a failed import no longer breaks the route for the life of the tab |
+| CSRF | Structured `csrf_failed` body; the SPA refreshes once and retries rather than reporting a permission the user holds. `nx_csrf` is environment-scoped so one deployment's sign-out cannot evict another's |
 | Client | `tryRefresh` classifies its outcome — only a definitive 401 signs you out; 429/5xx/network get one bounded retry |
 | Guards | A real `permissionsStatus` tri-state; no denial rendered until the answer is known |
 | Login page | Shows the form, with an explicit "Continue as \<name\>" for a still-valid session |

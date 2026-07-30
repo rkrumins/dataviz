@@ -63,7 +63,7 @@ sequenceDiagram
         Svc->>Svc: linking_policy decides link vs reject
     end
     Svc->>Svc: reconcile_sso_targets (role bindings + group members)
-    Svc-->>U: 302 + Set-Cookie nx_access / nx_refresh / nx_csrf
+    Svc-->>U: 302 + Set-Cookie nx_access / nx_refresh / nx_csrf / nx_access_exp
 ```
 
 Full per-flow sequence diagrams (15 of them, including the collision-blocked and 24h
@@ -77,8 +77,11 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
   `nx_access_exp`, the unix epoch at which `nx_access` expires — the
   client cannot inspect an HttpOnly cookie, so this is its only way to
   renew before expiry rather than after a 401. Neither carries identity
-  or a signature. `nx_access_exp` deliberately outlives the cookie it
-  describes (it follows the refresh TTL), because a tab that boots after
+  or a signature, but both are environment-scoped anyway — not for their
+  values, which are harmless to share, but for their names: eviction is
+  name-based, so one unscoped name lets a sign-out in one deployment
+  delete a sibling's cookie. `nx_access_exp` deliberately outlives the
+  cookie it describes (it follows the refresh TTL), because a tab that boots after
   the access token died is exactly the tab that needs to read it — and it
   is environment-scoped (`nx_access_exp_<env>`), because two deployments
   sharing a parent domain otherwise write one slot and each tab ends up
