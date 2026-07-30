@@ -79,6 +79,7 @@ function AccountSettingsContent() {
     const { showToast } = useToast()
     const user = useAuthStore((s) => s.user)
     const applyProfile = useAuthStore((s) => s.applyProfile)
+    const logout = useAuthStore((s) => s.logout)
     const { passwordSet, identities } = useAccountIdentity()
 
     const [firstName, setFirstName] = useState(user?.firstName ?? '')
@@ -202,11 +203,27 @@ function AccountSettingsContent() {
         setRevoking(true)
         try {
             await accountService.revokeAllSessions()
-            navigate('/login', { replace: true })
         } catch (err) {
             showToast('error', (err as Error).message)
             setRevoking(false)
+            return
         }
+        // Sign THIS tab out too, not just the server side.
+        //
+        // Navigating to /login without tearing down local state left the
+        // store still 'authenticated' and the cached user still in
+        // localStorage, so the login page took one look and offered
+        // "You're already signed in as …" — for a session that had just
+        // been revoked. Reloading re-read the same cache and said it
+        // again, so the user could not escape their own sign-out.
+        //
+        // ``logout()`` is the tested teardown: it clears the cache, resets
+        // the store, and broadcasts to sibling tabs so they drop out now
+        // rather than on their next request. Its POST to /auth/logout is
+        // redundant after a revoke-all and harmless — it swallows its own
+        // errors, so the local teardown happens either way.
+        await logout()
+        navigate('/login', { replace: true })
     }
 
     return (
