@@ -26,15 +26,17 @@
  *
  * Exactly ONE endpoint is exempt from the refresh-on-401 dance:
  * /auth/refresh itself, which would otherwise recurse into itself. Not
- * /auth/* as a whole — /auth/me 401ing on boot is precisely the case
+ * /auth/* as a whole — /me/session 401ing on boot is precisely the case
  * the silent refresh exists to recover, and it must keep going through
  * it. See {@link REFRESH_EXEMPT_PATHS}.
  *
- * The /login ROUTE is exempt too, and that is a different rule from the
- * endpoint list: see {@link onLoginRoute}.
+ * Two further exemptions are about the user rather than the endpoint, and
+ * they are different rules: the /login ROUTE (see {@link onLoginRoute})
+ * and a deliberate sign-out (see ``store/signedOut.ts``).
  */
 
 import { TIMEOUTS } from '../config/timeouts'
+import { isSignedOut } from '@/store/signedOut'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const CSRF_COOKIE = 'nx_csrf'
@@ -105,6 +107,25 @@ function onLoginRoute(): boolean {
   const path = window.location.pathname
   return path === LOGIN_PATH || path === `${LOGIN_PATH}/`
 }
+
+/**
+ * True once the user has explicitly signed out and not signed back in.
+ *
+ * This and {@link onLoginRoute} answer different questions, and both are
+ * needed:
+ *
+ *   * ``onLoginRoute`` is about WHERE they are. Someone standing on the
+ *     login page wants to type credentials — possibly someone else's —
+ *     so restoring the old session under them is wrong even though they
+ *     never asked to leave. This is the ordinary-expiry case.
+ *   * {@link isSignedOut} is about WHAT THEY ASKED FOR. Having signed
+ *     out, no route may silently restore, and the portal payload may not
+ *     mint a fresh session either.
+ *
+ * Safe to import at the top level despite this module being the one every
+ * service depends on: ``store/signedOut`` imports nothing, so there is no
+ * cycle to create.
+ */
 
 /**
  * What a refresh attempt actually established. This used to be a
@@ -515,6 +536,7 @@ export async function fetchWithTimeout(
     && !isRefreshExempt(input)
     && !skipAuthRefresh
     && !onLoginRoute()
+    && !isSignedOut()
   ) {
     const outcome = await tryRefresh()
     if (outcome === 'ok' || outcome === 'reauth') {

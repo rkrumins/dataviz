@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
+import { clearSignedOut, markSignedOut } from '@/store/signedOut'
 
 const { listProviders, loginContext, loginWithBrowserProfile, navigate } = vi.hoisted(() => ({
     listProviders: vi.fn(),
@@ -118,6 +119,35 @@ describe('portal auto sign-in', () => {
         renderLogin()
         await screen.findByText(/Continue with Corporate Portal/)
         expect(loginWithBrowserProfile).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses to sign in again after an explicit sign-out', async () => {
+        // THE "IT LOGGED ME BACK IN WITHOUT CREDENTIALS" CASE. Server-side
+        // revocation cannot stop this one: the payload is not a condemned
+        // credential being replayed, it is a request for a brand-new
+        // session. And the per-tab sentinel does not cover it either —
+        // open a fresh tab and it is clear. Only the signed-out marker
+        // makes "sign out" mean anything here.
+        window.localStorage.setItem('corp.user', 'the-signed-payload')
+        markSignedOut()
+
+        renderLogin()
+
+        expect(await screen.findByText(/Continue with Corporate Portal/)).toBeInTheDocument()
+        expect(loginWithBrowserProfile).not.toHaveBeenCalled()
+    })
+
+    it('resumes auto sign-in once the user signs back in', async () => {
+        // The marker has to lift, or one sign-out permanently disables the
+        // portal convenience for that browser.
+        window.localStorage.setItem('corp.user', 'the-signed-payload')
+        markSignedOut()
+        clearSignedOut()
+
+        renderLogin()
+
+        await waitFor(() => expect(loginWithBrowserProfile)
+            .toHaveBeenCalledWith('corp-portal', 'the-signed-payload'))
     })
 
     it('stays out of the way when more than one portal provider exists', async () => {

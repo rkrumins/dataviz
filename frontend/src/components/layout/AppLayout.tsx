@@ -8,7 +8,7 @@
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
 import { useEffect, useState } from 'react'
-import { Outlet, Navigate, useNavigate } from 'react-router-dom'
+import { Outlet, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { AlertTriangle, Home } from 'lucide-react'
 import { TopBar } from './TopBar'
 import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
@@ -37,6 +37,7 @@ import { useInviteWelcome } from '@/hooks/useInviteWelcome'
 export { useViewEditorModal }
 
 export function AppLayout() {
+  const location = useLocation()
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   // Selector subscriptions (not whole-store) so this always-mounted shell
@@ -135,7 +136,15 @@ export function AppLayout() {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
+    // Carry where they were. A session that expires under a user drops
+    // them here, and sending them to the dashboard afterwards means the
+    // page they were reading is gone — losing your place is itself one of
+    // the odd things that happen "when the token expires". The query
+    // string rather than router state so it survives the full page reload
+    // that a cold boot performs; LoginPage sanitises it on the way out.
+    const from = `${location.pathname}${location.search}`
+    const suffix = from === '/' ? '' : `?next=${encodeURIComponent(from)}`
+    return <Navigate to={`/login${suffix}`} replace />
   }
 
   return (

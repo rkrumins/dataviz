@@ -8,10 +8,13 @@
  *
  * Now:
  *   * The session lives in HttpOnly cookies that JS cannot read.
- *   * On boot we call ``GET /auth/me`` once. The server is the only
- *     authority on whether the cookie is valid; ``isAuthenticated`` is a
- *     derived projection of the resulting status.
- *   * Nothing about auth is written to localStorage.
+ *   * On boot we call ``GET /me/session`` once — identity, permissions
+ *     and token expiry in one answer. The server is the only authority on
+ *     whether the cookie is valid; ``isAuthenticated`` is a derived
+ *     projection of the resulting status.
+ *   * The only thing written to localStorage is the signed-out marker
+ *     (``store/signedOut.ts``), which carries no identity — just the fact
+ *     that the user asked to leave.
  */
 
 import { create } from 'zustand'
@@ -28,6 +31,7 @@ import {
     writeUserCache,
 } from '@/store/userCache'
 import { resetSessionLostLatch } from '@/services/fetchWithTimeout'
+import { clearSignedOut, markSignedOut } from '@/store/signedOut'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -335,6 +339,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     login: async (email, password) => {
         set({ error: null, isLoading: true })
+        clearSignedOut()
         resetSessionLostLatch()
         try {
             const { user } = await authService.login({ email, password })
@@ -352,6 +357,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     loginWithBrowserProfile: async (providerSlug, payload) => {
         set({ error: null, isLoading: true })
+        clearSignedOut()
         resetSessionLostLatch()
         try {
             const { user } = await authService.loginWithBrowserProfile(
@@ -380,6 +386,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // Run the identical post-login sequence, or the app would be
             // holding a valid session it does not know about.
             if (resp.autoSignedIn && resp.user) {
+                clearSignedOut()
                 resetSessionLostLatch()
                 set({ ..._authenticated(resp.user), error: null, isLoading: false })
                 writeUserCache(resp.user)
@@ -405,6 +412,11 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // family and tombstone the access session. Even if it fails
         // (network down, etc.) we still clear local state — the user is
         // logging out either way.
+        // Recorded BEFORE the request, not after: if /logout hangs or the
+        // network is down we still have to honour the intent, and the
+        // marker is what stops a silent refresh or a portal payload
+        // signing them straight back in while we wait.
+        markSignedOut()
         try {
             await authService.logout()
         } catch {

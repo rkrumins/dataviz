@@ -190,6 +190,12 @@ function AccountSettingsContent() {
         try {
             await accountService.changePassword(currentPassword, newPassword)
             showToast('success', 'Password changed. Sign in again.')
+            // Drop the local session before navigating. The server has
+            // just revoked every session for this account, but the store
+            // still says ``isAuthenticated``, and LoginPage reads that —
+            // so it rendered "You're already signed in as …" for a session
+            // that had been dead for a round trip.
+            await useAuthStore.getState().logout()
             navigate('/login', { replace: true })
         } catch (err) {
             setPasswordError((err as Error).message)
@@ -202,6 +208,9 @@ function AccountSettingsContent() {
         setRevoking(true)
         try {
             await accountService.revokeAllSessions()
+            // "Every session" includes this one — so clear it here too,
+            // or the login page greets us as the user we just signed out.
+            await useAuthStore.getState().logout()
             navigate('/login', { replace: true })
         } catch (err) {
             showToast('error', (err as Error).message)

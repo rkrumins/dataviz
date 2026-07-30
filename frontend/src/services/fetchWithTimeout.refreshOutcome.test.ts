@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchWithTimeout, resetSessionLostLatch } from './fetchWithTimeout'
+import { clearSignedOut, markSignedOut } from '@/store/signedOut'
 
 const REFRESH_URL = '/api/v1/auth/refresh'
 const PROTECTED_URL = '/api/v1/workspaces'
@@ -197,6 +198,55 @@ describe('the login route', () => {
         globalThis.fetch = f as unknown as typeof fetch
 
         await fetchWithTimeout('/api/v1/auth/me')
+
+        expect(refreshCalls(f)).toBe(1)
+    })
+})
+
+
+describe('after an explicit sign-out', () => {
+    afterEach(() => {
+        localStorage.clear()
+    })
+
+    it('no route silently restores the session', async () => {
+        // The route exemption above is about WHERE the user is. This is
+        // about what they ASKED FOR: having signed out, /dashboard must
+        // not quietly sign them back in either.
+        setPath('/dashboard')
+        markSignedOut()
+        const f = mockFetch([unauthorized])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        const res = await fetchWithTimeout('/api/v1/me/session')
+
+        expect(refreshCalls(f)).toBe(0)
+        expect(res.status).toBe(401)
+    })
+
+    it('signing back in restores the silent-refresh path', async () => {
+        // The marker has to be clearable, or one sign-out permanently
+        // downgrades the account to reactive-only auth.
+        setPath('/dashboard')
+        markSignedOut()
+        clearSignedOut()
+        const f = mockFetch([unauthorized])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout('/api/v1/me/session')
+
+        expect(refreshCalls(f)).toBe(1)
+    })
+
+    it('leaves an ordinary expiry alone', async () => {
+        // Scoped to EXPLICIT sign-out. A session that merely expired must
+        // still restore silently, or the "leave it open and come back"
+        // case breaks in a new way.
+        setPath('/dashboard')
+        const f = mockFetch([unauthorized])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout('/api/v1/me/session')
 
         expect(refreshCalls(f)).toBe(1)
     })

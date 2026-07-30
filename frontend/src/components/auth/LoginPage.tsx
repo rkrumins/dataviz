@@ -11,6 +11,8 @@ import {
     type SsoProviderSummary,
 } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { safeNext } from '@/lib/safeNext'
+import { isSignedOut } from '@/store/signedOut'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -123,11 +125,15 @@ function SsoButtons({
     providers,
     failed,
     onPortalError,
+    nextPath,
     showDivider = true,
 }: {
     providers: SsoProviderSummary[] | null
     failed: boolean
     onPortalError: (message: string) => void
+    /** Where to land after a portal sign-in — the page an expiry
+     *  interrupted, not always the dashboard. */
+    nextPath: string
     /** "Or sign in with" only makes sense when there is something above
      *  to be an alternative *to*. On an SSO-only deployment with a single
      *  provider these buttons are the whole page. */
@@ -153,10 +159,10 @@ function SsoButtons({
         setBusySlug(p.slug)
         const ok = await loginWithBrowserProfile(p.slug, payload)
         setBusySlug(null)
-        if (ok) navigate('/', { replace: true })
+        if (ok) navigate(nextPath, { replace: true })
     }
 
-    const next = encodeURIComponent('/dashboard')
+    const next = encodeURIComponent(nextPath === '/' ? '/dashboard' : nextPath)
     const customEnabled =
         (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
             .toString()
@@ -388,7 +394,7 @@ function SsoFailureBanner({ reference, onDismiss }: {
  * which is a thing people genuinely need: a shared machine, a second
  * tenant, an admin account alongside a normal one.
  */
-function AlreadySignedIn({ email }: { email: string }) {
+function AlreadySignedIn({ email, nextPath }: { email: string; nextPath: string }) {
     const navigate = useNavigate()
     const logout = useAuthStore((s) => s.logout)
     const [switching, setSwitching] = useState(false)
@@ -415,7 +421,7 @@ function AlreadySignedIn({ email }: { email: string }) {
                 <div className="mt-6 space-y-3">
                     <button
                         type="button"
-                        onClick={() => navigate('/', { replace: true })}
+                        onClick={() => navigate(nextPath, { replace: true })}
                         className="w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] hover:brightness-110 flex items-center justify-center gap-2"
                     >
                         Continue
@@ -467,6 +473,14 @@ export function LoginPage() {
     const navigate = useNavigate()
     const [params] = useSearchParams()
 
+    // Where an expiry interrupted them. AppLayout puts the path it was
+    // bouncing on into ``?next=``, so signing back in returns you to the
+    // page you were reading rather than to the dashboard — losing your
+    // place was itself one of the "odd things that happen when the token
+    // expires". Sanitised: this value comes from the URL, so an attacker
+    // gets to choose it.
+    const nextPath = safeNext(params.get('next'), '/')
+
     const {
         login, error, clearError, isLoading, isAuthenticated, status, user,
         loginWithBrowserProfile,
@@ -504,6 +518,13 @@ export function LoginPage() {
     useEffect(() => {
         if (providers === null || autoAttempted.current) return
         if (isAuthenticated || autoPortalAlreadyTried()) return
+        // Someone who signed out must not be signed straight back in by a
+        // payload still sitting in browser storage. Server-side revocation
+        // cannot stop this one: it isn't presenting a condemned
+        // credential, it is asking for a brand-new session. The per-tab
+        // sentinel above doesn't cover it either — open a new tab and it
+        // is clear. This is the check that makes "sign out" stick.
+        if (isSignedOut()) return
 
         const candidates = providers.filter(needsBrowserPayload)
         if (candidates.length !== 1) return
@@ -513,9 +534,9 @@ export function LoginPage() {
         autoAttempted.current = true
         markAutoPortalTried()
         void loginWithBrowserProfile(candidates[0].slug, payload).then((ok) => {
-            if (ok) navigate('/', { replace: true })
+            if (ok) navigate(nextPath, { replace: true })
         })
-    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])
+    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate, nextPath])
 
     // Read ``?error_code=...&email=...`` from the SSO failure redirect
     // path. The collision modal is the most user-actionable case; other
@@ -586,7 +607,7 @@ export function LoginPage() {
         e.preventDefault()
         if (!email || !password || isLoading) return
         const ok = await login(email, password)
-        if (ok) navigate('/', { replace: true })
+        if (ok) navigate(nextPath, { replace: true })
     }
 
     // Avoid flashing the form to a user whose cookie is still being
@@ -602,7 +623,7 @@ export function LoginPage() {
     // A live session, on the one page whose job is to ask who you are.
     // Say so and let them choose — do not decide for them.
     if (isAuthenticated && user) {
-        return <AlreadySignedIn email={user.email} />
+        return <AlreadySignedIn email={user.email} nextPath={nextPath} />
     }
 
     return (
@@ -812,6 +833,7 @@ export function LoginPage() {
                             providers={providers}
                             failed={contextFailed}
                             onPortalError={setPortalError}
+                            nextPath={nextPath}
                             showDivider={showEmailField}
                         />
                     )}
