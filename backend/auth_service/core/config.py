@@ -137,7 +137,7 @@ def _resolve_secret() -> str:
     return key
 
 
-def _resolve_retired_secrets(*, active: str) -> tuple[str, ...]:
+def _resolve_retired_secrets(*, active: str | None = None) -> tuple[str, ...]:
     """Keys accepted for VERIFICATION but never used to sign.
 
     Without this, changing ``JWT_SECRET_KEY`` invalidates every
@@ -167,7 +167,8 @@ def _resolve_retired_secrets(*, active: str) -> tuple[str, ...]:
                 "Retired keys are still trusted for verification, so they "
                 "carry the same strength requirement as the active one."
             )
-        if key != active and key not in keys:
+        if key != (active if active is not None else _resolve_secret()) \
+                and key not in keys:
             keys.append(key)
     return tuple(keys)
 
@@ -214,16 +215,37 @@ _LAZY_KEY_RING_NAMES = frozenset({
 })
 
 
+def _key_ring_fingerprint() -> tuple[str | None, str | None]:
+    """What the cached ring was resolved FROM.
+
+    The ring is cached, and a cache with no notion of what produced it
+    will happily serve a key the environment no longer configures. As a
+    module-level constant that could not happen — the value was fixed to
+    the module object, so re-importing produced a new one — but a plain
+    dict survives a re-import and keeps answering with the old ring.
+
+    That is not only a test concern, though the suite is where it
+    surfaced: the key-ring tests re-import under a rotated secret, and a
+    stale entry leaked out of them and broke nine unrelated tests with
+    signature failures. Keying on the environment makes the cache
+    self-invalidating, which is the property a constant had for free.
+    """
+    return os.getenv("JWT_SECRET_KEY"), os.getenv("JWT_SECRET_KEY_PREVIOUS")
+
+
 def _build_key_ring() -> dict[str, object]:
-    """Resolve and validate every key, once.
+    """Resolve and validate every key, once per configuration.
 
     Cached as a unit: the retired keys are validated against the active
     one, so resolving them independently could accept a ring the paired
     resolution would reject.
     """
-    if not _KEY_RING:
+    fingerprint = _key_ring_fingerprint()
+    if _KEY_RING.get("_fingerprint") != fingerprint:
+        _KEY_RING.clear()
         secret = _resolve_secret()
         previous = _resolve_retired_secrets(active=secret)
+        _KEY_RING["_fingerprint"] = fingerprint
         _KEY_RING.update({
             "JWT_SECRET_KEY": secret,
             "JWT_SECRET_KEYS_PREVIOUS": previous,

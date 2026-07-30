@@ -358,6 +358,44 @@ function readScopedCookie(base: string): string | null {
 }
 
 /**
+ * Re-mint ``nx_csrf`` if this session has lost it.
+ *
+ * Rotation is the only thing that writes that cookie, so once it is gone
+ * — evicted by a sibling deployment's sign-out, cleared by hand, expired
+ * — nothing restores it until the session next rotates. At a 60-minute
+ * access TTL that is up to an hour, and a tab doing nothing but reads
+ * never triggers a rotation at all: reloading the page issues only GETs,
+ * so the cookie stays missing however many times the user refreshes.
+ *
+ * Called before any write, and once at bootstrap, so the repair happens
+ * when the session is known rather than when a write has already failed.
+ *
+ * Gated on there being a session to rotate. ``readAccessExpiryMs()`` is
+ * the client's only evidence of one — the access cookie is HttpOnly — and
+ * without that check an anonymous POST to /auth/login or /auth/signup
+ * would fire a pointless refresh before every attempt.
+ */
+export async function ensureCsrfToken(): Promise<void> {
+  if (
+    csrfRepairInFlight
+    || onLoginRoute()
+    || readScopedCookie(CSRF_COOKIE) !== null
+    || readAccessExpiryMs() === null
+  ) {
+    return
+  }
+  csrfRepairInFlight = true
+  try {
+    await tryRefresh()
+  } catch {
+    // Let the caller's own request report the failure rather than
+    // inventing one here.
+  } finally {
+    csrfRepairInFlight = false
+  }
+}
+
+/**
  * Read the published access-token expiry, in epoch milliseconds.
  *
  * ``null`` when no session cookie is present, or when it predates this
@@ -663,6 +701,17 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, skipAuthRefresh = false, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
+
+  // Don't send a write we already know will fail.
+  //
+  // The double-submit header is mirrored from ``nx_csrf``. If that cookie
+  // is gone the request goes out with no header and the server refuses it
+  // before it reaches a handler, so the reactive repair further down is
+  // spending a guaranteed-403 round trip to learn something readable from
+  // ``document.cookie``.
+  if (!SAFE_METHODS.has(method) && !skipAuthRefresh) {
+    await ensureCsrfToken()
+  }
 
   let res: Response
   try {

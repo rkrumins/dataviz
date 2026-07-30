@@ -163,3 +163,64 @@ describe('CSRF failure recovery', () => {
         expect(sent).toBe('legacy')
     })
 })
+
+describe('a session that has lost its CSRF cookie', () => {
+    it('re-mints it before a write instead of sending a doomed one', async () => {
+        // The reactive repair spends a guaranteed-403 round trip to
+        // learn something readable from document.cookie.
+        document.cookie = `nx_access_exp=${Math.floor(Date.now() / 1000) + 900}`
+        const calls: string[] = []
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                calls.push(String(input))
+                if (String(input).includes('/auth/refresh')) {
+                    setCookie('nx_csrf', 'reminted')
+                    return json({ user: {} }, 200)
+                }
+                return json({ ok: true }, 200)
+            }),
+        )
+
+        await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+        expect(calls[0]).toContain('/auth/refresh')
+        expect(calls[1]).toContain('/views/v1')
+        // One attempt at the write, not two.
+        expect(calls.filter((c) => c.includes('/views/v1'))).toHaveLength(1)
+    })
+
+    it('does not rotate for an anonymous write', async () => {
+        // No session to rotate: nx_access_exp absent. Firing a refresh
+        // before every /auth/login POST would be pure noise.
+        const calls: string[] = []
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                calls.push(String(input))
+                return json({ ok: true }, 200)
+            }),
+        )
+
+        await fetchWithTimeout('/api/v1/auth/signup', { method: 'POST' })
+
+        expect(calls.some((c) => c.includes('/auth/refresh'))).toBe(false)
+    })
+
+    it('leaves a session that still has its cookie alone', async () => {
+        document.cookie = `nx_access_exp=${Math.floor(Date.now() / 1000) + 900}`
+        setCookie('nx_csrf', 'intact')
+        const calls: string[] = []
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                calls.push(String(input))
+                return json({ ok: true }, 200)
+            }),
+        )
+
+        await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+        expect(calls).toHaveLength(1)
+    })
+})

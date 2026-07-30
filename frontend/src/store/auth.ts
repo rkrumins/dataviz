@@ -26,7 +26,11 @@ import {
     readUserCache,
     writeUserCache,
 } from '@/store/userCache'
-import { resetSessionLostLatch, setAuthEnvironmentId } from '@/services/fetchWithTimeout'
+import {
+    ensureCsrfToken,
+    resetSessionLostLatch,
+    setAuthEnvironmentId,
+} from '@/services/fetchWithTimeout'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -299,6 +303,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // own token's expiry. Safe to do here because the keepalive
             // only starts once status flips to 'authenticated', below.
             setAuthEnvironmentId(environment_id)
+            // A session can be holding no CSRF cookie — evicted by a
+            // sibling deployment's sign-out, cleared by hand, expired —
+            // and only a rotation re-mints it. Bootstrap is the one place
+            // that knows a session exists before any write is attempted,
+            // so repairing here is what makes reloading the page fix it:
+            // a reload otherwise changes nothing, because it issues only
+            // GETs and no GET needs a CSRF token.
+            void ensureCsrfToken()
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
             // optimistic copy.
