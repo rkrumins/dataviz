@@ -24,6 +24,7 @@ from backend.auth_service.providers.custom import (
     CustomIdentityProvider,
 )
 from backend.auth_service.providers.oidc import OidcProvider, OidcSettings
+from tests.common.refresh_store import InMemoryRefreshStore
 
 
 # ── Claim mapper extraction (replaces Phase 2 _extract_groups tests) ─
@@ -254,20 +255,10 @@ class _StubUserIdentityRepo:
         self.touched_ids.append(identity_id)
 
 
-class _NoopRefreshStore:
-    revoked_family = None
-
-    async def is_family_revoked(self, fam):
-        return False
-
-    async def claim_jti(self, jti, family_id, expires_at_iso, **successor):
-        return True
-
-    async def get_rotation(self, jti):
-        return None
-
-    async def revoke_family(self, family_id):
-        self.revoked_family = family_id
+# Allow-by-record: a store that answers "no row" to everything refuses
+# every rotation, so this has to actually store. See
+# ``tests/common/refresh_store.py``.
+_NoopRefreshStore = InMemoryRefreshStore
 
 
 class _NoopSession:

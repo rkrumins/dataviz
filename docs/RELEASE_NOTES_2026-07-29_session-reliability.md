@@ -210,7 +210,8 @@ and the scoping is now asserted as a property rather than as a list of names.
 | Guards | A real `permissionsStatus` tri-state; no denial rendered until the answer is known |
 | Login page | Shows the form, with an explicit "Continue as \<name\>" for a still-valid session |
 | Config | Revocation TTL derived from the access TTL *and* the clock-skew leeway; startup refuses an incoherent pair |
-| Storage | `revoked_refresh_jti` is swept hourly; nothing pruned it before |
+| Refresh validity | Allow-by-record: one row per issued token, and a token is refused unless an active row says otherwise. `auth_time` and the successor pointer move onto that row |
+| Storage | `refresh_tokens` is swept hourly; nothing pruned the table it replaces |
 | Environments | `AUTH_ENVIRONMENT_ID` scopes cookie names and the JWT issuer — including `nx_dryrun`, which it had missed |
 | Key rotation | `JWT_SECRET_KEY_PREVIOUS` key ring with `kid` headers — now covering the dry-run tokens too, which signed and verified outside the ring |
 | Renewal | Scheduled ahead of expiry off a new `nx_access_exp` cookie, serialised across tabs by a Web Lock; reactive 401 refresh stays as the fallback |
@@ -366,6 +367,50 @@ files, the process will not boot and the error names the file. The `.env.example
 was 34 characters, so the ≥32 length floor passed it — a deployment that copied that file
 forward was signing production tokens with a secret published in the repo. `.env.example`
 now ships the key empty.
+
+### Refresh tokens are valid only while a record says so
+
+`revoked_refresh_jti` was a **denylist**: a refresh token was valid *unless* a row said
+otherwise. Correctness therefore rested on that denylist being complete and durable
+forever — and the sweep below deletes from it. A row lost to an early prune, a failed
+write, or a restore from a backup taken before the revocation made a consumed or revoked
+token valid again, silently, in the attacker's favour.
+
+`refresh_tokens` inverts it: a row per token, written at mint, and **nothing is accepted
+without an active row**. Every way the storage can fail now points the safe way — a
+missing row signs someone out instead of reviving a credential — and pruning an expired
+row can only reject a token that had already expired.
+
+Two things moved onto the row with it:
+
+* **`auth_time`** was a claim the refresh JWT asserted about *itself*, and its absence
+  meant "local password session, the 24-hour SSO re-auth ceiling does not apply". A token
+  minted without it skipped the ceiling entirely — the bug fixed earlier in this release
+  by defaulting the value at mint. Sourced from the record, the whole class is gone: the
+  row cannot be absent for a token that was just accepted, and it is not editable by
+  whoever holds the cookie.
+* **Family revocation** marks the family's own rows instead of writing a
+  `family-revoked:<id>` sentinel whose lifetime had to be hand-sized to outlive every
+  token it guarded — first stamped year 9999, making every revocation a permanent row,
+  then sized to the refresh TTL plus a grace day. There is nothing left that has to
+  outlive anything.
+
+**The signed JWT is still the bearer.** Switching to an opaque handle would change the
+wire format, so a rollback would strand every session minted after the deploy — a visible
+mass logout. Flipping *validation* delivers the security property with no format change,
+no dual-accept window, and no rollback risk.
+
+**Nobody is signed out by the deploy.** Sessions already live hold tokens with no row.
+`REFRESH_ADOPT_RECORDLESS` (default on) accepts such a token once and writes the row it
+should have had — which is exactly what the previous model did with the same token, so
+the ramp is the status quo rather than a new weakness. It is still the old behaviour, so
+turn it off once `JWT_REFRESH_EXPIRY_DAYS` have passed; every adoption logs at INFO, so
+the drain to zero is watchable rather than assumed. Adoption asks about the family first,
+so it cannot write a fresh licence for a session that was revoked.
+
+**It also closed a test blind spot.** Six fixtures wired
+`refresh_store_factory=lambda s: None`, so no test of an SSO login had ever touched
+refresh persistence — the same shape as the claims-resolver gap above.
 
 **An hourly sweep on the control-plane role.** `revoked_refresh_jti` is pruned of rows
 whose tokens can no longer be presented. The first pass after upgrading drains greedily —

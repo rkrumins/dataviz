@@ -1,13 +1,18 @@
-"""The revocation table has to shed rows.
+"""The refresh-token table has to shed rows, and shedding must be safe.
 
-``revoked_refresh_jti`` gains a row per rotation and a sentinel per
-revoked family. ``expires_at`` was written from the start and documented
-as the marker for reclaiming a row — and nothing ever read it, so the
-table grew for the life of the deployment and shed nothing. At a
-15-minute access TTL that is roughly ``users x tabs x 32`` rows a day.
+``refresh_tokens`` gains a row per rotation, so at a 15-minute access TTL
+it grows by roughly ``users x tabs x 32`` rows a day. ``expires_at`` marks
+when a row stops being able to matter, and the sweep reads it.
 
-It never surfaced as slowness because every read against it is a
-primary-key lookup, which is exactly why it went unnoticed.
+It never surfaces as slowness because every read against it is a
+primary-key lookup, which is exactly the kind of growth that goes
+unnoticed.
+
+The sweep is also where allow-by-record pays off most plainly. Against
+the old denylist these same deletes removed the only thing making a
+consumed or revoked token invalid, so an early prune or a restore from a
+stale backup could revive a dead credential. Now a deleted row can only
+cause a refusal — see ``test_pruning_cannot_revive_a_dead_token``.
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import RevokedRefreshJtiORM
+from backend.app.db.models import RefreshTokenORM
 from backend.app.db.repositories.refresh_token_repo import (
     make_refresh_store,
     purge_expired,
@@ -33,10 +38,12 @@ def _iso(offset_days: float) -> str:
 
 async def _add(session: AsyncSession, jti: str, expires_in_days: float) -> None:
     session.add(
-        RevokedRefreshJtiORM(
+        RefreshTokenORM(
             jti=jti,
             family_id="fam",
-            revoked_at=_iso(-1),
+            user_id="usr_gc",
+            mint_ms=0,
+            created_at=_iso(-1),
             expires_at=_iso(expires_in_days),
         )
     )
@@ -45,7 +52,7 @@ async def _add(session: AsyncSession, jti: str, expires_in_days: float) -> None:
 
 async def _count(session: AsyncSession) -> int:
     return (
-        await session.execute(select(func.count()).select_from(RevokedRefreshJtiORM))
+        await session.execute(select(func.count()).select_from(RefreshTokenORM))
     ).scalar_one()
 
 
@@ -57,45 +64,78 @@ async def test_expired_rows_are_reclaimed(db_session):
 
 
 async def test_live_rows_are_left_alone(db_session):
-    """A consumed jti whose token could still be presented must stay.
+    """A token that could still be presented must keep its row.
 
-    Deleting it early would make a genuine replay undetectable — the
-    reuse check reads exactly this table.
+    Under allow-by-record the row IS the token's licence, so deleting it
+    early signs the holder out rather than — as under the denylist —
+    making a genuine replay undetectable. Both are wrong; only one of
+    them is quiet.
     """
     await _add(db_session, "live", 3)
     await _add(db_session, "expired", -3)
     assert await purge_expired(db_session) == 1
     remaining = (
-        await db_session.execute(select(RevokedRefreshJtiORM.jti))
+        await db_session.execute(select(RefreshTokenORM.jti))
     ).scalars().all()
     assert remaining == ["live"]
 
 
-async def test_family_sentinels_are_reclaimable(db_session):
-    """Sentinels used to be stamped year 9999 so the sweep skipped them.
+async def test_revocation_no_longer_leaves_a_row_to_reclaim(db_session):
+    """Family revocation marks tokens; it does not add a row of its own.
 
-    A dead family is dead forever, so that reasoning held — and it made
-    every revocation a permanent row, the one kind that can never be
-    reclaimed. A sentinel only has to outlive the newest token in its
-    family, which is one refresh TTL from the revocation.
+    It used to insert a ``family-revoked:<id>`` sentinel whose expiry had
+    to be hand-sized to outlive every token it guarded — first stamped
+    year 9999, making every revocation permanent, then sized to the
+    refresh TTL plus a grace day. Marking the rows themselves removes the
+    whole question: there is nothing left that has to outlive anything.
     """
     store = make_refresh_store(db_session)
+    await store.record_mint(
+        jti="doomed-1", family_id="doomed-family", user_id="usr_x",
+        auth_time=None, mint_ms=0, expires_at_iso=_iso(7),
+    )
+    before = await _count(db_session)
+
     await store.revoke_family("doomed-family")
     await db_session.flush()
 
+    assert await _count(db_session) == before, "revocation added a row"
     row = (
         await db_session.execute(
-            select(RevokedRefreshJtiORM).where(
-                RevokedRefreshJtiORM.family_id == "doomed-family"
+            select(RefreshTokenORM).where(
+                RefreshTokenORM.family_id == "doomed-family"
             )
         )
     ).scalar_one()
-    assert not row.expires_at.startswith("9999"), (
-        "a sentinel the sweep can never reclaim is a permanent row"
-    )
+    assert row.revoked_at is not None
 
-    # Still guards the family for longer than any token in it can live.
-    assert row.expires_at > _iso(7)
+
+async def test_pruning_cannot_revive_a_dead_token(db_session):
+    """The property the inversion exists for.
+
+    Sweeping the old denylist deleted the rows that made consumed and
+    revoked tokens invalid, so a prune that ran early — a clock skew, a
+    mis-set expiry, a restore from a backup taken before the revocation —
+    handed a live credential back to whoever held it. Here the sweep
+    deletes the licence, so the same mistake can only refuse.
+    """
+    store = make_refresh_store(db_session)
+    await store.record_mint(
+        jti="revoked-and-swept", family_id="fam-dead", user_id="usr_x",
+        auth_time=None, mint_ms=0,
+        # Already expired, so the sweep is entitled to take it.
+        expires_at_iso=_iso(-1),
+    )
+    await store.revoke_family("fam-dead")
+    await db_session.flush()
+
+    assert await purge_expired(db_session) == 1
+
+    # The row is gone; the token it described is not thereby valid.
+    assert await store.get_record("revoked-and-swept") is None
+    assert await store.consume(
+        "revoked-and-swept", successor_jti="whatever",
+    ) is False
 
 
 async def test_the_batch_is_bounded(db_session):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from backend.app.db.repositories import idp_provider_repo
+from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 
 
 async def _provider(db_session, *, slug, domains=None, kind="oidc",
@@ -71,7 +72,13 @@ async def hrd_client(test_client, db_session, registry):
     app.state.identity_service = LocalIdentityService(
         session_factory=factory,
         user_repo=user_repo,
-        refresh_store_factory=lambda s: None,
+        # A real store, not ``lambda s: None``. Every one of these
+        # fixtures used to pass None, so no test of an SSO login ever
+        # touched refresh persistence — and allow-by-record makes the
+        # record the token's licence to exist, so that gap now shows up
+        # as an AttributeError rather than as a session that quietly
+        # cannot be renewed.
+        refresh_store_factory=make_refresh_store,
         email_domain_resolver=resolver,
         auth_config_provider=CachedAuthConfigProvider(
             lambda: app_auth_config_repo.get_snapshot(db_session),

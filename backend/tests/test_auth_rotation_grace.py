@@ -24,7 +24,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.auth.password import hash_password
-from backend.app.db.models import Base, RevokedRefreshJtiORM
+from backend.app.db.models import Base, RefreshTokenORM
 from backend.app.db.repositories import user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.auth_service.core.tokens import decode_refresh_token
@@ -35,7 +35,6 @@ from backend.auth_service.service import (
 
 
 _PASSWORD = "C0mpl3x!Passw0rd#"
-_FAMILY_SENTINEL_PREFIX = "family-revoked:"
 
 
 @pytest_asyncio.fixture()
@@ -112,11 +111,21 @@ async def _seed_user(factory, email="grace@example.com") -> str:
         return user.id
 
 
-async def _family_sentinels(real_engine) -> list[str]:
+async def _revoked_families(real_engine) -> set[str]:
+    """Families that have been killed.
+
+    Was a scan for ``family-revoked:<id>`` sentinel rows. Allow-by-record
+    has no sentinel — revocation marks the tokens themselves — so the
+    same question is asked of the rows that now carry the answer.
+    """
     maker = async_sessionmaker(bind=real_engine, expire_on_commit=False)
     async with maker() as session:
-        rows = (await session.execute(select(RevokedRefreshJtiORM.jti))).scalars()
-        return [j for j in rows if j.startswith(_FAMILY_SENTINEL_PREFIX)]
+        rows = (await session.execute(
+            select(RefreshTokenORM.family_id).where(
+                RefreshTokenORM.revoked_at.is_not(None)
+            )
+        )).scalars()
+        return set(rows)
 
 
 async def test_replay_inside_grace_returns_the_same_successor(
@@ -133,7 +142,7 @@ async def test_replay_inside_grace_returns_the_same_successor(
     replay_jti = decode_refresh_token(replayed.refresh_token).jti
     assert first_jti == replay_jti, "racers must converge on one successor"
 
-    assert not await _family_sentinels(real_engine), (
+    assert not await _revoked_families(real_engine), (
         "a concurrent refresh was mistaken for a stolen chain"
     )
 
@@ -164,7 +173,7 @@ async def test_concurrent_refreshes_both_succeed(
 
     jtis = {decode_refresh_token(t.refresh_token).jti for _, t in results}
     assert len(jtis) == 1, f"racers diverged onto separate tokens: {jtis}"
-    assert not await _family_sentinels(real_engine)
+    assert not await _revoked_families(real_engine)
 
 
 async def test_replay_outside_grace_still_kills_the_family(
@@ -188,7 +197,7 @@ async def test_replay_outside_grace_still_kills_the_family(
         await service.refresh(tokens.refresh_token)
     assert "reuse_detected" in str(exc.value)
 
-    assert await _family_sentinels(real_engine), "family was not revoked"
+    assert await _revoked_families(real_engine), "family was not revoked"
 
     with pytest.raises(InvalidRefreshToken) as exc:
         await service.refresh(rotated.refresh_token)

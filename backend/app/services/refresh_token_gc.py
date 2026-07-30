@@ -1,16 +1,21 @@
-"""Refresh-token revocation sweep.
+"""Refresh-token record sweep.
 
-``revoked_refresh_jti`` records one row per rotation — the consumed
-``jti``, so presenting it again is detectable — plus a sentinel per
-revoked family. ``expires_at`` has been written since the table existed
-and is documented as the marker for reclaiming a row, but nothing ever
-read it. The table therefore grew by one row per rotation for the life
-of the deployment and shed nothing: at a 15-minute access TTL that is
-roughly ``users x tabs x 32`` rows a day.
+``refresh_tokens`` holds one row per token ever issued, so it grows by a
+row per rotation: at a 15-minute access TTL that is roughly
+``users x tabs x 32`` rows a day. ``expires_at`` marks when a row stops
+being able to matter.
 
-It never showed up as slowness, because every read against it is a
+It never shows up as slowness, because every read against it is a
 primary-key lookup. It is storage and vacuum pressure, which is the kind
 of problem that stays invisible right up until it isn't.
+
+**The sweep is safe now in a way it structurally was not before.** It
+used to run against ``revoked_refresh_jti``, a denylist whose rows were
+the only thing making a consumed or revoked token invalid — so deleting
+one could bring a dead credential back to life, and correctness rested on
+``expires_at`` being right forever. Under allow-by-record a deleted row
+can only cause a refusal, and the rows deleted here belong to tokens that
+had already expired.
 
 This runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler``
 gate the outbox relay uses. Three web replicas each sweeping the same

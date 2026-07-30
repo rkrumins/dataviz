@@ -281,6 +281,29 @@ REFRESH_ROTATION_GRACE_SECONDS: int = int(
 )
 
 
+# Accept a refresh token that has no server-side record, once, and write
+# the record it should have had.
+#
+# Refresh validation is allow-by-record: a token is refused unless a row
+# in ``refresh_tokens`` says otherwise. Every session that was already
+# live when that deployed holds a token with no such row, because nothing
+# wrote one — so without this, the deploy signs out the entire estate at
+# each session's next rotation.
+#
+# Adoption is not a weakening of the new model so much as a continuation
+# of the old one: under the previous denylist those same tokens were
+# accepted with no row anywhere. But it *is* the old behaviour, so it is
+# meant to be temporary. After one refresh lifetime
+# (``JWT_REFRESH_EXPIRY_DAYS``) no record-less token can still exist:
+# set this to false, and allow-by-record is unconditional.
+#
+# Every adoption logs at INFO naming the user and family, so the drain to
+# zero is something an operator can watch rather than assume.
+REFRESH_ADOPT_RECORDLESS: bool = os.getenv(
+    "REFRESH_ADOPT_RECORDLESS", "true",
+).strip().lower() not in ("false", "0", "no", "off")
+
+
 # ── Rate limits ──────────────────────────────────────────────────────
 #
 # Two different jobs, so two different keys.

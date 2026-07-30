@@ -599,7 +599,13 @@ def sso_events(db_session):
         session_factory=_factory,
         user_repo=_user_repo,
         user_identity_repo=_user_identity_repo,
-        refresh_store_factory=lambda s: None,
+        # A real store, not ``lambda s: None``. Every one of these
+        # fixtures used to pass None, so no test of an SSO login ever
+        # touched refresh persistence — and allow-by-record makes the
+        # record the token's licence to exist, so that gap now shows up
+        # as an AttributeError rather than as a session that quietly
+        # cannot be renewed.
+        refresh_store_factory=make_refresh_store,
         outbox_emit=_outbox,
         claims_resolver=None,
     )
