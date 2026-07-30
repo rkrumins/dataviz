@@ -3,8 +3,8 @@
  *
  * Purpose: skip the 50-200ms "blank shell" flash on reloads within a
  * tab by seeding ``useAuthStore`` synchronously from a cached copy of
- * the last successful ``GET /auth/me`` response. The cache is ONLY a
- * render seed — every bootstrap still calls ``/auth/me`` and replaces
+ * the last successful ``GET /me/session`` response. The cache is ONLY a
+ * render seed — every bootstrap still calls ``/me/session`` and replaces
  * (or wipes) the cache based on the server's answer. The cookie
  * remains the single source of truth.
  *

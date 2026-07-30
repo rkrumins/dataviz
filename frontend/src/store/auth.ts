@@ -285,7 +285,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
         // Optimistic seed from the sessionStorage cache so the shell
         // can render synchronously on reload. The cookie is still the
-        // source of truth — the /auth/me call below confirms or
+        // source of truth — the /me/session call below confirms or
         // wipes this seed. Permissions are deliberately NOT seeded:
         // a role demotion between sessions must never surface admin
         // UI to a now-non-admin user.

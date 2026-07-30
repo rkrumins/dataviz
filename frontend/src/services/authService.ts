@@ -225,10 +225,11 @@ export const authService = {
         })
     },
 
-    /** Validate the access cookie and return the current user. */
-    me(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/me`)
-    },
+    // ``me()`` is gone: ``session()`` below returns the same user DTO
+    // alongside the permissions and the expiry, so calling both was two
+    // round trips for one answer. ``GET /auth/me`` still exists on the
+    // backend — it is the cross-service identity contract, not just this
+    // client's boot call — but nothing here needs it.
 
     /**
      * Resolve the whole session: identity, permissions, token expiry.

@@ -37,9 +37,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   // which is now ``workspace:provider:read``-gated (Phase 18) — readers
   // get their workspaces' providers' status, admins get all. Subscribe
   // to the claims so the poller starts once they hydrate AND tears down
-  // on demotion. Bootstrap flips ``status → 'authenticated'`` BEFORE
-  // awaiting hydratePermissions, so an inline ``can()`` check at
-  // status-flip time would be empty — the effect re-runs when claims
+  // on demotion. Bootstrap flips ``status → 'authenticated'`` from the
+  // user cache BEFORE the session resolves, so an inline ``can()`` check
+  // at status-flip time would be empty — the effect re-runs when claims
   // land. Both hooks are called unconditionally (Rules of Hooks).
   const isPlatformAdmin = usePermission('system:admin')
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')

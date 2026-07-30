@@ -82,7 +82,7 @@ function urlPath(input: RequestInfo | URL): string {
  * greppable: the module docstring used to claim all of /auth/* was in
  * here, and nothing in the code said otherwise. Only /auth/refresh is,
  * because bouncing it off itself would recurse. Every other endpoint,
- * including /auth/me called on boot, benefits from the silent refresh
+ * including /me/session called on boot, benefits from the silent refresh
  * so a still-valid refresh cookie can resurrect an expired access
  * cookie without ever logging the user out.
  */
@@ -101,31 +101,18 @@ function isRefreshExempt(input: RequestInfo | URL): boolean {
  * switching accounts impossible. Scoped to this ONE route on purpose:
  * reloading /dashboard with an expired access cookie must still recover
  * silently, because there the user has already said who they are.
+ *
+ * Distinct from {@link isSignedOut}, which the 401 handler also consults.
+ * This one is about WHERE the user is standing: someone on the login page
+ * wants to type credentials — possibly someone else's — so restoring the
+ * old session under them is wrong even though they never asked to leave.
+ * ``isSignedOut`` is about what they ASKED FOR, and holds on every route.
  */
 function onLoginRoute(): boolean {
   if (typeof window === 'undefined') return false
   const path = window.location.pathname
   return path === LOGIN_PATH || path === `${LOGIN_PATH}/`
 }
-
-/**
- * True once the user has explicitly signed out and not signed back in.
- *
- * This and {@link onLoginRoute} answer different questions, and both are
- * needed:
- *
- *   * ``onLoginRoute`` is about WHERE they are. Someone standing on the
- *     login page wants to type credentials — possibly someone else's —
- *     so restoring the old session under them is wrong even though they
- *     never asked to leave. This is the ordinary-expiry case.
- *   * {@link isSignedOut} is about WHAT THEY ASKED FOR. Having signed
- *     out, no route may silently restore, and the portal payload may not
- *     mint a fresh session either.
- *
- * Safe to import at the top level despite this module being the one every
- * service depends on: ``store/signedOut`` imports nothing, so there is no
- * cycle to create.
- */
 
 /**
  * What a refresh attempt actually established. This used to be a
@@ -170,7 +157,7 @@ const SESSION_LOST_WINDOW_MS = 10_000
 /**
  * Clear the session-lost latch. Called from the auth store's login /
  * portal-login / auto-signin paths — a fresh session deserves a fresh
- * attempt, exactly like ``resetClaimRecovery()`` next to it.
+ * attempt, exactly like ``clearSignedOut()`` next to it.
  */
 export function resetSessionLostLatch(): void {
   sessionLostAt = null
@@ -269,7 +256,7 @@ async function attemptRefresh(): Promise<{
         ) {
           // Wipe the cached user DTO before the bounce. The IdP
           // re-auth may resolve to a different account, and we
-          // don't want a stale cache seeding the next /auth/me.
+          // don't want a stale cache seeding the next /me/session.
           // Dynamic import avoids a top-level circular dep through
           // the auth store.
           try {
