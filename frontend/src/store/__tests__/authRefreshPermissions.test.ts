@@ -1,151 +1,171 @@
 /**
- * refreshPermissions — regression guard for the app-wide request storm.
+ * One policy for the claims slice, applied in one place.
  *
- * The storm was a self-sustaining loop: after a silent token refresh,
- * fetchWithTimeout re-hydrates permissions; a FAILED re-hydrate used to
- * zero claims to EMPTY, which defeated the before/after guard and fired a
- * blanket cache invalidation on every failure — amplifying one bad 401
- * into hundreds of requests. These tests pin the two fixes:
- *   1. a failed re-hydrate KEEPS the prior claims (no amplifier),
- *   2. skipAuthRefresh is forwarded so the re-hydrate can't recurse.
+ * There used to be three, and they disagreed about the only signal that
+ * mattered — a successful response carrying no permissions:
+ *
+ *   * the poller refused to downgrade a real claim set to nothing;
+ *   * ``hydratePermissions`` rotated the token once and then believed it;
+ *   * the same function with ``skipAuthRefresh`` — every post-refresh
+ *     re-hydrate, so every rotation — believed it immediately and blanked
+ *     the UI, which the poller then un-blanked up to 60 s later. That
+ *     round trip is what users reported as "it says I don't have
+ *     permission, then the content loads".
+ *
+ * All three were guesses forced by an endpoint that decoded the access
+ * token and so could not tell "this user holds nothing" from "I couldn't
+ * work it out". ``GET /me/session`` resolves from the database, making
+ * those two different outcomes on the wire — a 200 and a thrown error —
+ * which is what lets one rule replace three heuristics:
+ *
+ *   * an answer is trusted, empty or not;
+ *   * no answer keeps what we already knew, and reports ``error`` only
+ *     when there was nothing to keep.
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 
 vi.mock('@/services/authService', () => ({
-    authService: { myPermissions: vi.fn(), refresh: vi.fn() },
+    authService: { session: vi.fn(), refresh: vi.fn() },
 }))
 
-import { useAuthStore, resetClaimRecovery } from '@/store/auth'
+import { useAuthStore } from '@/store/auth'
 import { authService } from '@/services/authService'
 
 const REAL_CLAIMS = { sid: 's1', global: ['system:admin'], ws: {} }
-const myPermissions = authService.myPermissions as ReturnType<typeof vi.fn>
-const refresh = authService.refresh as ReturnType<typeof vi.fn>
+const EMPTY_CLAIMS = { sid: '', global: [], ws: {} }
+const session = authService.session as ReturnType<typeof vi.fn>
 
-describe('refreshPermissions', () => {
+/** The wire shape, with the fields this suite doesn't exercise defaulted. */
+function sessionState(permissions: unknown, over: Record<string, unknown> = {}) {
+    return {
+        user: {
+            id: 'u1', email: 'a@b.c', firstName: 'A', lastName: 'B',
+            role: 'user', status: 'active', authProvider: 'local',
+            createdAt: '', updatedAt: '',
+        },
+        permissions,
+        accessExpiresAt: null,
+        staleClaims: false,
+        ...over,
+    }
+}
+
+describe('refreshPermissions — a session that already knows its claims', () => {
     beforeEach(() => {
-        myPermissions.mockReset()
-        refresh.mockReset()
-        resetClaimRecovery()
-        // A session that already knows its claims — which is what every
-        // re-hydrate is, by definition.
+        session.mockReset()
         useAuthStore.setState({
             permissions: REAL_CLAIMS, permissionsStatus: 'ready',
         })
     })
 
-    it('keeps existing claims when the permissions fetch fails (no storm amplifier)', async () => {
-        myPermissions.mockRejectedValueOnce(new Error('401'))
+    it('keeps existing claims when the resolve fails (no storm amplifier)', async () => {
+        session.mockRejectedValueOnce(new Error('401'))
         await useAuthStore.getState().refreshPermissions()
         expect(useAuthStore.getState().permissions).toEqual(REAL_CLAIMS)
     })
 
-    it('stays ready when the fetch fails, instead of spinning forever', async () => {
-        // 'ready' means "this is the best answer available", not "the
-        // request succeeded". A guard waiting on an answer that is never
-        // coming is an eternal skeleton, not a safer UI.
-        myPermissions.mockRejectedValueOnce(new Error('boom'))
+    it('stays ready when the resolve fails, instead of spinning forever', async () => {
+        // We still hold a good answer, so there is nothing to wait for and
+        // nothing to warn about. ``error`` is for having NO answer.
+        session.mockRejectedValueOnce(new Error('boom'))
         await useAuthStore.getState().refreshPermissions()
         expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 
     it('never sends a hydrated session back to loading', async () => {
-        // The poller and the post-refresh re-hydrate both call this in
-        // the background. Dropping to 'loading' there would blank a
-        // working UI on every routine token rotation.
-        let resolveClaims: (v: unknown) => void = () => {}
-        myPermissions.mockReturnValueOnce(new Promise((r) => { resolveClaims = r }))
+        // The poller and the post-rotation re-resolve both call this in the
+        // background. Dropping to 'loading' would blank a working UI on
+        // every routine token rotation.
+        let resolveState: (v: unknown) => void = () => {}
+        session.mockReturnValueOnce(new Promise((r) => { resolveState = r }))
 
         const pending = useAuthStore.getState().refreshPermissions()
         expect(useAuthStore.getState().permissionsStatus).toBe('ready')
 
-        resolveClaims(REAL_CLAIMS)
+        resolveState(sessionState(REAL_CLAIMS))
         await pending
         expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 
-    it('still applies a genuine revocation (200 with reduced claims)', async () => {
-        // A TOTAL revocation and a CLAIMLESS TOKEN look identical on the wire: both
-        // are a 200 with nothing in it. We can't tell them apart from the payload, so
-        // we rotate the token once — that re-resolves claims from the DB — and then
-        // believe whatever comes back. If the user really has been stripped of
-        // everything, the second answer is empty too, and the revocation lands. The
-        // guarantee this test protects is unchanged; it just costs one rotation.
+    it('applies a genuine revocation without needing a rotation first', async () => {
+        // The endpoint reads the database, so an empty answer means the
+        // database says empty. No rotate-and-look-again dance, and no
+        // ambiguity to guess at: believe it.
         const reduced = { sid: 's1', global: [], ws: {} }
-        myPermissions
-            .mockResolvedValueOnce(reduced)   // looks empty…
-            .mockResolvedValueOnce(reduced)   // …and still empty after rotation → real
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
+        session.mockResolvedValueOnce(sessionState(reduced))
 
         await useAuthStore.getState().refreshPermissions()
 
         expect(useAuthStore.getState().permissions).toEqual(reduced)
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 
-    it('forwards skipAuthRefresh so the re-hydrate cannot recurse', async () => {
-        myPermissions.mockResolvedValueOnce(REAL_CLAIMS)
+    it('forwards skipAuthRefresh so the re-resolve cannot recurse', async () => {
+        session.mockResolvedValueOnce(sessionState(REAL_CLAIMS))
         await useAuthStore.getState().refreshPermissions({ skipAuthRefresh: true })
-        expect(myPermissions).toHaveBeenCalledWith({ skipAuthRefresh: true })
+        expect(session).toHaveBeenCalledWith({ skipAuthRefresh: true })
+    })
+
+    it('takes the user DTO along, so a rename lands without a second call', async () => {
+        session.mockResolvedValueOnce(
+            sessionState(REAL_CLAIMS, {
+                user: {
+                    id: 'u1', email: 'a@b.c', firstName: 'Renamed', lastName: 'B',
+                    role: 'user', status: 'active', authProvider: 'local',
+                    createdAt: '', updatedAt: '',
+                },
+            }),
+        )
+        await useAuthStore.getState().refreshPermissions()
+        expect(useAuthStore.getState().user?.firstName).toBe('Renamed')
     })
 })
 
-describe('a claimless access token self-heals', () => {
+describe('refreshPermissions — a session with nothing known yet', () => {
     beforeEach(() => {
-        myPermissions.mockReset()
-        refresh.mockReset()
-        resetClaimRecovery()
+        session.mockReset()
         useAuthStore.setState({
-            permissions: { sid: '', global: [], ws: {} },
-            permissionsStatus: 'unknown',
+            permissions: EMPTY_CLAIMS, permissionsStatus: 'unknown',
         })
     })
 
-    it('rotates the token when the JWT carries no claims, instead of stranding the user', async () => {
-        // /me/permissions DECODES the JWT, so a token minted without permission
-        // claims answers 200-with-nothing. The user then sees every gated control
-        // missing, and NO RELOAD FIXES IT — a reload reuses the same cookie. Only
-        // logging out and back in did, which is what a user reported. Rotating the
-        // token re-resolves claims from the DB and repairs the session in place.
-        myPermissions
-            .mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })          // claimless token
-            .mockResolvedValueOnce({ sid: 's2', global: ['system:admin'], ws: {} })  // after rotation
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
+    it('reports error — NOT ready — when the first resolve fails', async () => {
+        // THE REGRESSION THIS FILE EXISTS FOR. This used to land on
+        // 'ready' with an empty claim set, which every guard in the app
+        // reads as a definitive denial. One rate-limited or timed-out
+        // request during boot therefore painted "You don't have access"
+        // over the whole UI, and left it there until a later poll
+        // happened to succeed.
+        session.mockRejectedValueOnce(new Error('429'))
 
         await useAuthStore.getState().refreshPermissions()
 
-        expect(refresh).toHaveBeenCalledTimes(1)
-        expect(useAuthStore.getState().permissions.global).toContain('system:admin')
+        expect(useAuthStore.getState().permissionsStatus).toBe('error')
+        expect(useAuthStore.getState().permissionsStatus).not.toBe('ready')
     })
 
-    it('does not rotate when the token already carries claims', async () => {
-        myPermissions.mockResolvedValueOnce({ sid: 's1', global: ['system:admin'], ws: {} })
+    it('recovers to ready on a later attempt', async () => {
+        // 'error' has to be a state you can leave, or it is just a
+        // differently-worded dead end. The poller is what retries.
+        session.mockRejectedValueOnce(new Error('429'))
+        await useAuthStore.getState().refreshPermissions()
+        expect(useAuthStore.getState().permissionsStatus).toBe('error')
 
+        session.mockResolvedValueOnce(sessionState(REAL_CLAIMS))
         await useAuthStore.getState().refreshPermissions()
 
-        expect(refresh).not.toHaveBeenCalled()
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
+        expect(useAuthStore.getState().permissions).toEqual(REAL_CLAIMS)
     })
 
-    it('accepts empty claims for a user who genuinely has none, after one attempt', async () => {
-        // Rotation happened and the claims are STILL empty — that is a real state
-        // (a user with no bindings), not a broken one. Don't loop.
-        myPermissions
-            .mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
-            .mockResolvedValueOnce({ sid: 's2', global: [], ws: {} })
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
-
-        await useAuthStore.getState().refreshPermissions()
-        await useAuthStore.getState().refreshPermissions()
-
-        // One rotation for the whole page load — not one per hydrate.
-        expect(refresh).toHaveBeenCalledTimes(1)
-    })
-
-    it('keeps the empty claims when the rotation itself fails', async () => {
-        myPermissions.mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
-        refresh.mockRejectedValueOnce(new Error('refresh failed'))
+    it('believes a legitimately empty answer, and calls that ready', async () => {
+        // A user with no bindings is a real state, not a broken one. It
+        // must not be confused with the failure above — which is the whole
+        // reason the server distinguishes them now.
+        session.mockResolvedValueOnce(sessionState(EMPTY_CLAIMS))
 
         await useAuthStore.getState().refreshPermissions()
 
-        expect(useAuthStore.getState().permissions.global).toEqual([])
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 })

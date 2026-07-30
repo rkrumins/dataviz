@@ -44,6 +44,16 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const isPlatformAdmin = usePermission('system:admin')
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
   const canPollProviders = isPlatformAdmin || canReadProviders
+  // Has the first session resolve SETTLED — either way? The poller seeds
+  // its change-detection baseline from the store, and ``status`` alone is
+  // too early: it flips to ``authenticated`` off the sessionStorage user
+  // cache while claims are still in flight. Enabling there seeded an empty
+  // baseline, so the first poll "detected" a change that never happened
+  // and paid an unfiltered query invalidation plus a cross-tab broadcast
+  // on every warm reload. ``'error'` counts as settled: polling is how a
+  // failed first resolve recovers.
+  const permissionsStatus = useAuthStore((s) => s.permissionsStatus)
+  const claimsSettled = permissionsStatus === 'ready' || permissionsStatus === 'error'
 
   useEffect(() => {
     void bootstrap()
@@ -54,8 +64,8 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (status !== 'authenticated') {
-      // Logout / session-lost: stop the permission poller so it
-      // doesn't keep firing /me/permissions against an empty cookie.
+      // Logout / session-lost: stop the poller so it doesn't keep
+      // resolving the session against an empty cookie.
       disablePermissionPolling()
       return
     }
@@ -68,8 +78,8 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     // Catch idle-user permission updates and cross-tab changes. The
     // poller compares against its own last snapshot, so a stable
     // claims response is a silent no-op.
-    enablePermissionPolling()
-  }, [status, canPollProviders])
+    if (claimsSettled) enablePermissionPolling()
+  }, [status, canPollProviders, claimsSettled])
 
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null

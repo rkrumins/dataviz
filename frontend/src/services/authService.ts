@@ -145,6 +145,27 @@ export interface SessionResponse {
 }
 
 /**
+ * Everything needed to render a session, from one call.
+ *
+ * Replaces the boot-time ``GET /auth/me`` + ``GET /me/permissions`` pair.
+ * Two calls meant two chances to half-fail, and the store had grown three
+ * different policies for the combinations.
+ */
+export interface SessionState {
+    user: AuthUser
+    permissions: PermissionClaims
+    /** ISO instant the access token expires, or null when the server
+     *  could not read it. Null means "renew reactively" — the pre-
+     *  proactive-refresh behaviour. */
+    accessExpiresAt: string | null
+    /** The database and the token disagree about what this user may do:
+     *  someone's access changed and the token has not caught up. Rotate
+     *  to close it — ``requires(...)`` reads the token, so until then the
+     *  server will still enforce the old answer. */
+    staleClaims: boolean
+}
+
+/**
  * Permission claims for the current session. Mirrors the JWT claim
  * embedded by the backend — same shape, same field names.
  *
@@ -210,16 +231,21 @@ export const authService = {
     },
 
     /**
-     * Fetch the caller's effective permissions (decoded JWT claims).
+     * Resolve the whole session: identity, permissions, token expiry.
      *
-     * Used by the auth store on bootstrap and after login to hydrate
-     * the permission slice that drives ``<RequirePermission>`` and the
-     * ``can()`` helpers.
+     * The permissions here come from the DATABASE, not from re-reading
+     * the access token, which is what makes a mid-session grant or
+     * demotion observable at all. The store's single ``applyClaims``
+     * policy relies on that: a 200 with an empty set now genuinely means
+     * "this user holds nothing", so it can be believed, and a thrown
+     * error genuinely means "we don't know", so the previous answer can
+     * be kept. Those used to be the same signal, which is why three code
+     * paths guessed at it three different ways.
      */
-    myPermissions(opts?: { skipAuthRefresh?: boolean }): Promise<PermissionClaims> {
-        // skipAuthRefresh is passed by the post-refresh re-hydrate so this
+    session(opts?: { skipAuthRefresh?: boolean }): Promise<SessionState> {
+        // skipAuthRefresh is passed by the post-refresh re-resolve so this
         // call can't recurse back into the silent-refresh loop.
-        return request<PermissionClaims>(`${ME_API}/permissions`, opts)
+        return request<SessionState>(`${ME_API}/session`, opts)
     },
 
     /** Revoke the refresh-token family and clear cookies. Idempotent. */

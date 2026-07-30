@@ -34,7 +34,17 @@ interface NavCatalogueState {
     sidebarLabels: Record<string, string>
     /** Display labels for admin sections (for the Feature Access map). */
     adminLabels: Record<string, string>
-    /** True once the served catalogue has replaced the seed. */
+    /**
+     * True once we are DONE resolving the catalogue — whether the served
+     * one arrived or the seed is what we're keeping.
+     *
+     * "Settled", not "succeeded", and the distinction is load-bearing:
+     * ``RequireNav`` waits on this before rendering a denial, so a flag
+     * that stayed false on a failed fetch would leave every nav-guarded
+     * route showing a skeleton forever. An eternal spinner is not a safer
+     * UI than a wrong answer — and the seed is not a wrong answer, it
+     * mirrors the backend catalogue (guarded by the drift test).
+     */
     loaded: boolean
 
     /** Fetch the catalogue and reconcile. Best-effort: a failure keeps
@@ -80,6 +90,12 @@ export const useNavCatalogueStore = create<NavCatalogueState>()((set) => ({
             // Keep the seed — the shell stays usable. Route guards and
             // the sidebar fall back to the defaults, which match the
             // backend in the normal case.
+            //
+            // Still ``loaded: true``: this is the final answer available,
+            // and ``RequireNav`` blocks on it. Leaving it false would turn
+            // one failed catalogue fetch into a permanent skeleton on
+            // every nav-guarded route.
+            set({ loaded: true })
         }
     },
 }))

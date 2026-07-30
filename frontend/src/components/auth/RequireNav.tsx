@@ -10,9 +10,17 @@
  */
 import type { ReactNode } from 'react'
 import { ShieldOff } from 'lucide-react'
-import { useNavPermission, usePermissionsReady } from '@/store/auth'
-import { GuardSkeleton } from '@/components/auth/RequirePermission'
-import { useSidebarSpec, useAdminSectionSpec } from '@/store/navCatalogue'
+import {
+    useNavPermission,
+    usePermissionsReady,
+    usePermissionsUnavailable,
+} from '@/store/auth'
+import { GuardSkeleton, UnavailablePanel } from '@/components/auth/RequirePermission'
+import {
+    useSidebarSpec,
+    useAdminSectionSpec,
+    useNavCatalogueStore,
+} from '@/store/navCatalogue'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import type { NavigationTab } from '@/store/navigation'
 
@@ -35,10 +43,20 @@ export function RequireNav({ group, sectionKey, fallback, children }: RequireNav
     const adminSpec = useAdminSectionSpec(sectionKey)
     const spec = group === 'sidebar' ? sidebarSpec : adminSpec
     const ready = usePermissionsReady()
+    const unavailable = usePermissionsUnavailable()
+    // The SPEC is the other half of this verdict, and it has its own
+    // arrival time. Until the served catalogue lands, an unknown section
+    // key falls back to a hidden-by-default spec — so a fully-resolved
+    // super-admin could still be shown "You don't have access" for a
+    // section the seed simply didn't list, until the fetch completed.
+    // (``redis`` was exactly that.) Waiting on both means the denial we
+    // render is one the backend actually agrees with.
+    const catalogueLoaded = useNavCatalogueStore((s) => s.loaded)
     const allowed = useNavPermission(spec)
+    if (unavailable) return <UnavailablePanel />
     // Un-hydrated claims are indistinguishable from a real denial when
     // read off the claims slice alone — wait for the answer.
-    if (!ready) return <GuardSkeleton />
+    if (!ready || !catalogueLoaded) return <GuardSkeleton />
     if (allowed) return <>{children}</>
     return <>{fallback ?? <DeniedPanel spec={spec} />}</>
 }

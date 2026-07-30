@@ -78,6 +78,12 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     permissions:   { kind: 'perm', perm: 'system:admin' },
     sso:           { kind: 'perm', perm: 'system:admin' },
     audit:         { kind: 'perm', perm: 'system:audit:read' },
+    // Was missing while ``routes.tsx`` and ``AdminPage`` both referenced
+    // it, so ``useAdminSectionSpec('redis')`` fell to the hidden-by-
+    // default fallback until the served catalogue arrived. A super-admin
+    // opening /admin/redis got "You don't have access" first and the page
+    // a moment later — a denial the seed invented, not one anybody meant.
+    redis:         { kind: 'perm', perm: 'system:admin' },
 }
 
 

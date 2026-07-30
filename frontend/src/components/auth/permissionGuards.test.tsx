@@ -12,6 +12,12 @@
  * The bar: while the answer is outstanding, no denial anywhere. Once it
  * lands, a genuinely empty claim set must still deny — a user who really
  * holds nothing is a real state, not a broken one.
+ *
+ * And a THIRD outcome, which used to be folded into the second: we asked
+ * and could not find out. That was recorded as a definitive empty answer,
+ * so one rate-limited or timed-out request on boot told the user, in the
+ * same words as a real denial, that they had lost access to everything.
+ * It now renders "couldn't check your access", with a retry.
  */
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -22,9 +28,11 @@ import { RequireNav } from './RequireNav'
 import { RequireFeature } from '@/components/RequireFeature'
 import { useAuthStore, type PermissionsStatus } from '@/store/auth'
 import { useFeaturesStore } from '@/store/features'
+import { useNavCatalogueStore } from '@/store/navCatalogue'
 
 const EMPTY = { sid: '', global: [], ws: {} }
 const DENIED = /you don't have access/i
+const UNAVAILABLE = /couldn't check your access/i
 
 function claims(status: PermissionsStatus, global: string[] = []) {
     useAuthStore.setState({
@@ -45,6 +53,12 @@ beforeEach(() => {
         error: null,
         isLoading: false,
     })
+    // ``RequireNav`` waits on the nav catalogue as well as on the claims:
+    // an unknown section key falls back to a hidden-by-default spec, so a
+    // fully-resolved super-admin could be shown a denial for a section the
+    // bundled seed simply didn't list. Default to settled; the test that
+    // cares about the gate sets it back.
+    useNavCatalogueStore.setState({ loaded: true })
 })
 
 
@@ -143,6 +157,88 @@ describe('RequireNav', () => {
         render(guard)
 
         expect(screen.getByText('groups admin')).toBeInTheDocument()
+    })
+
+    it('waits for the nav catalogue before rendering a denial', () => {
+        // The spec is the other half of this verdict and has its own
+        // arrival time. Until the served catalogue lands, an unknown
+        // section key resolves to a hidden-by-default spec — which is a
+        // denial the seed invented, not one the backend agrees with.
+        // ``redis`` was exactly that: present in routes.tsx and in the
+        // backend catalogue, absent from the bundled seed, so a
+        // super-admin opening /admin/redis got "You don't have access"
+        // first and the page a moment later.
+        claims('ready')
+        useNavCatalogueStore.setState({ loaded: false })
+        render(guard)
+
+        expect(screen.queryByText(DENIED)).not.toBeInTheDocument()
+    })
+
+    it('still resolves when the catalogue fetch failed outright', () => {
+        // ``loaded`` means SETTLED, not succeeded. A flag that stayed
+        // false on a failed fetch would leave every nav-guarded route
+        // showing a skeleton forever, and an eternal spinner is not a
+        // safer UI than the bundled seed — which mirrors the backend.
+        claims('ready', ['system:groups:manage'])
+        useNavCatalogueStore.setState({ loaded: true })
+        render(guard)
+
+        expect(screen.getByText('groups admin')).toBeInTheDocument()
+    })
+})
+
+
+describe('a resolve that failed is not a denial', () => {
+    it('RequirePermission says it could not check, not that you may not', () => {
+        claims('error')
+        render(
+            <RequirePermission perm="system:admin">
+                <div>secret</div>
+            </RequirePermission>,
+        )
+
+        expect(screen.getByText(UNAVAILABLE)).toBeInTheDocument()
+        expect(screen.queryByText(DENIED)).not.toBeInTheDocument()
+        expect(screen.queryByText('secret')).not.toBeInTheDocument()
+    })
+
+    it('RequireWorkspacePermission does the same', () => {
+        claims('error')
+        render(
+            <RequireWorkspacePermission ws="ws_1" perm="workspace:admin">
+                <div>ws secret</div>
+            </RequireWorkspacePermission>,
+        )
+
+        expect(screen.getByText(UNAVAILABLE)).toBeInTheDocument()
+        expect(screen.queryByText(DENIED)).not.toBeInTheDocument()
+    })
+
+    it('RequireNav does the same', () => {
+        claims('error')
+        render(
+            <RequireNav group="admin" sectionKey="groups">
+                <div>groups admin</div>
+            </RequireNav>,
+        )
+
+        expect(screen.getByText(UNAVAILABLE)).toBeInTheDocument()
+        expect(screen.queryByText(DENIED)).not.toBeInTheDocument()
+    })
+
+    it('offers a way out rather than stranding the user', () => {
+        // "Couldn't check" is only an improvement on "you don't have
+        // access" if it is recoverable. Without a retry it is the same
+        // dead end in politer words.
+        claims('error')
+        render(
+            <RequirePermission perm="system:admin">
+                <div>secret</div>
+            </RequirePermission>,
+        )
+
+        expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
     })
 })
 

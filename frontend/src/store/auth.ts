@@ -19,6 +19,7 @@ import {
     authService,
     type AuthUser,
     type PermissionClaims,
+    type SessionState,
     type SignUpRequest,
 } from '@/services/authService'
 import {
@@ -46,15 +47,26 @@ export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated
  * denial, and flashes "You don't have access" before the content loads.
  *
  *   * ``unknown`` — nothing has been asked yet (also: logged out).
- *   * ``loading`` — a hydrate is in flight. Only ever entered FROM
- *     ``unknown``: a background re-hydrate must never blank a UI that
+ *   * ``loading`` — a resolve is in flight. Only ever entered FROM
+ *     ``unknown``: a background re-resolve must never blank a UI that
  *     already knows its claims.
- *   * ``ready``   — we have a definitive answer. Reached on ANY final
- *     one, including a legitimately empty claim set (a real state a
- *     user can hold) and a hydrate that failed after its one recovery
- *     rotation. That is what stops this becoming an eternal spinner.
+ *   * ``ready``   — we have a definitive answer from the server,
+ *     including a legitimately empty claim set (a real state a user can
+ *     hold).
+ *   * ``error``   — we asked and could not get an answer, and we have no
+ *     earlier one to fall back on.
+ *
+ * ``error`` is the state this type was missing, and its absence is the
+ * bug users reported as "it says I don't have permission, then the page
+ * loads". A failed resolve used to land on ``ready`` while the claims
+ * slice was still empty — indistinguishable, to every guard in the app,
+ * from a user who genuinely holds nothing. So one rate-limited or
+ * timed-out request on boot painted "You don't have access" over the
+ * whole UI, and it stayed until the next poll happened to succeed.
+ * Guards now render "couldn't check your access" here, which is both
+ * true and recoverable.
  */
-export type PermissionsStatus = 'unknown' | 'loading' | 'ready'
+export type PermissionsStatus = 'unknown' | 'loading' | 'ready' | 'error'
 
 /**
  * The frontend treats permission claims as **advisory** — the backend
@@ -292,20 +304,24 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         }
 
         try {
-            const { user } = await authService.me()
-            // Re-apply with the server's freshly-returned DTO so
-            // role/status updates from the backend overwrite the
-            // optimistic copy.
-            set({ ..._authenticated(user), error: null })
-            writeUserCache(user)
-            // Hydrate permissions in the background — failure here
-            // doesn't unauthenticate the user, it just means the FE
-            // gates fall closed until next refresh.
-            await hydratePermissions(set)
+            // ONE call for identity + permissions + expiry. This used to
+            // be /auth/me followed by /me/permissions, which could
+            // half-succeed four ways; the store had grown a different
+            // policy for each. A 401 here still throws, which is the
+            // "no session" signal below.
+            const state = await authService.session()
+            set({ ..._authenticated(state.user), error: null })
+            writeUserCache(state.user)
+            applyClaims(set, state.permissions)
+            // Renew before the token dies rather than discovering it via
+            // a 401 fifteen minutes into a page nobody touched.
+            onSessionResolved(state)
             // Phase 16: pull the nav catalogue (section→permission map)
-            // once so the sidebar + route guards read live specs.
-            // Seeded with bundled defaults, so this is non-fatal.
-            void useNavCatalogueStore.getState().hydrate()
+            // so the sidebar + route guards read live specs. Awaited:
+            // guards gate on it now (a ready claim set plus a seeded
+            // catalogue was its own denial flash), and the bundled seed
+            // means a failure is still non-fatal.
+            await useNavCatalogueStore.getState().hydrate()
         } catch {
             // Any failure (no cookie, expired, server down) →
             // unauthenticated. Wipe the cache so the next boot in
@@ -319,15 +335,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     login: async (email, password) => {
         set({ error: null, isLoading: true })
-        resetClaimRecovery()
         resetSessionLostLatch()
         try {
             const { user } = await authService.login({ email, password })
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
-            await hydratePermissions(set)
-            // Phase 16: load the nav catalogue post-login (see bootstrap).
-            void useNavCatalogueStore.getState().hydrate()
+            await establishSession(set)
             return true
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Login failed'
@@ -339,7 +352,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     loginWithBrowserProfile: async (providerSlug, payload) => {
         set({ error: null, isLoading: true })
-        resetClaimRecovery()
         resetSessionLostLatch()
         try {
             const { user } = await authService.loginWithBrowserProfile(
@@ -347,8 +359,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             )
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
-            await hydratePermissions(set)
-            void useNavCatalogueStore.getState().hydrate()
+            await establishSession(set)
             return true
         } catch (err: unknown) {
             const message = err instanceof Error
@@ -369,12 +380,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // Run the identical post-login sequence, or the app would be
             // holding a valid session it does not know about.
             if (resp.autoSignedIn && resp.user) {
-                resetClaimRecovery()
                 resetSessionLostLatch()
                 set({ ..._authenticated(resp.user), error: null, isLoading: false })
                 writeUserCache(resp.user)
-                await hydratePermissions(set)
-                void useNavCatalogueStore.getState().hydrate()
+                await establishSession(set)
                 return {
                     ok: true,
                     message: resp.message,
@@ -393,26 +402,26 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     logout: async () => {
         // Best-effort: call /logout so the server can revoke the refresh
-        // family. Even if it fails (network down, etc.) we still clear
-        // local state — the user is logging out either way.
+        // family and tombstone the access session. Even if it fails
+        // (network down, etc.) we still clear local state — the user is
+        // logging out either way.
         try {
             await authService.logout()
         } catch {
             // ignore
         }
         clearUserCache()
-        resetClaimRecovery()
+        cancelSessionRenewal()
         set({ ..._unauthenticated, error: null, isLoading: false })
     },
 
     handleSessionLost: () => {
         clearUserCache()
-        resetClaimRecovery()
+        cancelSessionRenewal()
         set({ ..._unauthenticated, error: null })
     },
 
-    setPermissions: (permissions) =>
-        set({ permissions, permissionsStatus: 'ready' }),
+    setPermissions: (permissions) => applyClaims(set, permissions),
 
     applyProfile: (fields) => {
         const user = get().user
@@ -429,14 +438,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     refreshPermissions: async (opts) => {
-        // Mirrors ``hydratePermissions`` but called from outside the
-        // login / bootstrap flow. Used by ``fetchWithTimeout`` after
-        // a successful silent refresh — the new JWT carries
-        // re-resolved claims (auth_service/service.py:365) and the
-        // FE store needs to catch up so route guards stop blocking
-        // a freshly-promoted admin. ``opts.skipAuthRefresh`` is set on
-        // that post-refresh call so it can't recurse into the loop.
-        await hydratePermissions(set, opts)
+        // Called from outside the login / bootstrap flow: by
+        // ``fetchWithTimeout`` after a silent refresh, and by the session
+        // poller. ``opts.skipAuthRefresh`` is set on the post-refresh call
+        // so it can't recurse into the 401 → refresh loop.
+        const state = await resolveSession(set, opts)
+        if (state !== null) onSessionResolved(state)
     },
 
     clearError: () => set({ error: null }),
@@ -456,15 +463,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 }))
 
 
-/**
- * Fetch ``/api/v1/me/permissions`` and stash the result in the store.
- *
- * Pulled out of the actions so login + bootstrap (and later, the silent
- * refresh handler) share one implementation. Failures clear the
- * permissions back to empty rather than crashing the auth flow — a
- * temporary outage of the permissions endpoint shouldn't log the user
- * out, just hide everything until they reload.
- */
 /** No global perms AND no workspace scopes: "you can do nothing at all". */
 function claimsAreEmpty(claims: PermissionClaims | null | undefined): boolean {
     if (!claims) return true
@@ -473,77 +471,123 @@ function claimsAreEmpty(claims: PermissionClaims | null | undefined): boolean {
 }
 
 /**
- * One-shot per page load. A claimless token is a property of the SESSION, not of
- * the request, so retrying on every hydrate would be a rotation storm.
+ * THE ONLY WRITER OF THE CLAIMS SLICE. Every path goes through here.
+ *
+ * There used to be three, and they disagreed about the one signal that
+ * mattered — a successful response carrying no permissions:
+ *
+ *   * the poller refused to downgrade a real claim set to nothing;
+ *   * ``hydratePermissions`` rotated the token once and then believed it;
+ *   * the same function called with ``skipAuthRefresh`` — which is every
+ *     post-refresh re-hydrate, so every ~15 minutes — believed it
+ *     immediately and blanked the UI.
+ *
+ * All three were reasonable guesses, because the endpoint they read
+ * decoded the access token and could not tell "this user holds nothing"
+ * apart from "I couldn't work it out". ``GET /me/session`` resolves from
+ * the database, so those are now two different outcomes on the wire: a
+ * 200 (however empty) and a thrown error. Which collapses three
+ * heuristics into one rule with no guessing in it:
+ *
+ *   * an answer is trusted, empty or not — the server means it;
+ *   * no answer keeps whatever we already knew, and only reports
+ *     ``error`` when there was nothing to keep.
+ *
+ * @param claims the resolved set, or ``null`` for "could not resolve"
  */
-let claimRecoveryAttempted = false
-
-/** Called on login/logout: a new session deserves a fresh attempt. */
-export function resetClaimRecovery(): void {
-    claimRecoveryAttempted = false
+function applyClaims(
+    set: (partial: Partial<AuthState>) => void,
+    claims: PermissionClaims | null,
+): void {
+    if (claims !== null) {
+        set({ permissions: claims, permissionsStatus: 'ready' })
+        return
+    }
+    // Keep the last known-good answer rather than blanking a working UI.
+    // Zeroing it here used also to defeat the silent-refresh before/after
+    // comparison (empty !== real), firing a blanket cache invalidation on
+    // every failed re-resolve — the amplifier behind the app-wide request
+    // storm.
+    const current = useAuthStore.getState()
+    if (!claimsAreEmpty(current.permissions)) {
+        set({ permissionsStatus: 'ready' })
+        return
+    }
+    // Nothing known and nothing coming. NOT 'ready': that is what painted
+    // "You don't have access" over the whole app after a single failed
+    // request on boot. Guards read this as "couldn't check", which is
+    // honest and offers a retry instead of an eternal skeleton.
+    set({ permissionsStatus: 'error' })
 }
 
-async function hydratePermissions(
+/**
+ * Resolve the session and apply it. Shared by boot, login and every
+ * background re-resolve.
+ *
+ * ``opts.background`` marks a re-resolve on a session that already knows
+ * its claims: it must not drop the guards back to a skeleton, because
+ * that would blank a working UI on every routine token rotation.
+ */
+async function resolveSession(
     set: (partial: Partial<AuthState>) => void,
     opts?: { skipAuthRefresh?: boolean },
-): Promise<void> {
-    // Only ever 'unknown' → 'loading'. A background re-hydrate on a
-    // session that already knows its claims must not send the guards
-    // back to a skeleton — same principle as the catch block below and
-    // as permissionPoller's empty-claims guard.
+): Promise<SessionState | null> {
     if (useAuthStore.getState().permissionsStatus === 'unknown') {
         set({ permissionsStatus: 'loading' })
     }
+    let state: SessionState
     try {
-        let claims = await authService.myPermissions(opts)
-
-        // SELF-HEAL A CLAIMLESS TOKEN.
-        //
-        // `/me/permissions` DECODES THE ACCESS JWT — it does not consult the
-        // database. So a token that carries no permission claims produces an empty
-        // set with a 200, not a 401: the backend's own note says such tokens "still
-        // authenticate (via the legacy role claim) and the user simply has no
-        // permissions until their next login."
-        //
-        // "Until their next login" is the bug. The user is left with every
-        // permission-gated control silently missing — the Create Workspace button,
-        // the provider and ontology summaries, the schema chips — and no reload can
-        // fix it, because a reload reuses the same cookie. Logging out and back in
-        // was the only cure, and that is exactly what a user reported.
-        //
-        // Rotating the token is the same cure without the ceremony: /auth/refresh
-        // re-resolves claims from the DB and mints a new access token, so one
-        // rotation restores the session in place.
-        //
-        // Guarded on `skipAuthRefresh` because that flag marks the call that ALREADY
-        // came from a refresh — rotating again there would loop.
-        if (claimsAreEmpty(claims) && !claimRecoveryAttempted && !opts?.skipAuthRefresh) {
-            claimRecoveryAttempted = true
-            try {
-                await authService.refresh()
-                claims = await authService.myPermissions({ skipAuthRefresh: true })
-            } catch {
-                // Rotation failed (or the session really is gone). Fall through with
-                // what we have: a user who genuinely holds no permissions is a real,
-                // legitimate state, and must not be mistaken for a broken one.
-            }
-        }
-
-        set({ permissions: claims, permissionsStatus: 'ready' })
+        state = await authService.session(opts)
     } catch {
-        // 'ready' even here: this is the final answer available for this
-        // page load (the one recovery rotation above is already spent),
-        // and a guard that waits forever for an answer that is not
-        // coming is an eternal spinner, not a safer UI.
-        set({ permissionsStatus: 'ready' })
-        // Keep the previous claims on a transient failure. Zeroing them
-        // to EMPTY here used to defeat the silent-refresh before/after
-        // guard (empty !== real), firing a blanket cache invalidation on
-        // every failed re-hydrate — the amplifier behind the app-wide
-        // request storm. A genuine revocation arrives as a 200 with
-        // reduced claims and still updates correctly above; an outage now
-        // leaves the last-known claims in place instead of blanking the UI.
+        applyClaims(set, null)
+        return null
     }
+    // The user DTO rides along, so a rename or a role change lands
+    // without a reload and without a second round trip.
+    set({ user: state.user })
+    writeUserCache(state.user)
+    applyClaims(set, state.permissions)
+    return state
+}
+
+/**
+ * Post-sign-in setup, shared by password login, portal login and the
+ * auto-signed-in invite path. All three did the same four things in the
+ * same order, and the ones that drifted drifted silently.
+ */
+async function establishSession(
+    set: (partial: Partial<AuthState>) => void,
+): Promise<void> {
+    const state = await resolveSession(set)
+    if (state !== null) onSessionResolved(state)
+    // Awaited, not fire-and-forget: route guards gate on the catalogue
+    // now. The bundled seed keeps a failure non-fatal.
+    await useNavCatalogueStore.getState().hydrate()
+}
+
+/**
+ * Hand a freshly resolved session to the renewal timer, which decides
+ * what it implies (renew when, rotate whether) — see
+ * ``store/sessionRenewal.ts``.
+ *
+ * A lazy import so this module does not depend on the timer at load time:
+ * ``sessionRenewal`` imports back into the store to re-resolve after a
+ * rotation, and tests drive the store without a timer at all.
+ */
+function onSessionResolved(state: SessionState): void {
+    void import('@/store/sessionRenewal')
+        .then((mod) => mod.onSessionResolved(state))
+        .catch(() => {
+            // Without the timer the session still renews reactively on a
+            // 401 — the behaviour before renewal was scheduled at all.
+        })
+}
+
+/** Stop renewing. Used by the logout / session-lost paths. */
+function cancelSessionRenewal(): void {
+    void import('@/store/sessionRenewal')
+        .then((mod) => mod.cancelSessionRenewal())
+        .catch(() => {})
 }
 
 
@@ -565,9 +609,28 @@ export function usePermission(
 /**
  * True once the claims are a known answer. Route guards render a
  * skeleton until this flips — an un-hydrated claim set is not a denial.
+ *
+ * Note this is false in the ``error`` state, which is the point: we asked
+ * and got nothing back, so we are not entitled to render a verdict.
+ * Guards pair this with {@link usePermissionsUnavailable} to tell
+ * "still loading" apart from "couldn't check".
  */
 export function usePermissionsReady(): boolean {
     return useAuthStore((s) => s.permissionsStatus === 'ready')
+}
+
+/**
+ * True when we tried to resolve what this user may do and failed, with
+ * no earlier answer to fall back on.
+ *
+ * Guards render a retry here rather than "You don't have access". The
+ * difference is not cosmetic: the old code called this case ``ready``
+ * with an empty claim set, so a single rate-limited or timed-out request
+ * on boot told the user — in the same words it uses for a real denial —
+ * that they had lost access to everything.
+ */
+export function usePermissionsUnavailable(): boolean {
+    return useAuthStore((s) => s.permissionsStatus === 'error')
 }
 
 /** Read the raw claims slice — useful for components that need to

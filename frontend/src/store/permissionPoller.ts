@@ -1,31 +1,35 @@
 /**
- * Permission poller — closes the "idle user" gap in dynamic RBAC.
+ * Session poller — closes the "idle user" gap in dynamic RBAC.
  *
  * Background:
- *   The silent refresh-on-401 dance in ``fetchWithTimeout`` already
- *   gives ACTIVE users dynamic permission updates: an admin mutates a
- *   binding → server revokes the user's sid → the user's next API
- *   request 401s → ``fetchWithTimeout`` silently calls
- *   ``/auth/refresh`` → the backend re-resolves DB claims → new JWT
- *   with fresh claims → ``refreshPermissions()`` rehydrates the store.
+ *   The silent refresh-on-401 dance in ``fetchWithTimeout`` gives ACTIVE
+ *   users dynamic permission updates, but that whole chain is
+ *   request-triggered. A user staring at a page without making API calls
+ *   never trips the 401. This poll closes the gap: every 60 seconds (and
+ *   immediately on tab focus) we resolve ``GET /me/session``, compare to
+ *   our last answer, and if it differs we apply it and invalidate React
+ *   Query so the UI repaints.
  *
- *   But that whole chain is request-triggered. A user who is staring
- *   at a page without making API calls never trips the 401, so their
- *   claims stay stale until either (a) they make a request, or (b)
- *   the JWT expires naturally (~5 min). For IDLE users — the typical
- *   "left a workspace open in another tab" case — this poll closes
- *   the gap: every 60 seconds (and immediately on tab focus) we hit
- *   ``/me/permissions``, compare to the cached store, and if the
- *   shape differs we re-hydrate + invalidate React Query so the UI
- *   repaints with fresh state.
+ *   IT USED TO POLL ``/me/permissions``, WHICH COULD NOT DO THIS JOB.
+ *   That endpoint re-reads the claims out of the access token, so polling
+ *   it returned the same answer every time until the token happened to
+ *   rotate — the change this poller exists to notice was invisible to the
+ *   request it made to notice it. ``/me/session`` resolves from the
+ *   database, so a grant or a demotion lands within one interval. The
+ *   cost moved with it: this is a real query now, not a token decode.
  *
- *   The endpoint is purely a JWT decode on the backend (no DB), so
- *   the cost is one tiny GET per minute per active tab — negligible
- *   even at fleet scale.
+ *   IT ALSO USED TO BE THE THING KEEPING THE SESSION ALIVE — the only
+ *   authenticated request still firing in an idle tab, so its 401 was
+ *   what drove renewal. That was load-bearing and undocumented anywhere
+ *   near the code that depended on it, and it failed in the obvious
+ *   place: polling stops while the tab is hidden, so a backgrounded tab
+ *   renewed nothing. Renewal is now scheduled deliberately in
+ *   ``store/sessionRenewal.ts``, and this module is free to be only what
+ *   its name says.
  *
  * Lifecycle:
- *   * ``enablePermissionPolling()`` — called from ``main.tsx`` once
- *     auth bootstrap has resolved to ``status === 'authenticated'``.
+ *   * ``enablePermissionPolling()`` — called from ``App.tsx`` once auth
+ *     bootstrap has resolved to ``status === 'authenticated'``.
  *   * ``disablePermissionPolling()`` — called when status flips back
  *     to unauthenticated (logout / session lost).
  *   * Tab visibility — hidden tabs pause; a tab returning to focus
@@ -34,8 +38,6 @@
  *     while they were away).
  */
 import { useAuthStore, claimsSnapshot } from './auth'
-import type { PermissionClaims } from '@/services/authService'
-import { authService } from '@/services/authService'
 import { getQueryClient } from '@/lib/queryClient'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { notifyPermissionsChanged } from './permissionChangeBus'
@@ -73,73 +75,32 @@ function invalidateAllQueries(): void {
     void qc.invalidateQueries()
 }
 
-/** No global perms AND no workspace scopes — i.e. "you can do nothing at all".
- *  A missing claims object counts as empty: "we don't know" is not "you have some". */
-function isEmptyClaims(claims: PermissionClaims | undefined | null): boolean {
-    if (!claims) return true
-    return (claims.global?.length ?? 0) === 0
-        && Object.keys(claims.ws ?? {}).length === 0
-}
-
 async function pollOnce(): Promise<void> {
-    try {
-        // LOAD-BEARING BEYOND PERMISSIONS: this call is also what keeps a
-        // signed-in tab signed in.
-        //
-        // Token refresh is reactive — `fetchWithTimeout` renews on a 401,
-        // and nothing schedules a renewal. In an idle tab this is the only
-        // authenticated request that still fires, so it is what notices the
-        // access cookie has expired: the 401 drives the silent refresh, and
-        // rotation slides the refresh window forward another full TTL. That
-        // is why an open tab stays alive for days without anyone touching it.
-        //
-        // So: do not pass `skipAuthRefresh` here, do not move the interval
-        // above the access-token TTL, and if this poller is ever removed,
-        // move renewal somewhere deliberate first. Breaking any of those
-        // does not fail here — it logs users out minutes later, somewhere
-        // else, with nothing pointing back at this line.
-        const claims = await authService.myPermissions()
+    // One entry point, one policy. This used to call ``setPermissions``
+    // directly and so carried its own opinion about an empty claim set —
+    // an opinion that contradicted the store's. Both were guesses forced
+    // by an endpoint that could not distinguish "holds nothing" from
+    // "couldn't tell"; ``/me/session`` can, so ``applyClaims`` decides,
+    // here and everywhere else.
+    //
+    // Not passed ``skipAuthRefresh``: a poll landing on an expired token
+    // should still recover through the silent-refresh path. Renewal no
+    // longer DEPENDS on that (see the module docstring), but there is no
+    // reason to refuse a free recovery. Errors are swallowed inside
+    // ``refreshPermissions``, which keeps the last known-good claims — so
+    // an outage leaves the snapshot unchanged and triggers nothing.
+    await useAuthStore.getState().refreshPermissions()
 
-        // NEVER downgrade a real claim set to nothing on the strength of a 200.
-        //
-        // `hydratePermissions` in store/auth.ts already refuses to do this — the
-        // comment there says zeroing claims "blank[ed] the UI" and amplified a
-        // request storm. This poller called `setPermissions` DIRECTLY and so
-        // bypassed that guard entirely: one odd 200 and every permission-gated
-        // control silently vanishes (the Create Workspace button, the provider and
-        // ontology summaries, the schema chips on each card), with a full page
-        // reload as the only cure.
-        //
-        // An empty payload is never a legitimate REVOCATION signal here: the
-        // endpoint runs `get_current_user`, which checks the revocation set and
-        // answers 401 — that path is handled elsewhere. And `get_permission_claims`
-        // returns EMPTY claims (200, not 401) for any token without embedded
-        // claims. So empty-after-non-empty means "we don't know", not "you have
-        // nothing" — and the two must not be rendered the same way.
-        const current = useAuthStore.getState().permissions
-        if (isEmptyClaims(claims) && !isEmptyClaims(current)) {
-            console.warn(
-                '[permissions] /me/permissions returned an empty claim set for a user '
-                + 'who has permissions. Keeping the known-good claims; not blanking the UI.',
-            )
-            return
-        }
-
-        const next = claimsSnapshot(claims)
-        if (next === lastSnapshot) return
-        lastSnapshot = next
-        useAuthStore.getState().setPermissions(claims)
-        invalidateAllQueries()
-        // Reload Zustand stores + emit the global change event so
-        // surfaces that aren't backed by React Query (CommandPalette
-        // workspaces list, page-level useState caches) also refresh.
-        // Without this, the auth store gets the new claims but the
-        // sidebar keeps showing workspaces the user has just lost.
-        void notifyPermissionsChanged()
-    } catch {
-        // Network / 401 / backend hiccup — swallow. The next tick (or
-        // the silent refresh path on a real request) will pick it up.
-    }
+    const next = claimsSnapshot(useAuthStore.getState().permissions)
+    if (next === lastSnapshot) return
+    lastSnapshot = next
+    invalidateAllQueries()
+    // Reload Zustand stores + emit the global change event so
+    // surfaces that aren't backed by React Query (CommandPalette
+    // workspaces list, page-level useState caches) also refresh.
+    // Without this, the auth store gets the new claims but the
+    // sidebar keeps showing workspaces the user has just lost.
+    void notifyPermissionsChanged()
 }
 
 function scheduleNext(myEpoch: number): void {
@@ -180,7 +141,16 @@ function startChain(): void {
  *  already-hydrated store — otherwise the first poll compares against
  *  ``''``, always "detects" a change, and blanket-invalidates every
  *  query on boot. A real mutation between bootstrap and the first
- *  poll still diffs against the seed and invalidates. */
+ *  poll still diffs against the seed and invalidates.
+ *
+ *  "Already-hydrated" is a real precondition, not a description: the
+ *  caller must wait for the first resolve to SETTLE. ``status`` flips to
+ *  ``authenticated`` from the sessionStorage user cache while claims are
+ *  still in flight, so enabling on ``status`` alone seeded the snapshot
+ *  from an empty store, and the first poll then "detected" a change that
+ *  had not happened — an unfiltered ``invalidateQueries`` plus a
+ *  cross-tab broadcast on every warm reload. ``App.tsx`` gates on
+ *  ``permissionsStatus`` for exactly this reason. */
 export function enablePermissionPolling(): void {
     authReady = true
     // Idempotent: the app shell calls this from an effect that can re-run (and

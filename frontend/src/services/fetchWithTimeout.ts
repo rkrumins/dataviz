@@ -126,8 +126,8 @@ type RefreshOutcome = 'ok' | 'reauth' | 'expired' | 'retryable'
 
 /**
  * Single in-flight refresh promise — concurrent 401s share one network
- * call instead of each spawning its own. Cleared on the next microtask
- * after resolution so subsequent unrelated 401s can start a new one.
+ * call instead of each spawning its own. Cleared synchronously when it
+ * settles, so a later unrelated 401 can start a fresh one.
  */
 let refreshInFlight: Promise<RefreshOutcome> | null = null
 
@@ -197,10 +197,10 @@ async function attemptRefresh(): Promise<{
           const mod = await import('@/store/auth')
           const before = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
           // skipAuthRefresh: we JUST refreshed the token, so this
-          // re-hydrate's GET /me/permissions must NOT re-enter the
-          // 401→refresh→re-hydrate path. Without it, a /me/permissions
-          // that still 401s recurses at network speed — the app-wide
-          // request storm.
+          // re-resolve's GET /me/session must NOT re-enter the
+          // 401→refresh→re-resolve path. Without it, a /me/session that
+          // still 401s recurses at network speed — the app-wide request
+          // storm.
           await mod.useAuthStore.getState().refreshPermissions({ skipAuthRefresh: true })
           const after = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
           if (before === after) return
@@ -311,9 +311,15 @@ async function tryRefresh(): Promise<RefreshOutcome> {
       if (second.outcome === 'ok') sessionLostAt = null
       return second.outcome
     } finally {
-      queueMicrotask(() => {
-        refreshInFlight = null
-      })
+      // Synchronous, not queueMicrotask. Deferring it left a window in
+      // which the promise was settled but still shared — harmless — and,
+      // more to the point, made the lifetime of the de-dup depend on
+      // microtask timing rather than on the request. Rotation is
+      // idempotent inside the grace window, so a duplicate POST is
+      // absorbed today; with REFRESH_ROTATION_GRACE_SECONDS=0, which the
+      // backend documents as a supported setting, a duplicate is read as
+      // a stolen chain and kills the family.
+      refreshInFlight = null
     }
   })()
   return refreshInFlight
