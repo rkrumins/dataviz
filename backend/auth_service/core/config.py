@@ -101,6 +101,21 @@ COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "true").lower() != "false"
 COOKIE_DOMAIN: str | None = os.getenv("AUTH_COOKIE_DOMAIN") or None
 COOKIE_SAMESITE: str = os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower()
 
+# The SAML ACS and the self-service link callback complete on a CROSS-SITE
+# POST, which browsers only send SameSite=None cookies on — and they
+# require Secure alongside it. So those three cookies force Secure
+# regardless of AUTH_COOKIE_SECURE (see ``cookies._cross_site_kwargs``),
+# which on a plain-HTTP dev box means the browser drops them and the
+# handshake dies with ``missing_flow_cookie``. That reads like a broken
+# IdP, and it made SAML and identity linking untestable locally.
+#
+# This lifts it for local work only. Validated against ENV below rather
+# than merely documented, so it cannot become the flag someone flips to
+# make a staging failure disappear.
+CROSS_SITE_COOKIES_INSECURE: bool = (
+    os.getenv("AUTH_CROSS_SITE_COOKIES_INSECURE", "false").lower() == "true"
+)
+
 
 # ── SSO session lifetime (Phase 2.E) ─────────────────────────────────
 # Re-auth ceiling: SSO users must complete a fresh IdP authentication at
@@ -193,4 +208,13 @@ if AUTH_CUSTOM_PROVIDER_ENABLED and ENV in _PROD_ENV_VALUES:
         "The Custom IdP is a dev/demo mock that trusts a self-signed "
         "cookie payload; running it in prod would bypass real SSO. "
         "Set AUTH_CUSTOM_PROVIDER_ENABLED=false or change ENV."
+    )
+
+if CROSS_SITE_COOKIES_INSECURE and ENV in _PROD_ENV_VALUES:
+    raise RuntimeError(
+        "AUTH_CROSS_SITE_COOKIES_INSECURE=true is forbidden in production. "
+        "It drops Secure from the SAML / link-intent / dry-run cookies, "
+        "which puts an in-flight IdP handshake on the wire in clear. It "
+        "exists so those flows can be exercised on a plain-HTTP dev box. "
+        "Set AUTH_CROSS_SITE_COOKIES_INSECURE=false or change ENV."
     )

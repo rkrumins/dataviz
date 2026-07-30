@@ -42,24 +42,27 @@ quadrantChart
 
 ## 1. Security Concerns
 
-### 1.1 JWT Stored in localStorage (CRITICAL)
+### 1.1 JWT Stored in localStorage — RESOLVED
 
 **Files:** `frontend/src/store/auth.ts`
 
-The codebase itself acknowledges this risk:
-```
-// SECURITY NOTE: The JWT is stored in localStorage via Zustand persist.
-// localStorage is accessible to any JS running on the page, making it
-// vulnerable to XSS. ... Tracked for v2.
-```
+This entry described the pre-cookie architecture and was still listed as a
+live CRITICAL long after the migration shipped, which made the whole
+section untrustworthy — a reader checking it would have gone looking for a
+hole that had already been closed.
 
-**Risk:** A single malicious npm dependency or CDN compromise can steal JWTs from `localStorage`, enabling full account impersonation for the token's lifetime (60 minutes).
+As built today: the access and refresh tokens live in HttpOnly cookies the
+frontend cannot read (`backend/auth_service/cookies.py`), CSRF is a
+double-submit against the JS-readable `nx_csrf` cookie
+(`backend/auth_service/csrf.py`), every call uses `credentials: 'include'`
+(`frontend/src/services/fetchWithTimeout.ts`), and the store holds no
+token at all. The only auth-related thing in `localStorage` is the
+signed-out marker (`frontend/src/store/signedOut.ts`), which carries no
+identity.
 
-**Recommendation:**
-1. Move to HttpOnly cookies set by backend (`POST /auth/set-cookie`)
-2. Add CSRF protection (`X-CSRF-Token` header)
-3. Frontend: use `credentials: 'include'` on API calls
-4. Remove JWT from localStorage entirely
+The access-token lifetime quoted here (60 minutes) is also stale: it is 15
+across the whole tree, asserted by
+`backend/tests/test_session_config_coherence.py`.
 
 ### 1.2 Credential Encryption is Optional (HIGH)
 

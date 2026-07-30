@@ -15,7 +15,7 @@ import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 export async function authFetch<T>(
     url: string,
-    init?: RequestInit & { silent403?: boolean },
+    init?: RequestInit & { silent403?: boolean; surface403?: boolean },
 ): Promise<T> {
     let res: Response
     try {

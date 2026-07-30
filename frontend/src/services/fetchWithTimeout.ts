@@ -397,6 +397,37 @@ function parseRetryAfterMs(header: string | null): number | null {
  * the underlying ``Response`` (or thrown error from ``apiClient``) so
  * per-call error handling can remain in place.
  */
+/**
+ * Is this 403 one the user is owed an explanation for?
+ *
+ * The modal's job is to explain a refusal to someone who just asked for
+ * something. Announcing every 403 announced denials nobody asked about:
+ * background reads probing admin-only endpoints to decide whether to
+ * render a count are *expected* to 403 for most tiers, and each one
+ * popped a card over working content.
+ *
+ * The method already carries the distinction. A background probe is a
+ * GET; clicking Delete is a DELETE. So unsafe methods surface by default
+ * — the user is behind them by definition — and reads have to ask.
+ * Inverting it this way matters because the old default was wrong in the
+ * direction nobody notices: an opt-out only lands on the call sites
+ * someone thought to check, while every read added later shouts by
+ * default.
+ *
+ * ``silent403`` still wins over everything: some mutations expect a 403
+ * as an ordinary answer (submitting the wrong current password on the
+ * change-password form) and must not be announced twice.
+ */
+function shouldSurface403(
+  method: string,
+  silent403: boolean,
+  surface403: boolean,
+): boolean {
+  if (silent403) return false
+  if (surface403) return true
+  return !SAFE_METHODS.has(method)
+}
+
 async function notifyAccessDenied(res: Response, requestPath: string): Promise<void> {
   if (typeof window === 'undefined') return
   let detail: string | null = null
@@ -508,9 +539,26 @@ async function runOnce(
 
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init?: RequestInit & { timeoutMs?: number; silent403?: boolean; skipAuthRefresh?: boolean },
+  init?: RequestInit & {
+    timeoutMs?: number
+    /** Never announce a 403 from this request, whatever the method. For
+     *  mutations whose 403 is an ordinary answer the caller renders
+     *  itself. */
+    silent403?: boolean
+    /** Announce a 403 from this READ. Reads are silent by default (see
+     *  {@link shouldSurface403}); set this when the user is visibly
+     *  waiting on the request and deserves the explanation. */
+    surface403?: boolean
+    skipAuthRefresh?: boolean
+  },
 ): Promise<Response> {
-  const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, skipAuthRefresh = false, ...fetchInit } = init ?? {}
+  const {
+    timeoutMs = TIMEOUTS.DEFAULT_MS,
+    silent403 = false,
+    surface403 = false,
+    skipAuthRefresh = false,
+    ...fetchInit
+  } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
 
   let res: Response
@@ -585,11 +633,15 @@ export async function fetchWithTimeout(
   // the denial centrally so the user sees a clear "you don't have X"
   // message instead of a generic toast.
   //
-  // Callers can opt out with ``silent403: true`` when the 403 is an
-  // expected outcome for a user tier (a background probe firing an
-  // admin-only endpoint to render counts, for example). The Response
-  // still flows through so the service can degrade gracefully — only
-  // the global modal is suppressed.
+  // WHICH 403s ARE WORTH ANNOUNCING: see ``shouldSurface403``. This used
+  // to announce every one of them unless a caller opted out, and the
+  // opt-out could only ever be added to sites somebody had noticed. So a
+  // background read firing at an admin-only endpoint — a legitimate,
+  // expected 403 for that user's tier — popped "Access denied" over a
+  // page that was loading perfectly well. That is the second half of the
+  // reported "it briefly says I don't have permission, then the content
+  // loads": not a route guard at all, a toast about a request the user
+  // never made.
   // A forced password rotation is announced the same structured way,
   // and needs to win over the access-denied modal: the account is not
   // missing a permission, it is being held until it picks a new
@@ -609,7 +661,9 @@ export async function fetchWithTimeout(
     } catch {
       // Not a JSON body — fall through to the normal 403 handling.
     }
-    if (!silent403) void notifyAccessDenied(res, urlPath(input))
+    if (shouldSurface403(method, silent403, surface403)) {
+      void notifyAccessDenied(res, urlPath(input))
+    }
   }
 
   return res

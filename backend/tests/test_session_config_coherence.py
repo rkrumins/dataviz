@@ -140,3 +140,36 @@ def test_startup_accepts_a_coherent_config():
     from backend.app import main as main_module
 
     main_module._assert_session_config_coherent()
+
+
+# ── The revocation store has to be shared ────────────────────────────
+
+
+def test_startup_refuses_a_per_process_revocation_store_in_prod(monkeypatch):
+    """Two workers with two revocation stores is worse than it sounds.
+
+    The in-memory fallback is right where it lives — on the per-request
+    path, raising would turn a config typo into a total auth outage. But
+    the app runs two gunicorn workers, so a revocation recorded in one is
+    invisible to the other: a suspended user's requests alternate between
+    refused and served depending on who answers. Boot is the moment to be
+    strict; nothing is being served and someone is watching.
+    """
+    from backend.app import main as main_module
+
+    monkeypatch.setattr("backend.auth_service.core.config.ENV", "production")
+    with pytest.raises(RuntimeError, match="in-process backend"):
+        main_module._assert_revocation_is_shared()
+
+
+def test_startup_only_warns_about_it_outside_prod(caplog):
+    """Dev and test must keep working without a Redis.
+
+    That is the whole reason the fallback exists; a check that broke it
+    would just get reverted.
+    """
+    from backend.app import main as main_module
+
+    with caplog.at_level("WARNING"):
+        main_module._assert_revocation_is_shared()
+    assert any("in-process backend" in r.message for r in caplog.records)

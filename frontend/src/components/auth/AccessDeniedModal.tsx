@@ -1,7 +1,15 @@
 /**
  * Global access-denied notice — listens for ``'auth:access-denied'``
- * events dispatched by ``fetchWithTimeout`` on every 403 and surfaces
- * them as a non-blocking floating card.
+ * events dispatched by ``fetchWithTimeout`` and surfaces them as a
+ * non-blocking floating card.
+ *
+ * Not every 403: only ones the user is owed an explanation for, which in
+ * practice means the requests they initiated. See ``shouldSurface403``.
+ * This card used to fire on all of them, so a background read probing an
+ * admin-only endpoint — a 403 that is the expected answer for most tiers
+ * — announced "Access denied" over a page that was loading fine. Users
+ * reported that as briefly being told they lacked permission just before
+ * the content appeared.
  *
  * Mounted once in ``AppLayout`` so every authenticated route inherits
  * the behaviour. The card matches the toast visual language (rounded

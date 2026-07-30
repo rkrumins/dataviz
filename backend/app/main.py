@@ -181,6 +181,55 @@ def _assert_session_config_coherent() -> None:
         access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
         REFRESH_ROTATION_GRACE_SECONDS, SSO_SESSION_MAX_AGE_HOURS,
     )
+    _assert_revocation_is_shared()
+
+
+def _assert_revocation_is_shared() -> None:
+    """In production, refuse to boot on a per-process revocation store.
+
+    ``get_revocation_service`` falls back to ``InMemoryBackend`` whenever
+    Redis cannot be built, and that fallback is right where it lives: it
+    runs on every authenticated request, so raising there would turn a
+    config typo into a total auth outage instead of a degradation.
+
+    But the degradation is worse than it sounds, and silent. The app runs
+    two gunicorn workers by design, so a revocation recorded in one is
+    invisible to the other: a suspended user's requests start alternating
+    between refused and served depending on which worker answers, and
+    "sign out everywhere" only reaches the worker that handled it.
+    Nothing surfaces except a warning at startup, in a log nobody reads
+    once it is running.
+
+    Boot is a different moment from the hot path — nothing is being
+    served yet, and an operator is watching — so it is the right place to
+    be strict. Dev and test are unaffected, which is what keeps the
+    fallback useful for the case it was written for.
+    """
+    from backend.app.services.revocation_service import (
+        InMemoryBackend,
+        get_revocation_service,
+    )
+    from backend.auth_service.core.config import ENV
+
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if not isinstance(backend, InMemoryBackend):
+        return
+    if ENV not in {"prod", "production"}:
+        logger.warning(
+            "Session revocation is using the in-process backend. Fine for "
+            "local dev; it is not shared across workers, so revoking a "
+            "session only affects the worker that handled the request."
+        )
+        return
+    raise RuntimeError(
+        "Session revocation fell back to the in-process backend in "
+        f"ENV={ENV}. It is not shared across workers or replicas, so "
+        "suspending a user or signing them out everywhere would take "
+        "effect on one worker and not the others — intermittently, and "
+        "with nothing to show for it. Fix the Redis configuration (see "
+        "the REDIS_STREAMS_* / REDIS_URL settings) or run with a "
+        "non-production ENV."
+    )
 
 
 @asynccontextmanager

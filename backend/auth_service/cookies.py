@@ -18,7 +18,12 @@ from __future__ import annotations
 
 from fastapi import Request, Response
 
-from .core.config import COOKIE_DOMAIN, COOKIE_SAMESITE, COOKIE_SECURE
+from .core.config import (
+    COOKIE_DOMAIN,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    CROSS_SITE_COOKIES_INSECURE,
+)
 from .interface import SessionTokens
 
 ACCESS_COOKIE_NAME = "nx_access"
@@ -97,9 +102,18 @@ def _cross_site_kwargs() -> dict:
     this from ``COOKIE_SECURE`` would reintroduce the exact bug in the
     off position — a cookie silently withheld at the ACS, in the one
     configuration where it is hardest to notice.
+
+    The cost was that SAML and self-service identity linking could not be
+    exercised on a plain-HTTP dev box AT ALL: the browser drops the cookie
+    and the handshake fails with ``missing_flow_cookie``, which reads like
+    a broken IdP rather than a local-protocol problem.
+    ``AUTH_CROSS_SITE_COOKIES_INSECURE`` lifts it for that case only, and
+    ``core.config`` refuses the flag outright when ``ENV`` looks like
+    production — so it cannot be the thing someone turns on to make a
+    staging problem go away.
     """
     return {
-        "secure": True,
+        "secure": not CROSS_SITE_COOKIES_INSECURE,
         "samesite": "none",
         "domain": COOKIE_DOMAIN,
     }
