@@ -7,8 +7,17 @@ production, dev, and test. There is intentionally **no ephemeral
 fallback**: a per-process random key silently invalidates every
 outstanding session on restart and masks a missing-secret
 misconfiguration in production. Absence, a too-weak value, or a known
-placeholder fails fast at import so the process never starts in an
-insecure state.
+placeholder fails fast — but at FIRST USE of the key ring, not at
+import, and explicitly at startup via ``assert_signing_secret()``.
+
+The distinction matters. Resolving at import made the secret a
+precondition for importing anything under ``auth_service``, and
+transitively for a great deal that never touches a token: the
+aggregation control plane, which neither mints nor verifies one, died
+with ``MissingSigningSecret`` on a repository import five links removed
+from any signing code. A process that needs the key still refuses to
+start without it; a process that does not is no longer held hostage to
+it.
 
 Local-dev convenience: when ``ENV`` is NOT a production-looking value
 AND a ``.env`` / ``.env.dev`` file exists in CWD, we auto-source it
@@ -128,7 +137,7 @@ def _resolve_secret() -> str:
     return key
 
 
-def _resolve_retired_secrets() -> tuple[str, ...]:
+def _resolve_retired_secrets(*, active: str) -> tuple[str, ...]:
     """Keys accepted for VERIFICATION but never used to sign.
 
     Without this, changing ``JWT_SECRET_KEY`` invalidates every
@@ -158,7 +167,7 @@ def _resolve_retired_secrets() -> tuple[str, ...]:
                 "Retired keys are still trusted for verification, so they "
                 "carry the same strength requirement as the active one."
             )
-        if key != JWT_SECRET_KEY and key not in keys:
+        if key != active and key not in keys:
             keys.append(key)
     return tuple(keys)
 
@@ -173,13 +182,90 @@ def key_id(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
 
 
-JWT_SECRET_KEY: str = _resolve_secret()
-JWT_SECRET_KEYS_PREVIOUS: tuple[str, ...] = _resolve_retired_secrets()
-JWT_SECRET_KEY_ID: str = key_id(JWT_SECRET_KEY)
-# (kid, key) pairs in verification-preference order: active key first.
-JWT_VERIFICATION_KEYS: tuple[tuple[str, str], ...] = tuple(
-    (key_id(k), k) for k in (JWT_SECRET_KEY, *JWT_SECRET_KEYS_PREVIOUS)
-)
+# ── The key ring, resolved on FIRST USE rather than at import ────────
+#
+# These four used to be plain module-level assignments, which made
+# ``JWT_SECRET_KEY`` a precondition for *importing* anything under
+# ``auth_service`` — and transitively for importing a great deal that has
+# nothing to do with tokens.
+#
+# That is not hypothetical. The aggregation control plane, a process that
+# neither mints nor verifies a token, died on its first ontology
+# resolution with ``MissingSigningSecret``: a function-local
+# ``from backend.app.db.repositories.stats_repo import ...`` initialised
+# the repositories package, whose ``__init__`` eagerly imported all 21
+# repos, one of which imports ``auth_service.providers.assurance``, whose
+# package ``__init__`` imports ``oidc``, which imports this module. Five
+# accidental couplings, ending in a batch worker being required to hold
+# the token-signing key.
+#
+# Resolving lazily severs that. A process that never signs or verifies a
+# token never touches these, so it never needs the secret. The guarantee
+# that a process which DOES need it refuses to start is unchanged, but it
+# is now stated rather than implied: ``assert_signing_secret()``, called
+# from the API's startup, and no longer an accident of import order.
+_KEY_RING: dict[str, object] = {}
+
+_LAZY_KEY_RING_NAMES = frozenset({
+    "JWT_SECRET_KEY",
+    "JWT_SECRET_KEYS_PREVIOUS",
+    "JWT_SECRET_KEY_ID",
+    "JWT_VERIFICATION_KEYS",
+})
+
+
+def _build_key_ring() -> dict[str, object]:
+    """Resolve and validate every key, once.
+
+    Cached as a unit: the retired keys are validated against the active
+    one, so resolving them independently could accept a ring the paired
+    resolution would reject.
+    """
+    if not _KEY_RING:
+        secret = _resolve_secret()
+        previous = _resolve_retired_secrets(active=secret)
+        _KEY_RING.update({
+            "JWT_SECRET_KEY": secret,
+            "JWT_SECRET_KEYS_PREVIOUS": previous,
+            "JWT_SECRET_KEY_ID": key_id(secret),
+            # (kid, key) pairs in verification-preference order: active first.
+            "JWT_VERIFICATION_KEYS": tuple(
+                (key_id(k), k) for k in (secret, *previous)
+            ),
+        })
+    return _KEY_RING
+
+
+def assert_signing_secret() -> None:
+    """Fail now if this process cannot sign tokens.
+
+    Called from the startup of any service that mints or verifies them,
+    so a missing or weak secret still stops the boot rather than
+    surfacing as a 500 on the first login. The check that used to happen
+    as a side effect of importing this module is this function; making it
+    explicit is what lets processes that have no business holding the key
+    import the module at all.
+    """
+    _build_key_ring()
+
+
+def reset_key_ring_cache() -> None:
+    """Drop the resolved ring. For tests that re-point the environment."""
+    _KEY_RING.clear()
+
+
+def __getattr__(name: str):
+    """PEP 562 lazy attributes for the key ring.
+
+    Keeps ``from ...config import JWT_SECRET_KEY`` working unchanged for
+    the handful of modules that genuinely need it, while leaving the
+    module importable by everything that does not.
+    """
+    if name in _LAZY_KEY_RING_NAMES:
+        return _build_key_ring()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", _DEFAULT_ALGORITHM)
 JWT_EXPIRY_MINUTES: int = int(
     os.getenv("JWT_EXPIRY_MINUTES", str(_DEFAULT_ACCESS_EXPIRY_MINUTES))

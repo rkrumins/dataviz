@@ -17,17 +17,22 @@ from datetime import datetime, timezone, timedelta
 import jwt
 from jwt import exceptions as pyjwt_exceptions
 
+from . import config
 from .config import (
     CLOCK_SKEW_LEEWAY_SECONDS,
-    JWT_SECRET_KEY,
-    JWT_SECRET_KEY_ID,
-    JWT_VERIFICATION_KEYS,
     JWT_ALGORITHM,
     JWT_EXPIRY_MINUTES,
     JWT_ISSUER,
     JWT_AUDIENCE,
     JWT_REFRESH_EXPIRY_DAYS,
 )
+
+# The key ring is reached through the module rather than bound at import.
+# Binding it here would make importing THIS module require a signing
+# secret, which is the coupling that took down a service holding no keys
+# at all — see the note on ``_build_key_ring`` in ``config``. Resolution
+# is cached after the first access, so this costs a dict lookup against
+# an HMAC.
 
 _REFRESH_AUDIENCE = f"{JWT_AUDIENCE}:refresh"
 _INVITE_AUDIENCE = f"{JWT_AUDIENCE}:invite"
@@ -49,9 +54,9 @@ def _encode(payload: dict) -> str:
     """Sign *payload* with the active key, stamping its ``kid``."""
     return jwt.encode(
         payload,
-        JWT_SECRET_KEY,
+        config.JWT_SECRET_KEY,
         algorithm=JWT_ALGORITHM,
-        headers={"kid": JWT_SECRET_KEY_ID},
+        headers={"kid": config.JWT_SECRET_KEY_ID},
     )
 
 
@@ -67,12 +72,12 @@ def _candidate_keys(token: str) -> tuple[tuple[str, str], ...]:
     try:
         kid = jwt.get_unverified_header(token).get("kid")
     except jwt.InvalidTokenError:
-        return JWT_VERIFICATION_KEYS
+        return config.JWT_VERIFICATION_KEYS
     if kid:
-        matched = tuple(entry for entry in JWT_VERIFICATION_KEYS if entry[0] == kid)
+        matched = tuple(entry for entry in config.JWT_VERIFICATION_KEYS if entry[0] == kid)
         if matched:
             return matched
-    return JWT_VERIFICATION_KEYS
+    return config.JWT_VERIFICATION_KEYS
 
 
 def is_foreign_token_error(exc: BaseException) -> bool:

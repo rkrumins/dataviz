@@ -72,6 +72,9 @@ from ..cookies import (
     set_saml_cookie,
     set_session_cookies,
 )
+# Module, not names: the key ring resolves on first access so this
+# module stays importable without a signing secret.
+from ..core import config as jwt_config
 from ..core.config import (
     AUTH_CUSTOM_PROVIDER_ENABLED,
     AUTH_ENVIRONMENT_ID,
@@ -79,8 +82,6 @@ from ..core.config import (
     COOKIE_SAMESITE,
     COOKIE_SECURE,
     JWT_ISSUER,
-    JWT_SECRET_KEY_ID,
-    JWT_VERIFICATION_KEYS,
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
@@ -1045,8 +1046,8 @@ async def diagnostics(request: Request):
             "csrf": CSRF_COOKIE_NAME,
             "access_exp": ACCESS_EXPIRY_COOKIE_NAME,
         },
-        active_kid=JWT_SECRET_KEY_ID,
-        accepted_kids=[kid for kid, _key in JWT_VERIFICATION_KEYS],
+        active_kid=jwt_config.JWT_SECRET_KEY_ID,
+        accepted_kids=[kid for kid, _key in jwt_config.JWT_VERIFICATION_KEYS],
         cookie_secure=COOKIE_SECURE,
         cookie_domain=COOKIE_DOMAIN,
         cookie_samesite=COOKIE_SAMESITE,
