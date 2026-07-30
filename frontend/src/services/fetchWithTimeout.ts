@@ -305,6 +305,35 @@ async function attemptRefresh(): Promise<{
 }
 
 /**
+ * Which deployment this tab is talking to, once it has said so.
+ *
+ * The expiry cookie's name is suffixed with it (``nx_access_exp_uat``),
+ * because two deployments under one parent domain otherwise write the
+ * same name into one cookie jar. Reading a sibling's value there is not
+ * a harmless approximation: it is a LATER expiry, so this tab schedules
+ * its rotation past its own token's death, never renews proactively, and
+ * falls back to the reactive 401 path — which an idle tab never triggers
+ * because it makes no requests.
+ *
+ * Latched from ``/auth/me``, the bootstrap call, which resolves before
+ * the keepalive is allowed to start. Until then — and forever, in a
+ * deployment that sets no environment id — the unscoped name is read,
+ * which is exactly what a single-deployment install writes.
+ */
+let environmentId: string | null = null
+
+/** Called by the auth store with whatever ``/auth/me`` reported. */
+export function setAuthEnvironmentId(id: string | null | undefined): void {
+  environmentId = id || null
+}
+
+function accessExpiryCookieName(): string {
+  return environmentId
+    ? `${ACCESS_EXPIRY_COOKIE}_${environmentId}`
+    : ACCESS_EXPIRY_COOKIE
+}
+
+/**
  * Read the published access-token expiry, in epoch milliseconds.
  *
  * ``null`` when no session cookie is present, or when it predates this
@@ -313,7 +342,12 @@ async function attemptRefresh(): Promise<{
  * until its first rotation.
  */
 export function readAccessExpiryMs(): number | null {
-  const raw = readCookie(ACCESS_EXPIRY_COOKIE)
+  // Fall back to the unscoped name rather than giving up: a tab that has
+  // not yet bootstrapped, or one served by a backend too old to scope
+  // the cookie, still gets a schedule instead of dropping to the probe
+  // interval for the life of the tab.
+  const raw =
+    readCookie(accessExpiryCookieName()) ?? readCookie(ACCESS_EXPIRY_COOKIE)
   if (!raw) return null
   const seconds = Number(raw)
   return Number.isFinite(seconds) ? seconds * 1000 : null

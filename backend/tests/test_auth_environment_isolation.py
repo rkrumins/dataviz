@@ -116,10 +116,14 @@ def test_every_signed_cookie_is_scoped(monkeypatch):
     """
     _tokens, uat = _reload_for_env(monkeypatch, "uat")
 
-    # Both are read from JavaScript by name and neither is
-    # signature-bearing, so a shared name costs nothing. See the comments
-    # on their definitions.
-    unscoped_by_design = {"CSRF_COOKIE_NAME", "ACCESS_EXPIRY_COOKIE_NAME"}
+    # Read from JavaScript by name and not signature-bearing. A shared
+    # name genuinely costs nothing here: the double-submit check only
+    # compares this cookie against the header on the SAME request, so a
+    # value written by a sibling deployment still proves exactly what the
+    # check is for. ``ACCESS_EXPIRY_COOKIE_NAME`` used to be on this list
+    # for the same stated reason and it did not hold — see
+    # ``test_the_expiry_cookie_is_scoped_so_siblings_cannot_cross_wire``.
+    unscoped_by_design = {"CSRF_COOKIE_NAME"}
 
     for attr in dir(uat):
         if not attr.endswith("_COOKIE_NAME") or attr.startswith("_"):
@@ -133,6 +137,70 @@ def test_every_signed_cookie_is_scoped(monkeypatch):
                 "a signature it must be; if it does not, add it to "
                 "unscoped_by_design with the reason."
             )
+
+
+def test_the_expiry_cookie_is_scoped_so_siblings_cannot_cross_wire(monkeypatch):
+    """Two deployments under one parent domain write one cookie jar.
+
+    ``nx_access_exp`` was unscoped on the reasoning that nothing in it is
+    signature-bearing, so sharing it would "at most make one of them
+    reschedule sooner than needed — and they cannot collide anyway
+    without also colliding on the access cookie, which IS scoped."
+
+    Both halves were wrong. The collision is not between the two cookies;
+    it is two BACKENDS writing one name, which is what scoping the access
+    cookie leaves possible rather than prevents. And the effect is not
+    "sooner": the client schedules at ``expiry - 60s``, so a sibling's
+    LATER expiry schedules it past its own token's death. It then never
+    renews proactively and falls back to reactive 401 refresh, which an
+    idle tab never triggers because it issues no requests — the session
+    lapses in exactly the way the keepalive exists to prevent.
+    """
+    _tokens, dev = _reload_for_env(monkeypatch, "dev")
+    _tokens, uat = _reload_for_env(monkeypatch, "uat")
+
+    assert dev.ACCESS_EXPIRY_COOKIE_NAME == "nx_access_exp_dev"
+    assert uat.ACCESS_EXPIRY_COOKIE_NAME == "nx_access_exp_uat"
+    assert dev.ACCESS_EXPIRY_COOKIE_NAME != uat.ACCESS_EXPIRY_COOKIE_NAME
+
+
+def test_two_backends_writing_one_jar_do_not_overwrite_the_schedule(monkeypatch):
+    """The failure, reproduced at the level it actually happens.
+
+    Not two constants compared — two responses, from two deployments,
+    landing in the browser one after the other the way sibling hosts
+    under a shared ``AUTH_COOKIE_DOMAIN`` do. Both expiry values have to
+    survive, or whichever backend answered last decides when the other's
+    tabs renew.
+    """
+    jar: dict[str, str] = {}
+
+    def _collect(response: Response) -> None:
+        for header in response.headers.getlist("set-cookie"):
+            name, _, rest = header.partition("=")
+            jar[name] = rest.split(";")[0]
+
+    for env in ("dev", "uat"):
+        _tokens, cookies = _reload_for_env(monkeypatch, env)
+        response = Response()
+        cookies.set_session_cookies(
+            response,
+            cookies.SessionTokens(
+                access_token=f"access.{env}",
+                access_max_age_seconds=900,
+                refresh_token=f"refresh.{env}",
+                refresh_max_age_seconds=604800,
+                csrf_token="csrf",
+            ),
+        )
+        _collect(response)
+
+    assert "nx_access_exp_dev" in jar
+    assert "nx_access_exp_uat" in jar
+    assert "nx_access_exp" not in jar, (
+        "an unscoped expiry cookie is still being written; a sibling "
+        "deployment will overwrite it and cross-wire the renewal schedule"
+    )
 
 
 def test_foreign_token_fails_as_issuer_not_signature(monkeypatch):

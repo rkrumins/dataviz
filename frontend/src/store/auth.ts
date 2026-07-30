@@ -26,7 +26,7 @@ import {
     readUserCache,
     writeUserCache,
 } from '@/store/userCache'
-import { resetSessionLostLatch } from '@/services/fetchWithTimeout'
+import { resetSessionLostLatch, setAuthEnvironmentId } from '@/services/fetchWithTimeout'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -292,7 +292,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         }
 
         try {
-            const { user } = await authService.me()
+            const { user, environment_id } = await authService.me()
+            // Before anything schedules a rotation: the keepalive reads
+            // an environment-suffixed cookie by name, and reading a
+            // sibling deployment's copy would schedule this tab past its
+            // own token's expiry. Safe to do here because the keepalive
+            // only starts once status flips to 'authenticated', below.
+            setAuthEnvironmentId(environment_id)
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
             // optimistic copy.
@@ -322,7 +328,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         resetClaimRecovery()
         resetSessionLostLatch()
         try {
-            const { user } = await authService.login({ email, password })
+            const { user, environment_id } = await authService.login({ email, password })
+            setAuthEnvironmentId(environment_id)
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
