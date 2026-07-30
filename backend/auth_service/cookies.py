@@ -31,6 +31,7 @@ signature-bearing. See the comments on their definitions below.
 """
 from __future__ import annotations
 
+import logging
 import time
 
 import jwt as pyjwt
@@ -43,6 +44,8 @@ from .core.config import (
     COOKIE_SECURE,
 )
 from .interface import SessionTokens
+
+logger = logging.getLogger(__name__)
 
 # Base names, before environment scoping. Kept as the eviction list
 # below: a browser that already holds a poisoned unsuffixed cookie has
@@ -157,6 +160,36 @@ _DRYRUN_COOKIE_MAX_AGE = 600
 # but is excluded from every data endpoint where it's never useful.
 REFRESH_COOKIE_PATH = "/api/v1/auth/"
 
+# The hard limit browsers place on one cookie, measured over name + value
+# (RFC 6265bis §5.4; Chrome and Firefox both enforce 4096). Past it the
+# cookie is **discarded without any error** — the Set-Cookie is sent, the
+# response is a 200, and the next request simply arrives anonymous. That
+# silence is what makes an oversized session cookie so expensive to
+# diagnose, and why this constant exists rather than being implicit.
+MAX_COOKIE_BYTES = 4096
+
+# The point at which the access cookie is close enough to the limit to be
+# worth saying so. Nothing branches on it — the token carries nothing that
+# grows with tenant size, so it should sit at a few hundred bytes forever —
+# which is exactly why crossing this is worth reporting: it means something
+# unbounded found its way back into the token, and the margin below the
+# limit is the window in which that can still be noticed rather than
+# diagnosed from unexplained sign-outs.
+#
+# Sized so the remaining headroom absorbs an environment-suffixed cookie
+# name, a longer signature if the algorithm ever changes, and growth in the
+# global permission vocabulary.
+ACCESS_COOKIE_WARN_BYTES = 3072
+
+
+def access_cookie_bytes(token: str) -> int:
+    """What the browser will measure for the access cookie.
+
+    Name plus separator plus value — the metric the 4096 limit applies
+    to, not the length of the token alone.
+    """
+    return len(ACCESS_COOKIE_NAME) + 1 + len(token)
+
 
 def _common_kwargs() -> dict:
     return {
@@ -187,9 +220,38 @@ def _cross_site_kwargs() -> dict:
     }
 
 
+def _warn_if_oversized(token: str) -> None:
+    """Say something when a cookie is about to be thrown away.
+
+    A cookie over ``MAX_COOKIE_BYTES`` is discarded by the browser with no
+    error of any kind: the ``Set-Cookie`` goes out, the response is a 200,
+    and the next request simply arrives anonymous. The user is bounced to
+    /login with nothing in any log to explain it, and because size depends
+    on how many workspaces *that particular user* is bound to, it looks
+    unreproducible.
+
+    Reaching this is a bug, not a configuration problem — the token carries
+    only bounded claims, so its size does not depend on the account — so it
+    is logged at ERROR and names the numbers needed to act on it. It stays
+    here afterwards as a tripwire: this is the last point in the process
+    that can still see the whole cookie.
+    """
+    size = access_cookie_bytes(token)
+    if size <= MAX_COOKIE_BYTES:
+        return
+    logger.error(
+        "Access cookie is %dB, over the %dB limit browsers enforce — it "
+        "will be DISCARDED silently and the session will present as an "
+        "unexplained sign-out. Nothing in this token is supposed to grow "
+        "with the account, so treat it as a bug in what the mint embedded.",
+        size, MAX_COOKIE_BYTES,
+    )
+
+
 def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
-    """Attach the three session cookies to *response*. Called by /login and /refresh."""
+    """Attach the four session cookies to *response*. Called by /login and /refresh."""
     common = _common_kwargs()
+    _warn_if_oversized(tokens.access_token)
     response.set_cookie(
         key=ACCESS_COOKIE_NAME,
         value=tokens.access_token,

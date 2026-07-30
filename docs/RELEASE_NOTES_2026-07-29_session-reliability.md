@@ -92,6 +92,75 @@ rejects a token that has not expired, and a token minted a second in the future 
 rejected as not-yet-valid. The OIDC path had allowed 60 seconds of skew from the start;
 we did not extend the same tolerance to ourselves.
 
+### An access cookie that outgrew what browsers accept
+
+Permission claims rode in the access JWT in full, including per-workspace grants. Those grow
+about 200 bytes of cookie per workspace a user is bound to, and past roughly **18 workspaces
+the cookie crossed the 4096-byte limit browsers enforce** — at which point it is discarded
+*silently*. `/auth/login` answered 200, the `Set-Cookie` went out, the browser threw it away,
+the next request arrived anonymous, and the SPA bounced the user to `/login` with nothing in
+any log. Because the size depends on how many workspaces that particular user holds, it
+presented as random unreproducible sign-outs hitting the most privileged accounts first, and
+it got worse as the product was adopted.
+
+Almost all of that volume was redundancy: 150 workspace bindings produced 150 verbatim
+copies of one 8-permission array — 29 KB of JSON, ~99% repetition, inflated another third by
+base64url. A real login by such a user measured **43,197 bytes**.
+
+**Workspace grants no longer travel in the cookie at all.** They live in the session store,
+keyed by `sid` — the same entry already read on every request for revocation, fetched in the
+same pipelined round trip, so reading them costs nothing extra. `to_jwt_dict()` has no option
+to include them, so the invariant is enforced by the signature rather than by review, and the
+access cookie is O(1) in tenant size: identical bytes for a user with 0 workspaces and one
+with 2,000.
+
+Stored payloads are also deduplicated (`{"ws": {id: 0}, "psets": [[…]]}`) — a ninefold
+reduction, since every workspace a user holds the same role on resolves to the same
+permission set. That is now a Redis-memory optimisation rather than a defence against the
+cliff.
+
+An intermediate version embedded the grants while they fitted and shed them above a byte
+budget. It worked, and it was still the wrong shape: a user with 99 bindings and one with 101
+exercised different authorization machinery, and the store path — the one serving the largest
+tenants — was the one almost nothing routinely tested. Deduplication alone would only have
+moved the cliff from ~18 workspaces to ~180.
+
+Splitting the cookie across `nx_access_0/1/2…` was considered and rejected: it addresses the
+per-cookie limit but not the constraint that actually binds, which is that the whole Cookie
+header rides on every request. 44 KB of it exceeds nginx's default
+`large_client_header_buffers 4 8k`, so it would have traded a silent drop for a hard 400.
+
+No hard refresh is needed. A tab open across the deploy holds a token with inline grants and
+no store entry, and the read path recognises each layout by inspection rather than assuming
+one — so it keeps every permission it had. Both compatibility branches self-drain within one
+refresh TTL.
+
+**"We can't tell" is no longer reported as "you may not."** Moving the grants out of the
+token means there is now a state where the server cannot establish them — Redis unreachable
+*and* the Postgres fallback failing. Resolving that to an empty grant map would have produced
+403 `Missing permission: …`, which asserts a fact about the user that was never checked, and
+it is the same "you don't have permissions" flash this release set out to remove. The claim
+set carries `ws_available` instead, and:
+
+* a **workspace-scoped** check that fails while the grants are unknown answers **503**, not
+  403;
+* a **global** check is unaffected — it is settled by the token, so an outage must not touch
+  it, which is why the decision is made in `requires` (where the permission is known) rather
+  than in the read path;
+* `GET /me/permissions` answers **503** rather than a 200 with an empty `ws`, because the SPA
+  store installs whatever it returns and would blank every workspace-gated control; on an
+  error it keeps the claims it already had.
+
+A Redis outage alone never reaches that state: Postgres answers, cached 30 seconds per user
+so an outage does not become one permission query per request.
+
+**This is also a story about the test suite.** `conftest.py` builds the test identity service
+with **no claims resolver**, so every test that signed in was minting a token carrying no
+permission claims at all. Nothing could measure a cookie that grew with claims, because no
+test had ever put a claim in one — the same shape of blindness as the transaction-semantics
+gap documented on that fixture. Tests that care now inject a resolver, and the wide-tenant
+test asserts its own premise so it cannot quietly stop testing anything.
+
 ### A rate limiter that could deny authentication
 
 Introduced by this work and caught in production, so it is worth recording rather than
@@ -135,6 +204,8 @@ and the scoping is now asserted as a property rather than as a list of names.
 | Revocation | Rejections carry their side effects out of the request session and commit separately, so they survive the rollback |
 | Rate limits | Generous per-address flood guard **plus** a strict per-account control; `/refresh` keyed per browser session; counters shared across replicas |
 | Limiter storage | The async limiter uses the redis-py asyncio client we already ship, not the `coredis` default; construction falls back to memory instead of 500ing sign-in; both limiters' backends are reported at boot |
+| Claim transport | Workspace grants moved out of the cookie entirely into the `sid` session store, read in the round trip revocation already made, so the access cookie is O(1) in tenant size; stored payloads deduplicated ~9x; reads accept the old inline layout so open tabs survive the deploy |
+| Unknown vs none | Grants that no source can supply are flagged, not flattened to an empty map: a workspace-scoped check answers 503 rather than "Missing permission", and global checks are untouched |
 | Client | `tryRefresh` classifies its outcome — only a definitive 401 signs you out; 429/5xx/network get one bounded retry |
 | Guards | A real `permissionsStatus` tri-state; no denial rendered until the answer is known |
 | Login page | Shows the form, with an explicit "Continue as \<name\>" for a still-valid session |

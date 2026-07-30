@@ -458,6 +458,21 @@ async def test_client(
     async def _test_session_factory():
         yield db_session
 
+    # SECOND BLIND SPOT, same shape as the transaction one above: no
+    # ``claims_resolver`` is wired, so ``/auth/login`` here mints tokens
+    # carrying NO permission claims. Every test that signs in through this
+    # fixture is therefore measuring a claim-free token.
+    #
+    # That is how the access cookie came to exceed the 4096-byte limit
+    # browsers enforce. Claims ride in the token and grow ~200 bytes per
+    # workspace binding; past roughly 18 the browser discarded the cookie
+    # silently and the user bounced to /login with nothing logged. No test
+    # could see it, because no test had ever put a claim in a token.
+    #
+    # Tests that care about claim content or cookie size must inject a
+    # resolver — see the ``real_claims`` fixture in
+    # ``test_auth_large_tenant_login.py``, which mirrors ``_resolve_claims``
+    # from ``app/main.py``.
     previous_identity_service = getattr(app.state, "identity_service", None)
     app.state.identity_service = LocalIdentityService(
         session_factory=_test_session_factory,

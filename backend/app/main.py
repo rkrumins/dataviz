@@ -625,12 +625,28 @@ async def lifespan(_app: FastAPI):
         # suspend / deprovision / role change. Best-effort: a Redis
         # outage must not block login (requires() applies its own
         # fail policy on the read side).
+        #
+        # The same write carries the resolved workspace grants, and it is
+        # the ONLY place they are written: they grow ~200 bytes of cookie
+        # per workspace binding, and a cookie over 4096 bytes is discarded
+        # by the browser without an error, so the token cannot carry them
+        # and no longer offers the option. A failure here therefore costs
+        # the user their workspace permissions until the read path
+        # re-resolves from Postgres — which is why it is logged rather
+        # than passed over.
         try:
-            await get_revocation_service().record_session(user_id, claims.sid)
+            await get_revocation_service().record_session(
+                user_id, claims.sid, claims=claims.to_session_dict(),
+            )
         except Exception as exc:  # noqa: BLE001 — recording is best-effort
             logger.warning(
                 "Session-index record failed (user=%s): %s", user_id, exc
             )
+        # ``to_jwt_dict`` cannot carry the per-workspace grants — there is
+        # no option for it to. They go to the store above, and the token
+        # keeps only ``sid`` and the bounded global half, so the access
+        # cookie is O(1) in tenant size rather than growing ~200 bytes per
+        # workspace binding toward a limit the browser enforces silently.
         return claims.to_jwt_dict()
 
     # Phase 3: inject the group->target reconciler (now handles both

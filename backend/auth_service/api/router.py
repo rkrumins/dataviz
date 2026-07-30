@@ -47,9 +47,11 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..cookies import (
+    ACCESS_COOKIE_WARN_BYTES,
     ACCESS_COOKIE_NAME,
     ACCESS_EXPIRY_COOKIE_NAME,
     CSRF_COOKIE_NAME,
+    MAX_COOKIE_BYTES,
     REFRESH_COOKIE_NAME,
     clear_dryrun_cookie,
     clear_link_intent_cookie,
@@ -982,6 +984,18 @@ async def diagnostics(request: Request):
             presented[label] = "present"
         else:
             presented[label] = _describe_token(raw, label)
+            if label == "access":
+                # Size, because the browser's 4096-byte limit is enforced
+                # silently: over it the cookie is dropped, the request
+                # arrives anonymous, and nothing logs a reason. A caller
+                # who got here at all is under the limit by definition —
+                # what this answers is "how close is this user?", which is
+                # the question when one account bounces and others do not.
+                size = len(name) + 1 + len(raw)
+                presented[label] += (
+                    f"; {size}B of {MAX_COOKIE_BYTES}B"
+                    + (" — NEAR LIMIT" if size > ACCESS_COOKIE_WARN_BYTES else "")
+                )
 
     # Reported as a delta rather than present/absent: when a session
     # lapses despite the client-side keepalive, the question is not

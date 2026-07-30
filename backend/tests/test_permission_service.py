@@ -106,13 +106,31 @@ def test_has_permission_global_admin_is_implicit_allow():
 
 
 def test_jwt_round_trip_preserves_shape():
+    """The token half round-trips, and loses the workspace grants doing it.
+
+    That loss is the contract, not a defect. ``ws_perms`` grows with the
+    number of workspaces a user is bound to and a cookie stops at 4096
+    bytes, so the grants live in the session store and
+    ``get_permission_claims`` recombines the halves per request. This test
+    used to assert full equality, which is what a token that carried them
+    would give you — and what silently signed out every user past ~18
+    workspaces.
+    """
     claims = PermissionClaims(
         sid="sess_z",
         global_perms=("system:workspaces:create",),
         ws_perms={"ws_x": ("workspace:view:read",)},
     )
-    restored = PermissionClaims.from_jwt_dict(claims.to_jwt_dict())
-    assert restored == claims
+    token_half = claims.to_jwt_dict()
+
+    assert not PermissionClaims.token_carries_ws(token_half)
+    assert PermissionClaims.from_jwt_dict(token_half) == PermissionClaims(
+        sid="sess_z", global_perms=("system:workspaces:create",),
+    )
+    # The grants are not lost, only carried elsewhere.
+    assert PermissionClaims.from_jwt_dict(
+        {**token_half, **claims.to_session_dict()},
+    ) == claims
 
 
 def test_new_session_id_prefixed_and_unique():

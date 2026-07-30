@@ -76,7 +76,19 @@ async def get_my_permissions(
     show the Share button only when the user can change visibility,
     etc.). Backend enforcement still happens in ``requires(...)``;
     the frontend treats this response as advisory.
+
+    503 when the workspace half of the claims could not be read from
+    anywhere. Advisory or not, answering 200 with an empty ``ws`` would be
+    worse than failing: the store installs whatever this returns, so a
+    momentary outage would overwrite a known-good claim set with one that
+    grants nothing and blank every workspace-gated control. On an error the
+    store keeps the claims it already had, which is the correct behaviour
+    for "temporarily cannot tell".
     """
+    if not claims.ws_available:
+        raise HTTPException(
+            status_code=503, detail="Permissions temporarily unavailable",
+        )
     return PermissionsResponse(
         sid=claims.sid,
         global_perms=list(claims.global_perms),

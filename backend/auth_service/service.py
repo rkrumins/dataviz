@@ -1194,6 +1194,15 @@ class LocalIdentityService:
             # ``sid``, so enforcing the rotation costs one more dict
             # lookup instead of a database round-trip on every call.
             extra["mcp"] = True
+        # No size decision here. The claims resolver does not put
+        # per-workspace grants in the token at all — see ``_resolve_claims``
+        # in ``app/main.py`` — so what arrives is bounded by construction
+        # and there is nothing to shed. This used to embed-while-it-fits,
+        # which meant a user's authorization travelled differently
+        # depending on how many workspaces they happened to hold, and the
+        # store path that served the largest tenants was the one least
+        # exercised. ``_warn_if_oversized`` in ``cookies.py`` remains as a
+        # tripwire in case something ever puts an unbounded claim back.
         access = create_access_token(
             user_id=user.id,
             email=user.email,

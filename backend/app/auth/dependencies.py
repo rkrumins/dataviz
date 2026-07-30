@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Callable, Optional
 
 import jwt as pyjwt
@@ -219,7 +220,7 @@ async def require_admin(
     admin page. Dropping the legacy path forces a single consistent
     state: if you don't have the claim, you don't have admin.
     """
-    claims = get_permission_claims(request)
+    claims = await get_permission_claims(request)
     if has_permission(claims, "system:admin"):
         return user
     raise HTTPException(
@@ -230,8 +231,8 @@ async def require_admin(
 
 # ── RBAC Phase 1: permission-claim plumbing ─────────────────────────
 
-def get_permission_claims(request: Request) -> PermissionClaims:
-    """Decode the access JWT and return the embedded permission claims.
+async def get_permission_claims(request: Request) -> PermissionClaims:
+    """Decode the access JWT and return this session's permission claims.
 
     Raises 401 if the token is missing, invalid, or expired. Used as a
     sibling of ``get_current_user`` — both depend on the same cookie,
@@ -243,6 +244,32 @@ def get_permission_claims(request: Request) -> PermissionClaims:
     authenticate (``get_current_user`` succeeds via the legacy
     ``role`` claim) and the user simply has no permissions until
     their next login. The JWT TTL is short, so this path is rare.
+
+    **Where the workspace grants come from.** The session store, always.
+    They are unbounded — about 200 bytes of cookie per workspace a user is
+    bound to — and a cookie has a hard 4096-byte ceiling, so the mint
+    cannot put them in the token and no longer offers the option.
+
+    The one remaining branch on the token is a compatibility path, not a
+    design choice:
+
+    * Token carries ``ws`` → it was minted before the split, and it has no
+      store entry because nothing wrote one for that ``sid``. Honour what
+      it carries. This is what keeps a tab that was already open across
+      the deploy fully authorised instead of 403ing on every workspace
+      route until the user re-logs in.
+    * Token omits ``ws`` → the current shape. Resolve from the store, and
+      from the database if the store cannot answer. See
+      ``_workspace_grants_from_store``.
+
+    The first branch is **self-draining**: after one refresh lifetime no
+    token can still carry ``ws``, and it can be deleted along with
+    ``token_carries_ws`` and ``_decode_ws``'s inline layout.
+
+    When neither source can answer, the returned claims carry
+    ``ws_available=False`` and an empty map. Callers that needed the
+    workspace half must treat that as 503, not as a denial — see
+    ``requires``.
     """
     token = read_access_cookie(request)
     if not token:
@@ -259,7 +286,154 @@ def get_permission_claims(request: Request) -> PermissionClaims:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    return PermissionClaims.from_jwt_dict(payload)
+    claims = PermissionClaims.from_jwt_dict(payload)
+    if PermissionClaims.token_carries_ws(payload):
+        return claims
+    grants = await _workspace_grants_from_store(
+        claims.sid, str(payload.get("sub") or ""),
+    )
+    return claims.with_ws(grants)
+
+
+async def _workspace_grants_from_store(
+    sid: str, user_id: str,
+) -> Optional[dict[str, tuple[str, ...]]]:
+    """Workspace grants for a token that does not carry its own.
+
+    Redis → Postgres → ``None``, in that order, and the ordering is the
+    whole point. The tempting shortcut is to treat an unreachable store as
+    "no workspace grants", which reads as a successful request that happens
+    to authorise nothing — a denial dressed up as a 200, and exactly the
+    failure shape (silent, data-dependent, unlogged) that the oversized
+    cookie produced in the first place. So a store miss escalates to the
+    database rather than degrading, and ``None`` — "nothing could answer" —
+    is a distinct result from ``{}`` — "the user holds nothing".
+
+    This runs on every current-shape token, but it is not a second round
+    trip: the revocation tombstone was already being fetched from the same
+    place, and ``read_session`` pipelines the two into one call. The
+    database step is the rare one — it needs the store to be unavailable.
+    """
+    if not sid:
+        return {}
+    try:
+        state = await get_revocation_service().read_session(sid)
+        if state.claims is not None:
+            return PermissionClaims.from_jwt_dict(state.claims).ws_perms
+        logger.warning(
+            "No stored workspace grants for sid=%s; resolving from the "
+            "database. Expected only if the session entry expired.", sid,
+        )
+    except Exception as exc:  # noqa: BLE001 — any store failure escalates
+        logger.warning(
+            "Session store unavailable for sid=%s (%s); resolving "
+            "workspace grants from the database.", sid, exc,
+        )
+    return await _workspace_grants_from_db(user_id)
+
+
+#: Postgres-fallback results, keyed by user id. Only the *fallback* is
+#: cached, never the store read — that distinction is the point.
+#:
+#: The store is read on every request because it costs nothing extra (the
+#: revocation tombstone was already being fetched from the same place in
+#: the same round trip) and because reading it live is what makes a
+#: permission change take effect immediately rather than at the next token
+#: rotation. Caching that would give back the staleness the split was
+#: partly meant to remove.
+#:
+#: The database fallback is the opposite case: it only runs when the store
+#: cannot answer, which in practice means Redis is down — precisely when
+#: every request in the fleet would otherwise turn into a permission
+#: query. A short cache turns that from per-request into per-session-per
+#: -window, which is the difference between a degraded cache and a
+#: saturated database.
+_DB_FALLBACK_TTL_SECONDS = 30
+_db_fallback_cache: dict[str, tuple[float, dict[str, tuple[str, ...]]]] = {}
+#: Bounded so an outage cannot turn this into a memory leak. Small: it
+#: only holds users seen during a store outage inside one 30s window.
+_DB_FALLBACK_CACHE_MAX = 2048
+
+
+def _cached_db_fallback(user_id: str) -> Optional[dict[str, tuple[str, ...]]]:
+    entry = _db_fallback_cache.get(user_id)
+    if entry is None:
+        return None
+    expires_at, grants = entry
+    if expires_at < time.monotonic():
+        _db_fallback_cache.pop(user_id, None)
+        return None
+    return grants
+
+
+def _remember_db_fallback(
+    user_id: str, grants: dict[str, tuple[str, ...]],
+) -> None:
+    if len(_db_fallback_cache) >= _DB_FALLBACK_CACHE_MAX:
+        # Wholesale clear rather than LRU bookkeeping: this only fills
+        # during an outage, and the cost of a cleared cache is one extra
+        # query per session, not a correctness problem.
+        _db_fallback_cache.clear()
+    _db_fallback_cache[user_id] = (
+        time.monotonic() + _DB_FALLBACK_TTL_SECONDS, grants,
+    )
+
+
+def reset_db_fallback_cache() -> None:
+    """Drop the fallback cache. For tests, and for a targeted flush."""
+    _db_fallback_cache.clear()
+
+
+async def _workspace_grants_from_db(
+    user_id: str,
+) -> Optional[dict[str, tuple[str, ...]]]:
+    """Last resort: re-resolve from Postgres.
+
+    Keyed on the user id from the token's ``sub`` rather than on the sid,
+    because the session index only runs user → sids and cannot be walked
+    backwards. ``sub`` is signed, so trusting it here is no weaker than
+    trusting the rest of the token.
+
+    Opens its own short-lived session rather than taking one as a
+    dependency. Declaring a session dependency here would acquire a
+    connection from the pool for every one of the ~70 endpoints that
+    depend on these claims, including those that never touch the
+    database — turning a rare fallback into permanent pool pressure.
+
+    Returns ``{}`` only when the user genuinely has no workspace grants,
+    and ``None`` when the database could not answer either. The two are
+    kept apart because an empty map is a *claim about the user*: hand it
+    to ``requires`` and it becomes "Missing permission: …", a 403 stating
+    as fact something the server never established. Collapsing them is
+    how the "you don't have permissions" flash gets built. ``None``
+    reaches the caller as ``ws_available=False``, and the endpoints that
+    need the workspace half answer 503 instead.
+    """
+    if not user_id:
+        # No ``sub`` on a token that otherwise verified. Nothing to look
+        # up, and nothing to be wrong about: this session has no user to
+        # hold workspace grants.
+        return {}
+    cached = _cached_db_fallback(user_id)
+    if cached is not None:
+        return cached
+
+    from backend.app.db.engine import get_session_factory
+    from backend.app.services import permission_service
+
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            resolved = await permission_service.resolve(session, user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "No grant source could answer for user=%s (store unavailable, "
+            "database fallback failed: %s) — workspace access is unknown, "
+            "not empty", user_id, exc,
+        )
+        return None
+    _remember_db_fallback(user_id, resolved.ws_perms)
+    return resolved.ws_perms
 
 
 async def _audit_access_denied(
@@ -362,7 +536,8 @@ def requires(
          ``_FAIL_CLOSED_PERMISSIONS``).
       4. Checks ``has_permission(claims, permission, workspace_id=...)``
          (or ``has_permission_any_workspace`` when ``workspace_any=True``)
-         and 403s on miss.
+         and 403s on miss — except when the miss was decided against a
+         workspace map that no source could supply, which is a 503.
     """
     if workspace is not None and workspace_any:
         raise ValueError(
@@ -424,6 +599,27 @@ def requires(
             allowed = has_permission_any_workspace(claims, permission)
         else:
             allowed = has_permission(claims, permission, workspace_id=workspace_id)
+
+        # A denial reached by consulting a workspace map that nothing could
+        # populate is not a denial — it is an unanswered question, and 403
+        # answers it wrongly and permanently ("you may not" rather than
+        # "ask again"). The check is here rather than in
+        # ``get_permission_claims`` because only here is it known whether
+        # the missing half was needed: a global permission is decided
+        # entirely by the token, so a store outage must not touch it.
+        if not allowed and not claims.ws_available and (
+            workspace_any or workspace_id is not None
+        ):
+            logger.warning(
+                "Cannot establish workspace grants for user=%s (perm=%s "
+                "workspace=%s); answering 503 rather than 403",
+                user.id, permission, workspace_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization temporarily unavailable",
+            )
+
         if not allowed:
             # Phase 5: structured 403 body so the FE can route by
             # ``detail.error`` instead of regex-matching on the prose.
