@@ -310,7 +310,156 @@ async def test_logout_without_access_token_still_revokes_family(session_factory)
         await svc.refresh(tokens.refresh_token)
 
 
-# ── 3. the cutoff is not defeated by a missing mint claim ────────────
+# ── 3. session state is resolved from the DB, not re-read off the token ──
+
+_FAKE_USER_ID = "usr_test000000"  # conftest's ``test_client`` identity
+
+
+@asynccontextmanager
+async def _token_minted_before_the_grant():
+    """Pin the caller's JWT claims to "no permissions at all".
+
+    The fixture's default claims carry ``system:admin``, which is the one
+    value that makes every comparison here vacuous. This models the real
+    situation instead: a token minted before an admin changed something.
+    """
+    from backend.app.auth.dependencies import get_permission_claims
+    from backend.app.main import app
+    from backend.app.services.permission_service import PermissionClaims
+
+    previous = app.dependency_overrides.get(get_permission_claims)
+    app.dependency_overrides[get_permission_claims] = lambda: PermissionClaims(
+        sid="sess_test", global_perms=(), ws_perms={},
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_permission_claims, None)
+        else:
+            app.dependency_overrides[get_permission_claims] = previous
+
+
+async def test_session_sees_a_grant_without_a_token_rotation(
+    test_client: AsyncClient, db_session,
+):
+    """The property the old design could not have.
+
+    ``/me/permissions`` re-reads the claims out of the access token, so
+    polling it after a grant returns the stale answer forever — with a
+    200, which is why nothing ever looked broken. Resolving from the
+    database means one poll picks the change up, and this test is the
+    proof: same session, same token, no rotation anywhere in it.
+    """
+    from backend.app.db.repositories import binding_repo
+
+    async with _token_minted_before_the_grant():
+        before = await test_client.get("/api/v1/me/session")
+        assert before.status_code == 200, before.text
+        assert before.json()["permissions"]["global"] == []
+        assert before.json()["staleClaims"] is False
+
+        await binding_repo.create_binding(
+            db_session,
+            subject_type="user", subject_id=_FAKE_USER_ID,
+            role_name="super_admin", scope_type="global",
+        )
+        await db_session.commit()
+
+        after = await test_client.get("/api/v1/me/session")
+        assert after.status_code == 200, after.text
+        assert "system:admin" in after.json()["permissions"]["global"]
+
+        # And the token is now behind the database, which the client has
+        # to be told — it is what makes it rotate instead of offering
+        # controls that ``requires()`` will still refuse.
+        assert after.json()["staleClaims"] is True
+
+        # The superseded endpoint demonstrates the defect it was retired
+        # for: same request, same moment, still the pre-grant answer.
+        legacy = await test_client.get("/api/v1/me/permissions")
+        assert legacy.status_code == 200
+        assert legacy.json()["global"] == []
+
+
+async def test_session_reports_matching_claims_as_fresh(
+    test_client: AsyncClient, db_session,
+):
+    """``staleClaims`` must not fire on a session nobody touched.
+
+    A false positive costs a token rotation on every poll — a self-
+    inflicted rotation storm. Ordering is the trap: ``resolve`` builds
+    buckets from query results and the token carries whatever order it was
+    serialised in, so comparing them raw reports differences that are not
+    there.
+    """
+    from backend.app.auth.dependencies import get_permission_claims
+    from backend.app.db.repositories import binding_repo
+    from backend.app.main import app
+    from backend.app.services.permission_service import PermissionClaims
+
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=_FAKE_USER_ID,
+        role_name="workspace_admin", scope_type="workspace",
+        scope_id="ws_alpha",
+    )
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=_FAKE_USER_ID,
+        role_name="workspace_viewer", scope_type="workspace",
+        scope_id="ws_beta",
+    )
+    await db_session.commit()
+
+    from backend.app.services.permission_service import resolve
+    truth = await resolve(db_session, _FAKE_USER_ID, sid="sess_test")
+
+    # Hand the endpoint the same claims back, deliberately reversed at
+    # every level, as a serialisation-order difference would.
+    reversed_ws = {
+        ws: tuple(reversed(sorted(perms)))
+        for ws, perms in reversed(list(truth.ws_perms.items()))
+    }
+    previous = app.dependency_overrides.get(get_permission_claims)
+    app.dependency_overrides[get_permission_claims] = lambda: PermissionClaims(
+        sid="sess_test",
+        global_perms=tuple(reversed(sorted(truth.global_perms))),
+        ws_perms=reversed_ws,
+    )
+    try:
+        resp = await test_client.get("/api/v1/me/session")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["staleClaims"] is False
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_permission_claims, None)
+        else:
+            app.dependency_overrides[get_permission_claims] = previous
+
+
+async def test_session_returns_the_same_user_shape_as_auth_me(
+    test_client: AsyncClient, db_session,
+):
+    """One user DTO, or the shell renders differently depending on
+    which call happened to answer first.
+
+    ``/me/session`` exists to replace the ``/auth/me`` + ``/me/permissions``
+    pair at boot, so its ``user`` has to be the identical object — not a
+    near-copy that drops ``avatarId`` or spells ``mustChangePassword``
+    differently.
+    """
+    await _seed(db_session, "same-shape@example.com")
+    await _login(test_client, "same-shape@example.com")
+
+    auth_me = await test_client.get("/api/v1/auth/me")
+    session = await test_client.get("/api/v1/me/session")
+    assert auth_me.status_code == 200 and session.status_code == 200
+
+    assert session.json()["user"].keys() == auth_me.json()["user"].keys()
+
+
+# ── 4. the cutoff is not defeated by a missing mint claim ────────────
 
 
 def test_cutoff_refuses_a_token_that_cannot_date_itself():
