@@ -58,11 +58,19 @@ def create_access_token(
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> dict:
+def decode_token(token: str, *, verify_exp: bool = True) -> dict:
     """Decode an access JWT.
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure
     (including audience mismatch — i.e. a refresh token presented as access).
+
+    ``verify_exp=False`` is for logout, which needs the ``sid`` out of the
+    token in order to tombstone it. A token a moment past ``exp`` still has
+    a live tombstone window to fill (the tombstone TTL deliberately outlives
+    the token), and refusing to parse it would skip the revocation in
+    exactly the case where the user has been sitting on the page long
+    enough to want out. The signature is still verified, so the ``sid``
+    cannot be forged into someone else's session.
     """
     return jwt.decode(
         token,
@@ -70,6 +78,7 @@ def decode_token(token: str) -> dict:
         algorithms=[JWT_ALGORITHM],
         issuer=JWT_ISSUER,
         audience=JWT_AUDIENCE,
+        options={"verify_exp": verify_exp},
     )
 
 
@@ -98,9 +107,14 @@ class RefreshClaims:
     # two has to be wrong — either a doomed token survives or a
     # legitimate new one is refused.
     #
-    # ``0`` means "this token predates the claim". Those are honoured
-    # rather than refused, so deploying the cutoff does not sign the
-    # whole estate out on the way in.
+    # ``0`` means "this token cannot say when it was minted". Note that a
+    # token merely predating the ``mat`` claim is NOT one of those: every
+    # token this module has ever issued carries ``iat``, and the decoder
+    # falls back to it, so legacy tokens still date themselves to the
+    # second. Reaching 0 therefore takes a token with neither claim — not
+    # something ``create_refresh_token`` can produce. Against a revocation
+    # cutoff that is treated as failure, not as licence; see
+    # ``_refresh_predates_cutoff``.
     mint_ms: int = 0
 
 
@@ -210,7 +224,9 @@ def decode_refresh_token(
     # Prefer the millisecond claim. Tokens minted before it existed fall
     # back to the standard second-granular ``iat``, which is enough to
     # place them safely on one side of a cutoff stamped later. A token
-    # carrying neither reads as 0 — "cannot tell" — and is let through.
+    # carrying neither reads as 0 — "cannot tell" — which the cutoff
+    # check refuses rather than waves through, because nothing this
+    # module issues lands there.
     try:
         mint_ms = int(payload.get("mat") or 0)
     except (TypeError, ValueError):

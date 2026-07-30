@@ -148,8 +148,20 @@ async def test_revocation_does_not_reach_other_users(
 
 # ── The cutoff comparison ────────────────────────────────────────────
 #
-# Fail-open in every "cannot tell" case. A session is killed on positive
-# evidence only — never because a stamp was missing or unreadable.
+# Fail-open when there is no instruction to enforce: no cutoff, or a
+# cutoff too malformed to read. A malformed column must never lock an
+# account out of its own refresh path.
+#
+# Fail-CLOSED on the one remaining case — a readable cutoff plus a token
+# that cannot say when it was minted. This used to fail open, on the
+# stated grounds that deploying the cutoff should not sign the estate
+# out. That reasoning does not apply: ``create_refresh_token`` has always
+# set ``iat`` and the decoder falls back to it, so a token predating the
+# ``mat`` claim still dates itself to the second and is judged normally.
+# Reaching ``mint_ms == 0`` takes a token carrying NEITHER claim, which
+# nothing here issues — so the case it was protecting was empty, while
+# the hole it left was real: an operator says "sign every earlier session
+# out" and an undateable token walks through the instruction.
 
 _STAMP = "2026-07-28T00:00:00+00:00"
 _STAMP_MS = 1785196800000  # 2026-07-28T00:00:00Z in epoch milliseconds
@@ -160,12 +172,13 @@ _STAMP_MS = 1785196800000  # 2026-07-28T00:00:00Z in epoch milliseconds
     [
         (1_000_000, None, False, "no cutoff set"),
         (1_000_000, "", False, "empty cutoff"),
-        (0, _STAMP, False, "token carries no mint claim"),
+        (0, _STAMP, True, "undateable token cannot outlive a real cutoff"),
         (_STAMP_MS - 1, _STAMP, True, "minted one millisecond before"),
         (_STAMP_MS, _STAMP, False, "minted exactly at the cutoff"),
         (_STAMP_MS + 1, _STAMP, False, "minted one millisecond after"),
         (_STAMP_MS - 1, "2026-07-28T00:00:00", True, "naive stamp read as UTC"),
         (1_000_000, "not-a-date", False, "unparseable stamp is ignored"),
+        (0, "not-a-date", False, "an unreadable cutoff condemns nothing"),
     ],
 )
 def test_cutoff_comparison(mint_ms, cutoff, expected, why):

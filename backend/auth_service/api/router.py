@@ -771,12 +771,45 @@ async def login(
 async def logout(request: Request, response: Response):
     svc = _identity_service(request)
     refresh = read_refresh_cookie(request)
-    await svc.logout(refresh)
+    # The access cookie goes too: the service tombstones its ``sid`` so the
+    # token stops working everywhere, not just in the browser we are about
+    # to clear cookies on.
+    await svc.logout(refresh, access_token=read_access_cookie(request))
     clear_session_cookies(response)
     return _Ack()
 
 
 # ── POST /auth/refresh ────────────────────────────────────────────────
+
+
+def _session_ended(detail: str | dict) -> JSONResponse:
+    """A 401 that actually evicts the cookies it just refused.
+
+    RETURN this; never ``raise`` its equivalent. ``clear_session_cookies``
+    writes ``Set-Cookie`` onto the injected ``Response``, and FastAPI
+    merges that object's headers into the reply *only* on the success path
+    (``fastapi/routing.py`` extends ``sub_response.headers.raw`` after the
+    endpoint returns). Raise instead, and Starlette's exception handler
+    builds a fresh ``JSONResponse`` from ``exc.detail`` alone — every
+    deletion is silently discarded, while the code reads as though it
+    cleared them.
+
+    The cost of that was a permanent login loop. A dead ``nx_refresh``
+    stayed in the jar for the full seven days of its ``max-age``, so every
+    page load re-presented it, 401'd, silently refreshed, 401'd again and
+    announced a lost session — and no amount of reloading could clear it,
+    because the reload is what re-presented the cookie.
+
+    Routing every eviction through one helper is also what keeps the
+    domain-scoped eviction work (PR #344) a drop-in: there is one place
+    that decides what "end this session" puts on the wire.
+    """
+    resp = JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": detail},
+    )
+    clear_session_cookies(resp)
+    return resp
 
 
 @router.post(
@@ -789,31 +822,19 @@ async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)
     if not token:
-        clear_session_cookies(response)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing refresh token",
-        )
+        return _session_ended("Missing refresh token")
     try:
         user, tokens = await svc.refresh(token)
     except SsoReauthRequired as exc:
-        clear_session_cookies(response)
         logger.info("SSO re-auth required (provider=%s)", exc.provider)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "error": "sso_reauth_required",
-                "provider": exc.provider,
-                "login_url": exc.login_url,
-            },
-        )
+        return _session_ended({
+            "error": "sso_reauth_required",
+            "provider": exc.provider,
+            "login_url": exc.login_url,
+        })
     except InvalidRefreshToken as exc:
-        clear_session_cookies(response)
         logger.info("Refresh rejected: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token invalid or expired",
-        )
+        return _session_ended("Refresh token invalid or expired")
 
     set_session_cookies(response, tokens)
     return SessionResponse(user=user)
@@ -1228,7 +1249,13 @@ async def saml_sls(slug: str, request: Request):
     if refresh_token:
         try:
             svc = _identity_service(request)
-            await svc.logout(refresh_token)
+            # Same both-halves sign-out as POST /logout. An IdP-initiated
+            # logout is exactly the case where the access token must die
+            # server-side: the user is being signed out somewhere else, so
+            # nobody is watching this browser drop its cookies.
+            await svc.logout(
+                refresh_token, access_token=read_access_cookie(request),
+            )
         except Exception:  # noqa: BLE001
             pass
 

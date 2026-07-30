@@ -156,6 +156,9 @@ class LocalIdentityService:
         (handles both role_binding and group_membership targets).
       * ``session_killer(user_id)`` -> None — Phase 2.E
         revoke-all-sessions hook.
+      * ``session_revoker(sid)`` -> None — tombstone ONE access session.
+        What sign-out needs; ``session_killer`` would take the user's
+        other devices with it.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -176,6 +179,7 @@ class LocalIdentityService:
         sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
         sso_role_preview: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
+        session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
     ):
         self._session_factory = session_factory
@@ -196,6 +200,13 @@ class LocalIdentityService:
         # mapping lookup, no writes.
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
+        # (sid) -> None. The single-session sibling of ``session_killer``,
+        # injected for the same isolation reason: the revocation store lives
+        # in backend.app.services and auth_service may not import it.
+        # Sign-out needs the narrow one — killing every session for the user
+        # would sign them out of their other devices, which is a different
+        # action with a different button.
+        self._session_revoker = session_revoker
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
         # ``app_auth_config``. When ``None`` (legacy test wiring), the
@@ -302,7 +313,24 @@ class LocalIdentityService:
         tokens = self._issue_tokens(user, family_id=None, claims_extra=claims_extra)
         return user, tokens
 
-    async def logout(self, refresh_token: Optional[str]) -> None:
+    async def logout(
+        self,
+        refresh_token: Optional[str],
+        *,
+        access_token: Optional[str] = None,
+    ) -> None:
+        # Tombstone the access token FIRST, and independently of the
+        # refresh half. Revoking the family only stops the next rotation;
+        # the access token minted alongside it stays valid for its whole
+        # remaining TTL, and clearing the cookie merely removes it from the
+        # browser that asked to leave. Anything that captured it elsewhere
+        # kept working after the user believed they were signed out.
+        #
+        # Ordered first on purpose: it is the half with the security
+        # consequence, and it must not be skipped by an unparseable or
+        # missing refresh cookie below.
+        await self._revoke_access_session(access_token)
+
         if not refresh_token:
             return
         try:
@@ -318,6 +346,32 @@ class LocalIdentityService:
                     session, "user.logged_out",
                     {"user_id": claims.sub},
                 )
+
+    async def _revoke_access_session(self, access_token: Optional[str]) -> None:
+        """Tombstone the ``sid`` carried by *access_token*, if we can read it.
+
+        Decoded with ``verify_exp=False``: an already-expired token needs no
+        tombstone, but a token a few seconds past its clock skew still does,
+        and refusing to parse it would silently skip the revocation. Failure
+        to revoke must never turn sign-out into an error — the cookies are
+        cleared either way — so everything here is best-effort and logged.
+        """
+        if not access_token or self._session_revoker is None:
+            return
+        try:
+            payload = decode_token(access_token, verify_exp=False)
+        except pyjwt.InvalidTokenError:
+            return  # not ours, or malformed — nothing to revoke
+        sid = payload.get("sid") or ""
+        if not sid:
+            return  # pre-RBAC token: no session identity to tombstone
+        try:
+            await self._session_revoker(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "session_revoker failed during logout — the access token "
+                "stays valid until it expires", exc_info=True,
+            )
 
     async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:
         try:
@@ -1226,18 +1280,39 @@ def _refresh_predates_cutoff(mint_ms: int, cutoff: Optional[str]) -> bool:
     are the two ordinary cases, and second precision cannot tell them
     apart.
 
-    Fails OPEN in every "cannot tell" case: no cutoff, no mint claim, or
-    an unparseable stamp. A session is killed on positive evidence, not
-    on missing evidence — the alternative is a malformed column locking
-    an account out of its own refresh path.
+    Fails OPEN when there is nothing to enforce — no cutoff — or when the
+    cutoff itself is unreadable. A malformed column must not lock an
+    account out of its own refresh path.
+
+    Fails CLOSED when a cutoff exists and the token cannot date itself
+    (``mint_ms <= 0``). That combination is the one place where "cannot
+    tell" and "let it through" must not be the same answer: an operator
+    has explicitly said *sign every earlier session out*, and a token
+    that declines to say when it was minted would otherwise walk straight
+    through the instruction. Nothing this codebase issues lands there —
+    ``create_refresh_token`` always sets ``iat`` and the decoder falls
+    back to it, so a legacy token still dates itself to the second (see
+    ``RefreshClaims.mint_ms``). A token with neither claim is foreign or
+    hand-made, which is precisely what should not survive.
     """
-    if not cutoff or mint_ms <= 0:
+    if not cutoff:
         return False
+    # Read the instruction before judging the token. An unreadable cutoff is
+    # not an instruction at all, so it cannot condemn anything — including a
+    # token that cannot date itself. Checking ``mint_ms`` first would let a
+    # malformed column lock every undateable token out, which is the failure
+    # this ordering exists to avoid.
     try:
         parsed = datetime.fromisoformat(cutoff)
     except ValueError:
         logger.warning("Unparseable sessions_valid_from %r — ignoring", cutoff)
         return False
+    if mint_ms <= 0:
+        logger.warning(
+            "Refresh token carries no mint instant while a revocation cutoff "
+            "is set — refusing it",
+        )
+        return True
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return mint_ms < int(parsed.timestamp() * 1000)

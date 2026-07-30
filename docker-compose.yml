@@ -275,7 +275,11 @@ services:
       # Auth — fail fast if secrets aren't set
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-60}"
+      # 15 is the tree-wide access-token TTL. Do not raise it here alone:
+      # it sets how long a revoked or demoted session keeps working, and
+      # test_session_config_coherence.py asserts this file agrees with the
+      # code default, the .env files and the k8s configmap.
+      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-15}"
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@synodic.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}
 

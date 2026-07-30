@@ -608,6 +608,12 @@ async def lifespan(_app: FastAPI):
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 
+    # Sign-out's narrower sibling: tombstone the one session that asked to
+    # leave. Clearing the cookie only removes the token from this browser;
+    # this is what makes a copy taken anywhere else stop working.
+    async def _revoke_one_session(sid: str) -> None:
+        await get_revocation_service().revoke_session(sid)
+
     # Phase 4: inject the platform SSO posture provider. The
     # ``auth_service`` stays free of ``backend.app.*`` imports —
     # the loader closure does the DB hit; the service only sees a
@@ -646,6 +652,7 @@ async def lifespan(_app: FastAPI):
         sso_role_reconciler=_reconcile_sso_targets,
         sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
+        session_revoker=_revoke_one_session,
         auth_config_provider=_auth_config_provider,
     )
     _assert_session_config_coherent()

@@ -44,18 +44,22 @@ _DEFAULT_ALGORITHM = "HS256"
 # accept; anything shorter is rejected as weak.
 _MIN_SECRET_LENGTH = 32
 # RBAC Phase 1: short access-token TTL paired with the Redis revocation
-# set. The design plan calls for ≤5 min so revocation lag stays within
-# enterprise tolerances; the shipped .env files and the k8s configmap
-# use 15, which is the documented ceiling.
+# set. Permission claims ride in the token, so this is how long a revoked
+# or demoted session keeps working, and the Redis tombstone has to be held
+# for the whole window — which is why RBAC_REVOCATION_TTL_SECONDS is
+# derived from this value rather than configured beside it, and why
+# startup refuses to boot if an explicit override makes the tombstone
+# shorter. See ``_assert_session_config_coherent`` in backend/app/main.py.
 #
-# Raising this is not free and the cost used to be invisible. Permission
-# claims ride in the token, so this is how long a revoked or demoted
-# session keeps working, and the Redis tombstone has to be held for the
-# whole window — which is why RBAC_REVOCATION_TTL_SECONDS is derived
-# from this value rather than configured beside it, and why startup
-# refuses to boot if an explicit override makes the tombstone shorter.
-# See ``_assert_session_config_coherent`` in backend/app/main.py.
-_DEFAULT_ACCESS_EXPIRY_MINUTES = 5
+# 15 is the documented ceiling and now the only number in the tree. It
+# used to be four numbers: 5 here, 15 in every .env and the k8s configmap,
+# and 60 in both compose files. Since this single value governs when an
+# access token expires, it decided whether a long-lived page hit the
+# refresh path after 5 minutes or after an hour — so every bug that only
+# shows up "when the token expires" behaved differently per environment
+# and reproduced nowhere. ``test_session_config_coherence.py`` now reads
+# the compose files too, so the spread cannot come back.
+_DEFAULT_ACCESS_EXPIRY_MINUTES = 15
 _DEFAULT_REFRESH_EXPIRY_DAYS = 7
 
 

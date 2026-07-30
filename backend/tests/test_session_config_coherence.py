@@ -10,6 +10,14 @@ That is what shipped. ``RBAC_REVOCATION_TTL_SECONDS`` defaulted to 360s
 — sized for the 5-minute access TTL in code — while every ``.env`` set
 60 minutes and the k8s configmap set 15. Nothing compared the two, so
 nothing noticed.
+
+The same drift then recurred one level up, in the TTL itself: 5 in code,
+15 in every ``.env`` and the configmap, 60 in both compose files — which
+this module did not read. Since that one number decides when a page hits
+the refresh path, every "it only breaks when the token expires" report
+behaved differently per environment and reproduced nowhere. The compose
+files are in ``_CONFIG_FILES`` now, and the code default is asserted
+against them, so a fifth number cannot appear quietly.
 """
 from __future__ import annotations
 
@@ -20,28 +28,40 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Every place an operator can set the access TTL.
+# Every place an operator can set the access TTL. Compose included: it is
+# what ``./dev.sh up`` and ``./deploy.sh up`` actually run, so leaving it
+# out made this suite green while the running system disagreed.
 _CONFIG_FILES = [
     REPO / ".env.example",
     REPO / ".env.dev",
     REPO / ".env.prod.example",
     REPO / "deploy/k8s/base/configmaps/common-config.yaml",
+    REPO / "docker-compose.yml",
+    REPO / "docker-compose.quickstart.yml",
 ]
 
 # Above this, a revoked session keeps working for an uncomfortably long
 # time and the tombstone has to be held in Redis for the whole window.
 _MAX_REASONABLE_ACCESS_MINUTES = 15
 
+# ``KEY=15``, ``KEY: "15"``, or compose's ``KEY: "${KEY:-15}"`` — the
+# interpolation default is the effective value when the env var is unset,
+# which is the case for every operator who has not overridden it.
+_ACCESS_TTL_PATTERNS = (
+    r'^\s*JWT_EXPIRY_MINUTES:?\s*=?\s*"?\$\{JWT_EXPIRY_MINUTES:-(\d+)\}"?\s*$',
+    r'^\s*JWT_EXPIRY_MINUTES:?\s*=?\s*"?(\d+)"?\s*$',
+)
+
 
 def _access_minutes(path: Path) -> int | None:
     if not path.exists():
         return None
-    match = re.search(
-        r'^\s*JWT_EXPIRY_MINUTES:?\s*=?\s*"?(\d+)"?\s*$',
-        path.read_text(),
-        re.MULTILINE,
-    )
-    return int(match.group(1)) if match else None
+    text = path.read_text()
+    for pattern in _ACCESS_TTL_PATTERNS:
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 @pytest.mark.parametrize("path", _CONFIG_FILES, ids=lambda p: p.name)
@@ -64,6 +84,27 @@ def test_every_shipped_config_uses_the_same_value():
     }
     assert len(set(values.values())) == 1, (
         f"JWT_EXPIRY_MINUTES disagrees across shipped configs: {values}"
+    )
+
+
+def test_the_code_default_matches_the_shipped_configs():
+    """The fourth number nobody was comparing.
+
+    An operator who sets nothing gets the code default; one who copies
+    ``.env.example`` gets that. When they differ, the same build behaves
+    two ways and only one of them is the one anybody tested.
+    """
+    from backend.auth_service.core.config import _DEFAULT_ACCESS_EXPIRY_MINUTES
+
+    shipped = {
+        path.name: _access_minutes(path)
+        for path in _CONFIG_FILES
+        if _access_minutes(path) is not None
+    }
+    assert shipped, "no shipped config declares JWT_EXPIRY_MINUTES"
+    assert set(shipped.values()) == {_DEFAULT_ACCESS_EXPIRY_MINUTES}, (
+        f"code default is {_DEFAULT_ACCESS_EXPIRY_MINUTES} but shipped "
+        f"configs say {shipped}"
     )
 
 

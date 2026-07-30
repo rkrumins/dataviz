@@ -103,8 +103,23 @@ class IdentityService(Protocol):
         """
         ...
 
-    async def logout(self, refresh_token: Optional[str]) -> None:
-        """Revoke the refresh token and its rotation family. Idempotent."""
+    async def logout(
+        self,
+        refresh_token: Optional[str],
+        *,
+        access_token: Optional[str] = None,
+    ) -> None:
+        """End the session: revoke the rotation family AND the access token.
+
+        Both halves are needed. Revoking the family stops the *next*
+        rotation; on its own it leaves the access token that was issued
+        alongside it valid until ``exp``. Clearing the cookie only removes
+        it from the browser that asked to sign out — a copy taken anywhere
+        else keeps working. ``access_token`` is optional because a browser
+        can legitimately reach here holding only a refresh cookie.
+
+        Idempotent.
+        """
         ...
 
     async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:
