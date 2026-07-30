@@ -68,11 +68,20 @@ def test_every_shipped_config_uses_the_same_value():
 
 
 def test_revocation_ttl_outlives_the_access_token():
-    """The derived default must satisfy the invariant on its own."""
-    from backend.app.services.revocation_service import REVOCATION_TTL_SECONDS
-    from backend.auth_service.core.config import JWT_EXPIRY_MINUTES
+    """The derived default must satisfy the invariant on its own.
 
-    assert REVOCATION_TTL_SECONDS >= JWT_EXPIRY_MINUTES * 60, (
+    Against ``exp + leeway``, not ``exp``: a token is honoured for the
+    leeway past its own expiry, so a tombstone sized to the raw TTL dies
+    while the token it exists to kill is still being accepted.
+    """
+    from backend.app.services.revocation_service import REVOCATION_TTL_SECONDS
+    from backend.auth_service.core.config import (
+        CLOCK_SKEW_LEEWAY_SECONDS,
+        JWT_EXPIRY_MINUTES,
+    )
+
+    acceptance_window = JWT_EXPIRY_MINUTES * 60 + CLOCK_SKEW_LEEWAY_SECONDS
+    assert REVOCATION_TTL_SECONDS >= acceptance_window, (
         "a revoked session would keep working after its tombstone expired"
     )
 
@@ -91,7 +100,38 @@ def test_startup_refuses_an_incoherent_override(monkeypatch):
     monkeypatch.setattr(
         "backend.auth_service.core.config.JWT_EXPIRY_MINUTES", 15,
     )
-    with pytest.raises(RuntimeError, match="shorter than the access-token"):
+    with pytest.raises(RuntimeError, match="shorter than the window"):
+        main_module._assert_session_config_coherent()
+
+
+def test_startup_refuses_a_tombstone_that_covers_exp_but_not_the_leeway(
+    monkeypatch,
+):
+    """The boundary the leeway moved.
+
+    900s access TTL with a 900s tombstone reads as coherent — the
+    tombstone covers the token's stated lifetime exactly. It is not:
+    the token is still accepted for ``leeway`` seconds after that, and
+    for those seconds a revoked session works again. This is the case
+    that silently passed before the leeway was part of the derivation.
+    """
+    from backend.app import main as main_module
+    from backend.auth_service.core.config import (
+        CLOCK_SKEW_LEEWAY_SECONDS,
+        JWT_EXPIRY_MINUTES,
+    )
+
+    assert CLOCK_SKEW_LEEWAY_SECONDS > 0, "nothing to test with no leeway"
+    # Sized off the live access TTL rather than monkeypatching it. The
+    # key-ring tests reload the config module, which leaves monkeypatch's
+    # attribute-walk resolving a different module object than the one
+    # ``main`` imports — so a patched JWT_EXPIRY_MINUTES silently does
+    # nothing when this file runs after that one.
+    monkeypatch.setattr(
+        "backend.app.services.revocation_service.REVOCATION_TTL_SECONDS",
+        JWT_EXPIRY_MINUTES * 60,
+    )
+    with pytest.raises(RuntimeError, match="clock-skew leeway"):
         main_module._assert_session_config_coherent()
 
 

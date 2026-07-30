@@ -36,6 +36,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from typing import Callable, Optional
 
 import jwt as pyjwt
@@ -46,12 +47,19 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..cookies import (
+    ACCESS_COOKIE_WARN_BYTES,
+    ACCESS_COOKIE_NAME,
+    ACCESS_EXPIRY_COOKIE_NAME,
+    CSRF_COOKIE_NAME,
+    MAX_COOKIE_BYTES,
+    REFRESH_COOKIE_NAME,
     clear_dryrun_cookie,
     clear_link_intent_cookie,
     clear_mock_identity_cookie,
     clear_oidc_cookie,
     clear_saml_cookie,
     clear_session_cookies,
+    raise_if_foreign_session,
     read_access_cookie,
     read_dryrun_cookie,
     read_link_intent_cookie,
@@ -66,6 +74,13 @@ from ..cookies import (
 )
 from ..core.config import (
     AUTH_CUSTOM_PROVIDER_ENABLED,
+    AUTH_ENVIRONMENT_ID,
+    COOKIE_DOMAIN,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    JWT_ISSUER,
+    JWT_SECRET_KEY_ID,
+    JWT_VERIFICATION_KEYS,
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
@@ -79,6 +94,7 @@ from ..core.tokens import (
     decode_oidc_state_token,
     decode_refresh_token,
     decode_saml_state_token,
+    decode_token,
 )
 from ..interface import (
     IdentityService,
@@ -194,8 +210,29 @@ limiter = Limiter(
 # Say which backend won. Swallowed storage errors mean a misconfigured
 # endpoint looks identical to a working one from the outside, and the
 # fallback silently makes every limit per-worker.
+#
+# The per-account limiter is built HERE rather than on first use. It used
+# to construct lazily inside ``login``, so a storage it could not build
+# raised on a real user's first sign-in — in production, hours after the
+# deploy, as a 500 with no prior signal. Building it at import turns the
+# same fault into a boot-time log line, and it can no longer raise: the
+# constructor falls back to memory.
+#
+# It gets its own field because the two limiters reach the same Redis by
+# different routes — this one through synchronous storage, that one
+# through asynchronous — so one can work while the other does not. That
+# is precisely what happened: the per-address limits were fine on Redis
+# while the per-account limiter could not be constructed at all.
+#
+# Only appended when a shared store was configured. With none, the
+# "in-memory" ahead of it already says everything.
+_ACCOUNT_LIMITER_BACKEND = get_account_limiter().backend
 logger.info(
-    "Rate-limit storage: %s", describe_storage(_RATELIMIT_STORAGE_URI),
+    "Rate-limit storage: %s%s",
+    describe_storage(_RATELIMIT_STORAGE_URI),
+    ""
+    if _RATELIMIT_STORAGE_URI is None
+    else f" (per-account limiter: {_ACCOUNT_LIMITER_BACKEND})",
 )
 
 
@@ -337,6 +374,35 @@ def _failure_redirect(ref: str, *, error_code: Optional[str] = None,
     else:
         params.append("sso_error=1")
     return "/login?" + "&".join(params)
+
+
+def _describe_token(raw: str, kind: str) -> str:
+    """Classify a presented session cookie for ``/auth/diagnostics``.
+
+    Never returns token contents — only the verdict, plus the ``kid``
+    when the token names a key we don't hold, which is the single most
+    useful fact when two environments are being confused for each other.
+    """
+    try:
+        kid = pyjwt.get_unverified_header(raw).get("kid") or "(none)"
+    except pyjwt.InvalidTokenError:
+        return "malformed"
+    try:
+        if kind == "refresh":
+            decode_refresh_token(raw)
+        else:
+            decode_token(raw)
+    except pyjwt.ExpiredSignatureError:
+        return f"expired (kid={kid})"
+    except pyjwt.InvalidIssuerError:
+        return f"foreign: issued by another environment (kid={kid})"
+    except pyjwt.InvalidAudienceError:
+        return f"foreign: wrong audience (kid={kid})"
+    except pyjwt.InvalidSignatureError:
+        return f"foreign: signed by a key this instance does not hold (kid={kid})"
+    except pyjwt.InvalidTokenError as exc:
+        return f"invalid: {exc} (kid={kid})"
+    return f"valid (kid={kid})"
 
 
 def _read_link_intent(request: Request, *, provider_id: str) -> Optional[str]:
@@ -772,7 +838,7 @@ async def logout(request: Request, response: Response):
     svc = _identity_service(request)
     refresh = read_refresh_cookie(request)
     await svc.logout(refresh)
-    clear_session_cookies(response)
+    clear_session_cookies(response, request)
     return _Ack()
 
 
@@ -789,7 +855,7 @@ async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)
     if not token:
-        clear_session_cookies(response)
+        clear_session_cookies(response, request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing refresh token",
@@ -797,7 +863,7 @@ async def refresh(request: Request, response: Response):
     try:
         user, tokens = await svc.refresh(token)
     except SsoReauthRequired as exc:
-        clear_session_cookies(response)
+        clear_session_cookies(response, request)
         logger.info("SSO re-auth required (provider=%s)", exc.provider)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -808,7 +874,27 @@ async def refresh(request: Request, response: Response):
             },
         )
     except InvalidRefreshToken as exc:
-        clear_session_cookies(response)
+        clear_session_cookies(response, request)
+        if getattr(exc, "foreign", False):
+            # The cookie was signed by a key outside this deployment's
+            # ring, or carries another environment's issuer. Retrying
+            # cannot help, so tell the frontend to stop refreshing and
+            # start a clean login instead of looping on 401.
+            logger.warning(
+                "Refresh rejected as foreign (host=%s): %s — session "
+                "cookies evicted across all scopes",
+                request.url.hostname, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": "session_foreign",
+                    "message": (
+                        "Session belongs to a different environment or "
+                        "signing key; please sign in again."
+                    ),
+                },
+            )
         logger.info("Refresh rejected: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -831,11 +917,132 @@ async def me(request: Request):
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
     if user is None:
+        # This is the first call the app makes after a page load, so it
+        # is where a foreign cookie usually surfaces. Classify before
+        # answering, so the handler can evict it rather than leaving the
+        # browser to re-present it on every route the user clicks.
+        raise_if_foreign_session(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
     return SessionResponse(user=user)
+
+
+# ── GET /auth/diagnostics ─────────────────────────────────────────────
+
+
+class AuthDiagnostics(BaseModel):
+    """Non-secret description of how THIS instance handles sessions.
+
+    Deliberately unauthenticated: it is most needed exactly when nobody
+    can authenticate. It exposes no key material — only the key
+    fingerprints (``kid``) already published in every JWT header.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    environment_id: str = Field(alias="environmentId")
+    issuer: str
+    cookie_names: dict[str, str] = Field(alias="cookieNames")
+    active_kid: str = Field(alias="activeKid")
+    accepted_kids: list[str] = Field(alias="acceptedKids")
+    cookie_secure: bool = Field(alias="cookieSecure")
+    cookie_domain: Optional[str] = Field(alias="cookieDomain")
+    cookie_samesite: str = Field(alias="cookieSamesite")
+    request_is_secure: bool = Field(alias="requestIsSecure")
+    secure_cookie_would_be_dropped: bool = Field(
+        alias="secureCookieWouldBeDropped"
+    )
+    session_cookies_presented: dict[str, str] = Field(
+        alias="sessionCookiesPresented"
+    )
+
+
+@router.get(
+    "/diagnostics",
+    response_model=AuthDiagnostics,
+    response_model_by_alias=True,
+)
+async def diagnostics(request: Request):
+    """Explain why this instance is or isn't accepting the caller's session.
+
+    Answers, without a shell on the pod, the three questions that a
+    cross-environment session bug actually turns on: are these two
+    deployments configured as distinct environments, do they share a
+    signing key, and did the browser's cookies even arrive.
+    """
+    presented: dict[str, str] = {}
+    for label, name in (
+        ("access", ACCESS_COOKIE_NAME),
+        ("refresh", REFRESH_COOKIE_NAME),
+        ("csrf", CSRF_COOKIE_NAME),
+    ):
+        raw = request.cookies.get(name)
+        if raw is None:
+            presented[label] = "absent"
+        elif label == "csrf":
+            presented[label] = "present"
+        else:
+            presented[label] = _describe_token(raw, label)
+            if label == "access":
+                # Size, because the browser's 4096-byte limit is enforced
+                # silently: over it the cookie is dropped, the request
+                # arrives anonymous, and nothing logs a reason. A caller
+                # who got here at all is under the limit by definition —
+                # what this answers is "how close is this user?", which is
+                # the question when one account bounces and others do not.
+                size = len(name) + 1 + len(raw)
+                presented[label] += (
+                    f"; {size}B of {MAX_COOKIE_BYTES}B"
+                    + (" — NEAR LIMIT" if size > ACCESS_COOKIE_WARN_BYTES else "")
+                )
+
+    # Reported as a delta rather than present/absent: when a session
+    # lapses despite the client-side keepalive, the question is not
+    # whether this cookie arrived but whether it says something the
+    # scheduler could have acted on. "expired 40m ago" means the tab
+    # never rotated; "expires in 12m" means it did and the problem is
+    # elsewhere.
+    raw_expiry = request.cookies.get(ACCESS_EXPIRY_COOKIE_NAME)
+    if raw_expiry is None:
+        presented["access_exp"] = "absent"
+    else:
+        try:
+            delta = int(raw_expiry) - int(time.time())
+        except ValueError:
+            presented["access_exp"] = "malformed"
+        else:
+            presented["access_exp"] = (
+                f"expires in {delta}s" if delta >= 0 else f"expired {-delta}s ago"
+            )
+
+    # Honour the proxy header: behind an ingress the TLS hop terminates
+    # upstream, so request.url.scheme alone reports http and would
+    # misdiagnose a correctly-secured deployment.
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    is_secure = (forwarded_proto or request.url.scheme).lower() == "https"
+
+    return AuthDiagnostics(
+        environment_id=AUTH_ENVIRONMENT_ID or "(unset)",
+        issuer=JWT_ISSUER,
+        cookie_names={
+            "access": ACCESS_COOKIE_NAME,
+            "refresh": REFRESH_COOKIE_NAME,
+            "csrf": CSRF_COOKIE_NAME,
+            "access_exp": ACCESS_EXPIRY_COOKIE_NAME,
+        },
+        active_kid=JWT_SECRET_KEY_ID,
+        accepted_kids=[kid for kid, _key in JWT_VERIFICATION_KEYS],
+        cookie_secure=COOKIE_SECURE,
+        cookie_domain=COOKIE_DOMAIN,
+        cookie_samesite=COOKIE_SAMESITE,
+        request_is_secure=is_secure,
+        # The silent killer: a Secure cookie sent over plain HTTP is
+        # discarded by the browser without any error, so login returns
+        # 200 and the next request is anonymous.
+        secure_cookie_would_be_dropped=COOKIE_SECURE and not is_secure,
+        session_cookies_presented=presented,
+    )
 
 
 # ── GET /auth/providers (public catalog) ─────────────────────────────
@@ -1221,7 +1428,7 @@ async def saml_sls(slug: str, request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.warning("SAML SLO failed (slug=%s): %s", slug, exc)
         resp = Response(status_code=status.HTTP_204_NO_CONTENT)
-        clear_session_cookies(resp)
+        clear_session_cookies(resp, request)
         return resp
 
     refresh_token = read_refresh_cookie(request)
@@ -1235,7 +1442,7 @@ async def saml_sls(slug: str, request: Request):
     resp = RedirectResponse(
         redirect_url or "/", status_code=status.HTTP_302_FOUND,
     )
-    clear_session_cookies(resp)
+    clear_session_cookies(resp, request)
     return resp
 
 

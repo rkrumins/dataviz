@@ -12,6 +12,7 @@ patches:
   - path: patches/replicas.yaml
   - path: patches/resource-limits.yaml
   - path: patches/ingress-patch.yaml
+  - path: patches/auth-environment.yaml
   - path: patches/anti-affinity.yaml
   - path: patches/hpa-production.yaml
   # Managed data tier: Cloud SQL + Memorystore replace in-cluster postgres/redis,

@@ -28,7 +28,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.auth.password import hash_password
-from backend.app.db.models import Base, RevokedRefreshJtiORM
+from backend.app.db.models import Base, RefreshTokenORM
 from backend.app.db.repositories import user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.auth_service.service import (
@@ -38,7 +38,6 @@ from backend.auth_service.service import (
 
 
 _PASSWORD = "C0mpl3x!Passw0rd#"
-_FAMILY_SENTINEL_PREFIX = "family-revoked:"
 
 
 @pytest_asyncio.fixture()
@@ -123,15 +122,35 @@ async def _seed_user(scoped_session_factory, email="durable@example.com") -> str
         return user.id
 
 
-async def _revoked_rows(real_engine) -> list[str]:
-    """Read the revocation table on a connection of its own.
+async def _revoked_families(real_engine) -> list[str]:
+    """Read the token records on a connection of its own.
 
     Reading through the same session that wrote would see uncommitted
     state and defeat the point.
+
+    Revocation used to be a ``family-revoked:<id>`` sentinel row; under
+    allow-by-record it marks ``revoked_at`` on the family's own tokens,
+    so that is what these tests now look for.
     """
     maker = async_sessionmaker(bind=real_engine, expire_on_commit=False)
     async with maker() as session:
-        result = await session.execute(select(RevokedRefreshJtiORM.jti))
+        result = await session.execute(
+            select(RefreshTokenORM.family_id).where(
+                RefreshTokenORM.revoked_at.is_not(None)
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def _consumed_jtis(real_engine) -> list[str]:
+    """Tokens that have been rotated away, on their own connection."""
+    maker = async_sessionmaker(bind=real_engine, expire_on_commit=False)
+    async with maker() as session:
+        result = await session.execute(
+            select(RefreshTokenORM.jti).where(
+                RefreshTokenORM.consumed_at.is_not(None)
+            )
+        )
         return list(result.scalars().all())
 
 
@@ -170,9 +189,7 @@ async def test_reuse_detection_persists_the_family_revocation(
         await service.refresh(tokens.refresh_token)
     assert "reuse_detected" in str(exc.value)
 
-    sentinels = [j for j in await _revoked_rows(real_engine)
-                 if j.startswith(_FAMILY_SENTINEL_PREFIX)]
-    assert sentinels, (
+    assert await _revoked_families(real_engine), (
         "family revocation was rolled back with the caller's transaction — "
         "the stolen family is still live"
     )
@@ -199,9 +216,9 @@ async def test_inactive_user_revocation_persists(
         await service.refresh(tokens.refresh_token)
     assert "user_inactive" in str(exc.value)
 
-    sentinels = [j for j in await _revoked_rows(real_engine)
-                 if j.startswith(_FAMILY_SENTINEL_PREFIX)]
-    assert sentinels, "inactive-user revocation did not survive the rollback"
+    assert await _revoked_families(real_engine), (
+        "inactive-user revocation did not survive the rollback"
+    )
 
 
 async def test_successful_refresh_still_commits_its_rotation(
@@ -217,6 +234,5 @@ async def test_successful_refresh_still_commits_its_rotation(
     _, tokens = await service.login("happy@example.com", _PASSWORD)
     await service.refresh(tokens.refresh_token)
 
-    rows = await _revoked_rows(real_engine)
-    consumed = [j for j in rows if not j.startswith(_FAMILY_SENTINEL_PREFIX)]
-    assert len(consumed) == 1, f"expected one consumed jti, got {rows}"
+    consumed = await _consumed_jtis(real_engine)
+    assert len(consumed) == 1, f"expected one consumed jti, got {consumed}"

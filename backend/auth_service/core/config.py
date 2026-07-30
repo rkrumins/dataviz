@@ -1,12 +1,14 @@
 """
 Auth-service configuration — environment-driven.
 
-``JWT_SECRET_KEY`` MUST be set explicitly (>= 32 chars) in every
-environment — production, dev, and test. There is intentionally **no
-ephemeral fallback**: a per-process random key silently invalidates
-every outstanding session on restart and masks a missing-secret
-misconfiguration in production. Absence or a too-weak value fails fast
-at import so the process never starts in an insecure state.
+``JWT_SECRET_KEY`` MUST be set explicitly (>= 32 chars, and not one of
+the placeholders this repo publishes) in every environment —
+production, dev, and test. There is intentionally **no ephemeral
+fallback**: a per-process random key silently invalidates every
+outstanding session on restart and masks a missing-secret
+misconfiguration in production. Absence, a too-weak value, or a known
+placeholder fails fast at import so the process never starts in an
+insecure state.
 
 Local-dev convenience: when ``ENV`` is NOT a production-looking value
 AND a ``.env`` / ``.env.dev`` file exists in CWD, we auto-source it
@@ -15,8 +17,10 @@ JWT_SECRET_KEY=...`` before every ``uvicorn`` invocation. Both gates
 have to pass; either fails closed -> we never load the file. A stray
 ``.env`` baked into a prod container is therefore inert.
 """
+import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 # ── Gated .env auto-load (local dev only) ────────────────────────────
@@ -43,6 +47,30 @@ _DEFAULT_ALGORITHM = "HS256"
 # HS256 needs a high-entropy shared secret. 32 chars is the floor we
 # accept; anything shorter is rejected as weak.
 _MIN_SECRET_LENGTH = 32
+
+# Length is not strength. ``dev-secret-key-change-in-production`` is 34
+# characters, so it cleared the floor above and booted clean — meaning a
+# deployment that copied ``.env.example`` forward signed every token in
+# production with a value published in this repository, and nothing
+# anywhere reported a problem.
+#
+# There is no honest way to measure guessability from the string alone:
+# entropy formulas score English-like passphrases highly and would hand
+# out false confidence. So this denylists the specific placeholders this
+# repository has published, which is the failure mode that actually
+# happens — someone copies an example file rather than inventing a weak
+# secret. ``.env.example`` no longer carries a value, but every ``.env``
+# already derived from it does, so the entry stays.
+#
+# Adding a placeholder here is only half the job: the value maps to the
+# file it came from so the error can name it, and
+# ``test_no_example_file_ships_a_secret_that_would_boot`` enforces the
+# converse — no example file may ship a secret a process would accept.
+_PLACEHOLDER_SECRETS: dict[str, str] = {
+    "dev-secret-key-change-in-production": ".env.example",
+    "REPLACE_ME": "deploy/k8s/secret.example.yaml",
+    "quickstart-demo-key": "docker-compose.quickstart.yml",
+}
 # RBAC Phase 1: short access-token TTL paired with the Redis revocation
 # set. The design plan calls for ≤5 min so revocation lag stays within
 # enterprise tolerances; the shipped .env files and the k8s configmap
@@ -63,6 +91,25 @@ class MissingSigningSecret(RuntimeError):
     """Raised at import when JWT_SECRET_KEY is unset or too weak."""
 
 
+def _reject_placeholder(key: str, *, var: str) -> None:
+    """Refuse a secret that is one of this repo's own example values.
+
+    Checked before the length floor so the operator is told which file
+    the value came from rather than being handed a generic "too weak" —
+    the fix is "generate a real secret", and naming the source file is
+    what makes that actionable.
+    """
+    origin = _PLACEHOLDER_SECRETS.get(key)
+    if origin is None:
+        return
+    raise MissingSigningSecret(
+        f"{var} is set to the placeholder value from {origin}. It is "
+        "published in this repository, so anyone can forge tokens for "
+        "this deployment. Generate a real secret with "
+        "`python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
+    )
+
+
 def _resolve_secret() -> str:
     key = os.getenv("JWT_SECRET_KEY")
     if not key:
@@ -72,6 +119,7 @@ def _resolve_secret() -> str:
             "is no ephemeral fallback. Generate one with "
             "`python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
         )
+    _reject_placeholder(key, var="JWT_SECRET_KEY")
     if len(key) < _MIN_SECRET_LENGTH:
         raise MissingSigningSecret(
             f"JWT_SECRET_KEY is too weak ({len(key)} chars); "
@@ -80,7 +128,58 @@ def _resolve_secret() -> str:
     return key
 
 
+def _resolve_retired_secrets() -> tuple[str, ...]:
+    """Keys accepted for VERIFICATION but never used to sign.
+
+    Without this, changing ``JWT_SECRET_KEY`` invalidates every
+    outstanding session the instant the new value lands — and during a
+    rolling update, pods holding the old and new key both serve traffic,
+    so the same user's requests flip between authenticated and 401 with
+    no session affinity to pin them. Carrying the previous key here
+    makes rotation and rollouts non-disruptive: sign with the new key,
+    keep accepting the old one until the refresh TTL has drained, then
+    drop it.
+
+    Comma-separated, most-recent first. Each entry is held to the same
+    length floor as the signing key, and duplicates of the active key
+    are dropped so the ring never verifies the same secret twice.
+    """
+    raw = os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
+    keys: list[str] = []
+    for candidate in raw.split(","):
+        key = candidate.strip()
+        if not key:
+            continue
+        _reject_placeholder(key, var="JWT_SECRET_KEY_PREVIOUS")
+        if len(key) < _MIN_SECRET_LENGTH:
+            raise MissingSigningSecret(
+                f"JWT_SECRET_KEY_PREVIOUS contains a key that is too weak "
+                f"({len(key)} chars); require >= {_MIN_SECRET_LENGTH}. "
+                "Retired keys are still trusted for verification, so they "
+                "carry the same strength requirement as the active one."
+            )
+        if key != JWT_SECRET_KEY and key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def key_id(secret: str) -> str:
+    """Short, non-reversible fingerprint of a signing key.
+
+    Emitted as the JWT ``kid`` header so verification selects the right
+    key directly instead of trial-decoding, and logged at startup so two
+    environments can be told apart without ever exposing the secret.
+    """
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+
+
 JWT_SECRET_KEY: str = _resolve_secret()
+JWT_SECRET_KEYS_PREVIOUS: tuple[str, ...] = _resolve_retired_secrets()
+JWT_SECRET_KEY_ID: str = key_id(JWT_SECRET_KEY)
+# (kid, key) pairs in verification-preference order: active key first.
+JWT_VERIFICATION_KEYS: tuple[tuple[str, str], ...] = tuple(
+    (key_id(k), k) for k in (JWT_SECRET_KEY, *JWT_SECRET_KEYS_PREVIOUS)
+)
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", _DEFAULT_ALGORITHM)
 JWT_EXPIRY_MINUTES: int = int(
     os.getenv("JWT_EXPIRY_MINUTES", str(_DEFAULT_ACCESS_EXPIRY_MINUTES))
@@ -88,7 +187,58 @@ JWT_EXPIRY_MINUTES: int = int(
 JWT_REFRESH_EXPIRY_DAYS: int = int(
     os.getenv("JWT_REFRESH_EXPIRY_DAYS", str(_DEFAULT_REFRESH_EXPIRY_DAYS))
 )
-JWT_ISSUER: str = os.getenv("JWT_ISSUER", "nexus-lineage")
+# Tolerance applied to ``exp``/``iat``/``nbf`` when verifying a token we
+# issued ourselves. Without it those are exact boundaries, so a pod whose
+# clock runs a second ahead of the one that minted the token rejects a
+# token that has not expired — surfacing as a sign-out nobody can explain
+# and nothing can reproduce.
+#
+# The IdP path has always allowed for this (``oidc.py`` validates
+# provider claims with the same value); the asymmetry was that we did not
+# extend the same tolerance to our own.
+#
+# Not free, and the cost is not local: an access token stays verifiable
+# for this long past ``exp``, so the revocation tombstone in
+# ``revocation_service`` has to outlive it or forced sign-out reopens the
+# gap it was built to close. That derivation reads this value — changing
+# it here moves both, and ``_assert_session_config_coherent`` refuses to
+# boot if an explicit override breaks the pairing.
+CLOCK_SKEW_LEEWAY_SECONDS: int = int(
+    os.getenv("JWT_CLOCK_SKEW_LEEWAY_SECONDS", "60")
+)
+# ── Environment identity ─────────────────────────────────────────────
+# Distinguishes one deployment of this app from another (``dev``,
+# ``uat``, ...). Optional: leave it unset and every value below is
+# byte-identical to what a single-environment deployment already emits.
+#
+# Set it when two environments can be open in the same browser. Cookie
+# jars are keyed by DOMAIN, not by cluster, so two deployments that use
+# the same cookie names overwrite each other's session even when they
+# run on different clusters entirely. Because the tokens also carry
+# identical ``iss``/``aud``, the receiving side cannot tell a foreign
+# token from its own and the only symptom is an opaque
+# "Signature verification failed" — the failure this setting removes.
+#
+# Constrained to a cookie-name-safe alphabet: it becomes part of the
+# cookie name, and a stray separator would silently produce a cookie the
+# browser refuses to store.
+_ENV_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+AUTH_ENVIRONMENT_ID: str = os.getenv("AUTH_ENVIRONMENT_ID", "").strip().lower()
+if AUTH_ENVIRONMENT_ID and not _ENV_ID_PATTERN.match(AUTH_ENVIRONMENT_ID):
+    raise RuntimeError(
+        f"AUTH_ENVIRONMENT_ID={AUTH_ENVIRONMENT_ID!r} is invalid. Use 1-32 "
+        "chars of [a-z0-9_-] starting alphanumeric (e.g. 'dev', 'uat') — "
+        "the value becomes part of the session cookie names."
+    )
+
+_BASE_ISSUER: str = os.getenv("JWT_ISSUER", "nexus-lineage")
+# Binding the environment into the issuer is what turns a cross-environment
+# token from an unexplained signature failure into an InvalidIssuerError —
+# a condition the caller can actually recognise and recover from by
+# evicting the cookie instead of looping on 401.
+JWT_ISSUER: str = (
+    f"{_BASE_ISSUER}:{AUTH_ENVIRONMENT_ID}" if AUTH_ENVIRONMENT_ID else _BASE_ISSUER
+)
 JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "nexus-lineage")
 
 # Cookie configuration. SameSite=Lax is safe for top-level navigation;
@@ -129,6 +279,29 @@ SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 REFRESH_ROTATION_GRACE_SECONDS: int = int(
     os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "30")
 )
+
+
+# Accept a refresh token that has no server-side record, once, and write
+# the record it should have had.
+#
+# Refresh validation is allow-by-record: a token is refused unless a row
+# in ``refresh_tokens`` says otherwise. Every session that was already
+# live when that deployed holds a token with no such row, because nothing
+# wrote one — so without this, the deploy signs out the entire estate at
+# each session's next rotation.
+#
+# Adoption is not a weakening of the new model so much as a continuation
+# of the old one: under the previous denylist those same tokens were
+# accepted with no row anywhere. But it *is* the old behaviour, so it is
+# meant to be temporary. After one refresh lifetime
+# (``JWT_REFRESH_EXPIRY_DAYS``) no record-less token can still exist:
+# set this to false, and allow-by-record is unconditional.
+#
+# Every adoption logs at INFO naming the user and family, so the drain to
+# zero is something an operator can watch rather than assume.
+REFRESH_ADOPT_RECORDLESS: bool = os.getenv(
+    "REFRESH_ADOPT_RECORDLESS", "true",
+).strip().lower() not in ("false", "0", "no", "off")
 
 
 # ── Rate limits ──────────────────────────────────────────────────────

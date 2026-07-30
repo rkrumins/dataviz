@@ -1,7 +1,7 @@
 """
 Cookie names and helpers for session transport.
 
-Three cookies make up a session:
+Four cookies make up a session:
 
 * ``nx_access``  — the access JWT. ``HttpOnly``, ``Secure``, ``SameSite=Lax``,
   path ``/``. Sent on every request to the API; read by ``get_current_user``.
@@ -9,26 +9,106 @@ Three cookies make up a session:
   path ``/api/v1/auth/refresh`` (so it's only sent to the refresh endpoint).
 * ``nx_csrf``    — the CSRF token. *Readable* by JavaScript so the frontend
   can echo it back as ``X-CSRF-Token``. ``Secure``, ``SameSite=Lax``.
+* ``nx_access_exp`` — when ``nx_access`` expires, as a unix epoch. Also
+  readable by JavaScript: the client cannot inspect an ``HttpOnly`` cookie,
+  so without this it has no way to renew before expiry rather than after a
+  401. Carries no identity and no signature.
 
 All cookie attributes are derived from environment-driven config in
 ``core.config`` so deployments can tune ``Secure`` (off in local HTTP dev),
 ``Domain`` (parent-domain sharing), and ``SameSite`` (e.g. ``strict``).
+
+The signature-bearing cookies (``nx_access``, ``nx_refresh``, and the SSO
+handshake cookies) are suffixed with ``AUTH_ENVIRONMENT_ID`` when one is
+configured — ``nx_access_uat`` — because cookie jars are keyed by domain
+rather than by cluster: two deployments sharing these names overwrite each
+other's session in a single browser even when they run on different
+clusters entirely. With the id unset the names are unchanged.
+
+``nx_csrf`` and ``nx_access_exp`` are deliberately excluded from that
+scoping — both are read from JavaScript by name, and neither is
+signature-bearing. See the comments on their definitions below.
 """
 from __future__ import annotations
 
-from fastapi import Request, Response
+import logging
+import time
 
-from .core.config import COOKIE_DOMAIN, COOKIE_SAMESITE, COOKIE_SECURE
+import jwt as pyjwt
+from fastapi import HTTPException, Request, Response, status
+
+from .core.config import (
+    AUTH_ENVIRONMENT_ID,
+    COOKIE_DOMAIN,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+)
 from .interface import SessionTokens
 
-ACCESS_COOKIE_NAME = "nx_access"
-REFRESH_COOKIE_NAME = "nx_refresh"
-CSRF_COOKIE_NAME = "nx_csrf"
+logger = logging.getLogger(__name__)
+
+# Base names, before environment scoping. Kept as the eviction list
+# below: a browser that already holds a poisoned unsuffixed cookie has
+# to have it cleared too, or the very loop this scoping fixes survives
+# the upgrade that fixes it.
+_BASE_ACCESS_COOKIE_NAME = "nx_access"
+_BASE_REFRESH_COOKIE_NAME = "nx_refresh"
+_BASE_CSRF_COOKIE_NAME = "nx_csrf"
+_BASE_ACCESS_EXPIRY_COOKIE_NAME = "nx_access_exp"
+
+
+def _scoped(name: str) -> str:
+    """Suffix *name* with the environment id when one is configured.
+
+    Cookie jars are keyed by domain, not by cluster or by port, so two
+    deployments using identical cookie names overwrite each other's
+    session in a single browser — that is why signing into UAT logs you
+    out of dev even across separate clusters. Scoping the NAME (rather
+    than relying on the domain attribute) makes the two jars disjoint
+    regardless of how the domain is configured.
+    """
+    return f"{name}_{AUTH_ENVIRONMENT_ID}" if AUTH_ENVIRONMENT_ID else name
+
+
+ACCESS_COOKIE_NAME = _scoped(_BASE_ACCESS_COOKIE_NAME)
+REFRESH_COOKIE_NAME = _scoped(_BASE_REFRESH_COOKIE_NAME)
+# Deliberately NOT scoped. This one is read from JavaScript by name
+# (frontend/src/services/fetchWithTimeout.ts), so a per-environment name
+# would have to be discovered at runtime before the first write request —
+# and getting that wrong fails every POST with a 403.
+#
+# Leaving it shared is safe: CSRF here is a double-submit check, which only
+# ever compares this cookie against the header on the SAME request. The
+# value carries no identity and no signature, so a token minted by another
+# environment still proves exactly what the check is for — that same-origin
+# script could read the cookie. The signature-bearing cookies above are the
+# ones that must not be shared.
+CSRF_COOKIE_NAME = _BASE_CSRF_COOKIE_NAME
+# When ``nx_access`` expires, as a unix epoch. Readable by JavaScript,
+# because the browser cannot read the HttpOnly access cookie and so has
+# no way to know its own session is about to lapse — which is why token
+# renewal was reactive: wait for a 401, then refresh, then replay. That
+# costs a user-visible request the whole round trip, and in an idle tab
+# nothing issues a request at all, so renewal depended on an unrelated
+# poller happening to fire.
+#
+# Publishing the expiry lets the client rotate BEFORE the token dies.
+# It leaks nothing — an expiry instant is not a secret, carries no
+# identity, and is already implicit in the access cookie's own Max-Age.
+#
+# NOT scoped by environment id, for the same reason as ``nx_csrf``: it
+# is read from JavaScript by name, and a per-environment name would have
+# to be discovered at runtime before the first refresh could be
+# scheduled. Nothing here is signature-bearing, so two environments
+# sharing the name at most makes one of them reschedule sooner than
+# needed — and they cannot collide anyway without also colliding on the
+# access cookie, which IS scoped.
+ACCESS_EXPIRY_COOKIE_NAME = _BASE_ACCESS_EXPIRY_COOKIE_NAME
 # Short-lived signed cookie holding the in-flight OIDC handshake
 # (state / nonce / PKCE verifier). Scoped to the auth subtree so it is
 # only ever sent to the callback. SameSite=Lax is required: the IdP
 # redirects back via a top-level GET navigation.
-OIDC_COOKIE_NAME = "nx_oidc"
+OIDC_COOKIE_NAME = _scoped("nx_oidc")
 OIDC_COOKIE_PATH = "/api/v1/auth/"
 _OIDC_COOKIE_MAX_AGE = 600
 
@@ -39,7 +119,7 @@ _OIDC_COOKIE_MAX_AGE = 600
 # explicitly withholds cookies from. Under Lax the ACS handler therefore
 # never sees this cookie and fails the handshake with ``missing_flow_cookie``
 # — the whole SP-initiated flow dead, on every IdP. See ``_cross_site_kwargs``.
-SAML_COOKIE_NAME = "nx_saml"
+SAML_COOKIE_NAME = _scoped("nx_saml")
 SAML_COOKIE_PATH = "/api/v1/auth/"
 _SAML_COOKIE_MAX_AGE = 600
 
@@ -47,7 +127,7 @@ _SAML_COOKIE_MAX_AGE = 600
 # obtains it from /api/v1/auth/custom/mock (also dev-only); the
 # /custom/login route reads it to find-or-provision the user. Refused
 # in production via the AUTH_CUSTOM_PROVIDER_ENABLED env gate.
-MOCK_IDENTITY_COOKIE_NAME = "nx_mock_identity"
+MOCK_IDENTITY_COOKIE_NAME = _scoped("nx_mock_identity")
 MOCK_IDENTITY_COOKIE_PATH = "/api/v1/auth/"
 _MOCK_IDENTITY_COOKIE_MAX_AGE = 600
 
@@ -57,7 +137,7 @@ _MOCK_IDENTITY_COOKIE_MAX_AGE = 600
 # Cross-site-scoped for the same reason as ``nx_saml``: linking a SAML IdP
 # completes on the ACS POST, and a Lax cookie would be dropped there, silently
 # turning a link into a JIT-provision of a duplicate account.
-LINK_INTENT_COOKIE_NAME = "nx_link_intent"
+LINK_INTENT_COOKIE_NAME = _scoped("nx_link_intent")
 LINK_INTENT_COOKIE_PATH = "/api/v1/auth/"
 _LINK_INTENT_COOKIE_MAX_AGE = 600
 
@@ -66,7 +146,12 @@ _LINK_INTENT_COOKIE_MAX_AGE = 600
 # and mints nothing. Cross-site-scoped for the same reason as ``nx_saml``:
 # a SAML dry-run completes on the ACS POST, and a Lax cookie dropped there
 # would silently turn the rehearsal into a real login.
-DRYRUN_COOKIE_NAME = "nx_dryrun"
+#
+# Environment-scoped like every other signed flow cookie. It was the one
+# that got missed: it carries a JWT, so two environments open in one
+# browser could clobber each other's in-flight rehearsal, and the admin
+# would see a dry run fail for no visible reason.
+DRYRUN_COOKIE_NAME = _scoped("nx_dryrun")
 DRYRUN_COOKIE_PATH = "/api/v1/auth/"
 _DRYRUN_COOKIE_MAX_AGE = 600
 
@@ -74,6 +159,36 @@ _DRYRUN_COOKIE_MAX_AGE = 600
 # AND /logout (logout needs to read it to revoke the rotation family)
 # but is excluded from every data endpoint where it's never useful.
 REFRESH_COOKIE_PATH = "/api/v1/auth/"
+
+# The hard limit browsers place on one cookie, measured over name + value
+# (RFC 6265bis §5.4; Chrome and Firefox both enforce 4096). Past it the
+# cookie is **discarded without any error** — the Set-Cookie is sent, the
+# response is a 200, and the next request simply arrives anonymous. That
+# silence is what makes an oversized session cookie so expensive to
+# diagnose, and why this constant exists rather than being implicit.
+MAX_COOKIE_BYTES = 4096
+
+# The point at which the access cookie is close enough to the limit to be
+# worth saying so. Nothing branches on it — the token carries nothing that
+# grows with tenant size, so it should sit at a few hundred bytes forever —
+# which is exactly why crossing this is worth reporting: it means something
+# unbounded found its way back into the token, and the margin below the
+# limit is the window in which that can still be noticed rather than
+# diagnosed from unexplained sign-outs.
+#
+# Sized so the remaining headroom absorbs an environment-suffixed cookie
+# name, a longer signature if the algorithm ever changes, and growth in the
+# global permission vocabulary.
+ACCESS_COOKIE_WARN_BYTES = 3072
+
+
+def access_cookie_bytes(token: str) -> int:
+    """What the browser will measure for the access cookie.
+
+    Name plus separator plus value — the metric the 4096 limit applies
+    to, not the length of the token alone.
+    """
+    return len(ACCESS_COOKIE_NAME) + 1 + len(token)
 
 
 def _common_kwargs() -> dict:
@@ -105,9 +220,38 @@ def _cross_site_kwargs() -> dict:
     }
 
 
+def _warn_if_oversized(token: str) -> None:
+    """Say something when a cookie is about to be thrown away.
+
+    A cookie over ``MAX_COOKIE_BYTES`` is discarded by the browser with no
+    error of any kind: the ``Set-Cookie`` goes out, the response is a 200,
+    and the next request simply arrives anonymous. The user is bounced to
+    /login with nothing in any log to explain it, and because size depends
+    on how many workspaces *that particular user* is bound to, it looks
+    unreproducible.
+
+    Reaching this is a bug, not a configuration problem — the token carries
+    only bounded claims, so its size does not depend on the account — so it
+    is logged at ERROR and names the numbers needed to act on it. It stays
+    here afterwards as a tripwire: this is the last point in the process
+    that can still see the whole cookie.
+    """
+    size = access_cookie_bytes(token)
+    if size <= MAX_COOKIE_BYTES:
+        return
+    logger.error(
+        "Access cookie is %dB, over the %dB limit browsers enforce — it "
+        "will be DISCARDED silently and the session will present as an "
+        "unexplained sign-out. Nothing in this token is supposed to grow "
+        "with the account, so treat it as a bug in what the mint embedded.",
+        size, MAX_COOKIE_BYTES,
+    )
+
+
 def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
-    """Attach the three session cookies to *response*. Called by /login and /refresh."""
+    """Attach the four session cookies to *response*. Called by /login and /refresh."""
     common = _common_kwargs()
+    _warn_if_oversized(tokens.access_token)
     response.set_cookie(
         key=ACCESS_COOKIE_NAME,
         value=tokens.access_token,
@@ -139,16 +283,172 @@ def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
         path="/",
         **common,
     )
+    # Same reasoning as the CSRF cookie above, for a different reason:
+    # this one has to OUTLIVE the access cookie it describes. A tab that
+    # boots after the access token died still needs to know *when* it
+    # died — that is precisely the tab that should refresh immediately
+    # rather than fire a request it knows will 401. Matching the access
+    # cookie's own Max-Age would delete this at the exact moment it
+    # becomes useful.
+    response.set_cookie(
+        key=ACCESS_EXPIRY_COOKIE_NAME,
+        value=str(int(time.time()) + tokens.access_max_age_seconds),
+        max_age=tokens.refresh_max_age_seconds,
+        httponly=False,
+        path="/",
+        **common,
+    )
 
 
-def clear_session_cookies(response: Response) -> None:
-    """Remove the three session cookies. Called by /logout (and on auth failure)."""
+def _is_ip_literal(host: str) -> bool:
+    return bool(host) and (host.replace(".", "").isdigit() or ":" in host)
+
+
+def _eviction_domains(request: Request | None) -> list[str | None]:
+    """Every domain scope a session cookie might have been stored under.
+
+    A browser deletes a cookie only when the deletion repeats the exact
+    domain it was stored with. One deletion using *this* process's
+    configured domain therefore cannot evict a cookie written under a
+    different ``AUTH_COOKIE_DOMAIN`` — or written by a sibling
+    environment that shares a parent domain. That gap is what turns a
+    single foreign cookie into a permanent 401 loop: the server rejects
+    it, tries to clear it, misses, and the browser sends it again.
+
+    So we emit one deletion per plausible scope: the configured domain,
+    host-only, and the immediate parent of the request host (the scope
+    two sibling environments such as ``dataviz-dev.local`` and
+    ``dataviz-uat.local`` would share). Deletions for a scope the
+    browser has no cookie in are simply ignored.
+    """
+    domains: list[str | None] = [COOKIE_DOMAIN, None]
+
+    host = (request.url.hostname if request is not None else None) or ""
+    if host and not _is_ip_literal(host):
+        parent = host.partition(".")[2]
+        if parent:
+            domains.append(f".{parent}")
+
+    seen: set[str | None] = set()
+    unique: list[str | None] = []
+    for domain in domains:
+        if domain not in seen:
+            seen.add(domain)
+            unique.append(domain)
+    return unique
+
+
+def _eviction_targets() -> list[tuple[str, str]]:
+    """(name, path) pairs to clear — current names plus the unscoped ones.
+
+    The unscoped names matter on the upgrade itself: a browser already
+    holding a poisoned ``nx_access`` from before scoping existed would
+    otherwise keep it forever, since the new code only ever writes and
+    clears ``nx_access_<env>``.
+    """
+    targets = [
+        (ACCESS_COOKIE_NAME, "/"),
+        (REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH),
+        (CSRF_COOKIE_NAME, "/"),
+        (ACCESS_EXPIRY_COOKIE_NAME, "/"),
+        (_BASE_ACCESS_COOKIE_NAME, "/"),
+        (_BASE_REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH),
+        (_BASE_CSRF_COOKIE_NAME, "/"),
+        (_BASE_ACCESS_EXPIRY_COOKIE_NAME, "/"),
+    ]
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
+    for target in targets:
+        if target not in seen:
+            seen.add(target)
+            unique.append(target)
+    return unique
+
+
+def clear_session_cookies(
+    response: Response, request: Request | None = None
+) -> None:
+    """Remove the session cookies across every scope they might hold.
+
+    Called by /logout, and by any path that has decided the presented
+    token can never become valid here — see the foreign-session handling
+    in ``backend.app.auth.dependencies``.
+
+    Pass *request* whenever one is available: without it the parent-domain
+    scope cannot be computed, and a cookie written under a shared parent
+    survives the clear.
+    """
     common = _common_kwargs()
-    # Browsers only delete a cookie when the deletion call repeats the
-    # original path/domain/secure attributes.
-    response.delete_cookie(ACCESS_COOKIE_NAME, path="/", **common)
-    response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH, **common)
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/", **common)
+    common.pop("domain", None)
+    for domain in _eviction_domains(request):
+        for name, path in _eviction_targets():
+            response.delete_cookie(name, path=path, domain=domain, **common)
+
+
+SESSION_FOREIGN_ERROR = "session_foreign"
+
+
+class ForeignSession(HTTPException):
+    """The presented ACCESS token does not belong to this deployment.
+
+    Raised when a token fails verification for a structural reason —
+    wrong signing key, wrong issuer, wrong audience, undecodable — as
+    opposed to merely having expired. An expired token is normal and the
+    frontend silently refreshes it; a foreign one never becomes valid,
+    so leaving it in the browser produces an endless
+    401 -> /login -> 401 cycle.
+
+    Deliberately an ``HTTPException`` carrying its own 401: that way any
+    app mounting these dependencies answers correctly through FastAPI's
+    built-in handler, with no extra wiring. The app-level handler in
+    ``backend.app.main`` recognises this exact type and *additionally*
+    evicts the cookies — so missing that registration degrades to a
+    plain 401 rather than a 500.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": SESSION_FOREIGN_ERROR,
+                "message": (
+                    "Session belongs to a different environment or signing "
+                    "key; please sign in again."
+                ),
+            },
+        )
+
+
+def raise_if_foreign_session(request: Request) -> None:
+    """Raise ``ForeignSession`` if the access cookie isn't ours at all.
+
+    Session validation collapses every decode failure to "no user", so
+    on its own it cannot tell "expired, refresh it" from "signed by
+    another environment, it will never work". Re-decoding here recovers
+    that distinction: expiry falls through to the ordinary 401 the
+    frontend resolves silently, while a foreign token raises so the
+    handler can evict the cookie instead of letting the browser
+    re-present it on every subsequent request.
+
+    Imported by both the FastAPI dependencies and ``/auth/me`` so the
+    two agree on what counts as unrecoverable.
+    """
+    # Imported here rather than at module scope: ``core.tokens`` reads
+    # the resolved signing config at import, and keeping that out of the
+    # cookie module's import graph avoids ordering surprises during the
+    # fail-fast secret checks in ``core.config``.
+    from .core.tokens import decode_token, is_foreign_token_error
+
+    token = read_access_cookie(request)
+    if not token:
+        return
+    try:
+        decode_token(token)
+    except pyjwt.ExpiredSignatureError:
+        return
+    except pyjwt.InvalidTokenError as exc:
+        if is_foreign_token_error(exc):
+            raise ForeignSession() from exc
 
 
 def read_access_cookie(request: Request) -> str | None:

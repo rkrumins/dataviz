@@ -11,6 +11,10 @@ Single source of truth for the SSO/IdP integration. Read this end-to-end
 before working on the auth surface; share the relevant sub-sections with
 operators standing up a new IdP.
 
+> **Running more than one environment?** Session cookies and JWT issuers must be scoped
+> per instance or two deployments will evict each other's sessions in the same browser —
+> see [Running several environments side by side](MULTI_ENVIRONMENT_SESSIONS.md).
+
 > **For developers integrating on top of SSO** — read alongside
 > [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md). That guide covers
 > developer setup (Day 1), architecture + component diagrams, 15
@@ -67,9 +71,15 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 
 ### 1.1 Authentication transport
 
-* HttpOnly cookies for `nx_access` / `nx_refresh` / `nx_csrf`. JS
-  never sees the access token; the CSRF cookie is JS-readable and
-  echoed back as `X-CSRF-Token` on writes (double-submit).
+* HttpOnly cookies for `nx_access` / `nx_refresh`. JS never sees either
+  token. Two companion cookies are JS-readable by design: `nx_csrf`,
+  echoed back as `X-CSRF-Token` on writes (double-submit), and
+  `nx_access_exp`, the unix epoch at which `nx_access` expires — the
+  client cannot inspect an HttpOnly cookie, so this is its only way to
+  renew before expiry rather than after a 401. Neither carries identity
+  or a signature. `nx_access_exp` deliberately outlives the cookie it
+  describes (it follows the refresh TTL), because a tab that boots after
+  the access token died is exactly the tab that needs to read it.
 * Refresh-token rotation with reuse-detection: presenting the same
   `jti` twice revokes the whole `family_id` — outside a bounded grace
   window. Within `REFRESH_ROTATION_GRACE_SECONDS` (default 30) the
@@ -78,17 +88,36 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
   a lost `Set-Cookie` are all indistinguishable from a replay by the
   token alone, and revoking on them signed users out of every tab.
   Set to 0 for strict rotation.
-* Token renewal is **reactive**, not scheduled: `fetchWithTimeout`
-  refreshes on a 401 and retries. Nothing runs a timer. In an idle tab
-  the thing that notices expiry is the 60 s permission poller
-  (`frontend/src/store/permissionPoller.ts`) — its `/me/permissions`
-  call is the only authenticated request still firing, so its 401 drives
-  the refresh, and rotation slides the refresh window forward another
-  full TTL. That is why an open tab stays signed in for days. The poller
-  is therefore load-bearing for sessions as well as permissions: do not
-  give it `skipAuthRefresh`, do not raise its interval above the access
-  TTL, and if it is removed, move renewal somewhere deliberate first.
-  Hidden tabs pause it and refresh on refocus.
+* Token renewal is **scheduled, with a reactive fallback**.
+  `frontend/src/store/sessionKeepalive.ts` reads `nx_access_exp` and
+  rotates about a minute ahead of it, re-arming from whatever the next
+  rotation publishes — so renewal costs no user-visible request a 401,
+  and an idle tab renews without needing anything else to fire.
+  `fetchWithTimeout` still refreshes on a 401 and retries, which covers
+  sessions predating the expiry cookie, tabs whose timers were frozen,
+  and anything the schedule misses. Both triggers go through the same
+  `refreshNow()`, so they share the in-flight dedupe, the retry policy
+  and the session-lost latch.
+
+  Unlike the permission poller, the keepalive keeps running while the
+  tab is hidden — a refresh window closes whether anyone is looking or
+  not — and re-evaluates on `visibilitychange` in case a throttled timer
+  missed its slot.
+* **One refresh per browser, not per tab.** Tabs contend for a
+  `nx-session-refresh` Web Lock. The winner rotates; the others acquire
+  the lock afterwards, see `nx_access_exp` has moved, and take that as
+  the answer instead of posting again. Detection is by *change* rather
+  than by apparent freshness: a 401 can mean revoked rather than
+  expired, and then the published expiry is still in the future, so a
+  freshness test would skip the refresh and leave a revoked session
+  erroring on every request instead of signing out. Browsers without
+  Web Locks fall back to per-tab behaviour, which the rotation grace
+  window above already makes safe.
+* **Sign-out propagates across tabs.** `logout` broadcasts
+  `{kind: 'signed-out'}` on the `rbac-permissions` BroadcastChannel and
+  receiving tabs run their local sign-out immediately, rather than
+  discovering the dead session on their next request. Sign-*in* is
+  deliberately not broadcast: a tab sitting on `/login` must stay there.
 * Session-cookie cache: `frontend/src/store/userCache.ts`
   sessionStorage-only, schema-versioned, wiped on logout / 401 /
   SSO re-auth bounce. Eliminates the cold-boot `/me` flash without

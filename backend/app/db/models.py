@@ -2194,11 +2194,16 @@ class InviteRedemptionORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# Each row records a refresh-token jti that has been consumed (rotated)
-# or revoked (logout / reuse-detection). The auth service consults this
-# table to:
-#   1. Detect refresh-token replay (presented jti already recorded → kill family)
-#   2. Honour explicit revocations (whole-family entries from logout)
+# SUPERSEDED by ``RefreshTokenORM`` below. Retained, unread and
+# unwritten, only so a rollback to the previous release finds its table
+# where it left it; drop it in a deliberate later revision once
+# ``REFRESH_ADOPT_RECORDLESS`` is off and there is no rollback left to
+# protect. Note that a rollback would not find rotations performed under
+# allow-by-record recorded here, so replay detection would not see them.
+#
+# Each row recorded a refresh-token jti that had been consumed (rotated)
+# or revoked (logout / reuse-detection) — a denylist, in which a token
+# was valid unless a row said otherwise.
 # Owned by the auth service; will move with it during extraction.
 
 class RevokedRefreshJtiORM(Base):
@@ -2231,6 +2236,79 @@ class RevokedRefreshJtiORM(Base):
 
     def __repr__(self) -> str:
         return f"<RevokedRefreshJti jti={self.jti!r} family={self.family_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# One row per refresh token that has ever been issued, written at mint.
+#
+# This is the same state as ``revoked_refresh_jti`` above turned the
+# right way up. That table is a DENYLIST: a refresh token is valid
+# unless a row says otherwise, so correctness depends on the denylist
+# being complete and durable forever — and ``purge_expired`` deletes
+# from it. A row lost to an early prune, a failed write, or a restore
+# from backup makes a consumed or revoked token valid again.
+#
+# Here validity is positive: a token is refused unless an active row
+# says otherwise. Every failure mode of the storage now points the safe
+# way — a missing row signs someone out rather than reviving a
+# credential — and pruning an expired row can only reject a token that
+# had already expired.
+#
+# The signed JWT remains the bearer. Going opaque would change the wire
+# format, so a rollback would strand every session minted after the
+# deploy; flipping *validation* delivers the security property with no
+# format change at all.
+# Owned by the auth service; will move with it during extraction.
+
+class RefreshTokenORM(Base):
+    __tablename__ = "refresh_tokens"
+
+    jti = Column(Text, primary_key=True)
+    family_id = Column(Text, nullable=False)
+    user_id = Column(Text, nullable=False)
+
+    # The IdP-issued authentication instant for SSO sessions, epoch
+    # seconds; NULL for local password logins.
+    #
+    # Held here rather than trusted from the token because the 24h SSO
+    # re-auth ceiling keys off it, and a refresh JWT that simply omits
+    # the claim reads as a local session and skips the ceiling entirely.
+    # That was a real bug earlier in this work. A server-side value
+    # cannot be absent or stale.
+    auth_time = Column(Integer, nullable=True)
+
+    # Mint instant in epoch MILLISECONDS, matching the token's ``mat``
+    # claim. Millisecond resolution because it is compared against
+    # ``users.sessions_valid_from``, and both ends of that comparison
+    # routinely land in the same second.
+    mint_ms = Column(BigInteger, nullable=False)
+
+    expires_at = Column(Text, nullable=False)   # ISO; the sweep's marker
+    created_at = Column(Text, nullable=False, default=_now)
+
+    # Set when this token is rotated away. Consumption is the UPDATE
+    # itself — conditional on this being NULL — so two concurrent
+    # refreshes cannot both succeed.
+    consumed_at = Column(Text, nullable=True)
+
+    # What this token rotated into. The successor's own row carries its
+    # expiry and mint instant, so nothing is denormalised here: the
+    # grace window follows this pointer and reads that row.
+    successor_jti = Column(Text, nullable=True)
+
+    # Set by logout and by reuse detection, across the whole family. It
+    # replaces the ``family-revoked:<id>`` sentinel row, whose expiry had
+    # to be hand-sized to outlive every token it guarded.
+    revoked_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_refresh_tokens_family", "family_id"),
+        Index("idx_refresh_tokens_user", "user_id"),
+        Index("idx_refresh_tokens_expires", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RefreshToken jti={self.jti!r} family={self.family_id!r}>"
 
 
 # ------------------------------------------------------------------ #

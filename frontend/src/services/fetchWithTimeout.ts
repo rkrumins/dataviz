@@ -14,8 +14,13 @@
  *   * On 401 for non-auth routes, a single silent ``POST /auth/refresh``
  *     is attempted; on success the original request is retried once
  *     with the rotated cookies. Concurrent 401s share the same in-flight
- *     refresh. If refresh fails we dispatch ``'auth:session-lost'`` on
- *     ``window`` so the auth store can transition to unauthenticated.
+ *     refresh, and concurrent TABS share a Web Lock. If refresh fails we
+ *     dispatch ``'auth:session-lost'`` on ``window`` so the auth store
+ *     can transition to unauthenticated.
+ *   * That 401 path is the FALLBACK. Renewal is normally scheduled ahead
+ *     of expiry by ``store/sessionKeepalive.ts``, which calls
+ *     {@link refreshNow} here rather than posting for itself, so both
+ *     triggers share one implementation.
  *   * Default timeout via AbortController, sourced from
  *     ``TIMEOUTS.DEFAULT_MS`` in ``src/config/timeouts.ts`` (30 s out of
  *     the box, overridable via ``VITE_TIMEOUT_DEFAULT_MS``). Per-call
@@ -38,11 +43,22 @@ import { TIMEOUTS } from '../config/timeouts'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const CSRF_COOKIE = 'nx_csrf'
+/** Unix epoch (seconds) at which ``nx_access`` expires. Published by the
+ *  backend precisely because the access cookie is HttpOnly and therefore
+ *  invisible here — see ``backend/auth_service/cookies.py``. */
+const ACCESS_EXPIRY_COOKIE = 'nx_access_exp'
 const CSRF_HEADER = 'X-CSRF-Token'
 const REFRESH_URL = '/api/v1/auth/refresh'
 const LOGIN_PATH = '/login'
 const SESSION_LOST_EVENT = 'auth:session-lost'
+/** Dispatched after the session cookies have been rotated, by either
+ *  trigger. {@link module:store/sessionKeepalive} listens so it can
+ *  re-arm against the new expiry. */
+export const SESSION_REFRESHED_EVENT = 'auth:session-refreshed'
 const ACCESS_DENIED_EVENT = 'auth:access-denied'
+/** Web Lock held for the duration of a refresh. Scoped to the origin, so
+ *  every tab of this app contends for the same one. */
+const REFRESH_LOCK = 'nx-session-refresh'
 
 /** Cap how long we'll wait when honoring a server-provided Retry-After. */
 const RETRY_AFTER_MAX_MS = 5_000
@@ -122,7 +138,7 @@ function onLoginRoute(): boolean {
  *                     caller surfaces the original 401 and signs nobody
  *                     out.
  */
-type RefreshOutcome = 'ok' | 'reauth' | 'expired' | 'retryable'
+export type RefreshOutcome = 'ok' | 'reauth' | 'expired' | 'retryable'
 
 /**
  * Single in-flight refresh promise — concurrent 401s share one network
@@ -288,6 +304,77 @@ async function attemptRefresh(): Promise<{
   }
 }
 
+/**
+ * Read the published access-token expiry, in epoch milliseconds.
+ *
+ * ``null`` when no session cookie is present, or when it predates this
+ * mechanism — a session established before the backend started
+ * publishing it keeps working and simply gets no proactive renewal
+ * until its first rotation.
+ */
+export function readAccessExpiryMs(): number | null {
+  const raw = readCookie(ACCESS_EXPIRY_COOKIE)
+  if (!raw) return null
+  const seconds = Number(raw)
+  return Number.isFinite(seconds) ? seconds * 1000 : null
+}
+
+/** One refresh attempt plus at most one bounded retry. */
+async function refreshChain(): Promise<RefreshOutcome> {
+  const first = await attemptRefresh()
+  if (first.outcome !== 'retryable') return first.outcome
+  // ONE bounded retry, honouring the server's Retry-After. The 429
+  // handling further down can't cover this: it only retries safe
+  // methods, and it never sees the bare POST above.
+  const waitMs = first.retryAfterMs
+  if (waitMs !== null) {
+    await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+  }
+  return (await attemptRefresh()).outcome
+}
+
+/**
+ * Run the refresh chain holding a cross-tab lock.
+ *
+ * ``refreshInFlight`` only dedupes within one JS context, so ten open
+ * tabs was ten simultaneous POSTs on the same refresh cookie. That was
+ * survivable — the server's rotation grace window hands every racer the
+ * same successor — but it was tolerating the collision, not avoiding
+ * it, and proactive renewal makes it worse: every tab derives its timer
+ * from the same published expiry, so they all fire on the same tick.
+ *
+ * Whoever gets the lock refreshes. The rest wake up, notice the expiry
+ * cookie has MOVED, and take that as the answer without issuing a
+ * second POST.
+ *
+ * Detecting "another tab did it" by change rather than by freshness is
+ * deliberate. A 401 can mean the session was revoked, not that it
+ * expired — and in that case the published expiry is still in the
+ * future. Testing whether it merely *looks* fresh would skip the
+ * refresh, report success, and leave a revoked session erroring on
+ * every request instead of signing out.
+ *
+ * Web Locks are absent in jsdom and in a handful of older browsers; there
+ * we fall back to the per-tab behaviour, which the rotation grace window
+ * already makes safe.
+ */
+async function refreshWithCrossTabLock(): Promise<RefreshOutcome> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+  if (!locks?.request) return refreshChain()
+  const before = readAccessExpiryMs()
+  try {
+    return await locks.request(REFRESH_LOCK, async () => {
+      const after = readAccessExpiryMs()
+      if (after !== null && after !== before) return 'ok' as RefreshOutcome
+      return refreshChain()
+    })
+  } catch {
+    // A lock manager that rejects (private-mode quirks, a released
+    // context) must not cost the user their session.
+    return refreshChain()
+  }
+}
+
 async function tryRefresh(): Promise<RefreshOutcome> {
   // The server has already told us this session is gone. Every further
   // POST would just re-ask a settled question.
@@ -295,21 +382,14 @@ async function tryRefresh(): Promise<RefreshOutcome> {
   if (refreshInFlight) return refreshInFlight
   refreshInFlight = (async () => {
     try {
-      const first = await attemptRefresh()
-      if (first.outcome !== 'retryable') {
-        if (first.outcome === 'ok') sessionLostAt = null
-        return first.outcome
+      const outcome = await refreshWithCrossTabLock()
+      if (outcome === 'ok') {
+        sessionLostAt = null
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(SESSION_REFRESHED_EVENT))
+        }
       }
-      // ONE bounded retry, honouring the server's Retry-After. The 429
-      // handling further down can't cover this: it only retries safe
-      // methods, and it never sees the bare POST above.
-      const waitMs = first.retryAfterMs
-      if (waitMs !== null) {
-        await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
-      }
-      const second = await attemptRefresh()
-      if (second.outcome === 'ok') sessionLostAt = null
-      return second.outcome
+      return outcome
     } finally {
       queueMicrotask(() => {
         refreshInFlight = null
@@ -317,6 +397,47 @@ async function tryRefresh(): Promise<RefreshOutcome> {
     }
   })()
   return refreshInFlight
+}
+
+/**
+ * Rotate the session now, without waiting for a request to 401.
+ *
+ * The proactive trigger ({@link module:store/sessionKeepalive}) calls
+ * this rather than posting to /auth/refresh itself, so both triggers
+ * share one implementation — the in-flight dedupe, the cross-tab lock,
+ * the session-lost latch, the bounded retry, and the post-refresh claims
+ * comparison. A second refresh path would drift from this one and the
+ * drift would only show up as an intermittent logout.
+ */
+export function refreshNow(): Promise<RefreshOutcome> {
+  return tryRefresh()
+}
+
+/**
+ * True when a 401 body carries the backend's ``session_foreign`` marker —
+ * the session was minted by a different environment or signing key, so no
+ * amount of refreshing will recover it.
+ *
+ * Reads a clone so the caller keeps an unconsumed body.
+ */
+async function isForeignSession(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.clone().json()) as {
+      detail?: { error?: string }
+    }
+    return body?.detail?.error === 'session_foreign'
+  } catch {
+    return false
+  }
+}
+
+async function clearCachedUser(): Promise<void> {
+  try {
+    const mod = await import('@/store/userCache')
+    mod.clearUserCache()
+  } catch {
+    // best-effort — the session-lost event still routes to /login
+  }
 }
 
 function notifySessionLost(): void {
@@ -510,6 +631,19 @@ export async function fetchWithTimeout(
     && !skipAuthRefresh
     && !onLoginRoute()
   ) {
+    // A session belonging to another environment (or signed with a key
+    // this backend no longer holds) can never be refreshed into a valid
+    // one — retrying just reproduces the 401. This is checked BEFORE
+    // tryRefresh rather than folded into its outcome: the classification
+    // below distinguishes "the session is gone" from "the refresh call
+    // failed", and a foreign token is neither. It is definitively
+    // unusable, so it short-circuits to one clean sign-out instead of
+    // ping-ponging on every section the user clicks.
+    if (await isForeignSession(res)) {
+      await clearCachedUser()
+      notifySessionLost()
+      return res
+    }
     const outcome = await tryRefresh()
     if (outcome === 'ok' || outcome === 'reauth') {
       try {

@@ -1,15 +1,20 @@
 """RevocationService — Redis-backed session revocation.
 
-When permission claims are embedded in the JWT they are valid for the
-duration of the access token (5 min by default). To make forced
-revocation (suspend user, remove from group, drop binding) take effect
-sooner than that, every session is tagged with a random ``sid`` claim
-and we maintain a Redis SET of revoked sids. The ``requires(...)``
-dependency checks the set on every request and force-logs-out any
-session whose sid is present.
+The global half of a session's permission claims rides in the JWT, so it
+is valid for the duration of the access token. To make forced revocation
+(suspend user, remove from group, drop binding) take effect sooner than
+that, every session is tagged with a random ``sid`` claim and we maintain
+a Redis SET of revoked sids. The ``requires(...)`` dependency checks the
+set on every request and force-logs-out any session whose sid is present.
 
 Keys live under ``rbac:revoked:<sid>`` and self-expire via Redis TTL,
 so no cron is required.
+
+The same ``sid`` also keys the session's **workspace** grants, which are
+unbounded in tenant size and so cannot travel in a cookie at all. They
+are a separate key read in the same pipelined round trip as the tombstone
+— see ``read_session`` — which is what makes them free rather than a
+second per-request lookup.
 
 This module hides the Redis client behind a class so tests can swap in
 an in-memory fake. Production code goes through the singleton
@@ -20,11 +25,17 @@ it into endpoints — Phase 2 turns it on per area.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Iterable, Optional, Protocol
 
-from backend.auth_service.core.config import JWT_EXPIRY_MINUTES
+from backend.auth_service.core.config import (
+    CLOCK_SKEW_LEEWAY_SECONDS,
+    JWT_EXPIRY_MINUTES,
+    JWT_REFRESH_EXPIRY_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +43,9 @@ logger = logging.getLogger(__name__)
 # ── Configuration ────────────────────────────────────────────────────
 
 # Access-token TTL drives how long a revocation entry needs to live —
-# we keep it for TTL + a buffer so a request that arrives at the very
-# end of the token's life still finds the entry.
+# we keep it for as long as a token can still be accepted, plus a buffer
+# so a request that arrives at the very end of that window still finds
+# the entry.
 #
 # DERIVED, not configured alongside it. These two were independent
 # numbers and they drifted: the 360s default was sized for the 5-minute
@@ -43,12 +55,33 @@ logger = logging.getLogger(__name__)
 # user, dropping a binding — silently stopped working for the tail of
 # every token. Deriving it means the invariant cannot be broken by
 # changing one file.
+#
+# The clock-skew leeway is part of that derivation, not decoration: a
+# token verifies for ``leeway`` seconds past its own ``exp``, so a
+# tombstone sized to ``exp`` alone expires while the token it is meant
+# to kill is still being honoured — reopening the exact gap above, but
+# only for the last minute of each token and only on a pod whose clock
+# is behind. Sizing it here is what keeps that from being something
+# anyone has to notice.
 _REVOCATION_TTL_BUFFER_SECONDS = 60
 _DEFAULT_REVOCATION_TTL_SECONDS = (
-    JWT_EXPIRY_MINUTES * 60 + _REVOCATION_TTL_BUFFER_SECONDS
+    JWT_EXPIRY_MINUTES * 60
+    + CLOCK_SKEW_LEEWAY_SECONDS
+    + _REVOCATION_TTL_BUFFER_SECONDS
 )
 REVOCATION_TTL_SECONDS: int = int(
     os.getenv("RBAC_REVOCATION_TTL_SECONDS", str(_DEFAULT_REVOCATION_TTL_SECONDS))
+)
+
+# How long a session's stored claim payload lives. Sized to the REFRESH
+# lifetime, not the access lifetime, and the distinction matters: one
+# session rotates through many access tokens, so an entry that expired
+# with the first of them would leave a still-valid session unable to
+# resolve its own workspace grants partway through — presenting to the
+# user as permissions vanishing for no reason. A day of margin covers the
+# rotation that extends a family right at the boundary.
+SESSION_CLAIMS_TTL_SECONDS: int = (
+    JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60 + 24 * 60 * 60
 )
 
 # ``is_revoked`` runs on EVERY authenticated request and on the 60s
@@ -66,6 +99,13 @@ REVOCATION_SOCKET_TIMEOUT_S: float = float(
 
 _KEY_PREFIX = "rbac:revoked:"
 _USER_SIDS_PREFIX = "rbac:user_sids:"
+# Per-session claim payload: the per-workspace grants that are too large
+# to keep in the access cookie. Deliberately a DIFFERENT key from the
+# revocation tombstone above, because there the *existence* of the key is
+# the signal — storing a payload under it would make "revoked" and
+# "has claims" indistinguishable. The two are read together in a single
+# pipelined round trip; see ``read_session``.
+_SESSION_CLAIMS_PREFIX = "rbac:sess:"
 
 
 def _key(sid: str) -> str:
@@ -74,6 +114,10 @@ def _key(sid: str) -> str:
 
 def _user_sids_key(user_id: str) -> str:
     return f"{_USER_SIDS_PREFIX}{user_id}"
+
+
+def _session_claims_key(sid: str) -> str:
+    return f"{_SESSION_CLAIMS_PREFIX}{sid}"
 
 
 # ── Backend protocol (so tests can swap in a fake) ───────────────────
@@ -86,6 +130,15 @@ class RevocationBackend(Protocol):
     async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None: ...
     async def set_members(self, key: str) -> set[str]: ...
     async def health(self) -> bool: ...
+    # Session claim payload.
+    async def set_value(self, key: str, value: str, ttl_seconds: int) -> None: ...
+    # Existence of *flag_key* and the value at *value_key*, fetched
+    # together. One method rather than two calls because this pair is read
+    # on every authenticated request: separately it is two round trips, and
+    # pipelined it is one.
+    async def exists_and_get(
+        self, flag_key: str, value_key: str,
+    ) -> tuple[bool, Optional[str]]: ...
 
 
 # ── Real Redis backend ────────────────────────────────────────────────
@@ -140,6 +193,35 @@ class RedisBackend:
         except Exception as exc:
             raise RevocationBackendError(str(exc)) from exc
 
+    async def set_value(self, key: str, value: str, ttl_seconds: int) -> None:
+        try:
+            await self._client.set(key, value, ex=ttl_seconds)
+        except Exception as exc:
+            raise RevocationBackendError(str(exc)) from exc
+
+    async def exists_and_get(
+        self, flag_key: str, value_key: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Both reads in one round trip.
+
+        ``transaction=False`` — this is a pipeline for batching, not for
+        atomicity. MULTI/EXEC would add nothing: the two keys are written
+        at different times by different code paths, so there is no
+        invariant between them to preserve, and on a Redis Cluster a
+        transaction spanning two keys that may hash to different slots is
+        rejected outright.
+        """
+        try:
+            async with self._client.pipeline(transaction=False) as pipe:
+                pipe.exists(flag_key)
+                pipe.get(value_key)
+                flag, value = await pipe.execute()
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
+            return bool(flag), value
+        except Exception as exc:
+            raise RevocationBackendError(str(exc)) from exc
+
     async def health(self) -> bool:
         try:
             return bool(await self._client.ping())
@@ -156,9 +238,19 @@ class InMemoryBackend:
     def __init__(self) -> None:
         self._set: set[str] = set()
         self._sets: dict[str, set[str]] = {}
+        self._values: dict[str, str] = {}
 
     async def exists(self, key: str) -> bool:
         return key in self._set
+
+    async def set_value(self, key: str, value: str, ttl_seconds: int) -> None:
+        # TTL ignored in the fake, as with ``set_with_ttl``.
+        self._values[key] = value
+
+    async def exists_and_get(
+        self, flag_key: str, value_key: str,
+    ) -> tuple[bool, Optional[str]]:
+        return flag_key in self._set, self._values.get(value_key)
 
     async def set_with_ttl(self, key: str, ttl_seconds: int) -> None:
         # TTL is ignored in the fake; tests that need expiry should
@@ -168,6 +260,7 @@ class InMemoryBackend:
     async def delete(self, key: str) -> None:
         self._set.discard(key)
         self._sets.pop(key, None)
+        self._values.pop(key, None)
 
     async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None:
         # TTL ignored in the fake (see set_with_ttl).
@@ -183,6 +276,20 @@ class InMemoryBackend:
 class RevocationBackendError(Exception):
     """Raised when the Redis backend rejects an operation. Callers
     decide fail-open vs fail-closed based on the operation context."""
+
+
+@dataclass(frozen=True)
+class SessionState:
+    """What the store knows about one session.
+
+    ``claims is None`` covers three different situations that the read
+    path treats identically — no entry was ever written (a token minted
+    before the split), the entry expired, or the payload was unreadable.
+    All three mean "this store cannot answer", and all three resolve the
+    same way: ask the database. Never "the user has no grants".
+    """
+    revoked: bool
+    claims: Optional[dict]
 
 
 # ── Service ──────────────────────────────────────────────────────────
@@ -227,12 +334,65 @@ class RevocationService:
     # whole-key TTL (refreshed on each add) equal to the revocation
     # window, so stale sids self-expire — a revoked sid whose access
     # token has already lapsed is a harmless no-op anyway.
-    async def record_session(self, user_id: str, sid: str) -> None:
+    async def record_session(
+        self,
+        user_id: str,
+        sid: str,
+        *,
+        claims: Optional[dict] = None,
+        claims_ttl_seconds: Optional[int] = None,
+    ) -> None:
         if not user_id or not sid:
             return
         await self._backend.add_to_set(
             _user_sids_key(user_id), sid, self._ttl
         )
+        if claims is None:
+            return
+        # The claim payload outlives the revocation window on purpose.
+        # ``self._ttl`` is sized to the access token, but this entry has to
+        # serve every access token in the refresh family — otherwise a
+        # session that keeps rotating loses its workspace grants partway
+        # through its own lifetime, which reads to the user as permissions
+        # evaporating for no reason.
+        await self._backend.set_value(
+            _session_claims_key(sid),
+            json.dumps(claims, separators=(",", ":")),
+            claims_ttl_seconds or SESSION_CLAIMS_TTL_SECONDS,
+        )
+
+    async def read_session(self, sid: str) -> "SessionState":
+        """Revocation status and stored claims, in one round trip.
+
+        Read on every authenticated request, which is why it is one call:
+        the tombstone check was already happening here, so folding the
+        claim fetch into the same pipeline makes the claims free rather
+        than doubling the per-request Redis cost.
+
+        Raises ``RevocationBackendError`` on a backend failure — the
+        caller owns the fail-open/fail-closed decision, and for claims
+        that decision is "fall back to the database", never "assume the
+        user has nothing".
+        """
+        if not sid:
+            return SessionState(revoked=False, claims=None)
+        revoked, raw = await self._backend.exists_and_get(
+            _key(sid), _session_claims_key(sid),
+        )
+        if raw is None:
+            return SessionState(revoked=revoked, claims=None)
+        try:
+            return SessionState(revoked=revoked, claims=json.loads(raw))
+        except (ValueError, TypeError):
+            # Corrupt payload is indistinguishable from absent: both mean
+            # "cannot serve claims from here", and the caller's database
+            # fallback handles it. Swallowing it silently would not —
+            # hence the warning.
+            logger.warning(
+                "Session claim payload for sid=%s is not valid JSON; "
+                "falling back to the database", sid,
+            )
+            return SessionState(revoked=revoked, claims=None)
 
     # Coarse revocation: caller knows the user but not their sids.
     # Reads the reverse index, revokes every sid in it, then drops the

@@ -22,6 +22,22 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .providers.manager import provider_manager
 from backend.auth_service.csrf import CSRFMiddleware
+from backend.auth_service.cookies import (
+    ACCESS_COOKIE_NAME as _ACCESS_COOKIE_NAME,
+    CSRF_COOKIE_NAME as _CSRF_COOKIE_NAME,
+    REFRESH_COOKIE_NAME as _REFRESH_COOKIE_NAME,
+    clear_session_cookies as _clear_session_cookies,
+    ForeignSession as _ForeignSession,
+)
+from backend.auth_service.core.config import (
+    AUTH_ENVIRONMENT_ID as _AUTH_ENVIRONMENT_ID,
+    COOKIE_DOMAIN as _COOKIE_DOMAIN,
+    COOKIE_SAMESITE as _COOKIE_SAMESITE,
+    COOKIE_SECURE as _COOKIE_SECURE,
+    JWT_ISSUER as _JWT_ISSUER,
+    JWT_SECRET_KEY_ID as _JWT_SECRET_KEY_ID,
+    JWT_VERIFICATION_KEYS as _JWT_VERIFICATION_KEYS,
+)
 from backend.auth_service.providers import LocalIdentityProvider, register_provider
 from backend.auth_service.service import LocalIdentityService
 
@@ -151,6 +167,7 @@ def _assert_session_config_coherent() -> None:
     """
     from backend.app.services.revocation_service import REVOCATION_TTL_SECONDS
     from backend.auth_service.core.config import (
+        CLOCK_SKEW_LEEWAY_SECONDS,
         JWT_EXPIRY_MINUTES,
         JWT_REFRESH_EXPIRY_DAYS,
         REFRESH_ROTATION_GRACE_SECONDS,
@@ -158,14 +175,20 @@ def _assert_session_config_coherent() -> None:
     )
 
     access_ttl = JWT_EXPIRY_MINUTES * 60
-    if REVOCATION_TTL_SECONDS < access_ttl:
+    # An access token is honoured until ``exp + leeway``, not ``exp``, so
+    # that — not the raw TTL — is what the tombstone has to outlive.
+    acceptance_window = access_ttl + CLOCK_SKEW_LEEWAY_SECONDS
+    if REVOCATION_TTL_SECONDS < acceptance_window:
         raise RuntimeError(
             f"RBAC_REVOCATION_TTL_SECONDS ({REVOCATION_TTL_SECONDS}s) is "
-            f"shorter than the access-token lifetime "
-            f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
-            "Session revocation would stop taking effect "
-            f"{access_ttl - REVOCATION_TTL_SECONDS}s before each token "
-            "expires. Raise the revocation TTL or lower the access TTL."
+            f"shorter than the window in which an access token is still "
+            f"accepted (JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = "
+            f"{access_ttl}s + {CLOCK_SKEW_LEEWAY_SECONDS}s clock-skew "
+            f"leeway = {acceptance_window}s). Session revocation would "
+            f"stop taking effect "
+            f"{acceptance_window - REVOCATION_TTL_SECONDS}s before each "
+            "token stops being honoured. Raise the revocation TTL or "
+            "lower the access TTL."
         )
     if JWT_EXPIRY_MINUTES > 15:
         logger.warning(
@@ -177,10 +200,51 @@ def _assert_session_config_coherent() -> None:
         )
     logger.info(
         "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
-        "rotation_grace=%ds sso_ceiling=%dh",
+        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh",
         access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
-        REFRESH_ROTATION_GRACE_SECONDS, SSO_SESSION_MAX_AGE_HOURS,
+        REFRESH_ROTATION_GRACE_SECONDS, CLOCK_SKEW_LEEWAY_SECONDS,
+        SSO_SESSION_MAX_AGE_HOURS,
     )
+def _log_auth_fingerprint() -> None:
+    """Log how this instance identifies and verifies sessions.
+
+    Never logs key material — only the ``kid`` fingerprints already
+    published in every JWT header. Two instances that disagree here
+    cannot share a session, which is exactly the question to answer
+    first when users are bouncing to /login after a redeploy or when
+    moving between environments.
+    """
+    logger.info(
+        "Auth fingerprint: environment_id=%s issuer=%s cookies=%s "
+        "active_kid=%s accepted_kids=%s cookie_secure=%s cookie_domain=%s "
+        "cookie_samesite=%s",
+        _AUTH_ENVIRONMENT_ID or "(unset)",
+        _JWT_ISSUER,
+        f"{_ACCESS_COOKIE_NAME}/{_REFRESH_COOKIE_NAME}/{_CSRF_COOKIE_NAME}",
+        _JWT_SECRET_KEY_ID,
+        ",".join(kid for kid, _key in _JWT_VERIFICATION_KEYS),
+        _COOKIE_SECURE,
+        _COOKIE_DOMAIN or "(host-only)",
+        _COOKIE_SAMESITE,
+    )
+    if not _AUTH_ENVIRONMENT_ID:
+        logger.warning(
+            "AUTH_ENVIRONMENT_ID is unset, so session cookies use the "
+            "unscoped names (%s). Two deployments reachable from the same "
+            "browser will overwrite each other's session — cookie jars are "
+            "keyed by domain, not by cluster. Set it per environment "
+            "(e.g. dev / uat) if more than one is in use.",
+            _ACCESS_COOKIE_NAME,
+        )
+    if _COOKIE_SECURE:
+        logger.warning(
+            "AUTH_COOKIE_SECURE=true: browsers DISCARD these cookies over "
+            "plain HTTP without reporting an error, so login succeeds with "
+            "200 and the next request is anonymous. Serve this host over "
+            "HTTPS, or set AUTH_COOKIE_SECURE=false for an HTTP-only "
+            "environment. GET /api/v1/auth/diagnostics reports whether a "
+            "given request actually arrived over TLS."
+        )
 
 
 @asynccontextmanager
@@ -196,6 +260,7 @@ async def lifespan(_app: FastAPI):
     the flag.
     """
     configure_json_logging()
+    _log_auth_fingerprint()
 
     _app.state.degraded = False
     _app.state.degraded_reason = None
@@ -560,12 +625,28 @@ async def lifespan(_app: FastAPI):
         # suspend / deprovision / role change. Best-effort: a Redis
         # outage must not block login (requires() applies its own
         # fail policy on the read side).
+        #
+        # The same write carries the resolved workspace grants, and it is
+        # the ONLY place they are written: they grow ~200 bytes of cookie
+        # per workspace binding, and a cookie over 4096 bytes is discarded
+        # by the browser without an error, so the token cannot carry them
+        # and no longer offers the option. A failure here therefore costs
+        # the user their workspace permissions until the read path
+        # re-resolves from Postgres — which is why it is logged rather
+        # than passed over.
         try:
-            await get_revocation_service().record_session(user_id, claims.sid)
+            await get_revocation_service().record_session(
+                user_id, claims.sid, claims=claims.to_session_dict(),
+            )
         except Exception as exc:  # noqa: BLE001 — recording is best-effort
             logger.warning(
                 "Session-index record failed (user=%s): %s", user_id, exc
             )
+        # ``to_jwt_dict`` cannot carry the per-workspace grants — there is
+        # no option for it to. They go to the store above, and the token
+        # keeps only ``sid`` and the bounded global half, so the access
+        # cookie is O(1) in tenant size rather than growing ~200 bytes per
+        # workspace binding toward a limit the browser enforces silently.
         return claims.to_jwt_dict()
 
     # Phase 3: inject the group->target reconciler (now handles both
@@ -1047,6 +1128,21 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
+    # Refresh-token revocation sweep. Same owner role as the relay: the
+    # table is shared, so three web replicas sweeping it would only
+    # contend for the same rows.
+    _app.state._refresh_gc_shutdown = asyncio.Event()
+    _app.state._refresh_gc_task = None
+    if runs_scheduler():
+        from .services.refresh_token_gc import run_sweeper as _run_refresh_gc
+        _app.state._refresh_gc_task = asyncio.create_task(
+            _run_refresh_gc(
+                get_jobs_session,
+                _app.state._refresh_gc_shutdown,
+            ),
+            name="refresh-token-gc",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
     # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
     # relay so replicas don't each probe every IdP. The cache is initialised
@@ -1126,6 +1222,21 @@ async def lifespan(_app: FastAPI):
             _outbox_relay_task.cancel()
             try:
                 await _outbox_relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the refresh-token sweeper before DB pool teardown, same shape.
+    _refresh_gc_shutdown = getattr(_app.state, "_refresh_gc_shutdown", None)
+    _refresh_gc_task = getattr(_app.state, "_refresh_gc_task", None)
+    if _refresh_gc_shutdown is not None:
+        _refresh_gc_shutdown.set()
+    if _refresh_gc_task is not None and not _refresh_gc_task.done():
+        try:
+            await asyncio.wait_for(_refresh_gc_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _refresh_gc_task.cancel()
+            try:
+                await _refresh_gc_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1244,6 +1355,28 @@ from backend.auth_service.api.router import limiter as _auth_limiter
 
 app.state.limiter = _auth_limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# A session cookie that this deployment can never verify — signed by a key
+# outside our ring, or stamped with another environment's issuer. Answering a
+# bare 401 leaves the cookie in the browser, so the frontend refreshes, gets
+# 401 again, and the user ping-pongs between the app and /login forever. Evict
+# the cookie across every scope it might hold and tell the client to stop
+# retrying and start a clean login.
+@app.exception_handler(_ForeignSession)
+async def _foreign_session_handler(request, exc):
+    logger.warning(
+        "Foreign session cookie rejected on %s — evicting across all scopes",
+        getattr(request, "url", "?"),
+    )
+    # Status and body come from the exception itself, so an app without
+    # this handler still answers the same 401 through FastAPI's built-in
+    # one — it just doesn't get the eviction headers.
+    response = JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail}
+    )
+    _clear_session_cookies(response, request)
+    return response
 
 # Global handler for management DB failures — returns structured 503 instead of
 # raw 500 with stack trace, so the frontend can show a meaningful message.

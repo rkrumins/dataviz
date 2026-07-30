@@ -83,21 +83,17 @@ function isEmptyClaims(claims: PermissionClaims | undefined | null): boolean {
 
 async function pollOnce(): Promise<void> {
     try {
-        // LOAD-BEARING BEYOND PERMISSIONS: this call is also what keeps a
-        // signed-in tab signed in.
+        // This used to be load-bearing for sessions as well as
+        // permissions, and it no longer is. Renewal now has its own
+        // scheduler (`store/sessionKeepalive.ts`), which rotates ahead of
+        // the published expiry instead of relying on this poll happening
+        // to be the request that takes the 401.
         //
-        // Token refresh is reactive — `fetchWithTimeout` renews on a 401,
-        // and nothing schedules a renewal. In an idle tab this is the only
-        // authenticated request that still fires, so it is what notices the
-        // access cookie has expired: the 401 drives the silent refresh, and
-        // rotation slides the refresh window forward another full TTL. That
-        // is why an open tab stays alive for days without anyone touching it.
-        //
-        // So: do not pass `skipAuthRefresh` here, do not move the interval
-        // above the access-token TTL, and if this poller is ever removed,
-        // move renewal somewhere deliberate first. Breaking any of those
-        // does not fail here — it logs users out minutes later, somewhere
-        // else, with nothing pointing back at this line.
+        // Still do not pass `skipAuthRefresh` here: reactive refresh
+        // remains the fallback whenever the keepalive has nothing to
+        // schedule against — a session predating the expiry cookie, or a
+        // tab whose timers were frozen — and this call is a normal
+        // authenticated request that should recover like any other.
         const claims = await authService.myPermissions()
 
         // NEVER downgrade a real claim set to nothing on the strength of a 200.

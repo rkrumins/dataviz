@@ -403,6 +403,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         clearUserCache()
         resetClaimRecovery()
         set({ ..._unauthenticated, error: null, isLoading: false })
+        // Other tabs share the cookie jar, so their session is gone too —
+        // they just don't know it yet. Told directly, they sign out now
+        // instead of discovering it on their next request.
+        void (async () => {
+            try {
+                const mod = await import('@/store/permissionChangeBus')
+                mod.notifySignedOut()
+            } catch {
+                // best-effort
+            }
+        })()
     },
 
     handleSessionLost: () => {

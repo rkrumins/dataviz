@@ -1420,14 +1420,29 @@ attacks at the bottom of the section.
 
 ### 10.2 Out of scope (defended elsewhere or deferred)
 
-* **DDoS / rate limiting** — `slowapi` decorates `/login` and
-  `/refresh` at 10/min and 30/min respectively. `/login` is keyed on
-  the client address; `/refresh` is keyed on the **rotation family**,
-  so one browser session gets its own budget. Keying it on the address
-  put every user behind a NAT or an ingress in one bucket, and a 429 on
-  refresh reads to the client as a lost session. Storage is shared via
-  `RATELIMIT_STORAGE_URI` when set — otherwise each gunicorn worker
-  counts separately. Anything broader is the reverse proxy / WAF's job.
+* **DDoS / rate limiting** — two controls with different keys, because
+  they do different jobs.
+
+  The **per-address** limits (`RATELIMIT_LOGIN_PER_IP`,
+  `RATELIMIT_SENSITIVE_PER_IP`) are a coarse flood guard. Behind a NAT
+  or an ingress every user shares one address, so a tight cap does not
+  stop an attacker — they have many addresses — while it does stop an
+  office, which has one. They are sized so a ~2000-seat tenant never
+  reaches them during a morning sign-in rush. Anything broader is the
+  reverse proxy / WAF's job.
+
+  The **per-account** limits (`RATELIMIT_LOGIN_PER_ACCOUNT`,
+  `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT`) are the security control.
+  They key on the account being attacked rather than the address
+  attacking it, so a spray is bounded however many hosts it comes from.
+  Login counts failures only and clears on success.
+
+  `/refresh` is keyed on the **rotation family** — one browser session
+  — because keying it on the address put every user behind an ingress
+  in one bucket, and a 429 on refresh reads to the client as a lost
+  session. Counters resolve through the central Redis resolver so they
+  are shared across replicas; an unreachable store degrades to
+  per-worker counting rather than failing requests.
 * **MFA** — not implemented. See `SSO.md §4` for the deferred
   pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
@@ -1449,14 +1464,15 @@ attacks at the bottom of the section.
 
 | Name | Path | HttpOnly | Secure | SameSite | TTL | Signed | Audience | Source of truth |
 |------|------|----------|--------|----------|-----|--------|----------|-----------------|
-| `nx_access` | `/` | yes | yes | lax | 5 min | HS256 | `nexus-lineage` | `cookies.py` + `tokens.create_access_token` |
+| `nx_access` | `/` | yes | yes | lax | 15 min | HS256 | `nexus-lineage` | `cookies.py` + `tokens.create_access_token` |
 | `nx_refresh` | `/api/v1/auth/` | yes | yes | lax | 7 days | HS256 | `nexus-lineage:refresh` | `cookies.py` + `tokens.create_refresh_token` |
 | `nx_csrf` | `/` | **no** (FE reads it) | yes | lax | follows refresh | unsigned random | — | `cookies.py:set_session_cookies` |
+| `nx_access_exp` | `/` | **no** (FE reads it) | yes | lax | follows refresh | unsigned epoch | — | `cookies.py:set_session_cookies` |
 | `nx_oidc` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:oidc_state` | `cookies.py` + `tokens.create_oidc_state_token` |
 | `nx_saml` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:saml_state` | `cookies.py` + `tokens.create_saml_state_token` |
 | `nx_mock_identity` | `/api/v1/auth/` | yes | yes | lax | 10 min | HS256 | `nexus-lineage:mock_identity` | `cookies.py` + `tokens.create_mock_identity_token` |
 | `nx_link_intent` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:link_intent` | `cookies.py` + `tokens.create_link_intent_token` |
-| `nx_dryrun` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 | `nexus-lineage:dryrun` | `cookies.py` + `tokens.create_dryrun_token` |
+| `nx_dryrun` | `/api/v1/auth/` | yes | yes | **none** (see below) | 10 min | HS256 (key ring) | `nexus-lineage:dryrun` | `cookies.py` + `tokens.create_dryrun_token` |
 | `nx_user_v1` (sessionStorage) | n/a (browser) | n/a | n/a | n/a | tab lifetime | n/a | n/a | `frontend/src/store/userCache.ts` |
 
 `Secure` and `SameSite` come from
@@ -1472,6 +1488,29 @@ flow is dead, on every IdP. Browsers only send `SameSite=None` alongside
 reintroduce that bug in the off position, which is the configuration where
 it is hardest to notice. `nx_oidc` keeps the default: the OIDC callback is
 a cross-site **GET**, which `Lax` permits.
+
+Two cookies are deliberately readable by JavaScript. `nx_csrf` has to be —
+double-submit works by the page echoing it into a header. `nx_access_exp`
+carries the epoch at which `nx_access` expires, so the client can rotate
+ahead of expiry rather than after a 401; the access token itself is
+HttpOnly, so there is no other way for it to know. Neither value carries
+identity or a signature, and the expiry is already implicit in the access
+cookie's own `Max-Age`.
+
+`nx_access_exp` follows the **refresh** TTL rather than the access TTL it
+describes. Matching the access cookie would delete it at the exact moment
+it becomes useful: a tab restored after the token died still needs to
+read *when* it died, and that tab is precisely the one that should
+refresh immediately instead of firing a request it knows will 401.
+
+`nx_csrf` and `nx_access_exp` are the only two **not** suffixed with
+`AUTH_ENVIRONMENT_ID` — both are read from JS by name, and a
+per-environment name would have to be discovered at runtime before the
+first write or the first scheduled renewal. Neither is signature-bearing,
+so sharing the name across environments is harmless. Every cookie that
+does carry a signature is scoped, `nx_dryrun` included;
+`test_every_signed_cookie_is_scoped` asserts the property rather than a
+list, because the list is what let `nx_dryrun` slip through.
 
 ### 11.2 Endpoints (Phases 0–4)
 
@@ -1571,7 +1610,14 @@ by `source_event_id` UNIQUE.
 | `RBAC_REVOCATION_TTL_SECONDS` | derived: access TTL + 60s | sid TTL in Redis. Derived from `JWT_EXPIRY_MINUTES` rather than set beside it — the two drifted, and a tombstone shorter than the token means revocation silently stops taking effect. Startup refuses an override below the access TTL. |
 | `REFRESH_ROTATION_GRACE_SECONDS` | `30` | how long a re-presented refresh token is read as a concurrent refresh rather than a stolen chain. `0` = strict rotation |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | peers whose `X-Forwarded-For` is trusted. Must name the proxy (or `*`) behind an ingress, or every caller is recorded as the proxy |
-| `RATELIMIT_STORAGE_URI` | (none → per-process) | shared rate-limit storage; falls back to `REDIS_URL` |
+| `RATELIMIT_STORAGE_URI` | (none → resolver) | Override for rate-limit counter storage. Unset, counters resolve through the central Redis resolver on the STREAMS role — the same path revocation takes — so they follow whatever each environment configures, including production's Memorystore coordinates. A defaulted (unconfigured) endpoint means in-process memory |
+| `AUTH_ENVIRONMENT_ID` | (none) | Scopes session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in one browser: cookie jars key on domain, not cluster, so identically-named cookies overwrite each other and the receiving side can only report an opaque signature failure |
+| `JWT_SECRET_KEY_PREVIOUS` | (none) | Comma-separated retired keys, most-recent first, accepted for **verification only**. Set before rotating `JWT_SECRET_KEY`. Same ≥32-char floor as the active key, since a retired key is still trusted |
+| `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Per-address cap on `/login`, `/resolve` and portal login. A coarse flood guard only — behind a NAT every user shares one address, so a tight cap stops the office and not the attacker. Sized so a ~2000-seat tenant never reaches it |
+| `RATELIMIT_SENSITIVE_PER_IP` | `200/minute` | Same, for signup, invite redemption, and password forgot/reset |
+| `RATELIMIT_REFRESH_PER_SESSION` | `30/minute` | Per rotation family, i.e. per browser session. Already per-user, so it needs no headroom for tenant size — a session needs ~4 rotations an hour |
+| `RATELIMIT_LOGIN_PER_ACCOUNT` | `10 per 15 minutes` | **The brute-force control.** Keys on the account under attack, so it holds however many addresses the attempts come from. Counts failures only and is cleared by a successful sign-in, so a legitimate user is never throttled |
+| `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT` | `3/hour` | Bounds mailbombing one person. Counted on every request, since reset responses are deliberately identical whether or not the account exists |
 | `MANAGEMENT_DB_URL` | (none — required) | management Postgres |
 
 ### 11.5 DB schema (auth subset)

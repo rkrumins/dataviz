@@ -41,13 +41,47 @@ logger = logging.getLogger(__name__)
 # async strategy cannot await.
 _ASYNC_SCHEME_PREFIX = "async+"
 
+# The prefix does more than pick sync vs async: the async Redis storage
+# also picks a CLIENT LIBRARY, and its default is ``coredis`` — which
+# this image does not ship and has no reason to. The sync storage that
+# slowapi drives accepts redis-py, which is why the per-IP limiter kept
+# working in production while this one raised ConfigurationError from its
+# constructor and turned every login into a 500.
+#
+# ``redispy`` is redis-py's own asyncio client, already a declared
+# dependency (``redis>=8.0.1``) and the same library revocation, the
+# providers and the streams adapter use. Pinning it here keeps one Redis
+# client in the image and means a ``limits`` upgrade that changes the
+# default cannot quietly reintroduce a driver we do not install.
+_ASYNC_REDIS_IMPLEMENTATION = "redispy"
+
+# Where the limiter lands when the configured storage cannot be built.
+# Weaker (per-worker counters) but functional, which is the whole point:
+# the fallback exists so a storage problem degrades the control instead
+# of denying authentication.
+_FALLBACK_URI = "async+memory://"
+
 
 def _as_async_uri(uri: Optional[str]) -> str:
     if not uri:
-        return "async+memory://"
+        return _FALLBACK_URI
     if uri.startswith(_ASYNC_SCHEME_PREFIX):
         return uri
     return f"{_ASYNC_SCHEME_PREFIX}{uri}"
+
+
+def _storage_kwargs(async_uri: str, storage_options: Optional[dict]) -> dict:
+    """Constructor kwargs for *async_uri*.
+
+    ``implementation`` only means anything to the Redis-backed storages.
+    ``MemoryStorage`` happens to swallow unknown kwargs today, but that
+    is incidental — relying on it would make an unrelated ``limits``
+    change break the fallback that exists to catch breakage.
+    """
+    kwargs = dict(storage_options or {})
+    if "redis" in async_uri.partition("://")[0]:
+        kwargs["implementation"] = _ASYNC_REDIS_IMPLEMENTATION
+    return kwargs
 
 
 def resolve_storage(role: str = "streams") -> tuple[Optional[str], dict]:
@@ -144,6 +178,30 @@ def describe_storage(uri: Optional[str]) -> str:
     return f"{scheme}://{rest.rsplit('@', 1)[-1]}"
 
 
+def _redact(text: str, uri: Optional[str], options: Optional[dict]) -> str:
+    """Strip anything secret out of a message we are about to log.
+
+    Storage errors from ``limits`` quote the URI they were given —
+    ``ConfigurationError(f"unknown storage scheme : {storage_string}")``
+    — and that string carries ``user:password@`` when the resolver put
+    credentials there. Interpolating the exception verbatim therefore
+    writes the Redis password into the log at ERROR, on the one code
+    path that is guaranteed to run in a misconfigured production.
+
+    So the failing URI is replaced with its redacted form, and any
+    credential passed through ``storage_options`` is masked too, rather
+    than trusting that the library never echoes one back.
+    """
+    if uri:
+        text = text.replace(uri, describe_storage(uri))
+        text = text.replace(_as_async_uri(uri), describe_storage(uri))
+    for key in ("password", "username"):
+        secret = (options or {}).get(key)
+        if isinstance(secret, str) and secret:
+            text = text.replace(secret, f"<{key}>")
+    return text
+
+
 def _bucket_key(scope: str, identity: str) -> str:
     digest = hashlib.sha256(identity.strip().lower().encode("utf-8")).hexdigest()
     return f"acct:{scope}:{digest[:32]}"
@@ -159,9 +217,37 @@ class AccountRateLimiter:
     """
 
     def __init__(self, storage_uri: Optional[str] = None, storage_options: Optional[dict] = None):
-        self._storage = storage_from_string(
-            _as_async_uri(storage_uri), **(storage_options or {}),
-        )
+        requested = _as_async_uri(storage_uri)
+        try:
+            self._storage = storage_from_string(
+                requested, **_storage_kwargs(requested, storage_options),
+            )
+            self.backend = requested.partition("://")[0].removeprefix(
+                _ASYNC_SCHEME_PREFIX
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Every method below fails open on a storage error, for the
+            # reason stated on ``check``: a limiter that cannot reach
+            # Redis must not become a login outage. Construction was the
+            # one place that did not, so a storage that could not be
+            # BUILT — a driver ``limits`` defaults to and we do not ship,
+            # a bad TLS path, a typo in RATELIMIT_STORAGE_URI, an option
+            # a future version rejects — raised through the endpoint and
+            # 500'd every sign-in attempt in the tenant.
+            #
+            # ERROR rather than WARNING: unlike a transient Redis blip,
+            # this does not heal on its own and the limiter stays
+            # per-worker until someone acts on it.
+            logger.error(
+                "Account rate-limit storage %s could not be built (%s: %s); "
+                "falling back to in-memory. Per-account limits are now "
+                "PER WORKER and not shared across replicas.",
+                describe_storage(storage_uri),
+                type(exc).__name__,
+                _redact(str(exc), storage_uri, storage_options),
+            )
+            self._storage = storage_from_string(_FALLBACK_URI)
+            self.backend = "memory (FELL BACK)"
         self._limiter = MovingWindowRateLimiter(self._storage)
 
     async def check(self, scope: str, identity: str, limit: str) -> bool:

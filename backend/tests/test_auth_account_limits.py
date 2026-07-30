@@ -138,6 +138,183 @@ def test_a_sync_redis_uri_is_mapped_to_the_async_backend():
     assert _as_async_uri("") == "async+memory://"
 
 
+# ── Redis-backed construction ────────────────────────────────────────
+#
+# The branch that took production down, and the one nothing above
+# reaches: ``resolve_storage`` returns None in dev and test, so every
+# test in this file until now built the in-memory backend. The Redis
+# path had no coverage at all, which is why "limits defaults its async
+# Redis client to a driver we do not install" shipped.
+#
+# None of these need a server. Construction is what failed, and
+# ``storage_from_string`` connects lazily.
+
+_REDIS_URIS = [
+    pytest.param("redis://cache:6379/1", {}, id="plain"),
+    pytest.param(
+        "rediss://cache:6379/1",
+        {
+            "username": "limiter",
+            "password": "hunter2",
+            "ssl_cert_reqs": "required",
+            "ssl_ca_certs": "/etc/ssl/certs/ca-certificates.crt",
+        },
+        id="tls-with-production-options",
+    ),
+    pytest.param(
+        "redis+sentinel://a:26379,b:26379/mymaster/1", {}, id="sentinel",
+    ),
+]
+
+
+@pytest.mark.parametrize("uri,options", _REDIS_URIS)
+def test_redis_storage_can_actually_be_built(uri, options, caplog):
+    """Every URI shape ``resolve_storage`` can emit must construct.
+
+    This is the test whose absence let a 500 on every login reach
+    production. It fails without ``implementation="redispy"``, because
+    ``limits`` defaults its async Redis client to ``coredis`` — an
+    optional extra this image does not ship and has no reason to.
+
+    The log assertion is the important half: the constructor falls back
+    to memory on failure, so a broken driver would otherwise still
+    produce a usable object and this test would pass while the shared
+    store was quietly gone.
+    """
+    limiter = AccountRateLimiter(uri, options)
+    assert "FELL BACK" not in limiter.backend, (
+        f"{uri} could not be built and silently degraded to memory: "
+        f"{caplog.text}"
+    )
+    assert "memory" not in type(limiter._storage).__name__.lower()
+
+
+@pytest.mark.parametrize("uri,options", _REDIS_URIS)
+def test_redis_storage_uses_the_client_we_ship(uri, options):
+    """Pin the driver, not just the fact that something was built.
+
+    ``limits`` chooses between coredis, redis-py and valkey, and only
+    redis-py is a declared dependency. A future default change would
+    otherwise reintroduce the same outage silently.
+    """
+    storage = AccountRateLimiter(uri, options)._storage
+    bridge = type(storage.bridge).__name__.lower()
+    assert "redispy" in bridge, f"{uri} built a {bridge}, not the redis-py one"
+
+
+def test_a_storage_that_cannot_be_built_falls_back_instead_of_raising(caplog):
+    """Construction has to fail open like every method on the class.
+
+    ``check``, ``record``, ``reset`` and ``retry_after_seconds`` all
+    swallow storage errors, on the stated grounds that a limiter which
+    cannot reach Redis must not become a login outage. ``__init__`` did
+    not, so a storage that could not be BUILT raised through
+    ``get_account_limiter()`` into the endpoint and 500'd every sign-in
+    in the tenant — which is exactly what a missing driver did.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        limiter = AccountRateLimiter("no-such-scheme://nowhere", {})
+
+    assert "FELL BACK" in limiter.backend
+    # Degraded, but working — that is the whole point of the fallback.
+    assert limiter._limiter is not None
+    assert "could not be built" in caplog.text
+    assert "PER WORKER" in caplog.text, (
+        "an operator has to be told the limits are no longer shared"
+    )
+
+
+def test_the_fallback_never_logs_credentials(caplog):
+    """The failure path is the one guaranteed to run in a broken prod.
+
+    ``limits`` quotes the URI it was handed back in its own exception
+    message, so interpolating the exception verbatim writes the Redis
+    password into the log at ERROR. Both shapes are covered: credentials
+    in the URI, and — the shape ``resolve_storage`` actually produces —
+    credentials in ``storage_options`` beside a clean URI.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        AccountRateLimiter("no-such-scheme://user:sup3rs3cret@host:6379/0", {})
+        AccountRateLimiter(
+            "no-such-scheme://host:6379/0",
+            {"username": "limiter", "password": "0ther-s3cret"},
+        )
+
+    assert "sup3rs3cret" not in caplog.text
+    assert "0ther-s3cret" not in caplog.text
+    # Still diagnosable: the host and the reason survive redaction.
+    assert "host:6379" in caplog.text
+
+
+async def test_a_fallback_limiter_still_throttles():
+    """Degraded must mean per-worker, not off.
+
+    A fallback that produced a limiter which allowed everything would
+    remove the brute-force control while looking healthy.
+    """
+    limiter = AccountRateLimiter("no-such-scheme://nowhere", {})
+    await _exhaust(limiter, "degraded@example.com")
+    assert not await limiter.check("login", "degraded@example.com", _LIMIT)
+
+
+async def test_login_survives_a_redis_that_is_configured_but_unreachable(
+    test_client, db_session, monkeypatch,
+):
+    """The production symptom, driven through the route.
+
+    A Redis-shaped URI that resolves and constructs but cannot be
+    reached — a Memorystore blip, a NetworkPolicy, a wrong host. The
+    limiter's storage builds fine and every call to it then raises at
+    connect time.
+
+    Sign-in must still work. The rate limiter sits *on top of*
+    authentication; it is allowed to stop working, and never allowed to
+    stop authentication working. Everything here goes through the real
+    endpoint rather than the limiter in isolation, because the outage
+    was a 500 from a route, not a failure of any single method.
+    """
+    from backend.app.auth.password import hash_password
+    from backend.app.db.repositories import user_repo
+    from backend.auth_service import ratelimit as ratelimit_mod
+
+    password = "C0mpl3x!Passw0rd#"
+    user = await user_repo.create_user(
+        db_session, email="reachable@example.com",
+        password_hash=hash_password(password),
+        first_name="A", last_name="B", status="active",
+    )
+    await user_repo.assign_role(db_session, user.id, "super_admin")
+    await db_session.commit()
+
+    # Nothing listens here. Construction succeeds; every operation fails.
+    monkeypatch.setattr(
+        ratelimit_mod, "_account_limiter",
+        AccountRateLimiter("redis://127.0.0.1:6399/0", {}),
+    )
+
+    wrong = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "reachable@example.com", "password": "wrong"},
+    )
+    assert wrong.status_code == 401, (
+        "an unreachable rate-limit store must not turn a bad password "
+        f"into a server error (got {wrong.status_code})"
+    )
+
+    ok = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "reachable@example.com", "password": password},
+    )
+    assert ok.status_code == 200, (
+        "an unreachable rate-limit store must not block a valid sign-in "
+        f"(got {ok.status_code})"
+    )
+
+
 # ── End to end, through the login endpoint ───────────────────────────
 
 async def test_login_endpoint_throttles_one_account_not_the_tenant(
