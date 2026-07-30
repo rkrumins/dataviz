@@ -29,6 +29,15 @@ from backend.auth_service.cookies import (
     clear_session_cookies as _clear_session_cookies,
     ForeignSession as _ForeignSession,
 )
+# The module, plus the constants that are safe to bind at import.
+#
+# The key ring (``JWT_SECRET_KEY``, ``JWT_SECRET_KEY_ID``,
+# ``JWT_VERIFICATION_KEYS``) is deliberately NOT imported by name: it
+# resolves on first access, and binding it here would make importing this
+# module require a signing secret again. Reached through
+# ``_auth_config`` at the two points that genuinely need it — the startup
+# assertion and the fingerprint log.
+from backend.auth_service.core import config as _auth_config
 from backend.auth_service.core.config import (
     AUTH_ENVIRONMENT_ID as _AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN as _COOKIE_DOMAIN,
