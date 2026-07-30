@@ -29,6 +29,11 @@ class InMemoryRefreshStore:
         self.records: dict[str, RefreshRecord] = {}
         #: Last family passed to ``revoke_family``, for assertions.
         self.revoked_family: Optional[str] = None
+        #: Stand-ins for the pre-inversion denylist — see
+        #: ``legacy_revocation``. Empty means "nothing predates this
+        #: revision", which is true of every test that does not opt in.
+        self.legacy_families: set[str] = set()
+        self.legacy_jtis: set[str] = set()
 
     async def record_mint(
         self,
@@ -87,3 +92,18 @@ class InMemoryRefreshStore:
             r.family_id == family_id and r.revoked_at_iso is not None
             for r in self.records.values()
         )
+
+    async def legacy_revocation(
+        self, jti: str, family_id: str,
+    ) -> Optional[str]:
+        """Verdicts from the pre-inversion denylist.
+
+        Empty by default: this double has no legacy table behind it, and
+        a test that wants a pre-deploy revocation says so by populating
+        ``legacy_families`` / ``legacy_jtis``.
+        """
+        if family_id in self.legacy_families:
+            return "family_revoked"
+        if jti in self.legacy_jtis:
+            return "reuse"
+        return None

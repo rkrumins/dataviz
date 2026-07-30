@@ -405,8 +405,16 @@ no dual-accept window, and no rollback risk.
 should have had — which is exactly what the previous model did with the same token, so
 the ramp is the status quo rather than a new weakness. It is still the old behaviour, so
 turn it off once `JWT_REFRESH_EXPIRY_DAYS` have passed; every adoption logs at INFO, so
-the drain to zero is watchable rather than assumed. Adoption asks about the family first,
-so it cannot write a fresh licence for a session that was revoked.
+the drain to zero is watchable rather than assumed.
+
+**Adoption consults the old denylist before it writes anything.** It has to. The
+family check derives its answer from `refresh_tokens`, and a family that existed
+before this revision has no rows there at all — so on its own it clears every
+pre-deploy family, including the ones killed by reuse detection or the SSO ceiling.
+The same applies to each `jti` the old model marked consumed: without the check,
+every superseded pre-deploy cookie is spendable once. `revoked_refresh_jti` is
+therefore still read on this one path, and only on it — a token minted under this
+revision has a record and never reaches the call.
 
 **It also closed a test blind spot.** Six fixtures wired
 `refresh_store_factory=lambda s: None`, so no test of an SSO login had ever touched

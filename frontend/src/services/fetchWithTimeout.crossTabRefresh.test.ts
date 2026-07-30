@@ -175,3 +175,38 @@ describe('without Web Locks', () => {
         expect(refreshCalls(f)).toBe(1)
     })
 })
+
+describe('the refresh POST is bounded', () => {
+    beforeEach(installLockManager)
+
+    it('carries an abort signal, so the lock cannot be held indefinitely', async () => {
+        // `fetch` has no timeout of its own. Before the cross-tab lock
+        // that cost one tab its renewal; now every tab queues behind the
+        // holder, so an unbounded POST wedges renewal origin-wide — on
+        // the reactive 401 path as well as the scheduled one. The signal
+        // is what bounds the hold, so it is asserted rather than assumed.
+        setExpiry(-60)
+        const f = mockRotatingRefresh()
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await refreshNow()
+
+        const init = f.mock.calls.find(
+            (c) => String(c[0]) === REFRESH_URL,
+        )?.[1] as RequestInit | undefined
+        expect(init?.signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('reads a timeout as retryable, not as a lost session', async () => {
+        // An abort says the server never answered, which is exactly the
+        // "we learned nothing" case. Classifying it as expired would
+        // turn a stalled network into a sign-out — the failure this
+        // branch spent its length removing.
+        setExpiry(-60)
+        globalThis.fetch = vi.fn(async () => {
+            throw new DOMException('The operation was aborted.', 'TimeoutError')
+        }) as unknown as typeof fetch
+
+        expect(await refreshNow()).toBe('retryable')
+    })
+})

@@ -2194,11 +2194,21 @@ class InviteRedemptionORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# SUPERSEDED by ``RefreshTokenORM`` below. Retained, unread and
-# unwritten, only so a rollback to the previous release finds its table
-# where it left it; drop it in a deliberate later revision once
-# ``REFRESH_ADOPT_RECORDLESS`` is off and there is no rollback left to
-# protect. Note that a rollback would not find rotations performed under
+# SUPERSEDED by ``RefreshTokenORM`` below. No longer written, and read
+# from exactly one place: ``SQLAlchemyRefreshStore.legacy_revocation``,
+# which the adoption ramp consults before granting a record-less token a
+# row. It has to, and the reason is easy to miss — a family that predates
+# allow-by-record has no rows in ``refresh_tokens`` at all, so the checks
+# derived from that table clear every pre-deploy family and every
+# pre-deploy consumed jti. This is where those revocations live, and
+# nowhere else.
+#
+# So it must NOT be dropped while ``REFRESH_ADOPT_RECORDLESS`` is on;
+# dropping it then silently re-opens both. Once the ramp is off, no
+# record-less token is accepted on any terms and the table is genuinely
+# dead — drop it in a deliberate later revision. Retaining it also means
+# a rollback to the previous release finds its table where it left it,
+# though a rollback would not find rotations performed under
 # allow-by-record recorded here, so replay detection would not see them.
 #
 # Each row recorded a refresh-token jti that had been consumed (rotated)

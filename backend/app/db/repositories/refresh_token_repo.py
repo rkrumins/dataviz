@@ -32,12 +32,20 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import RefreshTokenORM
+from backend.app.db.models import RefreshTokenORM, RevokedRefreshJtiORM
 from backend.auth_service.refresh import RefreshRecord
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+#: Key prefix the pre-inversion denylist used for its family sentinels.
+#:
+#: Kept verbatim because ``legacy_revocation`` reads rows this codebase no
+#: longer writes: the value is fixed by data already on disk, not by
+#: anything here, so it cannot be renamed to taste.
+_LEGACY_FAMILY_SENTINEL_PREFIX = "family-revoked:"
 
 
 #: Passes ``revoke_family`` makes before giving up on catching a row that
@@ -218,6 +226,49 @@ class SQLAlchemyRefreshStore:
             )
         ).scalar_one_or_none()
         return row is not None
+
+    async def legacy_revocation(
+        self, jti: str, family_id: str,
+    ) -> Optional[str]:
+        """What the pre-inversion denylist knows about a record-less token.
+
+        ``is_family_revoked`` above derives its answer from
+        ``refresh_tokens``, which is empty for every family that existed
+        before this revision — so on its own it clears each of them. The
+        only record of those revocations is ``revoked_refresh_jti``, which
+        this is the sole remaining reader of.
+
+        Two shapes of row live there, and both must outrank adoption:
+
+        * ``family-revoked:<id>`` — a sentinel written when a family was
+          killed. Returns ``"family_revoked"``.
+        * the consumed ``jti`` itself — the old model wrote one per
+          rotation so a replay was detectable. Returns ``"reuse"``, the
+          same verdict that model reached with the same token.
+
+        One query for both: a record-less token is rare and time-boxed to
+        the adoption ramp, but it is on the sign-in path, and two round
+        trips where one will do is a cost paid on every legacy rotation.
+
+        Returns ``None`` when the denylist has nothing to say, which for a
+        token minted under this revision is always — those have a record
+        and never reach this call.
+        """
+        sentinel = f"{_LEGACY_FAMILY_SENTINEL_PREFIX}{family_id}"
+        hits = set(
+            (
+                await self._session.execute(
+                    select(RevokedRefreshJtiORM.jti).where(
+                        RevokedRefreshJtiORM.jti.in_((sentinel, jti))
+                    )
+                )
+            ).scalars().all()
+        )
+        if sentinel in hits:
+            return "family_revoked"
+        if jti in hits:
+            return "reuse"
+        return None
 
 
 def make_refresh_store(session: AsyncSession) -> SQLAlchemyRefreshStore:

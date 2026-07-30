@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -28,7 +29,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.auth.password import hash_password
-from backend.app.db.models import Base, RefreshTokenORM
+from backend.app.db.models import Base, RefreshTokenORM, RevokedRefreshJtiORM
 from backend.app.db.repositories import user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.auth_service.core.tokens import (
@@ -120,6 +121,14 @@ async def _seed_user(factory, email="records@example.com") -> str:
         )
         await user_repo.assign_role(session, user.id, "super_admin")
         return user.id
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _iso_in_days(days: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
 
 
 async def _rows(real_engine) -> list[RefreshTokenORM]:
@@ -341,9 +350,12 @@ async def test_adoption_does_not_resurrect_a_revoked_family(
 ):
     """The ramp must not be a way back in.
 
-    A token with no record whose family was revoked is the shape a
-    stolen pre-deploy cookie has. Adoption asks about the family first,
-    so it cannot write a fresh licence for a session that was killed.
+    A family revoked *under this revision* has rows carrying
+    ``revoked_at``, so adoption of a sibling token sees them and refuses.
+
+    Note this is NOT the pre-deploy shape — the family here has records.
+    For a family revoked before allow-by-record deployed, see
+    ``test_adoption_does_not_resurrect_a_legacy_revoked_family``.
     """
     monkeypatch.setattr(
         "backend.auth_service.service.REFRESH_ADOPT_RECORDLESS", True,
@@ -359,3 +371,88 @@ async def test_adoption_does_not_resurrect_a_revoked_family(
     with pytest.raises(InvalidRefreshToken) as exc:
         await service.refresh(orphan)
     assert "family_revoked" in str(exc.value)
+
+
+async def test_adoption_does_not_resurrect_a_legacy_revoked_family(
+    service, scoped_session_factory, real_engine, monkeypatch,
+):
+    """The actual shape of a stolen pre-deploy cookie.
+
+    A family killed *before* this revision has **no rows in
+    ``refresh_tokens`` at all** — that is what "record-less" means. Its
+    revocation lives only in the ``revoked_refresh_jti`` denylist, as a
+    ``family-revoked:<id>`` sentinel.
+
+    ``is_family_revoked`` derives its answer from ``refresh_tokens``, so
+    for such a family it finds nothing and reports "not revoked", and
+    adoption writes the fresh licence the guard exists to withhold. The
+    families that reach here are the ones killed by reuse detection — an
+    actual detected token theft — and by the SSO re-auth ceiling; a
+    user-initiated "sign out everywhere" is separately covered by
+    ``users.sessions_valid_from``.
+    """
+    monkeypatch.setattr(
+        "backend.auth_service.service.REFRESH_ADOPT_RECORDLESS", True,
+    )
+    user_id = await _seed_user(scoped_session_factory, "legacy@example.com")
+    family = "fam_killed_before_the_deploy"
+
+    # Exactly what the previous revision wrote when it killed a family,
+    # and the only trace such a revocation left behind.
+    async with scoped_session_factory() as session:
+        session.add(
+            RevokedRefreshJtiORM(
+                jti=f"family-revoked:{family}",
+                family_id=family,
+                revoked_at=_iso_now(),
+                expires_at=_iso_in_days(8),
+            )
+        )
+
+    stolen, _ = create_refresh_token(user_id=user_id, family_id=family)
+
+    with pytest.raises(InvalidRefreshToken) as exc:
+        await service.refresh(stolen)
+    assert "family_revoked" in str(exc.value)
+
+    assert not await _rows(real_engine), (
+        "a revoked pre-deploy family must not be granted a record"
+    )
+
+
+async def test_adoption_refuses_an_already_consumed_legacy_token(
+    service, scoped_session_factory, monkeypatch,
+):
+    """Adoption must not re-licence a token that was already rotated away.
+
+    The previous model wrote one denylist row per *consumed* jti — that
+    was how it detected a replay. Those tokens have no row in
+    ``refresh_tokens`` either, so to the adoption path they look exactly
+    like a live pre-deploy session, and every superseded cookie still
+    sitting in a browser or a backup becomes spendable once.
+
+    This is the likelier of the two legacy holes: a family revocation
+    needs something to have gone wrong first, whereas a consumed jti is
+    the ordinary residue of every rotation before the deploy.
+    """
+    monkeypatch.setattr(
+        "backend.auth_service.service.REFRESH_ADOPT_RECORDLESS", True,
+    )
+    user_id = await _seed_user(scoped_session_factory, "consumed@example.com")
+    superseded, claims = create_refresh_token(
+        user_id=user_id, family_id="fam_rotated_before_the_deploy",
+    )
+
+    # The row the old model left behind when this token was rotated away.
+    async with scoped_session_factory() as session:
+        session.add(
+            RevokedRefreshJtiORM(
+                jti=claims.jti,
+                family_id=claims.family_id,
+                revoked_at=_iso_now(),
+                expires_at=_iso_in_days(8),
+            )
+        )
+
+    with pytest.raises(InvalidRefreshToken):
+        await service.refresh(superseded)

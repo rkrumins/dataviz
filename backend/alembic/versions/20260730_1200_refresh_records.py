@@ -45,10 +45,15 @@ and is not dropped here, but rolling the code back after tokens have
 rotated under this revision means those rotations were never written to
 it — so replay detection would not see them. Prefer rolling forward.
 
-Nothing reads or writes that table from this revision onward, and once
-``REFRESH_ADOPT_RECORDLESS`` is off there is no rollback left to protect,
-so it becomes dead weight that the hourly sweep no longer touches either.
-Dropping it belongs in a later revision, deliberately, not here.
+Nothing *writes* that table from this revision onward, and the hourly
+sweep no longer touches it. One reader remains: the adoption ramp asks it
+whether a record-less token's family, or the token's own ``jti``, was
+revoked or consumed before this revision — questions ``refresh_tokens``
+cannot answer, because a pre-deploy family has no rows in it at all.
+Dropping the table while ``REFRESH_ADOPT_RECORDLESS`` is on would silently
+re-admit every pre-deploy revoked session and every superseded pre-deploy
+cookie. Once the ramp is off it is genuinely dead; dropping it belongs in
+a later revision, deliberately, not here.
 
 The ORM (``backend.app.db.models.RefreshTokenORM``) declares the same
 table so ``create_all`` covers fresh and test databases; this migration

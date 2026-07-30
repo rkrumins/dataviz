@@ -127,6 +127,9 @@ class RefreshStore(Protocol):
     async def consume(self, jti: str, *, successor_jti: str) -> bool: ...
     async def revoke_family(self, family_id: str) -> bool: ...
     async def is_family_revoked(self, family_id: str) -> bool: ...
+    async def legacy_revocation(
+        self, jti: str, family_id: str,
+    ) -> Optional[str]: ...
 
 
 def _iso(epoch_seconds: int) -> str:
@@ -219,6 +222,36 @@ async def check_and_record_rotation(
         # logged out would be handed a brand-new licence.
         if await store.is_family_revoked(presented_family):
             return RotationOutcome("family_revoked")
+        # ...except that a family killed BEFORE this revision has no rows
+        # here at all — that is what "record-less" means — so the check
+        # above cannot see it and answers "not revoked" for every
+        # pre-deploy family. Its revocation, and every jti it consumed,
+        # were written to the old denylist and nothing else reads that
+        # table any more.
+        #
+        # So the ramp asks the denylist too, and only while it is a ramp:
+        # a token minted under this revision has a record and never
+        # reaches here. Two distinct verdicts come back, both of which
+        # adoption would otherwise overwrite with a fresh licence:
+        #
+        #   family_revoked — killed by reuse detection (a detected theft)
+        #                    or the SSO re-auth ceiling. A user-initiated
+        #                    "sign out everywhere" is separately covered
+        #                    by ``users.sessions_valid_from``.
+        #   reuse          — the old model wrote a row per *consumed*
+        #                    jti, so a superseded pre-deploy token is a
+        #                    replay. Answering "reuse" kills the family,
+        #                    which is exactly what the old model did with
+        #                    the same token: the ramp's standard is the
+        #                    status quo, not something weaker.
+        #
+        # Reconstructing the grace window for these is deliberately not
+        # attempted. It would matter only to a tab that raced a rotation
+        # in the seconds before the deploy, and the cost of guessing
+        # wrong in that direction is an accepted replay.
+        legacy = await store.legacy_revocation(presented_jti, presented_family)
+        if legacy is not None:
+            return RotationOutcome(legacy)
         if not adopt_recordless:
             return RotationOutcome("unknown")
         logger.info(

@@ -184,10 +184,20 @@ async function attemptRefresh(): Promise<{
     // module pulled in authService, and avoids recursing through the
     // refresh-on-401 logic above (the isAuthEndpoint guard would catch
     // it anyway, but going direct is cheaper).
+    //
+    // Bare, but NOT untimed. `fetch` has no timeout of its own, and a
+    // stalled connection — a proxy blackhole, a captive portal, a dead
+    // TCP peer — leaves this promise pending for as long as the browser
+    // allows. That used to cost one tab its renewal; since the refresh
+    // runs while holding an origin-wide Web Lock it would now wedge
+    // renewal in EVERY tab, on the reactive path as well as the
+    // scheduled one, because they all queue behind the same lock. The
+    // timeout is what bounds how long the lock can be held.
     const res = await fetch(REFRESH_URL, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(TIMEOUTS.DEFAULT_MS),
     })
     if (res.ok) {
       // Phase 10: the new JWT carries re-resolved claims (the
