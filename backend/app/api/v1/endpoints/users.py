@@ -20,7 +20,7 @@ import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import desc, select
@@ -41,6 +41,7 @@ from backend.app.api.v1.endpoints.auth import (
     INVITE_LINKS_FAIL_OPEN,
 )
 from backend.app.api.v1.feature_gate import feature_disabled
+from backend.auth_service.cookies import clear_session_cookies
 from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
@@ -358,6 +359,8 @@ async def change_my_password(
 
 @router.post("/me/sessions/revoke-all", status_code=status.HTTP_200_OK)
 async def revoke_my_sessions(
+    response: Response,
+    request: Request,
     current_user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -367,10 +370,18 @@ async def revoke_my_sessions(
     alive would mean re-issuing its cookies past the cutoff, which needs
     session-minting surface on ``IdentityService`` that does not exist
     and that the extraction plan does not want.
+
+    "This device included" has to mean the cookies as well. Revoking
+    server-side alone left the caller's browser holding a full set of
+    session cookies for a session that no longer exists — so the SPA
+    still believed it was signed in, the login page offered "You're
+    already signed in as …", and reloading re-read the same cookies and
+    said it again. The user could not get out of their own sign-out.
     """
     await _revoke_every_session(
         session, current_user.id, reason="revoked_by_user",
     )
+    clear_session_cookies(response, request)
     await user_repo.create_outbox_event(
         session,
         event_type="user.sessions_revoked_by_self",
